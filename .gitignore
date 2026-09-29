@@ -4,6 +4,7 @@
 # tool state dirs from other harnesses
 .omo/
 .omx/
+.gjc/
 # bun / node
 framework/node_modules/
 node_modules/
