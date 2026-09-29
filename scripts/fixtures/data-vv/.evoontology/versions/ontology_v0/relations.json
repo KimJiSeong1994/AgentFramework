@@ -1,0 +1,50 @@
+[
+  {
+    "id": "r-farm-place",
+    "source": "t-farm",
+    "relation_type": "hierarchy",
+    "target": "t-place",
+    "connection_condition": "tb_place_info.place_type = 'farm'",
+    "description": "농장은 장소의 한 종류"
+  },
+  {
+    "id": "r-visit-vehicle",
+    "source": "t-visit",
+    "relation_type": "association",
+    "target": "t-vehicle",
+    "connection_condition": "tb_visit_history.mobile_serial_number = tb_vehicle_info.mobile_serial_number",
+    "description": "방문한 차량"
+  },
+  {
+    "id": "r-visit-place",
+    "source": "t-visit",
+    "relation_type": "association",
+    "target": "t-place",
+    "connection_condition": "tb_visit_history.place_id = tb_place_info.place_id",
+    "description": "방문한 장소"
+  },
+  {
+    "id": "r-risk-visit",
+    "source": "t-risk",
+    "relation_type": "association",
+    "target": "t-visit",
+    "connection_condition": "tb_vehicle_risk_daily.mobile_serial_number = tb_visit_history.mobile_serial_number AND tb_vehicle_risk_daily.standard_date = tb_visit_history.standard_date",
+    "description": "방문일의 차량 위험도"
+  },
+  {
+    "id": "r-outbreak-place",
+    "source": "t-outbreak-farm",
+    "relation_type": "association",
+    "target": "t-place",
+    "connection_condition": "tb_hpai_outbreak_farm.place_id = tb_place_info.place_id",
+    "description": "발생 농장의 장소"
+  },
+  {
+    "id": "r-wild-outbreak",
+    "source": "t-outbreak-wild",
+    "relation_type": "association",
+    "target": "t-outbreak-farm",
+    "connection_condition": "dist_m(...) <= 10000 AND report_date within 21 days before",
+    "description": "발생 농장 주변·이전 3주의 야생조류 검출"
+  }
+]

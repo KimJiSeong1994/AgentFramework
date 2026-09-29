@@ -1,0 +1,228 @@
+[
+  {
+    "id": "m-farm-count",
+    "term_id": "t-farm",
+    "database_source": "vehicle_visit",
+    "table": "tb_place_info",
+    "column": "place_id",
+    "semantic_filter": "place_type = 'farm'",
+    "aggregation_semantics": "count(place_id) = 농장 수",
+    "grain": "장소 1행",
+    "validation": "TEXT-001 재현",
+    "evidence_refs": [
+      "ev-farm-count"
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "m-sido",
+    "term_id": "t-sido",
+    "database_source": "vehicle_visit",
+    "table": "tb_place_info",
+    "column": "sido",
+    "semantic_filter": "sido = '<약칭>' (경기도→경기, 충청남도→충남)",
+    "aggregation_semantics": "",
+    "grain": "장소 1행",
+    "validation": "TEXT-001",
+    "evidence_refs": [
+      "ev-farm-count"
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "m-sigungu",
+    "term_id": "t-sigungu",
+    "database_source": "vehicle_visit",
+    "table": "tb_place_info",
+    "column": "sigungu",
+    "semantic_filter": "sigungu LIKE '<시>%' (구 접미 허용) 또는 sigungu = '<군>'",
+    "aggregation_semantics": "",
+    "grain": "장소 1행",
+    "validation": "TEXT-002/005",
+    "evidence_refs": [
+      "ev-layer-farm"
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "m-livestock",
+    "term_id": "t-livestock",
+    "database_source": "vehicle_visit",
+    "table": "tb_place_info",
+    "column": "attrs",
+    "semantic_filter": "json_extract(attrs, '$.livestock_types') LIKE '%<축종>%'",
+    "aggregation_semantics": "",
+    "grain": "장소 1행",
+    "validation": "TEXT-002",
+    "evidence_refs": [
+      "ev-layer-farm"
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "m-outbreak-count",
+    "term_id": "t-outbreak-farm",
+    "database_source": "vehicle_visit",
+    "table": "tb_hpai_outbreak_farm",
+    "column": "outbreak_id",
+    "semantic_filter": "",
+    "aggregation_semantics": "count(outbreak_id) = 발생 건수",
+    "grain": "발생 1건",
+    "validation": "TEXT-003",
+    "evidence_refs": [
+      "ev-h5n1"
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "m-genotype",
+    "term_id": "t-genotype",
+    "database_source": "vehicle_visit",
+    "table": "tb_hpai_outbreak_farm",
+    "column": "genotype",
+    "semantic_filter": "genotype LIKE '%H5N1%'",
+    "aggregation_semantics": "",
+    "grain": "발생 1건",
+    "validation": "TEXT-003",
+    "evidence_refs": [
+      "ev-h5n1"
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "m-outbreak-where",
+    "term_id": "t-outbreak-farm",
+    "database_source": "vehicle_visit",
+    "table": "tb_hpai_outbreak_farm",
+    "column": "sido, sigungu, report_date, longitude, latitude",
+    "semantic_filter": "sido = '전북' AND sigungu = '부안군' AND report_date BETWEEN '2024-12-01' AND '2024-12-31' AND longitude IS NOT NULL",
+    "aggregation_semantics": "행 목록 (지도용)",
+    "grain": "발생 1건",
+    "validation": "HPAI-MAP-001",
+    "evidence_refs": [
+      "ev-h5n1"
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "m-vehicle",
+    "term_id": "t-vehicle",
+    "database_source": "vehicle_visit",
+    "table": "tb_vehicle_info",
+    "column": "mobile_serial_number",
+    "semantic_filter": "",
+    "aggregation_semantics": "count(DISTINCT mobile_serial_number) = 차량 수",
+    "grain": "차량 1대",
+    "validation": "TEXT-004",
+    "evidence_refs": [
+      "ev-feed-vehicle"
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "m-purpose",
+    "term_id": "t-purpose",
+    "database_source": "vehicle_visit",
+    "table": "tb_vehicle_info",
+    "column": "visit_purpose_name",
+    "semantic_filter": "visit_purpose_name LIKE '%사료운반%'",
+    "aggregation_semantics": "",
+    "grain": "차량 1대",
+    "validation": "TEXT-004",
+    "evidence_refs": [
+      "ev-feed-vehicle"
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "m-visit",
+    "term_id": "t-visit",
+    "database_source": "vehicle_visit",
+    "table": "tb_visit_history",
+    "column": "mobile_serial_number, place_id, place_type, start_time",
+    "semantic_filter": "place_type = 'farm' (농장 방문); 차량 조인: mobile_serial_number; 장소 조인: place_id",
+    "aggregation_semantics": "count(*) = 방문 횟수; 동선 = ORDER BY start_time",
+    "grain": "방문 1건",
+    "validation": "TEXT-004, MAP-001",
+    "evidence_refs": [
+      "ev-route",
+      "ev-feed-vehicle"
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "m-visit-date",
+    "term_id": "t-visit-date",
+    "database_source": "vehicle_visit",
+    "table": "tb_visit_history",
+    "column": "standard_date",
+    "semantic_filter": "standard_date BETWEEN 'YYYY-MM-01' AND 'YYYY-MM-31'",
+    "aggregation_semantics": "",
+    "grain": "방문 1건",
+    "validation": "MAP-001",
+    "evidence_refs": [
+      "ev-route"
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "m-risk",
+    "term_id": "t-risk",
+    "database_source": "vehicle_visit",
+    "table": "tb_vehicle_risk_daily",
+    "column": "risk_level",
+    "semantic_filter": "risk_level = '위험' (조인: mobile_serial_number AND standard_date = 방문일)",
+    "aggregation_semantics": "",
+    "grain": "차량·일 1행",
+    "validation": "MAP-002",
+    "evidence_refs": [
+      "ev-risk-level"
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "m-poultry",
+    "term_id": "t-poultry",
+    "database_source": "vehicle_visit",
+    "table": "tb_place_info",
+    "column": "attrs",
+    "semantic_filter": "place_type = 'farm' AND (json_extract(attrs,'$.livestock_types') LIKE '%닭%' OR ... LIKE '%계%' OR ... LIKE '%오리%' OR ... LIKE '%거위%' OR ... LIKE '%칠면조%' OR ... LIKE '%메추리%')",
+    "aggregation_semantics": "count(place_id) = 가금 농장 수",
+    "grain": "장소 1행",
+    "validation": "HPAI-MAP-002",
+    "evidence_refs": [
+      "ev-dist"
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "m-distance",
+    "term_id": "t-distance",
+    "database_source": "vehicle_visit",
+    "table": "tb_place_info",
+    "column": "longitude, latitude",
+    "semantic_filter": "dist_m(o.longitude, o.latitude, p.longitude, p.latitude) <= 10000",
+    "aggregation_semantics": "",
+    "grain": "장소 1행",
+    "validation": "HPAI-MAP-002",
+    "evidence_refs": [
+      "ev-dist"
+    ],
+    "confidence": "medium"
+  },
+  {
+    "id": "m-wild",
+    "term_id": "t-outbreak-wild",
+    "database_source": "vehicle_visit",
+    "table": "tb_hpai_outbreak_wild",
+    "column": "report_date, longitude, latitude",
+    "semantic_filter": "report_date BETWEEN date(o.report_date, '-21 days') AND o.report_date",
+    "aggregation_semantics": "count(*) = 검출 건수",
+    "grain": "검출 1건",
+    "validation": "HPAI-MAP-003",
+    "evidence_refs": [
+      "ev-wild"
+    ],
+    "confidence": "medium"
+  }
+]

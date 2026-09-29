@@ -1,0 +1,170 @@
+import { afterAll, beforeEach, describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import type { Config } from "@opencode-ai/plugin"
+import type { LcaConfig } from "../src/config.ts"
+import { AGENT_DEFS, MAIN_PROMPT, MAIN_RULE3_NO_DELEGATE, WORKER_PROMPT } from "../src/agents/prompts.ts"
+import { createConfigHook, type LcaOpenCodeConfig } from "../src/hooks/config.ts"
+import type { HookDeps } from "../src/hooks/types.ts"
+import { fakeDeps, type LogEntry } from "./helpers.ts"
+
+const worktree = mkdtempSync(join(tmpdir(), "lca-config-hook-"))
+afterAll(() => rmSync(worktree, { recursive: true, force: true }))
+
+let logs: LogEntry[] = []
+beforeEach(() => {
+  logs = []
+})
+
+function deps(overrides: Partial<LcaConfig> = {}): HookDeps {
+  return fakeDeps(worktree, overrides, logs)
+}
+
+async function run(config: Config, d: HookDeps = deps()): Promise<LcaOpenCodeConfig> {
+  await createConfigHook(d)(config)
+  return config as LcaOpenCodeConfig
+}
+
+describe("config hook", () => {
+  test("injects main/worker/reviewer from AGENT_DEFS into an empty config", async () => {
+    const c = await run({})
+    expect(c.agent?.main?.mode).toBe("primary")
+    expect(c.agent?.main?.prompt).toBe(MAIN_PROMPT)
+    expect(c.agent?.worker?.mode).toBe("subagent")
+    expect(c.agent?.worker?.prompt).toBe(WORKER_PROMPT)
+    expect(c.agent?.reviewer?.permission?.edit).toBe("deny")
+  })
+
+  test("tool visibility is expressed as permission deny + steps (agent `tools`/`maxSteps` are ignored post-decode)", async () => {
+    const c = await run({})
+    const perm = (n: string) => c.agent?.[n]?.permission as Record<string, unknown>
+    const a = (n: string) => c.agent?.[n] as Record<string, unknown>
+    for (const n of ["main", "worker", "reviewer"]) {
+      expect(a(n).tools).toBeUndefined()
+      expect(a(n).maxSteps).toBeUndefined()
+      expect(a(n).denied_tools).toBeUndefined()
+      expect(perm(n).task).toBe("deny")
+    }
+    expect(a("worker").steps).toBe(40)
+    expect(a("reviewer").steps).toBe(15)
+    expect(a("main").steps).toBeUndefined()
+    for (const t of ["delegate", "todowrite", "todoread", "webfetch"]) expect(perm("worker")[t]).toBe("deny")
+    for (const t of ["write", "edit", "patch", "bash", "delegate", "todowrite"]) expect(perm("reviewer")[t]).toBe("deny")
+    expect(perm("main").delegate).toBeUndefined()
+    expect(perm("main").webfetch).toBe("deny")
+    // built-in task tool off for everyone, delegate hidden from OpenCode's own primary agents
+    expect((c as any).permission.task).toBe("deny")
+    expect(perm("build").delegate).toBe("deny")
+    expect(perm("plan").delegate).toBe("deny")
+  })
+
+  test("with tool.delegate disabled, main's rule 3 falls back to the stage-1 direct task list", async () => {
+    const c = await run({}, deps({ disabled_hooks: ["tool.delegate"] }))
+    expect(c.agent?.main?.prompt).toContain(MAIN_RULE3_NO_DELEGATE)
+    expect(c.agent?.main?.prompt).not.toMatch(/delegate tool/i)
+  })
+
+  test("worker/reviewer get temperature 0.2, main does not", async () => {
+    const c = await run({})
+    expect(c.agent?.worker?.temperature).toBe(0.2)
+    expect(c.agent?.reviewer?.temperature).toBe(0.2)
+    expect(c.agent?.main?.temperature).toBeUndefined()
+  })
+
+  test("applies deps.config.models as model when set", async () => {
+    const c = await run({}, deps({ models: { main: "ollama/gemma4:26b", worker: "ollama/gemma4:26b" } }))
+    expect(c.agent?.main?.model).toBe("ollama/gemma4:26b")
+    expect(c.agent?.worker?.model).toBe("ollama/gemma4:26b")
+    expect(c.agent?.reviewer?.model).toBeUndefined()
+  })
+
+  test("does not mutate AGENT_DEFS", async () => {
+    await run({}, deps({ models: { worker: "ollama/x" } }))
+    expect(AGENT_DEFS.worker.model).toBeUndefined()
+    expect(AGENT_DEFS.worker.temperature).toBeUndefined()
+  })
+
+  test("user-defined agent with the same name wins per key, nested tools/permission merge", async () => {
+    const c = await run({
+      agent: {
+        worker: {
+          model: "ollama/user-model",
+          temperature: 0.7,
+          steps: 10,
+          permission: { bash: "ask" },
+        },
+        main: { prompt: "custom main prompt" },
+      },
+    })
+    const w = c.agent?.worker
+    expect(w?.model).toBe("ollama/user-model")
+    expect(w?.temperature).toBe(0.7)
+    expect((w as any)?.steps).toBe(10)
+    expect(w?.prompt).toBe(WORKER_PROMPT) // key not set by user keeps lca default
+    expect(w?.mode).toBe("subagent")
+    expect((w?.permission as Record<string, unknown>).bash).toBe("ask")
+    expect((w?.permission as Record<string, unknown>).task).toBe("deny")
+    expect((w?.permission as Record<string, unknown>).skill).toEqual({ "*": "deny" })
+    expect(c.agent?.main?.prompt).toBe("custom main prompt")
+    expect(c.agent?.main?.mode).toBe("primary")
+    expect(logs.some((l) => l.msg.includes("merged user agents: worker,main") || l.msg.includes("merged user agents: main,worker"))).toBe(true)
+  })
+
+  test("keeps unrelated user agents untouched apart from hiding delegate", async () => {
+    const c = await run({ agent: { build: { prompt: "b" }, plan: { model: "x/y" }, other: { prompt: "o" } } })
+    const hidden = { delegate: "deny", db_query: "deny", schema_lookup: "deny", "evo-semantic_*": "deny" }
+    expect(c.agent?.build).toEqual({ prompt: "b", permission: hidden } as any)
+    expect(c.agent?.plan).toEqual({ model: "x/y", permission: hidden } as any)
+    expect(c.agent?.other).toEqual({ prompt: "o" })
+  })
+
+  test("denies the built-in task tool globally via permission, keeps user permission keys", async () => {
+    const c = await run({ permission: { webfetch: "ask" } as any })
+    expect((c as any).permission).toEqual({ webfetch: "ask", task: "deny" })
+  })
+
+  test("sets default_agent, subagent_depth and compaction defaults without overriding user values", async () => {
+    const a = await run({})
+    expect(a.default_agent).toBe("main")
+    expect(a.subagent_depth).toBe(1)
+    expect(a.compaction).toEqual({ auto: true, prune: true })
+
+    const userCfg: LcaOpenCodeConfig = {
+      default_agent: "build",
+      subagent_depth: 3,
+      compaction: { prune: false, tail_turns: 4 },
+    }
+    const b = await run(userCfg)
+    expect(b.default_agent).toBe("build")
+    expect(b.subagent_depth).toBe(3)
+    expect(b.compaction).toEqual({ auto: true, prune: false, tail_turns: 4 })
+  })
+
+  test("logs a one-line summary with prompt token estimates", async () => {
+    await run({})
+    const summary = logs.find((l) => l.msg.startsWith("config:"))
+    expect(summary).toBeDefined()
+    expect(summary?.msg).toMatch(/main=\d+ worker=\d+ reviewer=\d+/)
+    expect(summary?.msg).not.toContain("\n")
+  })
+
+  test("warns when oh-my-openagent is loaded, but leaves the plugin list alone", async () => {
+    const c = await run({ plugin: ["oh-my-openagent@1.2.3", ["other-plugin", { a: 1 }]] })
+    expect(logs.some((l) => l.msg.startsWith("WARNING") && l.msg.includes("oh-my-openagent"))).toBe(true)
+    expect(c.plugin).toEqual(["oh-my-openagent@1.2.3", ["other-plugin", { a: 1 }]])
+  })
+
+  test("no warning without OMO", async () => {
+    await run({ plugin: [["some-plugin", {}]] })
+    expect(logs.some((l) => l.msg.startsWith("WARNING"))).toBe(false)
+  })
+
+  test("skill visibility: main allows only config.skills.allow, worker/reviewer deny all", async () => {
+    const c = await run({})
+    const perm = (n: string) => (c.agent?.[n]?.permission as Record<string, unknown> | undefined)?.skill
+    expect(perm("main")).toEqual({ "*": "deny", ulw: "allow", plan: "allow" })
+    expect(perm("worker")).toEqual({ "*": "deny" })
+    expect(perm("reviewer")).toEqual({ "*": "deny" })
+  })
+})

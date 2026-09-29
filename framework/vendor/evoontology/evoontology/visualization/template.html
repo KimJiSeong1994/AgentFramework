@@ -1,0 +1,3344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --panel: #ffffff;
+    --glass: rgba(255, 255, 255, 0.92);
+    --border: #e7e9ee;
+    --border-strong: #d8dce4;
+    --text: #1c212b;
+    --muted: #697182;
+    --accent: #5563d9;
+    --accent-strong: #4350b8;
+    --accent-soft: #eef0fb;
+    --shadow: 0 12px 32px rgba(17, 24, 39, 0.10);
+    --shadow-sm: 0 2px 10px rgba(17, 24, 39, 0.06);
+    --term-bg: #edf1fc;       --term-border: #aab9ef;       --term-text: #35448e;
+    --mapping-bg: #e9f5f0;    --mapping-border: #9ccfbb;    --mapping-text: #1e5c48;
+    --constraint-bg: #fbf3e4; --constraint-border: #ddbe8e; --constraint-text: #77571d;
+    --evidence-bg: #f1eefa;   --evidence-border: #c0b4e0;   --evidence-text: #55477c;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text); font-size: 15px; line-height: 1.5;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+                 Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  button {
+    font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--border-strong); border-radius: 9px; padding: 6px 14px; cursor: pointer;
+    transition: border-color .15s, color .15s, background .15s, box-shadow .15s;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button:disabled, button:disabled:hover {
+    color: #9aa4b2; border-color: var(--border-strong); background: #f2f4f7;
+    cursor: not-allowed; opacity: .72;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover { background: var(--accent-strong); color: #fff; }
+  button.linklike { border: none; background: none; color: var(--accent); padding: 0 2px; font-weight: 600; flex: none; }
+  button.linklike:hover { color: var(--accent-strong); text-decoration: underline; }
+  button:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(85, 99, 217, .25); }
+
+  /* ---- header ---- */
+  header {
+    display: grid; grid-template-columns: minmax(0, 1fr) max-content;
+    align-items: center; gap: 14px; padding: 12px 20px; flex: none; min-width: 0;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border); z-index: 30;
+  }
+  .header-context, .header-tools { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .header-context { overflow: hidden; }
+  .header-tools { justify-content: flex-end; }
+  .brand { display: flex; align-items: center; gap: 9px; font-size: 17.5px; font-weight: 700; white-space: nowrap; letter-spacing: .01em; }
+  .brand-mark {
+    width: 28px; height: 28px; border-radius: 8px; flex: none;
+    background: var(--accent);
+    display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow-sm);
+  }
+  .brand .sub { color: var(--muted); font-weight: 600; font-size: 15.5px; }
+  .badge {
+    display: inline-block; border-radius: 999px; padding: 3px 12px; font-size: 13px; font-weight: 600;
+    border: 1px solid var(--border-strong); background: var(--bg); color: var(--muted); white-space: nowrap;
+  }
+  .badge.version { color: var(--accent); border-color: #d6dbf5; background: var(--accent-soft); }
+  .badge.active { color: #1e6b45; border-color: #bfe0cd; background: #e9f6ef; }
+  .badge.explicit { color: #8a5a1e; border-color: #ecd3ae; background: #faf2e4; }
+  .version-picker { display: flex; align-items: center; gap: 7px; flex: none; }
+  .version-picker label { color: var(--muted); font-size: 12.5px; font-weight: 650; }
+  select {
+    font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border-strong);
+    border-radius: 9px; padding: 6px 30px 6px 10px; outline: none; cursor: pointer;
+  }
+  select:hover, select:focus { border-color: var(--accent); }
+  select:focus { box-shadow: 0 0 0 3px rgba(85, 99, 217, .16); }
+  #version-select { width: 220px; max-width: 220px; font-size: 13px; }
+  #btn-compare {
+    display: flex; align-items: center; gap: 7px; height: 34px; padding: 5px 12px;
+    white-space: nowrap; font-size: 13.5px; font-weight: 600; letter-spacing: 0;
+  }
+  #btn-compare.active { color: var(--accent); border-color: #c7cdf2; background: var(--accent-soft); }
+  .compare-icon { width: 18px; height: 18px; flex: none; stroke-width: 1.55; }
+  #status-chips { display: flex; gap: 6px; flex: 1; align-items: center; min-width: 0; overflow: hidden; }
+  .chip {
+    border: 1px solid var(--border-strong); background: var(--panel); color: var(--muted);
+    border-radius: 999px; padding: 3px 11px; font-size: 13.5px; white-space: nowrap;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  }
+  .chip.ok { color: #1e6b45; border-color: #bfe0cd; background: #e9f6ef; }
+  .chip.warn { color: #8a5a1e; border-color: #ecd3ae; background: #faf2e4; cursor: pointer; }
+  .chip.warn:hover { border-color: #d9a94f; }
+  .search-box { position: relative; display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .search-box input {
+    font: inherit; font-size: 14px; padding: 7px 12px; border: 1px solid var(--border-strong); border-radius: 9px;
+    width: 272px; color: var(--text); background: var(--panel); outline: none;
+  }
+  .search-box input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(85, 99, 217, .16); }
+  #search-status { min-width: 52px; color: var(--muted); font-size: 13px; text-align: right; white-space: nowrap; }
+  #search-status:empty { display: none; }
+  #search-results {
+    position: absolute; top: calc(100% + 6px); right: 0; width: 352px; max-height: 380px;
+    overflow: auto; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: var(--shadow); padding: 5px; z-index: 40;
+  }
+  .sr-item { display: flex; gap: 9px; align-items: center; padding: 8px 10px; border-radius: 9px; cursor: pointer; min-width: 0; }
+  .sr-item:hover { background: var(--accent-soft); }
+  .sr-text { flex: 1; min-width: 0; }
+  .sr-label { font-weight: 600; font-size: 13.5px; overflow-wrap: anywhere; }
+  .sr-id { color: var(--muted); font-size: 12px; font-family: ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
+
+  /* ---- language switch & help ---- */
+  .lang-switch { display: flex; border: 1px solid var(--border-strong); border-radius: 999px; overflow: hidden; flex: none; background: var(--panel); }
+  .lang-switch button {
+    border: none; border-radius: 0; background: transparent; color: var(--muted);
+    min-width: 46px; padding: 5px 11px; font-size: 13.5px; font-weight: 600;
+  }
+  .lang-switch button.active { background: var(--accent); color: #fff; }
+  .lang-switch button + button { border-left: 1px solid var(--border-strong); }
+  #btn-help {
+    width: 34px; height: 34px; border-radius: 50%; padding: 0; flex: none;
+    font-weight: 700; font-size: 15px; color: var(--accent); background: var(--accent-soft); border-color: #d6dbf5;
+  }
+  #btn-help:hover { background: #e2e6f9; }
+
+  /* ---- intro strip ---- */
+  #intro-strip {
+    display: flex; align-items: center; gap: 10px; padding: 9px 20px; flex: none;
+    background: #f2f4f8;
+    border-bottom: 1px solid var(--border); color: #46586e; font-size: 14px; z-index: 20;
+  }
+  #intro-strip svg { flex: none; }
+  #intro-text { flex: 1; min-width: 0; line-height: 1.5; overflow-wrap: anywhere; }
+
+  /* ---- tabs ---- */
+  nav {
+    display: flex; gap: 5px; padding: 9px 20px 0; flex: none;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  nav .tab {
+    border: 1px solid transparent; border-bottom: none; border-radius: 10px 10px 0 0;
+    min-width: 136px; background: transparent; color: var(--muted); padding: 8px 18px;
+    font-weight: 550; font-size: 15px; text-align: center; white-space: nowrap;
+  }
+  nav .tab:hover { color: var(--accent); }
+  nav .tab.active { background: var(--bg); border-color: var(--border); color: var(--text); font-weight: 650; }
+
+  /* ---- main layout ---- */
+  main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 372px; min-height: 0; }
+  #views { grid-column: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+  /* ---- content view ---- */
+  #view-content { display: grid; grid-template-rows: minmax(0, 1fr) auto; }
+  #compare-bar {
+    display: grid; grid-template-columns: max-content minmax(250px, 1fr) max-content max-content;
+    grid-template-areas: "title versions toggle close" "summary summary summary summary";
+    align-items: center; gap: 8px 12px; min-width: 0; flex: none;
+    margin: 12px 14px 0; padding: 8px 10px; background: rgba(255,255,255,.96);
+    border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-sm);
+  }
+  .compare-title { grid-area: title; display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 700; white-space: nowrap; }
+  .compare-title svg { color: var(--accent); }
+  .compare-vs { color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .08em; }
+  #compare-version-select { width: 210px; max-width: 210px; font-size: 13px; }
+  .compare-versions { grid-area: versions; display: flex; align-items: center; gap: 8px; min-width: 0; }
+  #diff-summary { grid-area: summary; display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
+  .diff-chip {
+    display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 10px;
+    font-size: 12.5px; font-weight: 650; white-space: nowrap; box-shadow: none;
+  }
+  .diff-chip:hover, .diff-chip[aria-pressed="true"] { box-shadow: 0 0 0 2px rgba(85, 99, 217, .14); }
+  .diff-chip.added { color: #246547; background: #e8f6ee; border: 1px solid #b8dfc9; }
+  .diff-chip.removed { color: #8a473b; background: #fbefed; border: 1px solid #edc6bf; }
+  .diff-chip.changed { color: #805c20; background: #faf3e5; border: 1px solid #e9d09f; }
+  .diff-chip.same { color: var(--muted); background: var(--bg); border: 1px solid var(--border); }
+  #btn-compare-close { justify-self: end; grid-area: close; padding: 4px 10px; color: var(--muted); white-space: nowrap; }
+  .diff-toggle {
+    grid-area: toggle; display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12.5px;
+    white-space: nowrap; cursor: pointer; user-select: none; padding-left: 4px;
+  }
+  .diff-toggle input { width: 15px; height: 15px; accent-color: var(--accent); }
+  #cy-wrap {
+    position: relative; grid-row: 1; margin: 14px 14px 0; border: 1px solid var(--border);
+    border-radius: 16px; overflow: hidden; background-color: var(--panel);
+    background-image: radial-gradient(circle, #e8ebf1 1px, transparent 1px);
+    background-size: 23px 23px; box-shadow: var(--shadow-sm);
+  }
+  .graph-pane { position: absolute; inset: 0; min-width: 0; background: transparent; }
+  #cy-wrap.compare-mode #primary-pane { right: 50%; border-right: 1px solid var(--border); }
+  #cy-wrap.compare-mode #compare-pane { display: block; left: 50%; background-color: var(--panel); }
+  #cy, #cy-compare { position: absolute; inset: 0; cursor: grab; }
+  #cy:active, #cy-compare:active { cursor: grabbing; }
+  .pane-label {
+    position: absolute; z-index: 6; top: 12px; left: 50%; transform: translateX(-50%);
+    max-width: calc(100% - 28px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    border: 1px solid var(--border); border-radius: 999px; padding: 4px 11px;
+    color: var(--muted); background: rgba(255,255,255,.92); box-shadow: var(--shadow-sm);
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px; font-weight: 650;
+  }
+  #cy-wrap:not(.compare-mode) .pane-label { display: none; }
+  #cy-wrap.compare-mode #legend, #cy-wrap.compare-mode #filters,
+  #cy-wrap.compare-mode #graph-actions { display: none; }
+  #hint-bar { grid-row: 2; padding: 9px 16px 11px; color: var(--muted); font-size: 14px; line-height: 1.55; }
+  #empty-hint {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 15.5px; text-align: center; padding: 24px; white-space: pre-wrap; z-index: 6;
+  }
+
+  /* ---- floating glass cards ---- */
+  .glass {
+    position: absolute; z-index: 5; background: var(--glass);
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.85); border-radius: 13px;
+    box-shadow: var(--shadow); padding: 11px 13px;
+  }
+  .glass-title { font-size: 12.5px; font-weight: 700; color: var(--muted); letter-spacing: .06em; margin-bottom: 7px; }
+  #legend { top: 16px; left: 16px; width: 220px; }
+  .lg-item { display: flex; align-items: center; gap: 9px; padding: 3px 0; font-size: 14px; }
+  .lg-count { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; padding-left: 14px; }
+  .swatch { width: 13px; height: 13px; border-radius: 4px; border: 1.5px solid; flex: none; display: inline-block; }
+  .swatch.term { background: var(--term-bg); border-color: var(--term-border); }
+  .swatch.mapping { background: var(--mapping-bg); border-color: var(--mapping-border); }
+  .swatch.constraint { background: var(--constraint-bg); border-color: var(--constraint-border); border-radius: 0;
+                       clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%); }
+  .swatch.evidence { background: var(--evidence-bg); border-color: var(--evidence-border); border-radius: 50%; }
+  .swatch.relation { width: 17px; height: 0; border: none; border-top: 2px solid #98a4bd; border-radius: 0; }
+  .swatch.reference { width: 19px; height: 0; border: none; border-top: 2.5px dotted #8f9bad; border-radius: 0; }
+  #graph-actions { top: 16px; right: 16px; display: flex; gap: 7px; padding: 9px; }
+  #graph-actions button { padding: 5px 10px; font-size: 13px; border-radius: 8px; background: rgba(255, 255, 255, .8); white-space: nowrap; }
+  #btn-fit { min-width: 78px; }
+  #btn-expand-all, #btn-collapse-all { min-width: 96px; }
+  #btn-reset { min-width: 112px; }
+  #filters { bottom: 16px; left: 16px; width: 220px; display: flex; flex-direction: column; gap: 7px; }
+  #filters label { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; user-select: none; }
+  #filters label.subtle { color: var(--muted); border-top: 1px dashed var(--border-strong); padding-top: 7px; margin-top: 3px; }
+  #filters input { width: 15px; height: 15px; accent-color: var(--accent); }
+  #tooltip {
+    position: absolute; z-index: 8; max-width: 310px; pointer-events: none;
+    background: rgba(31, 42, 56, 0.95); color: #f0f4f9; border-radius: 11px;
+    padding: 9px 12px; font-size: 13.5px; line-height: 1.55; box-shadow: var(--shadow);
+  }
+  .tt-title { font-weight: 650; margin-bottom: 3px; overflow-wrap: anywhere; }
+  .tt-line { color: #c3cfdd; overflow-wrap: anywhere; }
+
+  /* ---- detail panel ---- */
+  #detail {
+    grid-column: 2; min-width: 0; background: var(--panel); border-left: 1px solid var(--border);
+    overflow-y: auto; overflow-x: hidden; padding: 18px 18px 26px;
+    overflow-wrap: anywhere;
+  }
+  #detail-empty { color: var(--muted); font-size: 15px; line-height: 1.75; padding-top: 14px; }
+  .family-badge { display: inline-block; font-size: 12.5px; font-weight: 700; border-radius: 999px;
+                  padding: 3px 12px; border: 1px solid; }
+  .family-badge.term { color: var(--term-text); background: var(--term-bg); border-color: var(--term-border); }
+  .family-badge.mapping { color: var(--mapping-text); background: var(--mapping-bg); border-color: var(--mapping-border); }
+  .family-badge.constraint { color: var(--constraint-text); background: var(--constraint-bg); border-color: var(--constraint-border); }
+  .family-badge.evidence { color: var(--evidence-text); background: var(--evidence-bg); border-color: var(--evidence-border); }
+  .family-badge.relation { color: #31517a; background: #eef2f8; border-color: #b9c8dc; }
+  .family-badge.reference { color: #5b6b80; background: #f0f3f7; border-color: #cdd6e2; }
+  .family-badge.schema, .family-badge.tool { color: var(--evidence-text); background: var(--evidence-bg);
+                                             border-color: var(--evidence-border); }
+  .detail-title { font-size: 18px; font-weight: 650; margin: 9px 0 3px; word-break: break-word; line-height: 1.4; }
+  .detail-sub { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 12.5px;
+                margin-bottom: 12px; word-break: break-all; }
+  .detail-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .kv { border-top: 1px solid var(--border); padding-top: 8px; }
+  .kv-row { display: grid; grid-template-columns: minmax(96px, .38fr) minmax(0, 1fr);
+            gap: 12px; padding: 9px 12px; margin: 0 0 8px;
+            border: 1px solid var(--border); border-radius: 11px; background: #f8f9fb; }
+  .kv-row:nth-child(even) { background: #f2f4f8; }
+  .kv-key { min-width: 0; color: #4d6076; font-size: 13.5px; font-weight: 650;
+            padding-top: 1px; overflow-wrap: anywhere; }
+  .kv-val { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 5px; align-items: flex-start; }
+  .kv-text { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; line-height: 1.6; font-size: 15px; }
+  .link-chip {
+    font-size: 12.5px; font-family: ui-monospace, Consolas, monospace; color: var(--accent);
+    background: var(--accent-soft); border: 1px solid #d6dbf5; border-radius: 999px; padding: 2px 10px;
+    max-width: 100%; white-space: normal; text-align: left; overflow-wrap: anywhere;
+  }
+  .link-chip:hover { border-color: var(--accent); background: #e3e6f8; }
+  .value-chip {
+    display: inline-block; max-width: 100%; padding: 2px 9px; border: 1px solid var(--border-strong);
+    border-radius: 999px; background: var(--panel); color: #51637a; font-size: 13px;
+    line-height: 1.45; overflow-wrap: anywhere;
+  }
+  .diff-detail-list { display: grid; gap: 10px; margin-top: 12px; }
+  .diff-detail-item { border: 1px solid var(--border); border-radius: 12px; padding: 11px 12px; background: #f8f9fb; }
+  .diff-detail-item[data-element-id] { cursor: pointer; transition: border-color .15s, background .15s; }
+  .diff-detail-item[data-element-id]:hover { border-color: #c7cdf2; background: #f3f4fb; }
+  .diff-detail-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .diff-detail-name { min-width: 0; font-size: 14.5px; font-weight: 650; overflow-wrap: anywhere; }
+  .diff-detail-fields { display: grid; gap: 7px; margin-top: 9px; }
+  .diff-field { border-top: 1px solid var(--border); padding-top: 7px; }
+  .diff-field-name { color: #4d6076; font-size: 12.5px; font-weight: 700; margin-bottom: 3px; }
+  .diff-values { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; }
+  .diff-value { min-width: 0; padding: 6px 8px; border-radius: 8px; background: var(--panel); font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .diff-value.before { border-left: 3px solid #d59083; }
+  .diff-value.after { border-left: 3px solid #69a985; }
+  .warn-item { background: #faf2e4; border: 1px solid #ecd3ae; color: #6e4a21; border-radius: 9px;
+               padding: 9px 11px; margin-bottom: 9px; font-size: 14px; word-break: break-word; line-height: 1.55; }
+
+  /* ---- schema / tool docs ---- */
+  .doc { display: block; overflow: auto; padding: 20px 22px 32px; }
+  .doc h2 { font-size: 17px; margin: 24px 0 12px; }
+  .doc h2:first-child { margin-top: 4px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+  .card {
+    border: 1px solid var(--border); border-radius: 13px; background: var(--panel);
+    padding: 13px 15px; cursor: pointer; box-shadow: var(--shadow-sm);
+    transition: transform .12s, box-shadow .12s, border-color .12s;
+  }
+  .card:hover { transform: translateY(-2px); box-shadow: var(--shadow); border-color: #d6dbf5; }
+  .card.diff-card { position: relative; }
+  .card.diff-card .card-title { padding-right: 68px; }
+  .card.diff-card.added { border-color: #9fd1b5; background: #f1faf5; }
+  .card.diff-card.removed { border-color: #e2b1a8; background: #fdf4f2; }
+  .card.diff-card.changed { border-color: #dfc081; background: #fcf7ec; }
+  .card.diff-card.unchanged { opacity: .62; box-shadow: none; }
+  .diff-tag {
+    position: absolute; top: 9px; right: 10px; border-radius: 999px;
+    padding: 2px 7px; font-size: 10.5px; font-weight: 700; letter-spacing: .02em;
+  }
+  .diff-tag.added { color: #246547; background: #dff2e7; }
+  .diff-tag.removed { color: #8a473b; background: #f8e5e1; }
+  .diff-tag.changed { color: #805c20; background: #f5e8cb; }
+  .card-title { font-weight: 650; font-size: 15px; margin-bottom: 3px; word-break: break-word; }
+  .card-sub { color: var(--muted); font-size: 13px; line-height: 1.55; margin-bottom: 6px; }
+  .card-body { font-size: 12.5px; color: #51637a; font-family: ui-monospace, Consolas, monospace; word-break: break-word; }
+  .manifest {
+    background: #22303f; color: #d9e2ee; border-radius: 13px; padding: 15px 17px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 13px; white-space: pre-wrap; line-height: 1.7;
+  }
+  .doc-note { color: var(--muted); font-size: 14px; line-height: 1.7; margin: 0 0 12px; max-width: 880px; }
+  .doc h3 { font-size: 14px; margin: 0 0 9px; color: #51637a; }
+  .schema-subsection {
+    margin: 12px 0 6px; padding: 13px 15px 15px; border: 1px dashed #c3cede;
+    border-left: 3px solid #b9c8dc; border-radius: 13px; background: rgba(238, 242, 248, .55);
+  }
+  .compare-doc { padding: 0; overflow: hidden; }
+  .layer-compare-grid {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    min-height: 0; height: 100%; background: var(--border); gap: 1px;
+  }
+  .layer-compare-column { overflow: auto; min-width: 0; padding: 18px 18px 30px; background: var(--bg); }
+  .layer-compare-column h2 { font-size: 15px; margin: 22px 0 10px; }
+  .layer-compare-column h2:first-child { margin-top: 0; }
+  .layer-column-head {
+    position: sticky; top: -18px; z-index: 4; display: flex; align-items: center;
+    margin: -18px -18px 18px; padding: 11px 18px; background: rgba(255,255,255,.94);
+    border-bottom: 1px solid var(--border); backdrop-filter: blur(8px);
+  }
+  .layer-column-head .badge { margin-left: 0; }
+  .compare-manifest { white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; }
+  .compare-manifest .card-body { white-space: pre-wrap; line-height: 1.55; }
+  main.diff-highlights-off .diff-card { opacity: 1; border-color: var(--border); background: var(--panel); box-shadow: var(--shadow-sm); }
+  main.diff-highlights-off .diff-tag { display: none; }
+
+  main.compare-active { grid-template-columns: minmax(0, 1fr) 330px; }
+  @media (max-width: 1360px) {
+    header { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 10px 16px; }
+    .header-context, .header-tools { width: 100%; }
+    .header-tools { padding-top: 8px; border-top: 1px solid var(--border); }
+    .header-tools .search-box { flex: 1; }
+    .header-tools .search-box input { width: 100%; }
+    #intro-strip { min-height: 62px; }
+  }
+  @media (max-width: 1180px) {
+    .brand .sub, .version-picker label { display: none; }
+    main, main.compare-active { grid-template-columns: minmax(0, 1fr) 320px; }
+    #compare-bar {
+      grid-template-columns: minmax(0, 1fr) max-content;
+      grid-template-areas: "title close" "versions versions" "summary toggle";
+    }
+    .compare-versions { flex-wrap: wrap; }
+  }
+
+  /* ---- welcome overlay ---- */
+  #welcome-backdrop {
+    position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
+    background: rgba(15, 23, 42, 0.45); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+    padding: 24px;
+  }
+  #welcome {
+    width: min(660px, 100%); max-height: min(86vh, 780px); overflow: auto;
+    background: var(--panel); border-radius: 18px; box-shadow: 0 24px 70px rgba(15, 23, 42, .35);
+    animation: welcome-in .22s ease-out;
+  }
+  @keyframes welcome-in { from { opacity: 0; transform: translateY(14px) scale(.98); } to { opacity: 1; transform: none; } }
+  #welcome-head {
+    background: var(--panel);
+    padding: 22px 28px 18px; border-radius: 18px 18px 0 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .welcome-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .welcome-eyebrow { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700;
+                     letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .welcome-mark { width: 10px; height: 10px; border-radius: 3px; background: var(--accent); flex: none; }
+  #welcome-head h2 { margin: 0 0 6px; font-size: 22px; letter-spacing: .01em; line-height: 1.35; color: var(--text); }
+  #welcome-head p { margin: 0; font-size: 15px; color: var(--muted); }
+  #welcome-body { padding: 18px 28px 6px; }
+  #welcome-body h3 { font-size: 16px; margin: 18px 0 8px; color: var(--text); }
+  #welcome-body h3:first-child { margin-top: 4px; }
+  #welcome-body p { margin: 0; color: #46586e; font-size: 15px; line-height: 1.75; }
+  .welcome-list { margin: 0; padding: 0; list-style: none; }
+  .welcome-list li { display: grid; grid-template-columns: 7px minmax(0, 1fr);
+                     gap: 10px; align-items: baseline; padding: 5.5px 0;
+                     color: #46586e; font-size: 15px; line-height: 1.6; }
+  .welcome-list li::before { content: ""; width: 7px; height: 7px; border-radius: 50%;
+                             background: var(--accent); flex: none; transform: translateY(-1px); }
+  .welcome-list li > span { min-width: 0; }
+  .welcome-view { display: grid; grid-template-columns: minmax(112px, max-content) minmax(0, 1fr); gap: 10px; }
+  .w-tag { font-weight: 650; color: var(--text); flex: none; }
+  #welcome-foot {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 16px 28px 8px;
+  }
+  #welcome-foot label { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 14px; cursor: pointer; }
+  #welcome-foot input { width: 15px; height: 15px; accent-color: var(--accent); }
+  #btn-welcome-start { padding: 9px 26px; font-size: 15px; border-radius: 10px; }
+  #welcome-generated { color: var(--muted); font-size: 12.5px; padding: 6px 28px 20px; }
+
+  /* ---- duplicate-tab banner ---- */
+  #dupe-banner {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 120;
+    display: flex; align-items: center; gap: 12px; max-width: min(600px, calc(100vw - 32px));
+    background: #fff7e8; border: 1px solid #ecd3ae; color: #6e4a21; border-radius: 12px;
+    padding: 10px 14px; font-size: 13.5px; line-height: 1.5; box-shadow: var(--shadow);
+  }
+  #dupe-banner button { padding: 3px 12px; font-size: 13px; border-radius: 8px; flex: none; }
+
+  body.overview #intro-strip, body.overview .search-box { display: none; }
+  nav .tab { flex-shrink: 0; }
+  main.overview-active { grid-template-columns: minmax(0, 1fr); }
+  main.overview-active #detail { display: none; }
+  #view-overview { overflow: auto; padding: 28px; }
+  .result-hero { padding: 24px; border: 1px solid #cdd7f5; border-radius: 18px; background: linear-gradient(120deg,#f3f5ff,#f1faf7); margin-bottom: 22px; }
+  .result-hero h1 { font-size: 24px; margin: 0 0 12px; }
+  .result-hero p, .result-card p { line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .result-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); gap: 14px; }
+  .result-card { border: 1px solid var(--border); border-radius: 14px; background: var(--panel); padding: 18px; margin-bottom: 12px; min-width: 0; }
+  .result-card h3 { margin: 8px 0 12px; font-size: 16px; }
+  .result-card pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
+  .result-label { font-size: 12px; color: var(--muted); }
+  .result-card button { margin: 4px 8px 4px 0; }
+  .result-steps { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .result-step { background: white; border: 1px solid var(--border); border-radius: 20px; padding: 6px 12px; font-size: 12px; }
+  @media(max-width:760px) {
+    body:not(.overview) #intro-strip { display: none; }
+    body:not(.overview) main { overflow-y: auto; display: block; }
+    body:not(.overview) #views { min-height: 420px; }
+    body:not(.overview) #view-content { min-height: 340px; }
+    body:not(.overview) #cy-wrap { min-height: 300px; }
+    body:not(.overview) #detail { max-height: 240px; min-height: 80px; }
+    header { flex-wrap: wrap; height: auto; } .header-context, .header-tools { flex-wrap: wrap; }
+    main, main.compare-active { grid-template-columns: minmax(0,1fr); }
+    main:not(.overview-active) { grid-template-rows: minmax(220px,1fr) minmax(0,35%); }
+    #detail { grid-column: 1; grid-row: 2; overflow: auto; border-top: 1px solid var(--border); }
+    #view-overview { padding: 14px; }
+    nav { overflow-x: auto; } .result-grid { grid-template-columns: minmax(0,1fr); }
+  }
+  /* ---- scrollbars ---- */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #cdd6e2; border-radius: 999px; border: 2px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-thumb:hover { background: #b6c2d2; border: 2px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<header>
+  <div class="header-context">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+        <path d="M6.5 17.5 L12 6.5 L17.5 15.5" fill="none" stroke="#ffffff" stroke-width="1.7" opacity=".85"/>
+        <circle cx="6.5" cy="17.5" r="2.7" fill="#ffffff"/>
+        <circle cx="12" cy="6.5" r="2.7" fill="#ffffff"/>
+        <circle cx="17.5" cy="15.5" r="2.7" fill="#ffffff"/>
+      </svg>
+    </span>
+    EvoOntology<span class="sub"> · <span data-i18n="brand.sub">本体层浏览器</span></span>
+  </div>
+  <div class="version-picker">
+    <label for="version-select" data-i18n="version.label">版本</label>
+    <select id="version-select" data-i18n-title="version.select.title" title="切换当前查看版本"></select>
+  </div>
+  <span class="badge" id="badge-state"></span>
+  <button id="btn-compare" type="button" data-i18n-title="compare.open.title" title="并排对比两个版本">
+    <svg class="compare-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" aria-hidden="true">
+      <rect x="2.75" y="3.25" width="14.5" height="13.5" rx="2.25"/>
+      <path d="M10 3.5v13M5.25 7h1.8M12.95 13h1.8" stroke-linecap="round"/>
+    </svg>
+    <span data-i18n="compare.open">对比</span>
+  </button>
+  <div id="status-chips"></div>
+  </div>
+  <div class="header-tools">
+  <div class="search-box">
+    <input id="search-input" type="text" autocomplete="off" spellcheck="false"
+           data-i18n-placeholder="search.placeholder" placeholder="搜索语义对象">
+    <span id="search-status"></span>
+    <div id="search-results" hidden></div>
+  </div>
+  <div class="lang-switch" role="group" aria-label="Language / 语言">
+    <button type="button" data-lang="zh">中文</button>
+    <button type="button" data-lang="en">EN</button>
+  </div>
+  <button id="btn-help" type="button" data-i18n-title="help.title" title="查看使用指南">?</button>
+  </div>
+</header>
+<div id="intro-strip">
+  <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+    <circle cx="8" cy="8" r="7.2" fill="none" stroke="#7d93b2" stroke-width="1.4"/>
+    <rect x="7.3" y="7" width="1.4" height="4.6" rx=".7" fill="#7d93b2"/>
+    <circle cx="8" cy="4.6" r=".9" fill="#7d93b2"/>
+  </svg>
+  <span id="intro-text"></span>
+  <button id="btn-guide" type="button" class="linklike" data-i18n="intro.guide">使用指南</button>
+</div>
+<nav>
+  <button class="tab" data-view="overview" type="button" data-i18n="tab.overview">结果与问题</button>
+  <button class="tab active" data-view="content" type="button" data-i18n="tab.content">本体内容</button>
+  <button class="tab" data-view="schema" type="button" data-i18n="tab.schema">Schema 层</button>
+  <button class="tab" data-view="tool" type="button" data-i18n="tab.tool">Tool 层</button>
+</nav>
+<main>
+  <div id="views">
+    <div id="compare-bar" hidden>
+      <div class="compare-title">
+        <svg class="compare-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" aria-hidden="true">
+          <rect x="2.75" y="3.25" width="14.5" height="13.5" rx="2.25"/>
+          <path d="M10 3.5v13"/>
+        </svg>
+        <span data-i18n="compare.title">版本对比</span>
+      </div>
+      <div class="compare-versions">
+        <span id="compare-left-label" class="badge version"></span>
+        <span class="compare-vs">VS</span>
+        <select id="compare-version-select" data-i18n-title="compare.select.title" title="选择右侧对比版本"></select>
+      </div>
+      <div id="diff-summary"></div>
+      <label class="diff-toggle">
+        <input id="chk-highlight-diff" type="checkbox" checked>
+        <span data-i18n="compare.highlight">突出差异</span>
+      </label>
+      <button id="btn-compare-close" type="button" data-i18n="compare.close">退出对比</button>
+    </div>
+    <section id="view-overview" class="view" hidden></section>
+    <section id="view-content" class="view">
+      <div id="cy-wrap">
+        <div id="primary-pane" class="graph-pane">
+          <div class="pane-label" id="primary-pane-label"></div>
+          <div id="cy"></div>
+        </div>
+        <div id="compare-pane" class="graph-pane" hidden>
+          <div class="pane-label" id="compare-pane-label"></div>
+          <div id="cy-compare"></div>
+        </div>
+        <div id="empty-hint"></div>
+        <div class="glass" id="legend"><div class="glass-title" data-i18n="legend.title">图例</div></div>
+        <div class="glass" id="graph-actions">
+          <button id="btn-fit" type="button" data-i18n="action.fit" data-i18n-title="action.fit.title" title="缩放并居中显示所有可见元素">适配视图</button>
+          <button id="btn-expand-all" type="button" data-i18n="action.expandAll" data-i18n-title="action.expandAll.title" title="展开所有 Term 的关联对象">展开全部</button>
+          <button id="btn-collapse-all" type="button" data-i18n="action.collapseAll" data-i18n-title="action.collapseAll.title" title="收起所有关联对象，仅保留 Term 与语义关系">收起全部</button>
+          <button id="btn-reset" type="button" data-i18n="action.reset" data-i18n-title="action.reset.title" title="清空交互状态并恢复首次打开的视图">恢复初始</button>
+        </div>
+        <div class="glass" id="filters">
+          <div class="glass-title" data-i18n="filters.title">显示内容</div>
+          <label><input type="checkbox" id="chk-relations" checked><span class="swatch relation"></span><span data-i18n="filters.relations">语义关系</span></label>
+          <label><input type="checkbox" id="chk-refs" checked><span class="swatch reference"></span><span data-i18n="filters.refs">结构引用</span></label>
+          <label><input type="checkbox" data-family="mapping" checked><span class="swatch mapping"></span>Mapping</label>
+          <label><input type="checkbox" data-family="constraint" checked><span class="swatch constraint"></span>Constraint</label>
+          <label><input type="checkbox" data-family="evidence" checked><span class="swatch evidence"></span>Evidence</label>
+          <label class="subtle"><input type="checkbox" id="chk-labels"><span data-i18n="filters.labels">显示关系标签</span></label>
+        </div>
+        <div id="tooltip" hidden></div>
+      </div>
+      <div id="hint-bar" data-i18n="hint.bar">实线为语义关系（Semantic Relations），点线为结构引用（Structural References）；双击 Term 卡片可收起或重新展开其关联对象，按住空白处拖动可平移画布，滚轮缩放。</div>
+    </section>
+    <section id="view-schema" class="view doc" hidden></section>
+    <section id="view-tool" class="view doc" hidden></section>
+  </div>
+  <aside id="detail">
+    <div id="detail-empty" data-i18n="detail.empty">点击图中的节点、连线，或 Schema / Tool 页签中的卡片，即可在这里查看详情。</div>
+    <div id="detail-body" hidden></div>
+  </aside>
+</main>
+
+<div id="dupe-banner" hidden>
+  <span id="dupe-text" data-i18n="dupe.text"></span>
+  <button id="btn-dupe-dismiss" type="button" data-i18n="dupe.dismiss">知道了</button>
+</div>
+
+<div id="welcome-backdrop" hidden>
+  <div id="welcome" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
+    <div id="welcome-head">
+      <div class="welcome-top">
+        <div class="welcome-eyebrow">
+          <span class="welcome-mark" aria-hidden="true"></span>
+          EvoOntology
+        </div>
+        <div class="lang-switch" role="group" aria-label="Language / 语言">
+          <button type="button" data-lang="zh">中文</button>
+          <button type="button" data-lang="en">EN</button>
+        </div>
+      </div>
+      <h2 id="welcome-title" data-i18n="welcome.title">欢迎使用 EvoOntology 本体层浏览器</h2>
+      <p data-i18n="welcome.subtitle">探索面向 Data Agent 构建的 Agent-first 自进化本体层</p>
+    </div>
+    <div id="welcome-body">
+      <h3 data-i18n="welcome.what.title">这个页面是什么？</h3>
+      <p data-i18n="welcome.what.body">本页面是 EvoOntology 当前 ontology layer 的只读快照，不修改任何本体层状态。该层围绕 Agent 的工作负载构建，通过 Agent 的 MCP 工具接口按需访问，并根据 Agent 的执行轨迹持续进化。本页面将当前本体版本可视化为图谱：业务概念（Term）如何落地到数据库表列（Mapping）、受哪些使用约束（Constraint）、由哪些证据（Evidence）支撑，以及概念之间的语义关系（Relation）。</p>
+      <h3 data-i18n="welcome.views.title">四个视图</h3>
+      <p data-i18n="welcome.overview">结果与问题 — 从问题查看语义、证据、执行结果和进化效果</p>
+      <ul class="welcome-list">
+        <li><span class="welcome-view"><span class="w-tag" data-i18n="tab.content">本体内容</span><span data-i18n="welcome.views.content.desc">— 交互式语义图谱，支持搜索、过滤、展开 / 收起</span></span></li>
+        <li><span class="welcome-view"><span class="w-tag" data-i18n="tab.schema">Schema 层</span><span data-i18n="welcome.views.schema.desc">— 对象类型、受控关系取值与结构引用规则</span></span></li>
+        <li><span class="welcome-view"><span class="w-tag" data-i18n="tab.tool">Tool 层</span><span data-i18n="welcome.views.tool.desc">— 智能体查询本体层时使用的 MCP 工具</span></span></li>
+      </ul>
+      <h3 data-i18n="welcome.compare.title">版本与对比</h3>
+      <ul class="welcome-list">
+        <li><span data-i18n="welcome.compare.1">使用顶部版本选择器查看任一已嵌入版本；旁边的徽标会说明当前查看的是激活版本还是指定版本</span></li>
+        <li><span data-i18n="welcome.compare.2">有至少两个版本时，点击“对比”，以当前版本为左侧并选择右侧版本；本体内容、Schema 层和 Tool 层均支持并排对比</span></li>
+        <li><span data-i18n="welcome.compare.3">点击新增、删除或修改统计可查看具体差异；“突出差异”只控制视觉强调，不会改变所选版本</span></li>
+      </ul>
+      <h3 data-i18n="welcome.tips.title">浏览与操作</h3>
+      <ul class="welcome-list">
+        <li><span data-i18n="welcome.tips.1">点击图中的节点、连线或 Schema / Tool 卡片，在右侧面板查看详情并定位对象</span></li>
+        <li><span data-i18n="welcome.tips.2">顶栏可搜索任意对象；若出现警告徽标，点击可查看因引用无法解析而跳过的记录</span></li>
+        <li><span data-i18n="welcome.tips.3">双击 Term 或使用“展开全部 / 收起全部”控制关联对象；显示过滤器可控制关系、引用及各类非核心节点</span></li>
+        <li><span data-i18n="welcome.tips.4">“适配视图”只缩放并居中当前可见内容；“恢复初始”会清空交互状态并恢复首次打开的布局</span></li>
+        <li><span data-i18n="welcome.tips.5">拖动空白处可平移，滚轮可缩放；可在右上角或本指南中切换中文和英文</span></li>
+        <li><span data-i18n="welcome.tips.6">“不再自动显示”只关闭后续开屏；仍可通过顶部“?”或介绍条中的“使用指南”重新打开</span></li>
+      </ul>
+    </div>
+    <div id="welcome-foot">
+      <label><input type="checkbox" id="chk-welcome-hide"><span data-i18n="welcome.hide">不再自动显示</span></label>
+      <button id="btn-welcome-start" type="button" class="primary" data-i18n="welcome.start">开始探索</button>
+    </div>
+    <div id="welcome-generated"></div>
+  </div>
+</div>
+
+<script>__CYTOSCAPE_JS__
+</script>
+<script>
+window.EVO_DATA = __DATA_JSON__;
+</script>
+<script>
+(function () {
+  'use strict';
+
+  var ROOT_DATA = window.EVO_DATA || {};
+  var ROOT_META = ROOT_DATA.meta || {};
+  var VERSION_DATA = ROOT_DATA.versions || {};
+  var requestedVersion = '';
+  try { requestedVersion = new URLSearchParams(window.location.search).get('version') || ''; }
+  catch (e) { /* ignore malformed URL */ }
+  var currentVersion = VERSION_DATA[requestedVersion]
+    ? requestedVersion
+    : (ROOT_META.initial_version || Object.keys(VERSION_DATA)[0] || '');
+  function dataForVersion(version) {
+    return VERSION_DATA[version] || {};
+  }
+  var DATA = dataForVersion(currentVersion);
+  var FAMILY_ORDER = ['term', 'mapping', 'constraint', 'evidence'];
+  var COUNT_KEY = { term: 'terms', mapping: 'mappings', constraint: 'constraints', evidence: 'evidence' };
+  var WELCOME_KEY = 'evo-viz-welcome-hidden';
+
+  /* ================= i18n dictionaries ================= */
+
+  var I18N = {
+    zh: {
+      'brand.sub': '本体层浏览器',
+      'version.label': '版本',
+      'version.select.title': '切换当前查看版本',
+      'version.group.published': '已发布本体层',
+      'version.group.candidate': '进化候选版本',
+      'version.kind.published': '已发布',
+      'version.kind.candidate': '候选',
+      'badge.active': '当前激活版本',
+      'badge.explicit': '指定版本',
+      'tab.overview': '结果与问题',
+      'compare.open': '对比',
+      'compare.open.title': '并排对比两个本体层版本',
+      'compare.title': '版本对比',
+      'compare.select.title': '选择右侧对比版本',
+      'compare.close': '退出对比',
+      'compare.highlight': '突出差异',
+      'compare.added': '新增 {n} 项',
+      'compare.removed': '删除 {n} 项',
+      'compare.changed': '修改 {n} 项',
+      'compare.same': '无差异',
+      'compare.inspect': '点击查看具体差异',
+      'compare.details': '{status}明细',
+      'compare.before': '修改前',
+      'compare.after': '修改后',
+      'compare.emptyValue': '（无）',
+      'diff.added': '新增',
+      'diff.removed': '删除',
+      'diff.changed': '修改',
+      'search.placeholder': '搜索语义对象',
+      'search.matches': '找到 {n} 项',
+      'search.none': '未找到匹配项',
+      'help.title': '查看使用指南',
+      'intro.text': '这是 Agent-first 本体层版本 {version} 的只读视图：展示 Term（业务概念）、Mapping（数据落地）、Constraint（使用约束）、Evidence（证据）及其语义关系。点击任意节点或连线查看详情。',
+      'intro.guide': '使用指南',
+      'tab.content': '本体内容',
+      'tab.schema': 'Schema 层',
+      'tab.tool': 'Tool 层',
+      'legend.title': '图例',
+      'legend.relations': '语义关系',
+      'legend.refs': '结构引用',
+      'legend.mismatch': '图中显示 {rendered} 项；该版本共有 {total} 条记录，其中 {skipped} 条因引用无法解析而未显示（详见顶栏警告）',
+      'family.relation': '语义关系',
+      'family.reference': '结构引用',
+      'action.fit': '适配视图',
+      'action.fit.title': '缩放并居中显示所有可见元素',
+      'action.expandAll': '展开全部',
+      'action.expandAll.title': '展开所有 Term 的关联对象',
+      'action.collapseAll': '收起全部',
+      'action.collapseAll.title': '收起所有关联对象，仅保留 Term 与语义关系',
+      'action.reset': '恢复初始',
+      'action.reset.title': '清空交互状态并恢复首次打开的视图',
+      'filters.title': '显示内容',
+      'filters.relations': '语义关系',
+      'filters.refs': '结构引用',
+      'filters.labels': '显示连线标签',
+      'hint.bar': '实线为语义关系（Semantic Relations），点线为结构引用（Structural References）；双击 Term 卡片可收起或重新展开其关联对象，按住空白处拖动可平移画布，滚轮缩放。',
+      'detail.empty': '点击图中的节点、连线，或 Schema / Tool 页签中的卡片，即可在这里查看详情。',
+      'detail.expand': '展开关联对象',
+      'detail.collapse': '收起关联对象',
+      'detail.center': '居中',
+      'detail.locate': '定位到 {id}',
+      'detail.warnings.title': '数据质量警告',
+      'detail.warnings.sub': '以下引用无法解析，已被跳过；系统未为其创建虚拟对象',
+      'tooltip.expand': '双击展开 Mapping / Constraint / Evidence',
+      'tooltip.collapse': '双击收起关联对象',
+      'tooltip.clickDetail': '点击查看详情',
+      'status.warnings': '{n} 条警告',
+      'status.warnings.title': '点击查看无法解析并已跳过的引用',
+      'schema.objects': 'Schema Layer 定义的对象类型',
+      'schema.fields': '{n} 个字段',
+      'schema.relation': 'Relation（语义关系）',
+      'schema.relation.note': 'Relation 记录 Term 与 Term 之间的语义关系，在内容图谱中渲染为连线。每条 Relation 的 relation_type 字段必须取下方嵌套列出的受控值之一。',
+      'schema.relationTypes': 'relation_type 的受控取值',
+      'schema.relationTypes.belongsTo': '适用字段',
+      'schema.relationTypes.belongsValue': 'Relation.relation_type',
+      'schema.directionality': '是否有向',
+      'schema.direction': '具体方向',
+      'schema.directed': '有向',
+      'schema.undirected': '无向（对称）',
+      'schema.direction.flow': 'source（{source}）→ target（{target}）',
+      'schema.direction.undirected': 'source ↔ target（对称，无固定方向）',
+      'schema.role.parent_broader': '父级 / 上位概念',
+      'schema.role.child_narrower': '子级 / 下位概念',
+      'schema.role.whole_parent': '整体 / 父级',
+      'schema.role.part_child': '部分 / 子级',
+      'schema.role.input_base': '输入 / 基础概念',
+      'schema.role.derived_result': '派生结果',
+      'schema.references': '结构引用规则',
+      'tool.title': '语义工具（MCP Tool Layer）',
+      'tool.params': '参数',
+      'tool.manifest': '本体层清单（Layer Manifest）',
+      'common.description': '描述',
+      'common.fields': '字段',
+      'empty.noObjects': '该版本没有任何语义对象。',
+      'empty.initFailed': '图谱初始化失败：{err}\nSchema / Tool 页签仍可正常使用。',
+      'welcome.title': '欢迎使用 EvoOntology 本体层浏览器',
+      'welcome.subtitle': '探索面向 Data Agent 构建的 Agent-first 自进化本体层',
+      'welcome.what.title': '这个页面是什么？',
+      'welcome.what.body': '本页面是 EvoOntology 当前 ontology layer 的只读快照，不修改任何本体层状态。该层围绕 Agent 的工作负载构建，通过 Agent 的 MCP 工具接口按需访问，并根据 Agent 的执行轨迹持续进化。本页面将当前本体版本可视化为图谱：业务概念（Term）如何落地到数据库表列（Mapping）、受哪些使用约束（Constraint）、由哪些证据（Evidence）支撑，以及概念之间的语义关系（Relation）。',
+      'welcome.views.title': '四个视图',
+      'welcome.overview': '结果与问题 — 从问题查看语义、证据、执行结果和进化效果',
+      'welcome.views.content.desc': '— 交互式语义图谱，支持搜索、过滤、展开 / 收起',
+      'welcome.views.schema.desc': '— 对象类型、受控关系取值与结构引用规则',
+      'welcome.views.tool.desc': '— 智能体查询本体层时使用的 MCP 工具',
+      'welcome.compare.title': '版本与对比',
+      'welcome.compare.1': '版本选择器将已发布本体层与进化候选版本分组显示；旁边的徽标会说明当前查看的是激活版本还是指定版本',
+      'welcome.compare.2': '有至少两个版本时，点击“对比”，以当前版本为左侧并选择右侧版本；本体内容、Schema 层和 Tool 层均支持并排对比',
+      'welcome.compare.3': '点击新增、删除或修改统计可查看具体差异；“突出差异”只控制视觉强调，不会改变所选版本',
+      'welcome.tips.title': '浏览与操作',
+      'welcome.tips.1': '点击图中的节点、连线或 Schema / Tool 卡片，在右侧面板查看详情并定位对象',
+      'welcome.tips.2': '顶栏可搜索任意对象；若出现警告徽标，点击可查看因引用无法解析而跳过的记录',
+      'welcome.tips.3': '双击 Term 或使用“展开全部 / 收起全部”控制关联对象；显示过滤器可控制关系、引用及各类非核心节点',
+      'welcome.tips.4': '“适配视图”只缩放并居中当前可见内容；“恢复初始”会清空交互状态并恢复首次打开的布局',
+      'welcome.tips.5': '拖动空白处可平移，滚轮可缩放；可在右上角或本指南中切换中文和英文',
+      'welcome.tips.6': '“不再自动显示”只关闭后续开屏；仍可通过顶部“?”或介绍条中的“使用指南”重新打开',
+      'welcome.hide': '不再自动显示',
+      'welcome.start': '开始探索',
+      'welcome.generated': '本页面为只读快照，生成于 {time}',
+      'dupe.text': '这份可视化已在另一个标签页打开——当前是重复打开的副本，可以关闭其中一个标签页。',
+      'dupe.dismiss': '知道了'
+    },
+    en: {
+      'brand.sub': 'Ontology Layer Explorer',
+      'version.label': 'Version',
+      'version.select.title': 'Switch the version being viewed',
+      'version.group.published': 'Published ontology layers',
+      'version.group.candidate': 'Evolution candidates',
+      'version.kind.published': 'Published',
+      'version.kind.candidate': 'Candidate',
+      'badge.active': 'Active version',
+      'badge.explicit': 'Explicit version',
+      'tab.overview': 'Results & questions',
+      'compare.open': 'Compare',
+      'compare.open.title': 'Compare two ontology-layer versions side by side',
+      'compare.title': 'Version comparison',
+      'compare.select.title': 'Select the version shown on the right',
+      'compare.close': 'Exit compare',
+      'compare.highlight': 'Highlight differences',
+      'compare.added': '{n} added',
+      'compare.removed': '{n} removed',
+      'compare.changed': '{n} changed',
+      'compare.same': 'No differences',
+      'compare.inspect': 'Click to inspect the exact differences',
+      'compare.details': '{status} details',
+      'compare.before': 'Before',
+      'compare.after': 'After',
+      'compare.emptyValue': '(empty)',
+      'diff.added': 'Added',
+      'diff.removed': 'Removed',
+      'diff.changed': 'Changed',
+      'search.placeholder': 'Search semantic objects',
+      'search.matches': '{n} matches',
+      'search.none': 'No matches',
+      'help.title': 'Open the guide',
+      'intro.text': 'Read-only view of agent-first ontology-layer version {version}: Terms (business concepts), Mappings (data grounding), Constraints, Evidence and the relations between them. Click any node or edge to inspect it.',
+      'intro.guide': 'Guide',
+      'tab.content': 'Ontology Content',
+      'tab.schema': 'Schema Layer',
+      'tab.tool': 'Tool Layer',
+      'legend.title': 'Legend',
+      'legend.relations': 'Semantic Relations',
+      'legend.refs': 'Structural References',
+      'legend.mismatch': '{rendered} rendered; the version has {total} records in total, {skipped} skipped because references could not be resolved (see header warnings)',
+      'family.relation': 'Semantic Relation',
+      'family.reference': 'Structural Reference',
+      'action.fit': 'Fit view',
+      'action.fit.title': 'Zoom to fit all visible elements',
+      'action.expandAll': 'Expand all',
+      'action.expandAll.title': 'Expand related objects of every Term',
+      'action.collapseAll': 'Collapse all',
+      'action.collapseAll.title': 'Collapse all related objects, keeping only Terms and semantic relations',
+      'action.reset': 'Restore initial',
+      'action.reset.title': 'Clear interaction state and restore the initial view',
+      'filters.title': 'Display filters',
+      'filters.relations': 'Semantic relations',
+      'filters.refs': 'Structural references',
+      'filters.labels': 'Show edge labels',
+      'hint.bar': 'Solid edges are Semantic Relations and dotted edges are Structural References. Double-click a Term card to collapse or re-expand its related objects; drag the empty canvas to pan and scroll to zoom.',
+      'detail.empty': 'Click a node or edge in the graph, or a card on the Schema / Tool tabs, to see details here.',
+      'detail.expand': 'Expand related objects',
+      'detail.collapse': 'Collapse related objects',
+      'detail.center': 'Center',
+      'detail.locate': 'Locate {id}',
+      'detail.warnings.title': 'Data quality warnings',
+      'detail.warnings.sub': 'The references below could not be resolved and were skipped; no virtual objects were fabricated',
+      'tooltip.expand': 'Double-click to expand Mapping / Constraint / Evidence',
+      'tooltip.collapse': 'Double-click to collapse related objects',
+      'tooltip.clickDetail': 'Click for details',
+      'status.warnings': '{n} warnings',
+      'status.warnings.title': 'Click to view skipped broken references',
+      'schema.objects': 'Object types (defined by the Schema Layer)',
+      'schema.fields': '{n} fields',
+      'schema.relation': 'Relation (Semantic Relation)',
+      'schema.relation.note': 'A Relation records the semantic relationship between two Terms and is rendered as an edge in the content graph. Its relation_type field must take one of the controlled values listed below.',
+      'schema.relationTypes': 'Controlled values of relation_type (field of Relation records)',
+      'schema.relationTypes.belongsTo': 'Belongs to',
+      'schema.relationTypes.belongsValue': 'Controlled value of the Relation.relation_type field',
+      'schema.directionality': 'Directionality',
+      'schema.direction': 'Direction',
+      'schema.directed': 'Directed',
+      'schema.undirected': 'Undirected (symmetric)',
+      'schema.direction.flow': 'source ({source}) → target ({target})',
+      'schema.direction.undirected': 'source ↔ target (symmetric, no prescribed direction)',
+      'schema.role.parent_broader': 'parent / broader',
+      'schema.role.child_narrower': 'child / narrower',
+      'schema.role.whole_parent': 'whole / parent',
+      'schema.role.part_child': 'part / child',
+      'schema.role.input_base': 'input / base concept',
+      'schema.role.derived_result': 'derived result',
+      'schema.references': 'Structural reference rules',
+      'tool.title': 'Semantic tools (MCP Tool Layer)',
+      'tool.params': 'Parameters',
+      'tool.manifest': 'Layer Manifest',
+      'common.description': 'Description',
+      'common.fields': 'Fields',
+      'empty.noObjects': 'This version contains no semantic objects.',
+      'empty.initFailed': 'Graph initialisation failed: {err}\nThe Schema / Tool tabs still work.',
+      'welcome.title': 'Welcome to the EvoOntology Layer Explorer',
+      'welcome.subtitle': 'Explore an agent-first, self-evolving ontology layer for data agents',
+      'welcome.what.title': 'What is this page?',
+      'welcome.what.body': 'This page is a read-only snapshot of the current EvoOntology layer; it never modifies ontology-layer state. The layer is built around the agent\'s workload, queried on demand through the agent\'s MCP tool interface, and continuously adapted from the agent\'s execution trajectories. This page visualizes the current ontology version as a graph: how business concepts (Terms) are grounded to database tables and columns (Mappings), which usage Constraints apply, which Evidence supports them, and how the concepts relate to each other (Relations).',
+      'welcome.views.title': 'Four views',
+      'welcome.overview': 'Results & questions — explore semantics, evidence, execution and evolution outcomes through questions',
+      'welcome.views.content.desc': '— the interactive semantic graph with search, filters and expand / collapse',
+      'welcome.views.schema.desc': '— object types, controlled relation values and structural reference rules',
+      'welcome.views.tool.desc': '— the MCP tools agents use to query the ontology layer',
+      'welcome.compare.title': 'Versions and comparison',
+      'welcome.compare.1': 'Version selectors group published ontology layers separately from evolution candidates; the adjacent badge identifies whether the current version is active or explicitly selected',
+      'welcome.compare.2': 'When at least two versions exist, choose Compare to keep the current version on the left and select the right-hand version; Ontology Content, Schema Layer and Tool Layer all support side-by-side comparison',
+      'welcome.compare.3': 'Select an added, removed or changed count to inspect exact differences; Highlight differences only changes visual emphasis, not the selected versions',
+      'welcome.tips.title': 'Explore and control',
+      'welcome.tips.1': 'Select a graph node, edge, or Schema / Tool card to inspect details and locate the object from the right-hand panel',
+      'welcome.tips.2': 'Search any object from the top bar; when a warning badge appears, select it to inspect records skipped because their references could not be resolved',
+      'welcome.tips.3': 'Double-click a Term or use Expand all / Collapse all to control related objects; display filters control relations, references and each non-core node family',
+      'welcome.tips.4': 'Fit view only zooms and centers the currently visible content; Restore initial clears interaction state and returns to the first-open layout',
+      'welcome.tips.5': 'Drag the empty canvas to pan and scroll to zoom; switch between Chinese and English from the top-right corner or this guide',
+      'welcome.tips.6': 'Don\'t show this again only disables automatic opening; reopen the guide from the top “?” button or the Guide link in the introduction strip',
+      'welcome.hide': "Don't show this again",
+      'welcome.start': 'Start exploring',
+      'welcome.generated': 'This page is a read-only snapshot generated at {time}',
+      'dupe.text': 'This visualization is already open in another tab — this is a duplicate; you can close one of them.',
+      'dupe.dismiss': 'Got it'
+    }
+  };
+
+  /* Detail-panel field keys come from Core in English; show them in Chinese in zh mode. */
+  var KEY_ZH = {
+    'Name': '名称', 'ID': 'ID', 'Type': '类型', 'Definition': '定义', 'Scope': '作用域',
+    'Aliases': '别名', 'Mappings': '映射（Mapping）', 'Relations': '关系（Relation）',
+    'Constraints': '约束（Constraint）', 'Evidence': '证据（Evidence）', 'Lifecycle': '生命周期',
+    'Related Term': '关联概念（Term）', 'Data source': '数据源', 'Table': '表', 'Column': '列',
+    'Semantic Filter': '语义过滤条件', 'Aggregation': '聚合语义', 'Grain': '粒度',
+    'Validation': '验证', 'Confidence': '置信度', 'Source': '来源', 'Query': '查询语句',
+    'Result': '结果', 'Validation Method': '验证方法', 'Timestamp': '时间戳',
+    'Connection': '连接条件', 'Description': '描述', 'Note': '说明', 'Target': '作用对象',
+    'Trigger Keywords': '触发关键词', 'Severity': '严重级别', 'Reference': '引用类型',
+    'Terms': '相关概念（Term）', 'Object': '对象', 'From': '来源类型', 'To': '目标类型'
+  };
+
+  function detectLang() {
+    try {
+      var q = new URLSearchParams(window.location.search).get('lang');
+      if (q === 'zh' || q === 'en') return q;
+    } catch (e) { /* ignore */ }
+    return 'en'; // every new page open defaults to English; ?lang=zh opts into Chinese
+  }
+
+  var LANG = detectLang();
+
+  function t(key, params) {
+    var dict = I18N[LANG] || I18N.zh;
+    var text = dict[key] != null ? dict[key] : (I18N.zh[key] != null ? I18N.zh[key] : key);
+    if (params) {
+      Object.keys(params).forEach(function (k) {
+        text = text.split('{' + k + '}').join(String(params[k]));
+      });
+    }
+    return text;
+  }
+
+  function tr(key) { return LANG === 'zh' ? (KEY_ZH[key] || key) : key; }
+
+  /* Canonical English detail values coming from Core, localized for display. */
+  var VALUE_I18N = {};
+  function localizeValue(value) {
+    if (typeof value !== 'string') return value;
+    var hit = VALUE_I18N[value];
+    return hit ? (hit[LANG] || value) : value;
+  }
+
+  function familyLabel(family) {
+    if (family === 'relation') return t('family.relation');
+    if (family === 'reference') return t('family.reference');
+    if (family === 'term') return 'Term';
+    if (family === 'mapping') return 'Mapping';
+    if (family === 'constraint') return 'Constraint';
+    if (family === 'evidence') return 'Evidence';
+    if (family === 'schema') return 'Schema';
+    if (family === 'tool') return 'Tool';
+    return family;
+  }
+
+  /* ================= helpers ================= */
+
+  function $(selector, root) { return (root || document).querySelector(selector); }
+  function $all(selector, root) { return Array.prototype.slice.call((root || document).querySelectorAll(selector)); }
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  }
+  function truncate(text, max) {
+    text = String(text == null ? '' : text);
+    return text.length > max ? text.slice(0, max - 1) + '\u2026' : text;
+  }
+
+  /* ---- node label measurement (keeps text inside constraint/evidence shapes) ---- */
+  var measureCtx = null;
+  try { measureCtx = document.createElement('canvas').getContext('2d'); }
+  catch (e) { measureCtx = null; }
+  var MEASURE_FONT = '14px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
+
+  /* Mirror cytoscape's whitespace wrapping plus hard-break of overlong tokens;
+     returns the widest wrapped line's width and the number of lines. */
+  function measureWrapped(text, maxWidth) {
+    if (!measureCtx) return null;
+    measureCtx.font = MEASURE_FONT;
+    function widthOf(s) { return measureCtx.measureText(s).width; }
+    var tokens = String(text).split(/\s+/);
+    var lines = [];
+    var line = '';
+    tokens.forEach(function (token) {
+      if (!token) return;
+      while (widthOf(token) > maxWidth) {
+        var cut = token.length;
+        while (cut > 1 && widthOf(token.slice(0, cut - 1)) > maxWidth) cut--;
+        var piece = token.slice(0, Math.max(cut - 1, 1));
+        if (line) { lines.push(line); line = piece; }
+        else lines.push(piece);
+        token = token.slice(piece.length);
+      }
+      if (!token) return;
+      if (!line) { line = token; return; }
+      var candidate = line + ' ' + token;
+      if (widthOf(candidate) > maxWidth) { lines.push(line); line = token; }
+      else line = candidate;
+    });
+    if (line) lines.push(line);
+    var widest = 0;
+    lines.forEach(function (l) { widest = Math.max(widest, widthOf(l)); });
+    return { widest: widest, lines: Math.max(lines.length, 1) };
+  }
+
+  function computeNodeSize(d) {
+    if (d.family !== 'constraint' && d.family !== 'evidence') return;
+    var res = measureWrapped(d.display || d.label || '', d.family === 'constraint' ? 150 : 140);
+    if (!res) { d.w = 150; d.h = 52; return; }
+    var lineH = 14 * 1.28; /* font-size * line-height */
+    var textH = res.lines * lineH;
+    var boxW, boxH, h, ratio;
+    if (d.family === 'constraint') {
+      boxW = res.widest + 22; boxH = textH + 18;
+      h = Math.max(boxH + 10, 48);
+      d.h = Math.round(h);
+      d.w = Math.round(boxW / Math.max(0.35, 1 - boxH / (2 * h)));
+    } else {
+      boxW = res.widest + 18; boxH = textH + 14;
+      h = Math.max(boxH + 12, 46);
+      d.h = Math.round(h);
+      ratio = boxH / h;
+      d.w = Math.round(boxW / Math.max(0.35, Math.sqrt(Math.max(0.05, 1 - ratio * ratio))));
+    }
+  }
+
+  var meta = DATA.meta || {};
+  var tooltip = $('#tooltip');
+  var emptyState = null;
+  var lastDetail = null;  // re-render callback for the current detail panel content
+
+  /* ================= static i18n application ================= */
+
+  function applyStaticI18n() {
+    document.documentElement.lang = LANG === 'zh' ? 'zh-CN' : 'en';
+    $all('[data-i18n]').forEach(function (node) { node.textContent = t(node.getAttribute('data-i18n')); });
+    $all('[data-i18n-title]').forEach(function (node) { node.title = t(node.getAttribute('data-i18n-title')); });
+    $all('[data-i18n-placeholder]').forEach(function (node) {
+      node.placeholder = t(node.getAttribute('data-i18n-placeholder'));
+    });
+    $all('.lang-switch button').forEach(function (button) {
+      button.classList.toggle('active', button.getAttribute('data-lang') === LANG);
+    });
+    $('#intro-text').textContent = t('intro.text', { version: meta.version || '' });
+  }
+
+  /* ================= header ================= */
+
+  function optionLabel(version) {
+    return version;
+  }
+
+  function versionKind(version) {
+    return /^(?:ontology|semantic)_v\d+$/.test(version) ? 'published' : 'candidate';
+  }
+
+  function versionOptionLabel(version) {
+    return version + ' · ' + t('version.kind.' + versionKind(version));
+  }
+
+  function fillVersionSelect(select, selected, excluded) {
+    select.innerHTML = '';
+    var versions = ROOT_META.versions || Object.keys(VERSION_DATA);
+    ['published', 'candidate'].forEach(function (kind) {
+      var group = document.createElement('optgroup');
+      group.label = t('version.group.' + kind);
+      versions.forEach(function (version) {
+        if (version === excluded || versionKind(version) !== kind) return;
+        var option = document.createElement('option');
+        option.value = version;
+        option.textContent = versionOptionLabel(version);
+        option.selected = version === selected;
+        group.appendChild(option);
+      });
+      if (group.children.length) select.appendChild(group);
+    });
+  }
+
+  function renderVersionControls() {
+    fillVersionSelect($('#version-select'), currentVersion);
+    var compareSelect = $('#compare-version-select');
+    var selectedCompare = compareSelect.value;
+    if (!VERSION_DATA[selectedCompare] || selectedCompare === currentVersion) {
+      selectedCompare = (ROOT_META.versions || []).filter(function (v) {
+        return v !== currentVersion;
+      })[0] || currentVersion;
+    }
+    fillVersionSelect(compareSelect, selectedCompare, currentVersion);
+    $('#compare-left-label').textContent = optionLabel(currentVersion);
+    $('#primary-pane-label').textContent = optionLabel(currentVersion);
+    $('#compare-pane-label').textContent = optionLabel(selectedCompare);
+    $('#btn-compare').disabled = Object.keys(VERSION_DATA).length < 2;
+    $('#chk-highlight-diff').checked = diffHighlightOn;
+  }
+
+  function renderHeaderMeta() {
+    var stateBadge = $('#badge-state');
+    stateBadge.className = 'badge';
+    if (meta.active) { stateBadge.textContent = t('badge.active'); stateBadge.classList.add('active'); }
+    else { stateBadge.textContent = t('badge.explicit'); stateBadge.classList.add('explicit'); }
+  }
+
+  function renderStatusChips() {
+    var chipWrap = $('#status-chips');
+    chipWrap.innerHTML = '';
+    if (meta.warnings && meta.warnings.length) {
+      var chip = el('span', 'chip warn', t('status.warnings', { n: meta.warnings.length }));
+      chip.title = t('status.warnings.title');
+      chip.addEventListener('click', showWarnings);
+      chipWrap.appendChild(chip);
+    }
+  }
+
+  /* ================= tabs ================= */
+
+  var views = { overview: $('#view-overview'), content: $('#view-content'), schema: $('#view-schema'), tool: $('#view-tool') };
+  var tabButtons = $all('nav .tab');
+  var currentViewName = 'content';
+  function showView(name) {
+    currentViewName = name;
+    $('main').classList.toggle('overview-active', name === 'overview');
+    document.body.classList.toggle('overview', name === 'overview');
+    if (name === 'overview' && compareActive) exitCompare();
+    tabButtons.forEach(function (button) {
+      button.classList.toggle('active', button.getAttribute('data-view') === name);
+    });
+    Object.keys(views).forEach(function (key) { views[key].hidden = key !== name; });
+    if (name === 'content' && window.__cy) {
+      window.__cy.resize();
+      if (compareCy) compareCy.resize();
+    }
+    if (compareActive) renderCurrentDiffSummary();
+  }
+  tabButtons.forEach(function (button) {
+    button.addEventListener('click', function () { showView(button.getAttribute('data-view')); });
+  });
+
+  /* ================= legend =================
+     图例统计始终按图谱中实际渲染的元素（DATA.content）汇总，而不是版本的
+     记录总数（meta.counts）：坏引用导致的跳过会让两个数字不一致，此时以
+     “渲染数 / 总数”展示并在 title 中解释。 */
+
+  function renderLegend() {
+    var legend = $('#legend');
+    legend.innerHTML = '';
+    legend.appendChild(el('div', 'glass-title', t('legend.title')));
+    var contentNodes = (DATA.content && DATA.content.nodes) || [];
+    var contentEdges = (DATA.content && DATA.content.edges) || [];
+    var counts = meta.counts || {};
+    var nodeCountByFamily = {};
+    contentNodes.forEach(function (n) {
+      var fam = n.data && n.data.family;
+      if (fam) nodeCountByFamily[fam] = (nodeCountByFamily[fam] || 0) + 1;
+    });
+    var relationEdgeCount = contentEdges.filter(function (e) {
+      return e.data && e.data.family === 'relation';
+    }).length;
+    var referenceEdgeCount = contentEdges.filter(function (e) {
+      return e.data && e.data.family === 'reference';
+    }).length;
+
+    function addLegendRow(swatchClass, name, rendered, total) {
+      var row = el('div', 'lg-item');
+      row.appendChild(el('span', 'swatch ' + swatchClass));
+      row.appendChild(el('span', 'lg-name', name));
+      var label = String(rendered);
+      var mismatch = total != null && total !== rendered;
+      if (mismatch) label = rendered + ' / ' + total;
+      var count = el('span', 'lg-count', label);
+      if (mismatch) {
+        count.title = t('legend.mismatch', {
+          rendered: rendered, total: total, skipped: total - rendered
+        });
+      }
+      row.appendChild(count);
+      legend.appendChild(row);
+    }
+    FAMILY_ORDER.forEach(function (family) {
+      var key = COUNT_KEY[family] || family + 's';
+      addLegendRow(family, familyLabel(family), nodeCountByFamily[family] || 0,
+                   counts[key] != null ? counts[key] : null);
+    });
+    addLegendRow('relation', t('legend.relations'), relationEdgeCount,
+                 counts.relations != null ? counts.relations : null);
+    addLegendRow('reference', t('legend.refs'), referenceEdgeCount, null);
+  }
+
+  /* ================= detail panel ================= */
+
+  var detailEmpty = $('#detail-empty');
+  var detailBody = $('#detail-body');
+  var recordIndex = {};   // record_id -> element id（图谱初始化时填充）
+
+  function renderDetail(model) {
+    detailEmpty.hidden = true;
+    detailBody.hidden = false;
+    detailBody.innerHTML = '';
+    detailBody.appendChild(el('span', 'family-badge ' + model.family, familyLabel(model.family)));
+    detailBody.appendChild(el('div', 'detail-title', model.title));
+    if (model.subtitle) detailBody.appendChild(el('div', 'detail-sub', model.subtitle));
+    if (model.actions && model.actions.length) {
+      var bar = el('div', 'detail-actions');
+      model.actions.forEach(function (action) {
+        var button = el('button', action.primary ? 'primary' : '', action.label);
+        button.type = 'button';
+        button.addEventListener('click', action.onClick);
+        bar.appendChild(button);
+      });
+      detailBody.appendChild(bar);
+    }
+    if (model.pairs && model.pairs.length) {
+      var table = el('div', 'kv');
+      model.pairs.forEach(function (pair) {
+        var row = el('div', 'kv-row');
+        row.appendChild(el('div', 'kv-key', tr(pair[0])));
+        var valBox = el('div', 'kv-val');
+        var isList = Array.isArray(pair[1]);
+        if (isList) valBox.classList.add('is-list');
+        var items = isList ? pair[1] : [pair[1]];
+        items.forEach(function (item) { valBox.appendChild(renderValue(item, model.recordId, isList)); });
+        row.appendChild(valBox);
+        table.appendChild(row);
+      });
+      detailBody.appendChild(table);
+    }
+    detailBody.scrollTop = 0;
+  }
+
+  function renderValue(value, selfRecordId, isList) {
+    var targetId = typeof value === 'string' ? recordIndex[value] : null;
+    if (targetId && value !== selfRecordId) {
+      var chip = el('button', 'link-chip', value);
+      chip.type = 'button';
+      chip.title = t('detail.locate', { id: value });
+      chip.addEventListener('click', function () { focusElement(targetId); });
+      return chip;
+    }
+    return el('span', isList ? 'value-chip' : 'kv-text', String(localizeValue(value)));
+  }
+
+  function showWarnings() {
+    lastDetail = showWarnings;
+    detailEmpty.hidden = true;
+    detailBody.hidden = false;
+    detailBody.innerHTML = '';
+    detailBody.appendChild(el('div', 'detail-title', t('detail.warnings.title')));
+    detailBody.appendChild(el('div', 'detail-sub', t('detail.warnings.sub')));
+    var list = el('div', 'warn-list');
+    (meta.warnings || []).forEach(function (warning) { list.appendChild(el('div', 'warn-item', warning)); });
+    detailBody.appendChild(list);
+    detailBody.scrollTop = 0;
+  }
+
+  /* ================= graph: state ================= */
+
+  var cy = null;
+  var owners = {};          // satellite node id -> Set(term node id)
+  var termOfMapping = {};   // mapping node id -> term node id
+  var termOfConstraint = {}; // constraint node id -> term node id
+  var familyByNode = {};    // node id -> family
+  var expanded = new Set(); // term node ids whose satellites are visible
+  var expandAllFlag = false;
+  var familyVisible = { mapping: true, constraint: true, evidence: true };
+  var relationsVisible = true;
+  var refsVisible = true;
+  var labelToggleOn = false;
+  var termLayout = { coreId: null, sectors: {}, coreSlots: [], termRadius: 0 };
+
+  function addOwner(satelliteId, termId) {
+    if (!owners[satelliteId]) owners[satelliteId] = new Set();
+    owners[satelliteId].add(termId);
+  }
+
+  function focusElement(elementId) {
+    if (!window.__cy) return;
+    var elem = window.__cy.getElementById(elementId);
+    if (!elem.length) return;
+    var data = elem.data();
+    if (elem.isNode()) {
+      var fam = data.family;
+      if (fam !== 'term' && !familyVisible[fam]) {
+        familyVisible[fam] = true;
+        syncFilterBoxes();
+      }
+      if (fam !== 'term' && elem.hidden()) {
+        var ownerTerms = owners[elem.id()] ? Array.from(owners[elem.id()]) : [];
+        ownerTerms.forEach(function (termId) { expanded.add(termId); });
+        expandAllFlag = false;
+        applyVisibility();
+      }
+    } else if (elem.hidden()) {
+      if (elem.data().family === 'relation') {
+        relationsVisible = true;
+      } else {
+        refsVisible = true;
+        [elem.source(), elem.target()].forEach(function (endpoint) {
+          if (endpoint.data().family !== 'term' && owners[endpoint.id()]) {
+            owners[endpoint.id()].forEach(function (termId) { expanded.add(termId); });
+          }
+        });
+      }
+      syncFilterBoxes();
+      applyVisibility();
+    }
+    elem.select();
+    window.__cy.animate({ center: { eles: elem }, duration: 300 });
+    elem.addClass('flash');
+    setTimeout(function () { elem.removeClass('flash'); }, 1500);
+  }
+
+  /* ================= graph: style ================= */
+
+  var STYLE = [
+    { selector: 'node', style: {
+        'label': 'data(display)',
+        'font-family': '"Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+        'font-size': 14,
+        'color': '#232a36',
+        'text-wrap': 'wrap',
+        'text-max-width': '150px',
+        'text-valign': 'center',
+        'text-halign': 'center',
+        'border-width': 1.5,
+        'border-color': '#d5dae3',
+        'background-color': '#ffffff',
+        'overlay-opacity': 0,
+        'transition-property': 'opacity border-width border-color',
+        'transition-duration': 120
+    }},
+    { selector: 'node[family="term"]', style: {
+        'shape': 'round-rectangle',
+        'width': 'label', 'height': 'label', 'padding': '12px',
+        'background-color': '#edf1fc', 'border-color': '#aab9ef', 'color': '#35448e',
+        'font-size': 17, 'font-weight': 'bold', 'text-max-width': '210px'
+    }},
+    { selector: 'node[family="mapping"]', style: {
+        'shape': 'round-rectangle',
+        'width': 'label', 'height': 'label', 'padding': '8px',
+        'background-color': '#e9f5f0', 'border-color': '#9ccfbb', 'color': '#1e5c48',
+        'font-size': 14.5, 'text-max-width': '170px'
+    }},
+    { selector: 'node[family="constraint"]', style: {
+        'shape': 'hexagon', 'width': 'data(w)', 'height': 'data(h)',
+        'background-color': '#fbf3e4', 'border-color': '#ddbe8e', 'color': '#77571d',
+        'font-size': 14, 'text-max-width': '150px', 'line-height': 1.28
+    }},
+    { selector: 'node[family="evidence"]', style: {
+        'shape': 'ellipse', 'width': 'data(w)', 'height': 'data(h)',
+        'background-color': '#f1eefa', 'border-color': '#c0b4e0', 'color': '#55477c',
+        'font-size': 14, 'text-max-width': '140px', 'line-height': 1.28
+    }},
+    { selector: 'node[family="anchor"]', style: {
+        'shape': 'ellipse', 'width': 2, 'height': 2,
+        'opacity': 0, 'border-width': 0, 'label': '', 'overlay-opacity': 0,
+        'events': 'no'
+    }},
+    { selector: 'edge', style: {
+        'curve-style': 'bezier',
+        'width': 1.6,
+        'line-color': '#b9c2cf',
+        'target-arrow-shape': 'none',
+        'opacity': 0.9,
+        'font-size': 13,
+        'color': '#5d6675',
+        'text-background-color': '#f7f8fa',
+        'text-background-opacity': 0.92,
+        'text-background-padding': '2px',
+        'text-rotation': 'autorotate',
+        'transition-property': 'opacity',
+        'transition-duration': 120
+    }},
+    { selector: 'edge[family="relation"]', style: {
+        'width': 2, 'line-style': 'solid', 'line-color': '#8793aa', 'opacity': 0.92 } },
+    { selector: 'edge[family="reference"]', style: {
+        'width': 1.8, 'line-style': 'dotted', 'line-color': '#8f9bad',
+        'opacity': 0.96 } },
+    { selector: 'edge.label-on', style: { 'label': 'data(label)' } },
+    { selector: '.diff-unchanged', style: { 'opacity': 0.42 } },
+    { selector: 'node.diff-added', style: {
+        'background-color': '#e8f6ee', 'border-color': '#4f9b71', 'border-width': 3, 'opacity': 1 } },
+    { selector: 'edge.diff-added', style: {
+        'line-color': '#4f9b71', 'width': 3, 'opacity': 1 } },
+    { selector: 'node.diff-removed', style: {
+        'background-color': '#fbefed', 'border-color': '#c97869', 'border-width': 3, 'opacity': 1 } },
+    { selector: 'edge.diff-removed', style: {
+        'line-color': '#c97869', 'width': 3, 'opacity': 1 } },
+    { selector: 'node.diff-changed', style: {
+        'background-color': '#faf3e5', 'border-color': '#c6973f', 'border-width': 3, 'opacity': 1 } },
+    { selector: 'edge.diff-changed', style: {
+        'line-color': '#c6973f', 'width': 3, 'opacity': 1 } },
+    { selector: 'node:selected', style: { 'border-color': '#5563d9', 'border-width': 2.5 } },
+    { selector: 'edge:selected', style: {
+        'line-color': '#5563d9', 'width': 2.5, 'opacity': 1 } },
+    { selector: '.dim', style: { 'opacity': 0.16 } },
+    { selector: '.flash', style: { 'border-color': '#5563d9', 'border-width': 3.5 } }
+  ];
+
+  /* ================= graph: init ================= */
+
+  function resetGraphState() {
+    owners = {};
+    termOfMapping = {};
+    termOfConstraint = {};
+    familyByNode = {};
+    recordIndex = {};
+    expanded = new Set();
+    expandAllFlag = false;
+    termLayout = { coreId: null, sectors: {}, coreSlots: [], termRadius: 0 };
+    emptyState = null;
+    $('#empty-hint').style.display = 'none';
+  }
+
+  function initGraph() {
+    resetGraphState();
+    var sourceNodes = DATA.content && DATA.content.nodes ? DATA.content.nodes : [];
+    var sourceEdges = DATA.content && DATA.content.edges ? DATA.content.edges : [];
+    var nodes = JSON.parse(JSON.stringify(sourceNodes));
+    var edges = JSON.parse(JSON.stringify(sourceEdges));
+    if (!nodes.length) { showEmptyKey('empty.noObjects'); return; }
+
+    nodes.forEach(function (n) {
+      var d = n.data;
+      familyByNode[d.id] = d.family;
+      recordIndex[d.record_id] = d.id;
+      d.display = d.family === 'term' ? d.label : truncate(d.label, 26);
+      computeNodeSize(d);
+    });
+    edges.forEach(function (e) {
+      var d = e.data;
+      if (!d.label) d.label = d.kind || '';
+      if (d.family === 'relation' && d.record_id) recordIndex[d.record_id] = d.id;
+    });
+
+    var relationEndpoints = {};
+    edges.forEach(function (e) {
+      var d = e.data;
+      if (d.family === 'relation') relationEndpoints[d.id] = [d.source, d.target];
+    });
+    /* Cytoscape core cannot attach an edge to another edge, so relation
+       evidence (source "rel:<id>") is re-anchored to an invisible midpoint
+       node that tracks the relation edge. */
+    edges.forEach(function (e) {
+      var d = e.data;
+      if (d.family !== 'reference') return;
+      if (typeof d.source !== 'string' || d.source.indexOf('rel:') !== 0) return;
+      if (!relationEndpoints[d.source]) return;
+      var anchorId = 'mid:' + d.source;
+      if (!familyByNode[anchorId]) {
+        familyByNode[anchorId] = 'anchor';
+        nodes.push({ data: {
+          id: anchorId, family: 'anchor', label: '', display: '',
+          rel_id: d.source, w: 2, h: 2
+        } });
+      }
+      d.owner_terms = d.owner_terms || relationEndpoints[d.source];
+      d.rel_id = d.source;
+      d.source = anchorId;
+    });
+    edges.forEach(function (e) {
+      var d = e.data;
+      if (d.family !== 'reference' || d.kind !== 'grounded_by') return;
+      addOwner(d.target, d.source);
+      termOfMapping[d.target] = d.source;
+    });
+    edges.forEach(function (e) {
+      var d = e.data;
+      if (d.family !== 'reference' || d.kind !== 'constrained_by') return;
+      if (familyByNode[d.source] === 'term') {
+        termOfConstraint[d.target] = d.source;
+        addOwner(d.target, d.source);
+      } else if (familyByNode[d.source] === 'mapping' && termOfMapping[d.source]) {
+        termOfConstraint[d.target] = termOfMapping[d.source];
+        addOwner(d.target, termOfMapping[d.source]);
+      }
+    });
+    edges.forEach(function (e) {
+      var d = e.data;
+      if (d.family !== 'reference') return;
+      if (d.kind !== 'constrained_by' && d.kind !== 'supported_by') return;
+      var srcFam = familyByNode[d.source];
+      var ownerList = null;
+      if (srcFam === 'term') ownerList = [d.source];
+      else if (srcFam === 'mapping' && termOfMapping[d.source]) ownerList = [termOfMapping[d.source]];
+      else if (srcFam === 'constraint' && termOfConstraint[d.source]) ownerList = [termOfConstraint[d.source]];
+      else ownerList = d.owner_terms || relationEndpoints[d.source] || null;
+      if (ownerList) ownerList.forEach(function (termId) { addOwner(d.target, termId); });
+    });
+
+    cy = cytoscape({
+      container: document.getElementById('cy'),
+      elements: { nodes: nodes, edges: edges },
+      style: STYLE,
+      minZoom: 0.12,
+      maxZoom: 3,
+      wheelSensitivity: 0.22,
+      boxSelectionEnabled: false, /* background drag always pans */
+      userPanningEnabled: true
+    });
+    window.__cy = cy;
+
+    /* Open fully expanded so the canvas matches the filter panel (all
+       families checked). Double-click still collapses per Term. */
+    expandAllFlag = true;
+    cy.nodes('[family="term"]').forEach(function (n) { expanded.add(n.id()); });
+    applyVisibility();
+    runLayout(true);
+    wireGraphEvents();
+  }
+
+  function showEmptyKey(key, params) {
+    emptyState = { key: key, params: params };
+    var hint = $('#empty-hint');
+    hint.textContent = t(key, params);
+    hint.style.display = 'flex';
+  }
+
+  /* ================= graph: visibility & layout ================= */
+
+  function satelliteVisible(nodeId) {
+    if (!familyVisible[familyByNode[nodeId]]) return false;
+    if (expandAllFlag) return true;
+    var set = owners[nodeId];
+    if (!set) return false;
+    var it = set.values();
+    var step;
+    while (!(step = it.next()).done) {
+      if (expanded.has(step.value)) return true;
+    }
+    return false;
+  }
+
+  function applyVisibility() {
+    if (!cy) return;
+    cy.batch(function () {
+      cy.nodes().forEach(function (n) {
+        var fam = n.data().family;
+        var visible = fam === 'term' ? true
+          : fam === 'anchor' ? relationsVisible
+          : satelliteVisible(n.id());
+        n.style('display', visible ? 'element' : 'none');
+      });
+      cy.edges('[family="relation"]').forEach(function (e) {
+        e.style('display', relationsVisible ? 'element' : 'none');
+      });
+      cy.edges('[family="reference"]').forEach(function (e) {
+        var visible = refsVisible && e.source().visible() && e.target().visible();
+        e.style('display', visible ? 'element' : 'none');
+      });
+    });
+  }
+
+  function stableNodes(collection) {
+    return collection.toArray().sort(function (a, b) {
+      return a.id().localeCompare(b.id());
+    });
+  }
+
+  function ownedObjectCount(termId) {
+    return Object.keys(owners).reduce(function (count, nodeId) {
+      return count + (owners[nodeId] && owners[nodeId].has(termId) ? 1 : 0);
+    }, 0);
+  }
+
+  function chooseCoreTerm(termNodes) {
+    return stableNodes(termNodes).sort(function (a, b) {
+      var degreeA = a.connectedEdges('[family="relation"]').length;
+      var degreeB = b.connectedEdges('[family="relation"]').length;
+      if (degreeA !== degreeB) return degreeB - degreeA;
+      var ownedA = ownedObjectCount(a.id());
+      var ownedB = ownedObjectCount(b.id());
+      if (ownedA !== ownedB) return ownedB - ownedA;
+      return a.id().localeCompare(b.id());
+    })[0];
+  }
+
+  function termPairKey(a, b) {
+    return a < b ? a + '\u0000' + b : b + '\u0000' + a;
+  }
+
+  function buildTermAffinities(termNodes) {
+    var termIds = new Set(stableNodes(termNodes).map(function (node) { return node.id(); }));
+    var weights = {};
+    function add(a, b, weight) {
+      if (a === b || !termIds.has(a) || !termIds.has(b)) return;
+      var key = termPairKey(a, b);
+      weights[key] = (weights[key] || 0) + weight;
+    }
+    cy.edges('[family="relation"]').forEach(function (edge) {
+      add(edge.source().id(), edge.target().id(), 8);
+    });
+    Object.keys(owners).sort().forEach(function (nodeId) {
+      var node = cy.getElementById(nodeId);
+      if (!node.length || !node.visible()) return;
+      var termList = Array.from(owners[nodeId]).filter(function (id) {
+        return termIds.has(id);
+      }).sort();
+      if (termList.length < 2) return;
+      var sharedWeight = 3 / Math.max(1, termList.length - 1);
+      for (var a = 0; a < termList.length; a++) {
+        for (var b = a + 1; b < termList.length; b++) add(termList[a], termList[b], sharedWeight);
+      }
+    });
+    return weights;
+  }
+
+  function orderedPeripheralTerms(core, termNodes) {
+    var remaining = stableNodes(termNodes).filter(function (node) { return node.id() !== core.id(); });
+    if (remaining.length < 2) return remaining;
+    var affinity = buildTermAffinities(termNodes);
+    function between(a, b) { return affinity[termPairKey(a.id(), b.id())] || 0; }
+    function total(node) {
+      return remaining.reduce(function (sum, other) {
+        return sum + (other.id() === node.id() ? 0 : between(node, other));
+      }, 0);
+    }
+    remaining.sort(function (a, b) {
+      return total(b) - total(a)
+        || ownedObjectCount(b.id()) - ownedObjectCount(a.id())
+        || a.id().localeCompare(b.id());
+    });
+    var cycle = [remaining.shift()];
+    while (remaining.length) {
+      var best = null;
+      remaining.forEach(function (node) {
+        for (var gap = 0; gap < cycle.length; gap++) {
+          var left = cycle[gap];
+          var right = cycle[(gap + 1) % cycle.length];
+          var gain = cycle.length === 1
+            ? between(left, node)
+            : between(left, node) + between(node, right) - between(left, right);
+          var candidate = {
+            node: node, gap: gap, gain: gain, total: total(node), owned: ownedObjectCount(node.id())
+          };
+          if (!best || candidate.gain > best.gain
+              || (candidate.gain === best.gain && candidate.total > best.total)
+              || (candidate.gain === best.gain && candidate.total === best.total && candidate.owned > best.owned)
+              || (candidate.gain === best.gain && candidate.total === best.total
+                  && candidate.owned === best.owned && candidate.node.id() < best.node.id())) best = candidate;
+        }
+      });
+      cycle.splice(best.gap + 1, 0, best.node);
+      remaining = remaining.filter(function (node) { return node.id() !== best.node.id(); });
+    }
+    return cycle;
+  }
+
+  function visibleOwnedObjectCount(termId) {
+    return Object.keys(owners).reduce(function (count, nodeId) {
+      var node = cy.getElementById(nodeId);
+      return count + (node.length && node.visible() && owners[nodeId].has(termId) ? 1 : 0);
+    }, 0);
+  }
+
+  function layoutTermHierarchy() {
+    var termNodes = cy.nodes('[family="term"]:visible');
+    if (!termNodes.length) return false;
+    var core = chooseCoreTerm(termNodes);
+    core.position({ x: 0, y: 0 });
+    var peripheral = orderedPeripheralTerms(core, termNodes);
+    termLayout = { coreId: core.id(), sectors: {}, coreSlots: [], termRadius: 0 };
+    if (!peripheral.length) return true;
+    var perRing = 10;
+    for (var start = 0; start < peripheral.length; start += perRing) {
+      var ring = peripheral.slice(start, start + perRing);
+      var ringIndex = Math.floor(start / perRing);
+      var weights = ring.map(function (node) {
+        return 1 + Math.min(3, Math.sqrt(visibleOwnedObjectCount(node.id())) * 0.72);
+      });
+      var totalWeight = weights.reduce(function (sum, weight) { return sum + weight; }, 0);
+      var angleStart = -Math.PI / 2 + (ringIndex % 2 ? Math.PI / ring.length : 0);
+      var cursor = angleStart;
+      var radius = 320 + ringIndex * 390;
+      ring.forEach(function (node, index) {
+        var span = 2 * Math.PI * weights[index] / totalWeight;
+        var usableSpan = Math.max(0.22, span - Math.min(0.12, 0.72 / ring.length));
+        var box = node.boundingBox({ includeLabels: true, includeOverlays: false });
+        radius = Math.max(radius, (box.w + 90) / usableSpan);
+        termLayout.sectors[node.id()] = { angle: cursor + span / 2, span: usableSpan, ring: ringIndex };
+        if (ringIndex === 0) termLayout.coreSlots.push(cursor);
+        cursor += span;
+      });
+      ring.forEach(function (node) {
+        var angle = termLayout.sectors[node.id()].angle;
+        termLayout.sectors[node.id()].radius = radius;
+        termLayout.termRadius = Math.max(termLayout.termRadius, radius);
+        node.position({ x: radius * Math.cos(angle), y: radius * Math.sin(angle) });
+      });
+    }
+    return true;
+  }
+
+  function familyRingOffset(family) {
+    return family === 'mapping' ? 150
+      : family === 'constraint' ? 255
+      : family === 'evidence' ? 375
+      : 255;
+  }
+
+  function satelliteLayerRadius(family) {
+    var termRadius = termLayout.termRadius || 320;
+    return family === 'mapping' ? termRadius + 140
+      : family === 'constraint' ? termRadius + 260
+      : family === 'evidence' ? termRadius + 390
+      : termRadius + 260;
+  }
+
+  function setLayeredPosition(node, radius, angle) {
+    node.scratch('_layoutRadius', radius);
+    node.position({ x: radius * Math.cos(angle), y: radius * Math.sin(angle) });
+  }
+
+  function positionOnAssignedLayer(node, x, y) {
+    var radius = node.scratch('_layoutRadius');
+    if (!radius) return { x: x, y: y };
+    var length = Math.hypot(x, y);
+    var angle = length > 1 ? Math.atan2(y, x) : -Math.PI / 2;
+    return { x: radius * Math.cos(angle), y: radius * Math.sin(angle) };
+  }
+
+  function satelliteBranchKey(node, termId, seen) {
+    if (node.data('family') === 'mapping') return node.id();
+    seen = seen || new Set();
+    if (seen.has(node.id())) return node.id();
+    seen.add(node.id());
+    var sources = node.incomers('edge[family="reference"]').toArray().map(function (edge) {
+      return edge.source();
+    }).filter(function (source) {
+      var family = source.data('family');
+      return family === 'term' || family === 'mapping' || family === 'constraint';
+    }).sort(function (a, b) {
+      var priority = { mapping: 0, constraint: 1, term: 2 };
+      return priority[a.data('family')] - priority[b.data('family')] || a.id().localeCompare(b.id());
+    });
+    for (var index = 0; index < sources.length; index++) {
+      var source = sources[index];
+      if (source.data('family') === 'term') {
+        if (source.id() === termId) return node.id();
+        continue;
+      }
+      if (owners[source.id()] && owners[source.id()].has(termId)) {
+        return satelliteBranchKey(source, termId, seen);
+      }
+    }
+    return node.id();
+  }
+
+  function layoutSatellites() {
+    if (!cy) return;
+    var byOwner = {};
+    var sharedGroups = {};
+    cy.nodes(':visible').forEach(function (n) {
+      if (n.data().family === 'term' || n.data().family === 'anchor') return;
+      var set = owners[n.id()];
+      if (!set || !set.size) return;
+      if (set.size > 1) {
+        var signature = Array.from(set).sort().join('\u0000');
+        (sharedGroups[signature] = sharedGroups[signature] || []).push(n);
+        return;
+      }
+      var primary = Array.from(set)[0];
+      (byOwner[primary] = byOwner[primary] || []).push(n);
+    });
+    cy.batch(function () {
+      Object.keys(byOwner).forEach(function (termId) {
+        var term = cy.getElementById(termId);
+        if (!term.length) return;
+        var tp = term.position();
+        var sats = byOwner[termId].sort(function (a, b) { return a.id() < b.id() ? -1 : 1; });
+        var distanceFromCore = Math.hypot(tp.x, tp.y);
+        var sector = termLayout.sectors[termId];
+        var base = sector ? sector.angle : (distanceFromCore > 1 ? Math.atan2(tp.y, tp.x) : -Math.PI / 2);
+        var branches = {};
+        sats.forEach(function (node) {
+          var key = satelliteBranchKey(node, termId);
+          (branches[key] = branches[key] || []).push(node);
+        });
+        var branchKeys = Object.keys(branches).sort();
+        var isCore = termId === termLayout.coreId;
+        var maxSpan = isCore ? 2 * Math.PI : Math.min(1.28, sector ? sector.span * 0.72 : Math.PI * 0.55);
+        var familyStats = {};
+        sats.forEach(function (node) {
+          var family = node.data('family');
+          var stats = familyStats[family] || { count: 0, maxWidth: 0 };
+          stats.count++;
+          stats.maxWidth = Math.max(stats.maxWidth, node.boundingBox({
+            includeLabels: true, includeOverlays: false
+          }).w);
+          familyStats[family] = stats;
+        });
+        branchKeys.forEach(function (key, branchIndex) {
+          var angle;
+          if (isCore && termLayout.coreSlots.length && branchKeys.length <= termLayout.coreSlots.length) {
+            angle = termLayout.coreSlots[Math.floor(branchIndex * termLayout.coreSlots.length / branchKeys.length)];
+          } else {
+            angle = branchKeys.length === 1
+              ? base
+              : base - maxSpan / 2 + branchIndex * maxSpan / (branchKeys.length - 1);
+          }
+          var sameFamilyIndex = {};
+          var sameFamilyCount = {};
+          branches[key].forEach(function (node) {
+            var family = node.data('family');
+            sameFamilyCount[family] = (sameFamilyCount[family] || 0) + 1;
+          });
+          branches[key].sort(function (a, b) {
+            return familyRingOffset(a.data('family')) - familyRingOffset(b.data('family'))
+              || a.id().localeCompare(b.id());
+          }).forEach(function (node) {
+            var family = node.data('family');
+            var index = sameFamilyIndex[family] || 0;
+            sameFamilyIndex[family] = index + 1;
+            var stats = familyStats[family];
+            var neededRadius = stats.count > 1
+              ? (stats.count - 1) * (stats.maxWidth + 38) / Math.max(maxSpan, 0.2)
+              : 0;
+            var radius = Math.max(satelliteLayerRadius(family), neededRadius);
+            var nudge = (index - (sameFamilyCount[family] - 1) / 2) * Math.min(0.18, (stats.maxWidth + 30) / radius);
+            setLayeredPosition(node, radius, angle + nudge);
+          });
+        });
+      });
+      Object.keys(sharedGroups).sort().forEach(function (signature, groupIndex) {
+        var nodes = sharedGroups[signature].sort(function (a, b) { return a.id() < b.id() ? -1 : 1; });
+        var termIds = signature.split('\u0000');
+        var direction = termIds.reduce(function (acc, id) {
+          var position = cy.getElementById(id).position();
+          var length = Math.hypot(position.x, position.y);
+          if (length > 1) { acc.x += position.x / length; acc.y += position.y / length; }
+          return acc;
+        }, { x: 0, y: 0 });
+        var directionLength = Math.hypot(direction.x, direction.y);
+        var angle = directionLength > 0.2
+          ? Math.atan2(direction.y, direction.x)
+          : -Math.PI / 2 + groupIndex * 2.39996;
+        var maxWidth = 0;
+        nodes.forEach(function (node) {
+          maxWidth = Math.max(maxWidth, node.boundingBox({
+            includeLabels: true, includeOverlays: false
+          }).w);
+        });
+        nodes.forEach(function (node, index) {
+          var radius = satelliteLayerRadius(node.data('family'));
+          var nudge = (index - (nodes.length - 1) / 2) * (maxWidth + 38) / radius;
+          setLayeredPosition(node, radius, angle + nudge);
+        });
+      });
+    });
+  }
+
+  function layoutUnownedSatellites() {
+    var orphans = cy.nodes(':visible').filter(function (n) {
+      var family = n.data('family');
+      return family !== 'term' && family !== 'anchor' && !owners[n.id()];
+    });
+    if (!orphans.length) return;
+    var termNodes = cy.nodes('[family="term"]:visible');
+    var outerRadius = 0;
+    termNodes.forEach(function (term) {
+      var p = term.position();
+      outerRadius = Math.max(outerRadius, Math.hypot(p.x, p.y));
+    });
+    outerRadius = Math.max(outerRadius + 470, satelliteLayerRadius('evidence') + 180);
+    var ordered = stableNodes(orphans);
+    ordered.forEach(function (node, index) {
+      var angle = -Math.PI / 2 + index * 2 * Math.PI / ordered.length;
+      setLayeredPosition(node, outerRadius, angle);
+    });
+  }
+
+  function resolveOverlaps(movable) {
+    if (!cy) return;
+    var pad = 36;
+    for (var iter = 0; iter < 240; iter++) {
+      var nodes = cy.nodes(':visible').not('[family="anchor"]');
+      var boxes = nodes.map(function (n) {
+        return n.boundingBox({ includeLabels: true, includeOverlays: false });
+      });
+      var moved = false;
+      for (var a = 0; a < nodes.length; a++) {
+        for (var b = a + 1; b < nodes.length; b++) {
+          var canA = !movable || movable(nodes[a]);
+          var canB = !movable || movable(nodes[b]);
+          if (!canA && !canB) continue;
+          var ba = boxes[a], bb = boxes[b];
+          var cax = (ba.x1 + ba.x2) / 2, cay = (ba.y1 + ba.y2) / 2;
+          var cbx = (bb.x1 + bb.x2) / 2, cby = (bb.y1 + bb.y2) / 2;
+          var ox = (ba.w + bb.w) / 2 + pad - Math.abs(cax - cbx);
+          var oy = (ba.h + bb.h) / 2 + pad - Math.abs(cay - cby);
+          if (ox <= 0 || oy <= 0) continue;
+          moved = true;
+          var shareA = canA ? (canB ? 0.5 : 1) : 0;
+          var shareB = canB ? (canA ? 0.5 : 1) : 0;
+          if (ox < oy) {
+            var sgnX = cax >= cbx ? 1 : -1;
+            if (shareA) nodes[a].position(positionOnAssignedLayer(nodes[a], cax + sgnX * ox * shareA, cay));
+            if (shareB) nodes[b].position(positionOnAssignedLayer(nodes[b], cbx - sgnX * ox * shareB, cby));
+          } else {
+            var sgnY = cay >= cby ? 1 : -1;
+            if (shareA) nodes[a].position(positionOnAssignedLayer(nodes[a], cax, cay + sgnY * oy * shareA));
+            if (shareB) nodes[b].position(positionOnAssignedLayer(nodes[b], cbx, cby - sgnY * oy * shareB));
+          }
+          if (shareA) boxes[a] = nodes[a].boundingBox({ includeLabels: true, includeOverlays: false });
+          if (shareB) boxes[b] = nodes[b].boundingBox({ includeLabels: true, includeOverlays: false });
+        }
+      }
+      if (!moved) break;
+    }
+  }
+
+  function tidyOverlaps() {
+    resolveOverlaps(function (n) { return n.data('family') !== 'term'; });
+  }
+
+  function avoidEdgeNodeCrossings(graph, maxIterations) {
+    if (!graph) return;
+    var nodes = graph.nodes(':visible').not('[family="anchor"]');
+    var edges = graph.edges(':visible');
+    for (var iter = 0; iter < maxIterations; iter++) {
+      var adjustments = [];
+      var moved = false;
+      nodes.forEach(function (node) {
+        var center = node.position();
+        var box = node.boundingBox({ includeLabels: true, includeOverlays: false });
+        var clearance = Math.min(170, Math.hypot(box.w, box.h) / 2 + 16);
+        var pushX = 0, pushY = 0, hits = 0;
+        edges.forEach(function (edge) {
+          if (edge.source().id() === node.id() || edge.target().id() === node.id()) return;
+          var source = edge.source().position(), target = edge.target().position();
+          var vx = target.x - source.x, vy = target.y - source.y;
+          var lengthSquared = vx * vx + vy * vy;
+          if (lengthSquared < 1) return;
+          var t = ((center.x - source.x) * vx + (center.y - source.y) * vy) / lengthSquared;
+          t = Math.max(0, Math.min(1, t));
+          var nearestX = source.x + t * vx, nearestY = source.y + t * vy;
+          var dx = center.x - nearestX, dy = center.y - nearestY;
+          var distance = Math.hypot(dx, dy);
+          if (distance >= clearance) return;
+          var ux, uy;
+          if (distance < 0.5) {
+            var normalLength = Math.max(Math.hypot(vx, vy), 1);
+            ux = -vy / normalLength; uy = vx / normalLength; distance = 0;
+            if ((node.id().length + iter) % 2) { ux = -ux; uy = -uy; }
+          } else {
+            ux = dx / distance; uy = dy / distance;
+          }
+          var weight = node.data('family') === 'term' ? 0 : 1;
+          if (!weight) return;
+          var shift = Math.min((clearance - distance + 8) * weight, 30);
+          pushX += ux * shift;
+          pushY += uy * shift;
+          hits++;
+        });
+        if (hits) {
+          adjustments.push({
+            node: node,
+            x: center.x + pushX / hits,
+            y: center.y + pushY / hits
+          });
+          moved = true;
+        }
+      });
+      if (!moved) break;
+      graph.batch(function () {
+        adjustments.forEach(function (item) {
+          item.node.position(positionOnAssignedLayer(item.node, item.x, item.y));
+        });
+      });
+    }
+  }
+
+  function settleGraphGeometry() {
+    tidyOverlaps();
+    syncAnchors();
+    avoidEdgeNodeCrossings(cy, 36);
+    tidyOverlaps();
+    syncAnchors();
+    avoidEdgeNodeCrossings(cy, 12);
+  }
+
+  var anchorSyncQueued = false;
+  function syncAnchorsFor(graph) {
+    if (!graph) return;
+    graph.nodes('[family="anchor"]').forEach(function (a) {
+      var rel = graph.getElementById(a.data('rel_id'));
+      if (!rel.nonempty()) return;
+      var mp = rel.midpoint();
+      var p = a.position();
+      if (Math.abs(p.x - mp.x) > 0.5 || Math.abs(p.y - mp.y) > 0.5) a.position(mp);
+    });
+  }
+  function syncAnchors() { syncAnchorsFor(cy); }
+  function scheduleAnchorSync() {
+    if (anchorSyncQueued) return;
+    anchorSyncQueued = true;
+    window.requestAnimationFrame(function () {
+      anchorSyncQueued = false;
+      syncAnchors();
+    });
+  }
+
+  function fitGraphToCenter(graph, padding) {
+    if (!graph) return;
+    var visible = graph.elements(':visible').not('node[family="anchor"]');
+    if (!visible.length) return;
+    graph.fit(visible, padding);
+    graph.center(visible);
+  }
+
+  function runLayout(fitAfter) {
+    if (!cy) return;
+    var visible = cy.elements(':visible').not('node[family="anchor"]');
+    if (!visible.length) return;
+    if (!layoutTermHierarchy()) {
+      visible.layout({ name: 'grid', fit: false, padding: 64, avoidOverlap: true }).run();
+    }
+    layoutSatellites();
+    layoutUnownedSatellites();
+    settleGraphGeometry();
+    if (fitAfter !== false) fitGraphToCenter(cy, 64);
+  }
+
+  function syncFilterBoxes() {
+    var chkRelations = $('#chk-relations');
+    if (chkRelations) chkRelations.checked = relationsVisible;
+    var chkRefs = $('#chk-refs');
+    if (chkRefs) chkRefs.checked = refsVisible;
+    $all('#filters input[data-family]').forEach(function (box) {
+      box.checked = familyVisible[box.getAttribute('data-family')];
+    });
+  }
+
+  /* ================= graph: expand / collapse ================= */
+
+  function toggleExpand(termId) {
+    if (expandAllFlag) {
+      expandAllFlag = false;
+      expanded.clear();
+      cy.nodes('[family="term"]').forEach(function (n) {
+        if (n.id() !== termId) expanded.add(n.id());
+      });
+    } else if (expanded.has(termId)) {
+      expanded.delete(termId);
+    } else {
+      expanded.add(termId);
+    }
+    /* Deliberately no cy.fit() here: the double-clicked Term is already under
+       the pointer, so refitting every visible element would zoom the camera
+       back out and disorient the user. Satellites simply appear around it. */
+    applyVisibility();
+    layoutSatellites();
+    settleGraphGeometry();
+  }
+
+  function expandEverything() {
+    if (!cy) return;
+    expandAllFlag = true;
+    cy.nodes('[family="term"]').forEach(function (n) { expanded.add(n.id()); });
+    applyVisibility();
+    layoutSatellites();
+    settleGraphGeometry();
+    fitGraphToCenter(cy, 60);
+  }
+
+  function collapseEverything() {
+    expandAllFlag = false;
+    expanded.clear();
+    applyVisibility();
+    settleGraphGeometry();
+  }
+
+  function resetView() {
+    if (!cy) return;
+    expandAllFlag = true; /* opening state: everything visible */
+    expanded.clear();
+    cy.nodes('[family="term"]').forEach(function (n) { expanded.add(n.id()); });
+    familyVisible = { mapping: true, constraint: true, evidence: true };
+    relationsVisible = true;
+    refsVisible = true;
+    labelToggleOn = false;
+    var chkLabels = $('#chk-labels');
+    if (chkLabels) chkLabels.checked = false;
+    syncFilterBoxes();
+    cy.elements('.label-on').removeClass('label-on');
+    cy.elements('.dim').removeClass('dim');
+    cy.elements(':selected').unselect();
+    var input = $('#search-input');
+    input.value = '';
+    $('#search-status').textContent = '';
+    $('#search-results').hidden = true;
+    applyVisibility();
+    runLayout(true);
+    lastDetail = null;
+    detailEmpty.hidden = false;
+    detailBody.hidden = true;
+  }
+
+  /* ================= graph: interactions ================= */
+
+  function focusDimOn(graph, elem) {
+    var hood = elem.closedNeighborhood();
+    graph.batch(function () {
+      graph.elements().addClass('dim');
+      hood.removeClass('dim');
+    });
+  }
+
+  function focusDim(elem) { focusDimOn(cy, elem); }
+
+  function showNodeDetail(node) {
+    var d = node.data();
+    var actions = [];
+    if (d.family === 'term') {
+      var isExpanded = expandAllFlag || expanded.has(d.id);
+      actions.push({
+        label: isExpanded ? t('detail.collapse') : t('detail.expand'),
+        primary: true,
+        onClick: function () { toggleExpand(d.id); showNodeDetail(node); }
+      });
+    }
+    actions.push({
+      label: t('detail.center'),
+      onClick: function () { cy.animate({ center: { eles: node }, duration: 280 }); }
+    });
+    renderDetail({
+      family: d.family,
+      title: d.label,
+      subtitle: d.record_id,
+      recordId: d.record_id,
+      pairs: d.detail,
+      actions: actions
+    });
+    lastDetail = function () { showNodeDetail(node); };
+  }
+
+  function showEdgeDetail(edge) {
+    var d = edge.data();
+    var sourceLabel = cy.getElementById(d.source).data('label') || d.source;
+    if (d.rel_id) {
+      var relEdge = cy.getElementById(d.rel_id);
+      if (relEdge.nonempty()) sourceLabel = relEdge.data('label') || d.rel_id;
+    }
+    var targetLabel = cy.getElementById(d.target).data('label') || d.target;
+    renderDetail({
+      family: d.family === 'relation' ? 'relation' : 'reference',
+      title: d.family === 'relation' ? (d.relation_type || 'relation')
+        : (d.kind || 'reference'),
+      subtitle: sourceLabel + ' \u2192 ' + targetLabel,
+      recordId: d.record_id || null,
+      pairs: d.detail,
+      actions: [{
+        label: t('detail.center'),
+        onClick: function () { cy.animate({ center: { eles: edge }, duration: 280 }); }
+      }]
+    });
+    lastDetail = function () { showEdgeDetail(edge); };
+  }
+
+  function showTooltip(node) {
+    var d = node.data();
+    tooltip.innerHTML = '';
+    tooltip.appendChild(el('div', 'tt-title', d.label));
+    if (d.family === 'term') {
+      if (d.definition) tooltip.appendChild(el('div', 'tt-line', truncate(d.definition, 160)));
+      var hint = (expandAllFlag || expanded.has(d.id))
+        ? t('tooltip.collapse')
+        : t('tooltip.expand');
+      tooltip.appendChild(el('div', 'tt-line', hint));
+    } else {
+      tooltip.appendChild(el('div', 'tt-line', familyLabel(d.family) + ' · ' + t('tooltip.clickDetail')));
+    }
+    tooltip.hidden = false;
+    moveTooltipTo(node);
+  }
+
+  function moveTooltipTo(node) {
+    var wrap = $('#cy-wrap');
+    var pos = node.renderedPosition();
+    var width = wrap.clientWidth;
+    var height = wrap.clientHeight;
+    var x = Math.max(8, Math.min(pos.x + 16, width - tooltip.offsetWidth - 8));
+    var y = Math.max(8, Math.min(pos.y + 16, height - tooltip.offsetHeight - 8));
+    tooltip.style.left = x + 'px';
+    tooltip.style.top = y + 'px';
+  }
+
+  function wireGraphEvents() {
+    cy.on('tap', function (event) {
+      if (event.target === cy) cy.elements('.dim').removeClass('dim');
+    });
+    cy.on('select', 'node', function (event) {
+      focusDim(event.target);
+      showNodeDetail(event.target);
+    });
+    cy.on('select', 'edge', function (event) {
+      focusDim(event.target);
+      event.target.addClass('label-on');
+      showEdgeDetail(event.target);
+    });
+    cy.on('unselect', 'edge', function (event) {
+      if (!labelToggleOn) event.target.removeClass('label-on');
+    });
+    cy.on('dbltap', 'node[family="term"]', function (event) {
+      toggleExpand(event.target.id());
+    });
+    cy.on('mouseover', 'node', function (event) { showTooltip(event.target); });
+    cy.on('mouseout', 'node', function () { tooltip.hidden = true; });
+    cy.on('mouseover', 'edge', function (event) { event.target.addClass('label-on'); });
+    cy.on('mouseout', 'edge', function (event) {
+      if (!labelToggleOn && !event.target.selected()) event.target.removeClass('label-on');
+    });
+    cy.on('position', 'node', scheduleAnchorSync);
+  }
+
+  function wireToolbarAndFilters() {
+    $('#btn-fit').addEventListener('click', function () { fitGraphToCenter(cy, 60); });
+    $('#btn-expand-all').addEventListener('click', expandEverything);
+    $('#btn-collapse-all').addEventListener('click', collapseEverything);
+    $('#btn-reset').addEventListener('click', resetView);
+    $all('#filters input[data-family]').forEach(function (box) {
+      box.addEventListener('change', function () {
+        familyVisible[box.getAttribute('data-family')] = box.checked;
+        applyVisibility();
+      });
+    });
+    $('#chk-relations').addEventListener('change', function () {
+      relationsVisible = this.checked;
+      applyVisibility();
+    });
+    $('#chk-refs').addEventListener('change', function () {
+      refsVisible = this.checked;
+      applyVisibility();
+    });
+    $('#chk-labels').addEventListener('change', function () {
+      labelToggleOn = this.checked;
+      cy.batch(function () {
+        cy.edges().forEach(function (e) { e.toggleClass('label-on', labelToggleOn); });
+      });
+    });
+  }
+
+  /* ================= version switching & comparison ================= */
+
+  var compareCy = null;
+  var compareActive = false;
+  var diffHighlightOn = true;
+  var layerDiffs = {};
+
+  function switchVersion(version) {
+    if (!VERSION_DATA[version] || version === currentVersion) return;
+    currentVersion = version;
+    DATA = dataForVersion(version);
+    meta = DATA.meta || {};
+    if (cy) cy.destroy();
+    cy = null;
+    window.__cy = null;
+    initGraph();
+    applyI18n();
+    syncFilterBoxes();
+    if (compareActive) {
+      $('#cy-wrap').classList.add('compare-mode');
+      window.requestAnimationFrame(function () {
+        cy.resize();
+        runLayout(true);
+        buildCompareGraph();
+      });
+    }
+  }
+
+  function prepareCompareElements(versionData) {
+    var nodes = JSON.parse(JSON.stringify(
+      versionData.content && versionData.content.nodes ? versionData.content.nodes : []
+    ));
+    var edges = JSON.parse(JSON.stringify(
+      versionData.content && versionData.content.edges ? versionData.content.edges : []
+    ));
+    var families = {};
+    nodes.forEach(function (n) {
+      var d = n.data;
+      families[d.id] = d.family;
+      d.display = d.family === 'term' ? d.label : truncate(d.label, 26);
+      computeNodeSize(d);
+    });
+    var relationEndpoints = {};
+    edges.forEach(function (e) {
+      var d = e.data;
+      if (!d.label) d.label = d.kind || '';
+      if (d.family === 'relation') relationEndpoints[d.id] = [d.source, d.target];
+    });
+    edges.forEach(function (e) {
+      var d = e.data;
+      if (d.family !== 'reference' || typeof d.source !== 'string' ||
+          d.source.indexOf('rel:') !== 0 || !relationEndpoints[d.source]) return;
+      var anchorId = 'mid:' + d.source;
+      if (!families[anchorId]) {
+        families[anchorId] = 'anchor';
+        nodes.push({ data: {
+          id: anchorId, family: 'anchor', label: '', display: '',
+          rel_id: d.source, w: 2, h: 2
+        } });
+      }
+      d.rel_id = d.source;
+      d.source = anchorId;
+    });
+    return { nodes: nodes, edges: edges };
+  }
+
+  function stableNormalize(value) {
+    if (Array.isArray(value)) {
+      return value.map(stableNormalize).sort(function (a, b) {
+        return JSON.stringify(a).localeCompare(JSON.stringify(b));
+      });
+    }
+    if (value && typeof value === 'object') {
+      var normalized = {};
+      Object.keys(value).sort().forEach(function (key) {
+        normalized[key] = stableNormalize(value[key]);
+      });
+      return normalized;
+    }
+    return value;
+  }
+
+  function stableStringify(value) { return JSON.stringify(stableNormalize(value)); }
+
+  /* Compare only canonical semantic records. Structural Reference edges are
+     derived from fields on those records, so counting them again would inflate
+     added/removed totals and make an unchanged neighboring node look changed. */
+  function semanticEntries(versionData) {
+    var entries = {};
+    var content = versionData.content || {};
+    (content.nodes || []).forEach(function (item) {
+      var d = item.data || {};
+      if (!d.comparison) return;
+      entries[d.id] = {
+        signature: stableStringify(d.comparison), fields: d.comparison,
+        family: d.family, title: d.label || d.record_id || d.id, elementId: d.id
+      };
+    });
+    (content.edges || []).forEach(function (item) {
+      var d = item.data || {};
+      if (d.family !== 'relation' || !d.comparison) return;
+      entries[d.id] = {
+        signature: stableStringify(d.comparison), fields: d.comparison,
+        family: 'relation', title: d.record_id || d.label || d.id, elementId: d.id
+      };
+    });
+    return entries;
+  }
+
+  function fieldChanges(before, after) {
+    var changes = [];
+    var keys = {};
+    Object.keys(before || {}).forEach(function (key) { keys[key] = true; });
+    Object.keys(after || {}).forEach(function (key) { keys[key] = true; });
+    Object.keys(keys).sort().forEach(function (key) {
+      var leftValue = before ? before[key] : undefined;
+      var rightValue = after ? after[key] : undefined;
+      if (stableStringify(leftValue) !== stableStringify(rightValue)) {
+        changes.push({ field: key, before: leftValue, after: rightValue });
+      }
+    });
+    return changes;
+  }
+
+  function computeSignatureDiff(left, right) {
+    var leftStatus = {}, rightStatus = {};
+    var counts = { added: 0, removed: 0, changed: 0 };
+    var entries = { added: [], removed: [], changed: [] };
+    Object.keys(left).forEach(function (id) {
+      if (!Object.prototype.hasOwnProperty.call(right, id)) {
+        leftStatus[id] = 'removed';
+        counts.removed++;
+        entries.removed.push(Object.assign({ key: id, status: 'removed' }, left[id]));
+      } else if (left[id].signature !== right[id].signature) {
+        leftStatus[id] = rightStatus[id] = 'changed';
+        counts.changed++;
+        entries.changed.push({
+          key: id, status: 'changed', title: left[id].title || right[id].title,
+          family: left[id].family || right[id].family,
+          elementId: left[id].elementId || right[id].elementId,
+          before: left[id].fields, after: right[id].fields,
+          changes: fieldChanges(left[id].fields, right[id].fields)
+        });
+      } else {
+        leftStatus[id] = rightStatus[id] = 'unchanged';
+      }
+    });
+    Object.keys(right).forEach(function (id) {
+      if (!Object.prototype.hasOwnProperty.call(left, id)) {
+        rightStatus[id] = 'added';
+        counts.added++;
+        entries.added.push(Object.assign({ key: id, status: 'added' }, right[id]));
+      }
+    });
+    return { left: leftStatus, right: rightStatus, counts: counts, entries: entries };
+  }
+
+  function computeDiff(leftData, rightData) {
+    return computeSignatureDiff(semanticEntries(leftData), semanticEntries(rightData));
+  }
+
+  function applyDiffClasses(graph, statusById) {
+    graph.elements().removeClass('diff-added diff-removed diff-changed diff-unchanged');
+    if (!diffHighlightOn) return;
+    Object.keys(statusById).forEach(function (id) {
+      var elem = graph.getElementById(id);
+      if (elem.nonempty()) elem.addClass('diff-' + statusById[id]);
+    });
+  }
+
+  function formatDiffValue(value) {
+    if (value == null || value === '') return t('compare.emptyValue');
+    if (typeof value === 'object') return JSON.stringify(value, null, 2);
+    return String(localizeValue(value));
+  }
+
+  function focusDiffEntry(entry) {
+    if (currentViewName !== 'content' || !entry.elementId) return;
+    var graph = entry.status === 'added' ? compareCy : cy;
+    if (!graph) return;
+    var element = graph.getElementById(entry.elementId);
+    if (!element.nonempty()) return;
+    graph.elements().unselect();
+    element.select();
+    graph.animate({ center: { eles: element }, duration: 280 });
+  }
+
+  function showDiffDetails(status, diff) {
+    var items = diff && diff.entries && diff.entries[status] || [];
+    if (!items.length) return;
+    $all('.diff-chip').forEach(function (chip) {
+      chip.setAttribute('aria-pressed', chip.getAttribute('data-status') === status ? 'true' : 'false');
+    });
+    detailEmpty.hidden = true;
+    detailBody.hidden = false;
+    detailBody.innerHTML = '';
+    detailBody.appendChild(el('span', 'family-badge schema', t('tab.' + currentViewName)));
+    detailBody.appendChild(el('div', 'detail-title', t('compare.details', { status: t('diff.' + status) })));
+    detailBody.appendChild(el('div', 'detail-sub', diff.leftVersion + ' \u2192 ' + diff.rightVersion));
+    var list = el('div', 'diff-detail-list');
+    items.forEach(function (item) {
+      var box = el('div', 'diff-detail-item');
+      if (item.elementId) {
+        box.setAttribute('data-element-id', item.elementId);
+        box.addEventListener('click', function () { focusDiffEntry(item); });
+      }
+      var head = el('div', 'diff-detail-head');
+      head.appendChild(el('span', 'family-badge ' + item.family, familyLabel(item.family)));
+      head.appendChild(el('div', 'diff-detail-name', item.title || item.key));
+      box.appendChild(head);
+      if (status === 'changed') {
+        var fields = el('div', 'diff-detail-fields');
+        (item.changes || []).forEach(function (change) {
+          var field = el('div', 'diff-field');
+          field.appendChild(el('div', 'diff-field-name', change.field));
+          var values = el('div', 'diff-values');
+          values.appendChild(el('div', 'diff-value before', t('compare.before') + '\n' + formatDiffValue(change.before)));
+          values.appendChild(el('div', 'diff-value after', t('compare.after') + '\n' + formatDiffValue(change.after)));
+          field.appendChild(values);
+          fields.appendChild(field);
+        });
+        box.appendChild(fields);
+      }
+      list.appendChild(box);
+    });
+    detailBody.appendChild(list);
+    detailBody.scrollTop = 0;
+    lastDetail = function () { showDiffDetails(status, layerDiffs[currentViewName]); };
+  }
+
+  function renderDiffSummary(diff) {
+    var summary = $('#diff-summary');
+    summary.innerHTML = '';
+    var counts = diff ? diff.counts : { added: 0, removed: 0, changed: 0 };
+    if (!counts.added && !counts.removed && !counts.changed) {
+      summary.appendChild(el('span', 'diff-chip same', t('compare.same')));
+      return;
+    }
+    [
+      ['added', 'compare.added'],
+      ['removed', 'compare.removed'],
+      ['changed', 'compare.changed']
+    ].forEach(function (item) {
+      if (!counts[item[0]]) return;
+      var chip = el('button', 'diff-chip ' + item[0], t(item[1], { n: counts[item[0]] }));
+      chip.type = 'button';
+      chip.setAttribute('data-status', item[0]);
+      chip.setAttribute('aria-pressed', 'false');
+      var names = (diff.entries[item[0]] || []).map(function (entry) { return entry.title || entry.key; });
+      chip.title = t('compare.inspect') + (names.length ? ': ' + names.join(', ') : '');
+      chip.addEventListener('click', function () { showDiffDetails(item[0], diff); });
+      summary.appendChild(chip);
+    });
+  }
+
+  function renderCurrentDiffSummary() {
+    var diff = layerDiffs[currentViewName];
+    renderDiffSummary(diff);
+  }
+
+  function positionCompareGraph(graph) {
+    var bb = cy.elements(':visible').boundingBox();
+    var cx = bb.x1 + bb.w / 2;
+    var cyCenter = bb.y1 + bb.h / 2;
+    var uniqueIndex = 0;
+    graph.nodes().not('[family="anchor"]').forEach(function (node) {
+      var leftNode = cy.getElementById(node.id());
+      if (leftNode.nonempty()) {
+        node.position(leftNode.position());
+        return;
+      }
+      var linked = node.connectedEdges().connectedNodes().filter(function (neighbor) {
+        return cy.getElementById(neighbor.id()).nonempty();
+      });
+      if (linked.length) {
+        var sx = 0, sy = 0;
+        linked.forEach(function (neighbor) {
+          var p = cy.getElementById(neighbor.id()).position();
+          sx += p.x; sy += p.y;
+        });
+        var angle = uniqueIndex++ * 2.39996;
+        node.position({
+          x: sx / linked.length + Math.cos(angle) * 120,
+          y: sy / linked.length + Math.sin(angle) * 120
+        });
+      } else {
+        var fallbackAngle = uniqueIndex++ * 2.39996;
+        var radius = 150 + Math.sqrt(uniqueIndex) * 55;
+        node.position({
+          x: cx + Math.cos(fallbackAngle) * radius,
+          y: cyCenter + Math.sin(fallbackAngle) * radius
+        });
+      }
+    });
+    syncAnchorsFor(graph);
+  }
+
+  function wireCompareGraphEvents() {
+    compareCy.on('tap', function (event) {
+      if (event.target === compareCy) compareCy.elements().removeClass('dim');
+    });
+    compareCy.on('select', 'node', function (event) {
+      var node = event.target;
+      focusDimOn(compareCy, node);
+      var d = node.data();
+      renderDetail({
+        family: d.family,
+        title: d.label,
+        subtitle: d.record_id,
+        recordId: d.record_id,
+        pairs: d.detail,
+        actions: [{
+          label: t('detail.center'),
+          onClick: function () { compareCy.animate({ center: { eles: node }, duration: 280 }); }
+        }]
+      });
+      lastDetail = null;
+    });
+    compareCy.on('select', 'edge', function (event) {
+      var edge = event.target;
+      focusDimOn(compareCy, edge);
+      edge.addClass('label-on');
+      var d = edge.data();
+      var sourceLabel = compareCy.getElementById(d.source).data('label') || d.source;
+      if (d.rel_id) {
+        var relEdge = compareCy.getElementById(d.rel_id);
+        if (relEdge.nonempty()) sourceLabel = relEdge.data('label') || d.rel_id;
+      }
+      var targetLabel = compareCy.getElementById(d.target).data('label') || d.target;
+      renderDetail({
+        family: d.family === 'relation' ? 'relation' : 'reference',
+        title: d.family === 'relation' ? (d.relation_type || 'relation') : (d.kind || 'reference'),
+        subtitle: sourceLabel + ' \u2192 ' + targetLabel,
+        recordId: d.record_id || null,
+        pairs: d.detail,
+        actions: [{
+          label: t('detail.center'),
+          onClick: function () { compareCy.animate({ center: { eles: edge }, duration: 280 }); }
+        }]
+      });
+      lastDetail = null;
+    });
+    compareCy.on('position', 'node', function () { syncAnchorsFor(compareCy); });
+  }
+
+  function buildCompareGraph() {
+    if (!compareActive || !cy) return;
+    var rightVersion = $('#compare-version-select').value;
+    if (!VERSION_DATA[rightVersion] || rightVersion === currentVersion) {
+      rightVersion = (ROOT_META.versions || []).filter(function (v) {
+        return v !== currentVersion;
+      })[0];
+      if (!rightVersion) return;
+      $('#compare-version-select').value = rightVersion;
+    }
+    if (compareCy) compareCy.destroy();
+    var prepared = prepareCompareElements(VERSION_DATA[rightVersion]);
+    compareCy = cytoscape({
+      container: document.getElementById('cy-compare'),
+      elements: prepared,
+      style: STYLE,
+      layout: { name: 'preset' },
+      minZoom: 0.12,
+      maxZoom: 3,
+      wheelSensitivity: 0.22,
+      boxSelectionEnabled: false,
+      userPanningEnabled: true
+    });
+    positionCompareGraph(compareCy);
+    layerDiffs.content = computeDiff(DATA, VERSION_DATA[rightVersion]);
+    layerDiffs.content.leftVersion = currentVersion;
+    layerDiffs.content.rightVersion = rightVersion;
+    applyDiffClasses(cy, layerDiffs.content.left);
+    applyDiffClasses(compareCy, layerDiffs.content.right);
+    $('#compare-pane-label').textContent = optionLabel(rightVersion);
+    $('#compare-left-label').textContent = optionLabel(currentVersion);
+    $('#primary-pane-label').textContent = optionLabel(currentVersion);
+    wireCompareGraphEvents();
+    fitGraphToCenter(compareCy, 60);
+    buildSchemaCompareView();
+    buildToolCompareView();
+    renderCurrentDiffSummary();
+  }
+
+  function enterCompare() {
+    if (currentViewName === 'overview') showView('content');
+    if (compareActive || Object.keys(VERSION_DATA).length < 2) return;
+    compareActive = true;
+    $('#compare-bar').hidden = false;
+    $('#compare-pane').hidden = false;
+    $('#cy-wrap').classList.add('compare-mode');
+    $('main').classList.add('compare-active');
+    $('main').classList.toggle('diff-highlights-off', !diffHighlightOn);
+    $('#btn-compare').classList.add('active');
+    renderVersionControls();
+    window.requestAnimationFrame(function () {
+      cy.resize();
+      runLayout(true);
+      buildCompareGraph();
+    });
+  }
+
+  function exitCompare() {
+    if (!compareActive) return;
+    compareActive = false;
+    if (compareCy) compareCy.destroy();
+    compareCy = null;
+    layerDiffs = {};
+    cy.elements().removeClass('diff-added diff-removed diff-changed diff-unchanged');
+    $('#compare-bar').hidden = true;
+    $('#compare-pane').hidden = true;
+    $('#cy-wrap').classList.remove('compare-mode');
+    $('main').classList.remove('compare-active', 'diff-highlights-off');
+    $('#btn-compare').classList.remove('active');
+    buildSchemaView();
+    buildToolView();
+    window.requestAnimationFrame(function () {
+      cy.resize();
+      fitGraphToCenter(cy, 60);
+    });
+  }
+
+  $('#version-select').addEventListener('change', function () { switchVersion(this.value); });
+  $('#btn-compare').addEventListener('click', function () {
+    if (compareActive) exitCompare(); else enterCompare();
+  });
+  $('#btn-compare-close').addEventListener('click', exitCompare);
+  $('#compare-version-select').addEventListener('change', buildCompareGraph);
+  $('#chk-highlight-diff').addEventListener('change', function () {
+    diffHighlightOn = this.checked;
+    $('main').classList.toggle('diff-highlights-off', !diffHighlightOn);
+    if (!compareActive) return;
+    if (layerDiffs.content) {
+      applyDiffClasses(cy, layerDiffs.content.left);
+      if (compareCy) applyDiffClasses(compareCy, layerDiffs.content.right);
+    }
+  });
+
+  /* ================= search ================= */
+
+  var searchInput = $('#search-input');
+  var searchStatus = $('#search-status');
+  var searchResults = $('#search-results');
+
+  function searchNodes(query) {
+    query = query.trim().toLowerCase();
+    if (!query) return [];
+    var matches = [];
+    ((DATA.content && DATA.content.nodes) || []).forEach(function (n) {
+      var d = n.data;
+      var hay = [d.label, d.record_id].concat(d.search || []);
+      var hit = hay.some(function (item) {
+        return item && String(item).toLowerCase().indexOf(query) !== -1;
+      });
+      if (hit) matches.push(d);
+    });
+    return matches.slice(0, 12);
+  }
+
+  searchInput.addEventListener('input', function () {
+    var query = searchInput.value.trim();
+    searchResults.innerHTML = '';
+    if (!query) {
+      searchResults.hidden = true;
+      searchStatus.textContent = '';
+      return;
+    }
+    var matches = searchNodes(query);
+    searchStatus.textContent = matches.length
+      ? t('search.matches', { n: matches.length })
+      : t('search.none');
+    matches.forEach(function (d) {
+      var item = el('div', 'sr-item');
+      item.appendChild(el('span', 'swatch ' + d.family));
+      var textBox = el('div', 'sr-text');
+      textBox.appendChild(el('div', 'sr-label', d.label));
+      textBox.appendChild(el('div', 'sr-id', d.record_id));
+      item.appendChild(textBox);
+      item.addEventListener('click', function () {
+        searchResults.hidden = true;
+        focusElement(d.id);
+      });
+      searchResults.appendChild(item);
+    });
+    searchResults.hidden = false;
+  });
+
+  searchInput.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter') {
+      var first = searchResults.querySelector('.sr-item');
+      if (first) first.click();
+    } else if (event.key === 'Escape') {
+      searchResults.hidden = true;
+      searchInput.blur();
+    }
+  });
+
+  document.addEventListener('click', function (event) {
+    if (!event.target.closest || !event.target.closest('.search-box')) {
+      searchResults.hidden = true;
+    }
+  });
+
+  /* ================= schema / tool views ================= */
+
+  function relationDirectionLabel(item) {
+    if (!item.directed) return t('schema.direction.undirected');
+    return t('schema.direction.flow', {
+      source: t('schema.role.' + item.source_role),
+      target: t('schema.role.' + item.target_role)
+    });
+  }
+
+  function cardGrid(items) {
+    var grid = el('div', 'cards');
+    items.forEach(function (item) {
+      var className = 'card';
+      if (item.diffStatus) className += ' diff-card ' + item.diffStatus;
+      if (item.mono) className += ' compare-manifest';
+      var card = el('div', className);
+      if (item.diffStatus && item.diffStatus !== 'unchanged') {
+        card.appendChild(el('span', 'diff-tag ' + item.diffStatus, t('diff.' + item.diffStatus)));
+      }
+      card.appendChild(el('div', 'card-title', item.title));
+      if (item.subtitle) card.appendChild(el('div', 'card-sub', item.subtitle));
+      if (item.body) card.appendChild(el('div', 'card-body', item.body));
+      card.addEventListener('click', function () {
+        renderDetail(item.getDetail());
+        lastDetail = function () { renderDetail(item.getDetail()); };
+      });
+      grid.appendChild(card);
+    });
+    return grid;
+  }
+
+  function schemaCompareGroups(schema) {
+    schema = schema || {};
+    var typeNames = (schema.relation_types || []).map(function (item) { return item.name; });
+    var groups = [{
+      title: t('schema.objects'),
+      items: (schema.object_types || []).map(function (item) {
+        return {
+          key: 'object:' + item.name, raw: item, title: item.name,
+          subtitle: item.description, body: t('schema.fields', { n: item.fields.length }),
+          getDetail: function () {
+            return {
+              family: 'schema', title: item.name, subtitle: '', recordId: null, actions: [],
+              pairs: [[t('common.description'), item.description], [t('common.fields'), item.fields]]
+            };
+          }
+        };
+      })
+    }];
+    if (schema.relation_record) {
+      var record = schema.relation_record;
+      groups.push({
+        title: t('schema.relation'),
+        items: [{
+          key: 'relation-record:' + record.name, raw: record, title: record.name,
+          subtitle: record.description, body: t('schema.fields', { n: record.fields.length }),
+          getDetail: function () {
+            return {
+              family: 'relation', title: record.name, subtitle: '', recordId: null, actions: [],
+              pairs: [
+                [t('common.description'), record.description],
+                [t('common.fields'), record.fields],
+                ['relation_type', typeNames.length ? typeNames : '\u2014']
+              ]
+            };
+          }
+        }]
+      });
+    }
+    groups.push({
+      title: t('schema.relationTypes'),
+      items: (schema.relation_types || []).map(function (item) {
+        return {
+          key: 'relation-type:' + item.name, raw: item, title: item.name,
+          subtitle: item.description,
+          body: (item.directed ? t('schema.directed') : t('schema.undirected'))
+            + ' · ' + relationDirectionLabel(item),
+          getDetail: function () {
+            return {
+              family: 'relation', title: item.name, subtitle: '', recordId: null, actions: [],
+              pairs: [
+                [t('schema.relationTypes.belongsTo'), t('schema.relationTypes.belongsValue')],
+                [t('common.description'), item.description],
+                [t('schema.directionality'), item.directed ? t('schema.directed') : t('schema.undirected')],
+                [t('schema.direction'), relationDirectionLabel(item)]
+              ]
+            };
+          }
+        };
+      })
+    });
+    groups.push({
+      title: t('schema.references'),
+      items: (schema.reference_rules || []).map(function (item) {
+        return {
+          key: 'reference:' + item.name, raw: item, title: item.name,
+          subtitle: item.from + ' \u2192 ' + item.to, body: item.description,
+          getDetail: function () {
+            return {
+              family: 'reference', title: item.name, subtitle: '', recordId: null, actions: [],
+              pairs: [['From', item.from], ['To', item.to], [t('common.description'), item.description]]
+            };
+          }
+        };
+      })
+    });
+    return groups;
+  }
+
+  function toolCompareGroups(toolData) {
+    toolData = toolData || {};
+    return [
+      {
+        title: t('tool.title'),
+        items: (toolData.tools || []).map(function (tool) {
+          return {
+            key: 'tool:' + tool.name, raw: tool, title: tool.name,
+            subtitle: tool.description, body: (tool.parameters || []).join('   '),
+            getDetail: function () {
+              return {
+                family: 'tool', title: tool.name, subtitle: '', recordId: null, actions: [],
+                pairs: [[t('common.description'), tool.description], [t('tool.params'), tool.parameters || []]]
+              };
+            }
+          };
+        })
+      },
+      {
+        title: t('tool.manifest'),
+        items: [{
+          key: 'manifest', raw: toolData.manifest || '', title: t('tool.manifest'),
+          signature: stableManifestSignature(toolData.manifest),
+          body: toolData.manifest || '\u2014', mono: true,
+          getDetail: function () {
+            return {
+              family: 'tool', title: t('tool.manifest'), subtitle: '', recordId: null, actions: [],
+              pairs: [['Manifest', toolData.manifest || '\u2014']]
+            };
+          }
+        }]
+      }
+    ];
+  }
+
+  function stableManifestSignature(manifest) {
+    return String(manifest || '').split(/\r?\n/).filter(function (line) {
+      return !/^(Ontology layer version:|Objects:|Active constraints:)/.test(line);
+    }).join('\n').trim();
+  }
+
+  function groupedSignatures(groups) {
+    var signatures = {};
+    groups.forEach(function (group) {
+      group.items.forEach(function (item) {
+        var value = item.signature == null ? item.raw : item.signature;
+        var detail = item.getDetail ? item.getDetail() : {};
+        var fields = item.signature == null ? value : { value: value };
+        signatures[item.key] = {
+          signature: stableStringify(value), fields: fields,
+          family: detail.family || 'schema', title: item.title || item.key
+        };
+      });
+    });
+    return signatures;
+  }
+
+  function renderLayerColumn(version, groups, statuses) {
+    var column = el('div', 'layer-compare-column');
+    var head = el('div', 'layer-column-head');
+    head.appendChild(el('span', 'badge explicit', optionLabel(version)));
+    column.appendChild(head);
+    groups.forEach(function (group) {
+      if (!group.items.length) return;
+      column.appendChild(el('h2', '', group.title));
+      column.appendChild(cardGrid(group.items.map(function (item) {
+        var copy = Object.assign({}, item);
+        copy.diffStatus = statuses[item.key] || 'unchanged';
+        return copy;
+      })));
+    });
+    return column;
+  }
+
+  function buildLayerCompareView(view, leftVersion, rightVersion, leftGroups, rightGroups, diff) {
+    view.innerHTML = '';
+    view.classList.add('compare-doc');
+    var grid = el('div', 'layer-compare-grid');
+    grid.appendChild(renderLayerColumn(leftVersion, leftGroups, diff.left));
+    grid.appendChild(renderLayerColumn(rightVersion, rightGroups, diff.right));
+    view.appendChild(grid);
+  }
+
+  function selectedCompareVersion() {
+    var version = $('#compare-version-select').value;
+    if (VERSION_DATA[version] && version !== currentVersion) return version;
+    return (ROOT_META.versions || []).filter(function (item) { return item !== currentVersion; })[0];
+  }
+
+  function buildSchemaCompareView() {
+    if (!compareActive) return;
+    var rightVersion = selectedCompareVersion();
+    if (!rightVersion) return;
+    var leftGroups = schemaCompareGroups(DATA.schema);
+    var rightGroups = schemaCompareGroups(VERSION_DATA[rightVersion].schema);
+    layerDiffs.schema = computeSignatureDiff(
+      groupedSignatures(leftGroups), groupedSignatures(rightGroups)
+    );
+    layerDiffs.schema.leftVersion = currentVersion;
+    layerDiffs.schema.rightVersion = rightVersion;
+    buildLayerCompareView(
+      views.schema, currentVersion, rightVersion, leftGroups, rightGroups, layerDiffs.schema
+    );
+  }
+
+  function buildToolCompareView() {
+    if (!compareActive) return;
+    var rightVersion = selectedCompareVersion();
+    if (!rightVersion) return;
+    var leftGroups = toolCompareGroups(DATA.tools);
+    var rightGroups = toolCompareGroups(VERSION_DATA[rightVersion].tools);
+    layerDiffs.tool = computeSignatureDiff(
+      groupedSignatures(leftGroups), groupedSignatures(rightGroups)
+    );
+    layerDiffs.tool.leftVersion = currentVersion;
+    layerDiffs.tool.rightVersion = rightVersion;
+    buildLayerCompareView(
+      views.tool, currentVersion, rightVersion, leftGroups, rightGroups, layerDiffs.tool
+    );
+  }
+
+  function buildSchemaView() {
+    var view = views.schema;
+    if (compareActive) {
+      buildSchemaCompareView();
+      return;
+    }
+    view.innerHTML = '';
+    view.classList.remove('compare-doc');
+    var schema = DATA.schema || {};
+    view.appendChild(el('h2', '', t('schema.objects')));
+    view.appendChild(cardGrid((schema.object_types || []).map(function (item) {
+      return {
+        title: item.name,
+        subtitle: item.description,
+        body: t('schema.fields', { n: item.fields.length }),
+        getDetail: function () {
+          return {
+            family: 'schema', title: item.name, subtitle: '', recordId: null, actions: [],
+            pairs: [[t('common.description'), item.description], [t('common.fields'), item.fields]]
+          };
+        }
+      };
+    })));
+    if (schema.relation_record) {
+      var typeNames = (schema.relation_types || []).map(function (item) { return item.name; });
+      var record = schema.relation_record;
+      view.appendChild(el('h2', '', t('schema.relation')));
+      view.appendChild(el('p', 'doc-note', t('schema.relation.note')));
+      view.appendChild(cardGrid([{
+        title: record.name,
+        subtitle: record.description,
+        body: t('schema.fields', { n: record.fields.length }),
+        getDetail: function () {
+          return {
+            family: 'relation', title: record.name, subtitle: '', recordId: null, actions: [],
+            pairs: [
+              [t('common.description'), record.description],
+              [t('common.fields'), record.fields],
+              ['relation_type', typeNames.length ? typeNames : '\u2014']
+            ]
+          };
+        }
+      }]));
+      var sub = el('div', 'schema-subsection');
+      sub.appendChild(el('h3', '', t('schema.relationTypes')));
+      sub.appendChild(cardGrid((schema.relation_types || []).map(function (item) {
+        return {
+          title: item.name,
+          subtitle: item.description,
+          body: (item.directed ? t('schema.directed') : t('schema.undirected'))
+            + ' · ' + relationDirectionLabel(item),
+          getDetail: function () {
+            return {
+              family: 'relation', title: item.name, subtitle: '', recordId: null, actions: [],
+              pairs: [
+                [t('schema.relationTypes.belongsTo'), t('schema.relationTypes.belongsValue')],
+                [t('common.description'), item.description],
+                [t('schema.directionality'), item.directed ? t('schema.directed') : t('schema.undirected')],
+                [t('schema.direction'), relationDirectionLabel(item)]
+              ]
+            };
+          }
+        };
+      })));
+      view.appendChild(sub);
+    }
+    view.appendChild(el('h2', '', t('schema.references')));
+    view.appendChild(cardGrid((schema.reference_rules || []).map(function (item) {
+      return {
+        title: item.name,
+        subtitle: item.from + ' \u2192 ' + item.to,
+        body: item.description,
+        getDetail: function () {
+          return {
+            family: 'reference', title: item.name, subtitle: '', recordId: null, actions: [],
+            pairs: [['From', item.from], ['To', item.to], [t('common.description'), item.description]]
+          };
+        }
+      };
+    })));
+  }
+
+  function buildToolView() {
+    var view = views.tool;
+    if (compareActive) {
+      buildToolCompareView();
+      return;
+    }
+    view.innerHTML = '';
+    view.classList.remove('compare-doc');
+    var toolData = DATA.tools || {};
+    view.appendChild(el('h2', '', t('tool.title')));
+    view.appendChild(cardGrid((toolData.tools || []).map(function (tool) {
+      return {
+        title: tool.name,
+        subtitle: tool.description,
+        body: (tool.parameters || []).join('   '),
+        getDetail: function () {
+          return {
+            family: 'tool', title: tool.name, subtitle: '', recordId: null, actions: [],
+            pairs: [[t('common.description'), tool.description], [t('tool.params'), tool.parameters || []]]
+          };
+        }
+      };
+    })));
+    view.appendChild(el('h2', '', t('tool.manifest')));
+    view.appendChild(el('div', 'manifest', toolData.manifest || ''));
+  }
+
+  /* ================= welcome overlay ================= */
+
+  function openWelcome() { $('#welcome-backdrop').hidden = false; }
+
+  function closeWelcome() {
+    $('#welcome-backdrop').hidden = true;
+    if ($('#chk-welcome-hide').checked) {
+      try { window.localStorage.setItem(WELCOME_KEY, '1'); } catch (e) { /* ignore */ }
+    }
+  }
+
+  function renderWelcomeGenerated() {
+    var box = $('#welcome-generated');
+    var stamp = meta.generated_at || '';
+    box.textContent = stamp ? t('welcome.generated', { time: stamp }) : '';
+  }
+
+  $('#btn-welcome-start').addEventListener('click', closeWelcome);
+  $('#welcome-backdrop').addEventListener('click', function (event) {
+    if (event.target === this) closeWelcome();
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && !$('#welcome-backdrop').hidden) closeWelcome();
+  });
+  $('#btn-help').addEventListener('click', openWelcome);
+  $('#btn-guide').addEventListener('click', openWelcome);
+
+  /* ================= outcome and question explorer ================= */
+  function words(zh, en) { return LANG === 'zh' ? zh : en; }
+  function stateLabel(value) {
+    var labels = {completed:['已执行','Executed'],failed:['执行失败','Failed'],interrupted:['已中断','Interrupted'],running:['运行中','Running'],accepted:['已接受并发布','Accepted and published'],incomplete:['未完成，保留原版本','Incomplete; parent retained'],user_interrupted:['用户中断','User interrupted'],budget_exhausted:['预算已用完','Budget exhausted'],missing_data:['缺少数据','Missing data'],missing_permissions:['缺少访问权限','Missing access'],unreliable_evaluation:['评估无法可靠完成','Evaluation unreliable'],external_block:['外部条件阻塞','External block']};
+    return labels[value] ? words(labels[value][0],labels[value][1]) : value;
+  }
+  function printable(value) { return typeof value === 'string' ? value : JSON.stringify(value, null, 2); }
+  function focusQuestion(question) {
+    if (compareActive) exitCompare();
+    showView('content');
+    if (!cy) return;
+    var ids = question.object_ids || [];
+    var selected = cy.elements().filter(function (e) {
+      return ids.indexOf(e.id()) >= 0 || ids.indexOf(e.data('raw_id')) >= 0
+        || ids.some(function (id) { return e.id() === 'term:' + id || e.id() === 'mapping:' + id
+            || e.id() === 'constraint:' + id || e.id() === 'evidence:' + id || e.id() === 'rel:' + id; });
+    });
+    var neighborhood = selected.closedNeighborhood();
+    cy.elements().removeClass('dim');
+    if (selected.length) {
+      cy.elements().not(neighborhood).addClass('dim');
+      cy.fit(neighborhood, 70);
+    }
+    detailEmpty.hidden = true; detailBody.hidden = false; detailBody.innerHTML = '';
+    detailBody.appendChild(el('div', 'detail-title', question.question));
+    detailBody.appendChild(el('p', '', words('高亮关联概念及其相邻证据。点击对象查看具体口径与依据。',
+      'Related concepts and neighboring evidence are highlighted. Select an object to inspect its definition and grounding.')));
+    lastDetail = null;
+  }
+  function buildOverview() {
+    var view = $('#view-overview'); view.innerHTML = '';
+    var experience = DATA.experience || {};
+    var questions = experience.questions || [];
+    var hero = el('div', 'result-hero');
+    hero.appendChild(el('div', 'result-label', currentVersion + ' · ' + (meta.active ? words('当前使用版本','Active version') : words('历史或候选版本','Historical or candidate version'))));
+    hero.appendChild(el('h1', '', words('理解这份数据，从一个问题开始','Understand your data, one question at a time')));
+    hero.appendChild(el('p', '', experience.summary || words('语义结构已保存。此版本尚未记录结果摘要。','Semantic structure is stored. No outcome summary was recorded for this version.')));
+    var steps = el('div', 'result-steps');
+    steps.appendChild(el('span','result-step',words('语义对象：','Semantic objects: ') + Object.keys(meta.counts || {}).reduce(function(n,k){return n + meta.counts[k];},0)));
+    steps.appendChild(el('span','result-step',words('关联问题：','Linked questions: ') + questions.length));
+    var executed = questions.filter(function(q){return (q.tasks || []).some(function(t){return t.task_status === 'completed';});}).length;
+    steps.appendChild(el('span','result-step',words('已执行问题：','Executed questions: ') + executed));
+    hero.appendChild(steps);
+    hero.appendChild(el('p','result-label',words('建立语义关联、完成执行与独立验证是不同阶段；执行完成不代表答案正确。','Semantic coverage, execution and independent validation are distinct stages; completion does not establish correctness.')));
+    view.appendChild(hero);
+    if ((experience.limitations || []).length) {
+      var limits = el('div','result-card'); limits.appendChild(el('h3','',words('已知限制','Known limitations')));
+      experience.limitations.forEach(function(item){limits.appendChild(el('p','',item));}); view.appendChild(limits);
+    }
+    view.appendChild(el('h2','',words('从问题查看语义与证据','Explore semantics and evidence through questions')));
+    var grid = el('div','result-grid');
+    if (!questions.length) grid.appendChild(el('p','',words('尚无问题关联。构建或进化时保存问题与对象的关联后，可在这里查看。','No linked questions yet. Save question-to-object links during build or evolution to explore them here.')));
+    questions.forEach(function(question){
+      var card = el('article','result-card');
+      var origins = {user: words('用户问题','User question'),history:words('历史问题','Historical question'),generated:words('合成探索问题','Synthetic exploration')};
+      card.appendChild(el('div','result-label',origins[question.origin] || question.origin));
+      card.appendChild(el('h3','',question.question));
+      (question.provenance || []).forEach(function(source){
+        card.appendChild(el('p','result-label',words('来源：','Source: ') + source.source_ref));
+      });
+      var button = el('button','',words('查看关联语义','Show related semantics'));
+      button.disabled = !(question.object_ids || []).length;
+      button.addEventListener('click',function(){focusQuestion(question);}); card.appendChild(button);
+      (question.tasks || []).forEach(function(task){
+        var details = el('details',''); details.appendChild(el('summary','',words('执行记录 · ','Execution · ') + stateLabel(task.task_status)));
+        details.appendChild(el('pre','',printable(task.final_answer))); card.appendChild(details);
+      });
+      grid.appendChild(card);
+    }); view.appendChild(grid);
+    view.appendChild(el('h2','',words('进化与效果','Evolution and outcomes')));
+    var runs = experience.runs || [];
+    if (!runs.length) view.appendChild(el('p','',words('尚无独立进化评估记录。','No independent evolution evaluation has been recorded.')));
+    runs.slice().reverse().forEach(function(run){
+      var card = el('article','result-card');
+      card.appendChild(el('h3','',run.run_id + ' · ' + stateLabel(run.status)));
+      card.appendChild(el('p','',run.parent_version + ' → ' + (run.accepted_version || run.current_candidate || '—')));
+      card.appendChild(el('p','result-label',words('已运行轮数 / 预算：','Rounds / budget: ') + run.round + ' / ' + ((run.budget || {}).max_rounds || '—')));
+      if (run.end_reason) card.appendChild(el('p','',words('保留原版本：','Parent retained: ') + stateLabel(run.end_reason)));
+      (run.evaluations || []).forEach(function(evaluation){
+        card.appendChild(el('p','result-label',evaluation.subject + ' · ' + evaluation.role + ' · ' + (evaluation.provenance || words('来源未标注','Unspecified provenance'))));
+        card.appendChild(el('pre','',printable(evaluation.metrics)));
+      });
+      var right = run.accepted_version || run.current_candidate;
+      if (VERSION_DATA[run.parent_version] && VERSION_DATA[right]) {
+        var compare = el('button','',words('查看本轮结构变化','Compare this run'));
+        compare.addEventListener('click',function(){
+          if (compareActive) exitCompare(); switchVersion(run.parent_version);
+          $('#compare-version-select').value = right; enterCompare();
+        }); card.appendChild(compare);
+        var leftQuestions = ((VERSION_DATA[run.parent_version].experience || {}).questions || []);
+        var rightQuestions = ((VERSION_DATA[right].experience || {}).questions || []);
+        leftQuestions.forEach(function(before){
+          var after = rightQuestions.find(function(q){return q.id === before.id;});
+          if (!after || !(before.tasks || []).length || !(after.tasks || []).length) return;
+          var pair = el('details',''); pair.appendChild(el('summary','',before.question));
+          pair.appendChild(el('p','result-label',words('公开任务回放；结果差异不等于经过验证的改善。','Public task replays; output differences alone do not establish improvement.')));
+          var columns = el('div','result-grid');
+          [before,after].forEach(function(q,i){var side=el('div','result-card');side.appendChild(el('h3','',i ? right : run.parent_version));side.appendChild(el('pre','',printable(q.tasks[q.tasks.length-1].final_answer)));columns.appendChild(side);});
+          pair.appendChild(columns); card.appendChild(pair);
+        });
+      }
+      view.appendChild(card);
+    });
+  }
+
+  /* ================= language switching ================= */
+
+  function applyI18n() {
+    applyStaticI18n();
+    renderVersionControls();
+    renderHeaderMeta();
+    renderStatusChips();
+    renderLegend();
+    buildSchemaView();
+    buildToolView();
+    buildOverview();
+    if (lastDetail) {
+      lastDetail();
+    } else {
+      detailEmpty.hidden = false;
+      detailBody.hidden = true;
+    }
+    if (emptyState) $('#empty-hint').textContent = t(emptyState.key, emptyState.params);
+    tooltip.hidden = true;
+    searchStatus.textContent = '';
+    searchResults.hidden = true;
+    renderWelcomeGenerated();
+    if (compareActive && compareCy) buildCompareGraph();
+  }
+
+  function setLang(lang) {
+    if (lang !== 'zh' && lang !== 'en') return;
+    LANG = lang;
+    applyI18n();
+  }
+
+  $all('.lang-switch button').forEach(function (button) {
+    button.addEventListener('click', function () { setLang(button.getAttribute('data-lang')); });
+  });
+
+  /* ================= boot ================= */
+
+  applyI18n();
+  wireToolbarAndFilters();
+  try {
+    initGraph();
+  } catch (err) {
+    showEmptyKey('empty.initFailed', { err: err && err.message ? err.message : String(err) });
+    if (window.console && console.error) console.error(err);
+  }
+  try {
+    var requestedCompare = new URLSearchParams(window.location.search).get('compare') || '';
+    if (VERSION_DATA[requestedCompare] && requestedCompare !== currentVersion) {
+      $('#compare-version-select').value = requestedCompare;
+      enterCompare();
+    }
+  } catch (e) { /* ignore malformed URL */ }
+
+  if (!(new URLSearchParams(window.location.search).get('compare'))) showView('overview');
+
+  /* ---- duplicate-tab guard ----------------------------------------------
+     visualize_ontology opens the browser exactly once. If the same rendered
+     page gets opened a second time (a duplicate open), show a clear notice
+     so the two tabs are not indistinguishable. */
+  (function () {
+    var DUPE_KEY = 'evo-viz-open-tab';
+    var pageKey = (meta.version || '') + '|' + (meta.generated_at || '');
+    var tabId = String(Date.now()) + '-' + Math.random().toString(36).slice(2);
+    function readEntry() {
+      try { return JSON.parse(window.localStorage.getItem(DUPE_KEY) || 'null'); }
+      catch (e) { return null; }
+    }
+    function writeEntry() {
+      try {
+        window.localStorage.setItem(DUPE_KEY, JSON.stringify({
+          page: pageKey, id: tabId, ts: Date.now()
+        }));
+      } catch (e) { /* storage unavailable */ }
+    }
+    var existing = readEntry();
+    var duplicate = !!(existing && existing.page === pageKey &&
+                       existing.id !== tabId && (Date.now() - existing.ts) < 8000);
+    writeEntry();
+    window.setInterval(writeEntry, 3000);
+    window.addEventListener('pagehide', function () {
+      var current = readEntry();
+      if (current && current.id === tabId) {
+        try { window.localStorage.removeItem(DUPE_KEY); } catch (e) { /* ignore */ }
+      }
+    });
+    if (duplicate) $('#dupe-banner').hidden = false;
+  })();
+  $('#btn-dupe-dismiss').addEventListener('click', function () {
+    $('#dupe-banner').hidden = true;
+  });
+
+  var welcomeHidden = new URLSearchParams(window.location.search).get('welcome') === '0';
+  if (!welcomeHidden) {
+    try { welcomeHidden = window.localStorage.getItem(WELCOME_KEY) === '1'; } catch (e) { /* ignore */ }
+  }
+  if (!welcomeHidden && new URLSearchParams(window.location.search).get('welcome') === '1') openWelcome();
+})();
+</script>
+</body>
+</html>

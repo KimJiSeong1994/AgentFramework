@@ -1,0 +1,299 @@
+// lca configuration: user (~/.config/lca/lca.jsonc) -> project (<worktree>/.lca/lca.jsonc), project wins per key.
+// Contract owned by the scaffold. Fill-in lives here; other modules only import the types + loadConfig.
+import { existsSync, readFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
+
+export type Mode = "none" | "ulw" | "plan" | "data"
+
+/** Shell control characters a verify command may never contain (`&&` is allowed; a lone `&`, `|`, `;`, `$`, backtick, `<`, `>` are not). */
+export const VERIFY_DENY_RE = /[|;$`<>]|(?<!&)&(?!&)|[\r\n\t]/
+/** Runner options that load code/config from files the worker may have written (pytest -p/-c/-o/--rootdir, npm -C, ...). */
+export const VERIFY_DENY_OPTION_RE = /(^|\s)(-p|-c|-o|-C|--rootdir|--config-file|--override-ini|--import-mode|--preload|--require|-r|--prefix|--userconfig)(\s|=|$)/
+/** A `cd` segment may only descend into the worktree: no `..` segment, no absolute path, no option-looking argument. */
+export const VERIFY_CD_RE = /^cd (?!\/)(?!-)(?!(?:[^\s]*\/)?\.\.(?:\/|$))[A-Za-z0-9_.\/-]+$/
+
+/**
+ * Files the test runners load implicitly (config, plugins, hooks). A worker may not change them unless the task's own
+ * text names them: otherwise `conftest.py` skipping every test or a `Makefile` with an empty `test:` target passes
+ * verify without touching the protected test file (stage-2 second review, S1).
+ */
+export const AUTOLOAD_PROTECTED = [
+  "conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", "sitecustomize.py", "usercustomize.py", "*.pth",
+  "Makefile", "makefile", "GNUmakefile", "package.json", "bunfig.toml", ".npmrc", "jest.config.*", "vitest.config.*",
+  ".gitattributes", "go.mod", "Cargo.toml", "build.rs",
+]
+
+/** Why a verify command is refused, or null when it may run. Trivial always-pass commands are refused too. */
+export function verifyCommandProblem(command: string, allow: string[]): string | null {
+  const c = command.trim()
+  if (!c) return "empty"
+  if (VERIFY_DENY_RE.test(c)) return "contains a shell control character (| ; & $ ` < > or a newline); use a single test command, && is allowed"
+  if (/^(true|false|echo|ls|cat|exit|test)\b|^[:[]/.test(c)) return "trivial command that proves nothing; use the task's test command"
+  if (VERIFY_DENY_OPTION_RE.test(c)) return "uses a runner option that loads plugins/config from the repository (-p, -c, -o, --rootdir, ...); drop it"
+  let runners = 0
+  for (const part of c.split("&&")) {
+    const seg = part.trim()
+    if (/^cd\b/.test(seg)) {
+      if (!VERIFY_CD_RE.test(seg)) return `cd must stay inside the project (no .., no absolute path): "${seg.slice(0, 60)}"`
+      continue
+    }
+    if (!allow.some((re) => new RegExp(re).test(seg))) return `not a recognised test/check runner: "${seg.slice(0, 60)}" (allowed: pytest, unittest, bun/npm test, go/cargo test, make test, *test*.sh ...)`
+    runners++
+  }
+  if (runners === 0) return "no test/check runner in the command (cd alone proves nothing)"
+  return null
+}
+
+export type LcaConfig = {
+  /** hook ids to disable, e.g. ["guard.repeat", "mode.detect"] */
+  disabled_hooks: string[]
+  /** prefix budgets in estimated tokens; doctor/tests assert these */
+  budget: { main: number; worker: number; reviewer: number }
+  guards: {
+    /** identical (tool,args) calls allowed per session before the call is blocked */
+    repeat_limit: number
+    /** read/glob/grep/bash output trimming: lines, bytes and (estimated) tokens — the token cap is what protects
+     *  the prefill budget; long absolute paths tokenize at ~2 chars/token so bytes alone under-count. */
+    read_max_lines: number
+    read_max_bytes: number
+    read_max_tokens: number
+    /** strip the worktree/directory prefix from tool outputs (glob/grep/list/read/bash) before the model sees them */
+    relativize_paths: boolean
+    /** abort the session when the assistant text repeats an n-gram this many times */
+    repetition_ngram: number
+    repetition_count: number
+    abort_on_repetition: boolean
+  }
+  loop: {
+    max_iterations: number
+    ttl_ms: number
+    stagnation: number
+    failures: number
+    compaction_guard_ms: number
+  }
+  models: {
+    /** provider/model ids; undefined = inherit OpenCode default */
+    main?: string
+    worker?: string
+    reviewer?: string
+    "data-analyst"?: string
+    "data-verifier"?: string
+    "ontology-evolver"?: string
+    "answer-judge"?: string
+  }
+  /** max output tokens per agent role (data agents fall back to the worker cap when unset) */
+  max_output: { main: number; worker: number; reviewer: number; "data-analyst"?: number; "data-verifier"?: number; "ontology-evolver"?: number; "answer-judge"?: number }
+  /**
+   * Skills the main agent may see. OpenCode auto-discovers skills from ~/.claude/skills, ~/.agents/skills,
+   * .opencode/skills etc. and puts every description into the skill tool's schema (measured: 13 skills = ~2K
+   * prefix tokens). Everything not listed here is denied via the agent's permission.skill, which hides it.
+   */
+  skills: { allow: string[] }
+  /** Optional per-turn advice, never execution authorization. Only project-local skills are considered. */
+  skill_router: {
+    mode: "off" | "shadow" | "suggest"
+    endpoint: string
+    timeout_ms: number
+    min_probability: number
+    min_margin: number
+  }
+  /** Stage 2: serial worker delegation (delegate tool + idle-loop resume). */
+  delegate: {
+    /** run the reviewer child session on each task's diff + verify output */
+    review: boolean
+    /**
+     * Code tasks run in a linked git worktree under the state root (worker + verify bound to it); the task's diff is
+     * applied to the main worktree only when the task is accepted (`git apply --check` first; a patch that no longer
+     * applies marks the task blocked and stays in .lca/handoffs). Needs a repository with at least one commit.
+     */
+    worktree: boolean
+    /**
+     * false (default): a REJECT on a task whose verify command passed is advisory after the last attempt (task = done,
+     * summary shows the reason); an unparseable verdict never fails a task. true: REJECT/no-verdict on the last
+     * attempt marks the task failed even when verify passed.
+     */
+    review_strict: boolean
+    /** worker attempts per task; a failed verify or a REJECT re-runs the worker once with the reason */
+    max_attempts: number
+    /** wall-clock cap for one worker session run */
+    task_ttl_ms: number
+    /** wall-clock cap for one reviewer session run */
+    review_ttl_ms: number
+    /** wall-clock cap for a whole queue run (all tasks); remaining tasks are cancelled when exceeded */
+    queue_ttl_ms: number
+    /** cap for the task's `verify` shell command */
+    verify_timeout_ms: number
+    /** chars of "previous tasks" context prepended to the next worker prompt (handoff summary) */
+    handoff_context_chars: number
+    /** chars of the worker's final report kept in the ledger / handoff file / tool result */
+    report_max_chars: number
+    /** chars of the per-task diff shown to the reviewer */
+    diff_max_chars: number
+    /** chars of verify output kept (tail) */
+    verify_output_chars: number
+    /** path globs never counted as task changes (git pathspec globs, matched at any depth); .lca/state and .lca/handoffs are always excluded */
+    diff_exclude: string[]
+    /**
+     * Regexes (case-sensitive, tested against the trimmed command) at least one of which a task's `verify` command must
+     * match. The model authors these commands and they run without a permission prompt, so only recognised test
+     * runners/checkers are allowed; anything else is refused at delegate time (the model gets told) and never runs.
+     * Shell control characters | ; & (except &&) $ ` < > are always refused (VERIFY_DENY_RE).
+     */
+    verify_allow: string[]
+  }
+  /**
+   * Stage 3 data layer: read-only SQL access (`db_query`), a static schema description (`schema_lookup`) and the
+   * EvoOntology semantic MCP (`evo-semantic`, only browse/resolve exposed) for the `data-analyst` agent.
+   * `backend: "none"` (default) registers nothing, so the prefix of every other agent is untouched.
+   */
+  data: {
+    backend: "none" | "sqlite" | "postgres"
+    /** directory of data-task check suites (`<suite>.json`, SQL assertions over the answer query); `default` is built in */
+    checks_dir: string
+    /** sqlite file, relative to the worktree unless absolute; opened read-only */
+    sqlite_path: string
+    /** JSON produced by scripts/lca-schema-extract.py (or by hand): { dialect, notes, tables: {...} }; relative to the worktree */
+    schema_file: string
+    /** postgres: the DSN is read ONLY from this environment variable (never from config/logs) */
+    pg_dsn_env: string
+    /** postgres: refuse hosts other than loopback unless true (the handover DB is a production superuser account) */
+    pg_allow_remote: boolean
+    psql_path: string
+    /** result trimming for db_query */
+    max_rows: number
+    max_cell_chars: number
+    max_output_tokens: number
+    statement_timeout_ms: number
+    /** cap on db_query calls per session (the analyst prompt says 2; this is the hard stop) */
+    max_queries_per_session: number
+    evo: {
+      enabled: boolean
+      /** EvoOntology workspace (contains active.json + versions/), relative to the worktree unless absolute */
+      workspace: string
+      python: string
+      /** path to evoontology/runtime/mcp_server.py; empty = the vendored copy under framework/vendor */
+      server: string
+    }
+  }
+}
+
+export const DATA_DEFAULTS: LcaConfig["data"] = {
+  backend: "none",
+  checks_dir: "data/checks",
+  sqlite_path: "data/app.sqlite",
+  schema_file: "data/schema.json",
+  pg_dsn_env: "LCA_PG_DSN",
+  pg_allow_remote: false,
+  psql_path: "psql",
+  max_rows: 50,
+  max_cell_chars: 80,
+  max_output_tokens: 1500,
+  statement_timeout_ms: 15_000,
+  max_queries_per_session: 6,
+  evo: { enabled: true, workspace: ".evoontology", python: "python3", server: "" },
+}
+
+export const DEFAULT_CONFIG: LcaConfig = {
+  disabled_hooks: [],
+  budget: { main: 8000, worker: 5000, reviewer: 3000 },
+  guards: {
+    repeat_limit: 2,
+    read_max_lines: 200,
+    read_max_bytes: 20000,
+    read_max_tokens: 2500,
+    relativize_paths: true,
+    repetition_ngram: 12,
+    repetition_count: 4,
+    abort_on_repetition: true,
+  },
+  loop: {
+    max_iterations: 20,
+    ttl_ms: 2 * 60 * 60 * 1000,
+    stagnation: 3,
+    failures: 5,
+    compaction_guard_ms: 60_000,
+  },
+  models: {},
+  max_output: { main: 8192, worker: 4096, reviewer: 2048, "data-analyst": 2048, "data-verifier": 1024, "ontology-evolver": 4096, "answer-judge": 512 },
+  skills: { allow: ["ulw", "plan"] },
+  skill_router: {
+    mode: "off",
+    endpoint: "http://127.0.0.1:8080",
+    timeout_ms: 1000,
+    min_probability: 0.95,
+    min_margin: 0.2,
+  },
+  delegate: {
+    review: true,
+    worktree: false,
+    review_strict: false,
+    max_attempts: 2,
+    task_ttl_ms: 15 * 60 * 1000,
+    review_ttl_ms: 3 * 60 * 1000,
+    queue_ttl_ms: 2 * 60 * 60 * 1000,
+    verify_timeout_ms: 120_000,
+    handoff_context_chars: 600,
+    report_max_chars: 1200,
+    diff_max_chars: 6000,
+    verify_output_chars: 1500,
+    diff_exclude: [
+      "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", ".venv", "dist", "build", "*.pyc", "*.log",
+      // never let secrets into a diff (or into git objects): the reviewer prompt and handoffs are plain text
+      ".env", ".env.*", "*.pem", "*.key", "*.p12", "id_rsa*", "id_ed25519*",
+    ],
+    verify_allow: [
+      "^(python3?|py) -m (pytest|unittest|mypy|ruff|black|flake8|doctest)\\b",
+      "^(pytest|mypy|ruff|flake8|black|pyright)\\b",
+      "^(bun|npm|pnpm|yarn) (test|run test|run check|run lint|run typecheck|x tsc|x vitest|x jest)\\b",
+      "^(bun test|bunx (tsc|vitest|jest|eslint|biome))\\b",
+      "^(npx|node --test|tsc|vitest|jest|eslint|biome|deno test)\\b",
+      "^(go (test|vet|build)|cargo (test|check|clippy|build)|make (test|check|lint)|ctest|mvn test|gradle test|dotnet test|swift test|mix test|rspec|bundle exec rspec)\\b",
+      "^(bash|sh) (\\./)?[A-Za-z0-9_./-]*(test|check|verify)[A-Za-z0-9_./-]*\\.sh\\b",
+      "^(\\./)?[A-Za-z0-9_./-]*(test|check|verify)[A-Za-z0-9_./-]*\\.sh\\b",
+    ],
+  },
+  data: DATA_DEFAULTS,
+}
+
+// Strip line comments, block comments and trailing commas from JSONC. Good enough for config files.
+export function parseJsonc<T = unknown>(text: string): T {
+  const noBlock = text.replace(/\/\*[\s\S]*?\*\//g, "")
+  const noLine = noBlock.replace(/(^|[^:"'\\])\/\/.*$/gm, "$1")
+  const noTrailing = noLine.replace(/,(\s*[}\]])/g, "$1")
+  return JSON.parse(noTrailing) as T
+}
+
+function deepMerge<T extends Record<string, any>>(base: T, patch: Partial<T> | undefined): T {
+  if (!patch) return base
+  const out: any = { ...base }
+  for (const [k, v] of Object.entries(patch)) {
+    if (v && typeof v === "object" && !Array.isArray(v) && typeof out[k] === "object" && !Array.isArray(out[k])) {
+      out[k] = deepMerge(out[k], v)
+    } else if (v !== undefined) {
+      out[k] = v
+    }
+  }
+  return out
+}
+
+export function userConfigPath(): string {
+  return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "lca", "lca.jsonc")
+}
+
+export function projectConfigPath(worktree: string): string {
+  return join(worktree, ".lca", "lca.jsonc")
+}
+
+export function loadConfig(worktree: string): LcaConfig {
+  let cfg = DEFAULT_CONFIG
+  for (const p of [userConfigPath(), projectConfigPath(worktree)]) {
+    if (!existsSync(p)) continue
+    try {
+      cfg = deepMerge(cfg, parseJsonc<Partial<LcaConfig>>(readFileSync(p, "utf8")))
+    } catch (e) {
+      console.error(`[lca] invalid config ${p}: ${(e as Error).message}`)
+    }
+  }
+  return cfg
+}
