@@ -1,0 +1,356 @@
+{
+  "dialect": "sqlite",
+  "table_prefix": "",
+  "notes": [
+    "JSON columns: use json_extract(attrs, '$.livestock_types') (Postgres would use attrs->>'livestock_types').",
+    "Distance: dist_m(lon1, lat1, lon2, lat2) returns metres (Postgres: ST_DWithin on geom).",
+    "Dates are ISO strings 'YYYY-MM-DD'; compare with BETWEEN 'YYYY-MM-01' AND 'YYYY-MM-31'. date(x, '-21 days') works.",
+    "sido values are short names: 경기, 충남, 충북, 전북, 전남, 경북, 경남, 강원. sigungu may carry a district suffix: use LIKE '천안시%'."
+  ],
+  "tables": {
+    "tb_place_info": {
+      "description": "장소 허브: 농장(farm, place_id a...), 시설(facility, f...), 철새도래지(habitat, h...)",
+      "columns": [
+        {
+          "name": "place_id",
+          "type": "TEXT",
+          "description": "9자리 id, 첫 글자 a/f/h"
+        },
+        {
+          "name": "place_type",
+          "type": "TEXT",
+          "values": [
+            "farm",
+            "facility",
+            "habitat"
+          ]
+        },
+        {
+          "name": "place_name",
+          "type": "TEXT"
+        },
+        {
+          "name": "address",
+          "type": "TEXT"
+        },
+        {
+          "name": "longitude",
+          "type": "REAL"
+        },
+        {
+          "name": "latitude",
+          "type": "REAL"
+        },
+        {
+          "name": "attrs",
+          "type": "TEXT(JSON)",
+          "description": "속성 JSON; livestock_types = '산란계,육계' 같은 쉼표 목록 (부분일치 LIKE '%산란계%')"
+        },
+        {
+          "name": "sido",
+          "type": "TEXT",
+          "description": "시도 약칭",
+          "values": [
+            "경기",
+            "충남",
+            "충북",
+            "전북",
+            "전남",
+            "경북",
+            "경남",
+            "강원"
+          ]
+        },
+        {
+          "name": "sigungu",
+          "type": "TEXT",
+          "description": "시군구 (예: '천안시 동남구', '제천시', '부안군')"
+        },
+        {
+          "name": "eupmyeondong",
+          "type": "TEXT"
+        }
+      ],
+      "primary_key": [
+        "place_id"
+      ]
+    },
+    "tb_vehicle_info": {
+      "description": "축산 차량 1대 = 1행",
+      "columns": [
+        {
+          "name": "vehicle_management_id",
+          "type": "TEXT"
+        },
+        {
+          "name": "mobile_serial_number",
+          "type": "TEXT",
+          "description": "단말 번호 10자리; 방문/위험도와의 조인 키"
+        },
+        {
+          "name": "vehicle_registration_number",
+          "type": "TEXT"
+        },
+        {
+          "name": "vehicle_model",
+          "type": "TEXT"
+        },
+        {
+          "name": "visit_purpose_code",
+          "type": "TEXT"
+        },
+        {
+          "name": "visit_purpose_name",
+          "type": "TEXT",
+          "description": "방문 목적 (사료운반, 가축운반, 분뇨운반, 왕진진료, 컨설팅, 계란운반, 약품운반)",
+          "values": [
+            "사료운반",
+            "가축운반",
+            "분뇨운반",
+            "왕진진료",
+            "컨설팅",
+            "계란운반",
+            "약품운반"
+          ]
+        },
+        {
+          "name": "main_livestock_types",
+          "type": "TEXT"
+        }
+      ],
+      "primary_key": [
+        "vehicle_management_id"
+      ]
+    },
+    "tb_visit_history": {
+      "description": "차량의 장소 방문 이벤트 1건 = 1행",
+      "columns": [
+        {
+          "name": "standard_date",
+          "type": "TEXT",
+          "description": "방문일 YYYY-MM-DD"
+        },
+        {
+          "name": "mobile_serial_number",
+          "type": "TEXT",
+          "description": "차량 단말 번호 (tb_vehicle_info.mobile_serial_number)"
+        },
+        {
+          "name": "start_time",
+          "type": "TEXT",
+          "description": "방문 시작 'YYYY-MM-DD HH:MM:SS'"
+        },
+        {
+          "name": "end_time",
+          "type": "TEXT"
+        },
+        {
+          "name": "duration_seconds",
+          "type": "INTEGER"
+        },
+        {
+          "name": "place_id",
+          "type": "TEXT",
+          "description": "tb_place_info.place_id"
+        },
+        {
+          "name": "place_type",
+          "type": "TEXT",
+          "values": [
+            "farm",
+            "facility",
+            "habitat"
+          ]
+        },
+        {
+          "name": "place_name",
+          "type": "TEXT"
+        },
+        {
+          "name": "gps_longitude",
+          "type": "REAL"
+        },
+        {
+          "name": "gps_latitude",
+          "type": "REAL"
+        }
+      ],
+      "primary_key": [
+        "standard_date",
+        "mobile_serial_number",
+        "start_time",
+        "place_id"
+      ],
+      "foreign_keys": [
+        "place_id -> tb_place_info.place_id",
+        "mobile_serial_number -> tb_vehicle_info.mobile_serial_number"
+      ]
+    },
+    "tb_vehicle_risk_daily": {
+      "description": "차량·일 단위 위험도 1행",
+      "columns": [
+        {
+          "name": "standard_date",
+          "type": "TEXT"
+        },
+        {
+          "name": "mobile_serial_number",
+          "type": "TEXT"
+        },
+        {
+          "name": "risk_score",
+          "type": "REAL",
+          "description": ">= 1.0 위험, >= 0.7 주의, 그 외 낮음"
+        },
+        {
+          "name": "risk_level",
+          "type": "TEXT",
+          "values": [
+            "낮음",
+            "주의",
+            "위험"
+          ]
+        },
+        {
+          "name": "risk_explanation",
+          "type": "TEXT"
+        }
+      ],
+      "primary_key": [
+        "standard_date",
+        "mobile_serial_number"
+      ]
+    },
+    "tb_hpai_outbreak_farm": {
+      "description": "농장 HPAI 발생 사건 1건 = 1행",
+      "columns": [
+        {
+          "name": "outbreak_id",
+          "type": "INTEGER"
+        },
+        {
+          "name": "season",
+          "type": "TEXT"
+        },
+        {
+          "name": "category",
+          "type": "TEXT",
+          "values": [
+            "신고",
+            "예찰",
+            "예방적살처분"
+          ]
+        },
+        {
+          "name": "report_date",
+          "type": "TEXT",
+          "description": "YYYY-MM-DD"
+        },
+        {
+          "name": "place_id",
+          "type": "TEXT",
+          "description": "tb_place_info.place_id (nullable)"
+        },
+        {
+          "name": "sido",
+          "type": "TEXT",
+          "values": [
+            "경기",
+            "충남",
+            "충북",
+            "전북",
+            "전남",
+            "경북",
+            "경남",
+            "강원"
+          ]
+        },
+        {
+          "name": "sigungu",
+          "type": "TEXT"
+        },
+        {
+          "name": "address",
+          "type": "TEXT"
+        },
+        {
+          "name": "livestock_type",
+          "type": "TEXT"
+        },
+        {
+          "name": "genotype",
+          "type": "TEXT",
+          "description": "혈청형/유전형, 예: H5N1 (LIKE '%H5N1%')"
+        },
+        {
+          "name": "livestock_count",
+          "type": "INTEGER"
+        },
+        {
+          "name": "longitude",
+          "type": "REAL"
+        },
+        {
+          "name": "latitude",
+          "type": "REAL"
+        }
+      ],
+      "primary_key": [
+        "outbreak_id"
+      ]
+    },
+    "tb_hpai_outbreak_wild": {
+      "description": "야생조류 HPAI 검출 1건 = 1행",
+      "columns": [
+        {
+          "name": "outbreak_id",
+          "type": "INTEGER"
+        },
+        {
+          "name": "season",
+          "type": "TEXT"
+        },
+        {
+          "name": "detection_location",
+          "type": "TEXT"
+        },
+        {
+          "name": "report_date",
+          "type": "TEXT",
+          "description": "YYYY-MM-DD"
+        },
+        {
+          "name": "sido",
+          "type": "TEXT"
+        },
+        {
+          "name": "sigungu",
+          "type": "TEXT"
+        },
+        {
+          "name": "sample_type",
+          "type": "TEXT"
+        },
+        {
+          "name": "pathogenicity",
+          "type": "TEXT"
+        },
+        {
+          "name": "genotype",
+          "type": "TEXT"
+        },
+        {
+          "name": "longitude",
+          "type": "REAL"
+        },
+        {
+          "name": "latitude",
+          "type": "REAL"
+        }
+      ],
+      "primary_key": [
+        "outbreak_id"
+      ]
+    }
+  }
+}

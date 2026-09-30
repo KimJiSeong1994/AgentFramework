@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "kind": "tool-outcome-snapshot",
+  "coverage": {
+    "totalCount": 0,
+    "included": 0,
+    "limit": 10000
+  },
+  "observations": []
+}

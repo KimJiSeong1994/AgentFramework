@@ -1,0 +1,120 @@
+[
+  {
+    "id": "c-sido-short",
+    "target": "t-sido",
+    "constraint_type": "value_format",
+    "trigger_keywords": [
+      "경기도",
+      "충청남도",
+      "충청북도",
+      "전라북도",
+      "전라남도",
+      "경상북도",
+      "경상남도",
+      "강원도"
+    ],
+    "severity": "warn",
+    "scope": "tb_place_info.sido, tb_hpai_outbreak_farm.sido",
+    "description": "시도는 약칭(경기, 충남, 충북, 전북, 전남, 경북, 경남, 강원)으로 저장됨. 전체 이름으로 비교하면 0행"
+  },
+  {
+    "id": "c-sigungu-prefix",
+    "target": "t-sigungu",
+    "constraint_type": "value_format",
+    "trigger_keywords": [
+      "시",
+      "구",
+      "천안시"
+    ],
+    "severity": "warn",
+    "scope": "tb_place_info.sigungu",
+    "description": "시 아래에 구가 붙을 수 있으므로 시 단위 질의는 LIKE '<시>%'"
+  },
+  {
+    "id": "c-livestock-like",
+    "target": "t-livestock",
+    "constraint_type": "value_format",
+    "trigger_keywords": [
+      "축종",
+      "산란계",
+      "오리",
+      "육계",
+      "가금"
+    ],
+    "severity": "warn",
+    "scope": "tb_place_info.attrs",
+    "description": "livestock_types는 쉼표 목록이므로 json_extract(attrs,'$.livestock_types') LIKE '%<축종>%'"
+  },
+  {
+    "id": "c-risk-values",
+    "target": "t-risk",
+    "constraint_type": "value_domain",
+    "trigger_keywords": [
+      "위험",
+      "주의",
+      "낮음",
+      "위험도"
+    ],
+    "severity": "block",
+    "scope": "tb_vehicle_risk_daily.risk_level",
+    "description": "risk_level 값은 정확히 '낮음' | '주의' | '위험'"
+  },
+  {
+    "id": "c-read-only",
+    "target": "t-visit",
+    "constraint_type": "access",
+    "trigger_keywords": [
+      "삭제",
+      "수정",
+      "insert",
+      "update"
+    ],
+    "severity": "block",
+    "scope": "all tables",
+    "description": "읽기 전용. SELECT/WITH만 허용"
+  },
+  {
+    "id": "c-radius-self",
+    "target": "t-distance",
+    "constraint_type": "convention",
+    "trigger_keywords": [
+      "반경",
+      "주변",
+      "인근",
+      "근처"
+    ],
+    "severity": "warn",
+    "scope": "tb_hpai_outbreak_farm x tb_place_info",
+    "description": "발생 농장 '주변/반경' 질의는 발생 농장 자신(place_id가 같은 행)을 제외하고 센다"
+  },
+  {
+    "id": "c-window-inclusive",
+    "target": "t-outbreak-wild",
+    "constraint_type": "convention",
+    "trigger_keywords": [
+      "발생 전",
+      "21일",
+      "이전",
+      "안의",
+      "일 안"
+    ],
+    "severity": "warn",
+    "scope": "tb_hpai_outbreak_wild.report_date vs tb_hpai_outbreak_farm.report_date",
+    "description": "'발생 전 N일 안' 창은 발생일 당일을 포함한다: w.report_date BETWEEN date(o.report_date, '-N days') AND o.report_date (엄격한 < 아님)"
+  },
+  {
+    "id": "c-dialect",
+    "target": "t-distance",
+    "constraint_type": "dialect",
+    "trigger_keywords": [
+      "거리",
+      "반경",
+      "km",
+      "ST_DWithin",
+      "->>"
+    ],
+    "severity": "info",
+    "scope": "sqlite fixture",
+    "description": "sqlite: json_extract(attrs,'$.k'), dist_m(lon1,lat1,lon2,lat2) 미터, date(x,'-21 days'); Postgres: attrs->>'k', ST_DWithin(geom,geom,m), INTERVAL"
+  }
+]

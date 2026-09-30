@@ -1,0 +1,66 @@
+[
+  {
+    "id": "ev-farm-count",
+    "source": "queries.jsonl",
+    "query": "SELECT count(place_id) AS farm_count FROM tb_place_info WHERE sido = '경기' AND place_type = 'farm'",
+    "result": "[(22,)]",
+    "validation_method": "fixture query executed on vehicle_visit.sqlite",
+    "timestamp": "2026-09-23"
+  },
+  {
+    "id": "ev-layer-farm",
+    "source": "queries.jsonl",
+    "query": "SELECT count(place_id) AS farm_count FROM tb_place_info WHERE sido = '충남' AND sigungu LIKE '천안시%' AND place_type = 'farm' AND json_extract(attrs, '$.livestock_types') LIKE '%산란계%'",
+    "result": "[(6,)]",
+    "validation_method": "fixture query executed on vehicle_visit.sqlite",
+    "timestamp": "2026-09-23"
+  },
+  {
+    "id": "ev-h5n1",
+    "source": "queries.jsonl",
+    "query": "SELECT count(outbreak_id) AS outbreak_count FROM tb_hpai_outbreak_farm WHERE genotype LIKE '%H5N1%'",
+    "result": "[(23,)]",
+    "validation_method": "fixture query executed on vehicle_visit.sqlite",
+    "timestamp": "2026-09-23"
+  },
+  {
+    "id": "ev-feed-vehicle",
+    "source": "queries.jsonl",
+    "query": "SELECT count(DISTINCT v.mobile_serial_number) AS vehicle_count FROM tb_vehicle_info v JOIN tb_visit_history h ON h.mobile_serial_number = v.mobile_serial_number WHERE v.visit_purpose_name LIKE '%사료운반%' AND h.place_type = 'farm'",
+    "result": "[(9,)]",
+    "validation_method": "fixture query executed on vehicle_visit.sqlite",
+    "timestamp": "2026-09-23"
+  },
+  {
+    "id": "ev-route",
+    "source": "queries.jsonl",
+    "query": "SELECT standard_date, start_time, place_id, place_name, gps_longitude, gps_latitude FROM tb_visit_history WHERE mobile_serial_number = '0000125451' AND standard_date BETWEEN '2024-12-01' AND '2024-12-31' AND place_type = 'farm' AND gps_longitude IS NOT NULL ORDER BY start_time",
+    "result": "[('2024-12-03', '2024-12-03 08:15:00', 'a00000042', '천안시 서북구 farm 42', 126.95338, 36.64187), ('2024-12-05', '2024-12-05 18:06:00', 'a00000138', '양산시 farm 138', 128.78843, 35.39104), ('2024-12-08', '20",
+    "validation_method": "fixture query executed on vehicle_visit.sqlite",
+    "timestamp": "2026-09-23"
+  },
+  {
+    "id": "ev-risk-level",
+    "source": "queries.jsonl",
+    "query": "SELECT risk_level, count(*) FROM tb_vehicle_risk_daily GROUP BY 1",
+    "result": "[('낮음', 214), ('위험', 256), ('주의', 80)]",
+    "validation_method": "fixture query executed on vehicle_visit.sqlite",
+    "timestamp": "2026-09-23"
+  },
+  {
+    "id": "ev-dist",
+    "source": "queries.jsonl",
+    "query": "SELECT count(*) AS farm_count FROM tb_hpai_outbreak_farm o JOIN tb_place_info p ON p.place_type = 'farm' AND p.place_id <> o.place_id AND dist_m(o.longitude, o.latitude, p.longitude, p.latitude) <= 10000 WHERE o.outbreak_id = 1392 AND (json_extract(p.attrs, '$.livestock_types') LIKE '%닭%' OR json_extract(p.attrs, '$.livestock_types') LIKE '%계%' OR json_extract(p.attrs, '$.livestock_types') LIKE '%오리%' OR json_extract(p.attrs, '$.livestock_types') LIKE '%거위%' OR json_extract(p.attrs, '$.livestock_types') LIKE '%칠면조%' OR json_extract(p.attrs, '$.livestock_types') LIKE '%메추리%')",
+    "result": "[(3,)]",
+    "validation_method": "fixture query executed on vehicle_visit.sqlite",
+    "timestamp": "2026-09-23"
+  },
+  {
+    "id": "ev-wild",
+    "source": "queries.jsonl",
+    "query": "SELECT count(*) AS wild_count FROM tb_hpai_outbreak_farm o JOIN tb_hpai_outbreak_wild w ON dist_m(o.longitude, o.latitude, w.longitude, w.latitude) <= 10000 AND w.report_date BETWEEN date(o.report_date, '-21 days') AND o.report_date WHERE o.outbreak_id = 1392",
+    "result": "[(6,)]",
+    "validation_method": "fixture query executed on vehicle_visit.sqlite",
+    "timestamp": "2026-09-23"
+  }
+]

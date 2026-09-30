@@ -1,0 +1,31 @@
+{
+  "description": "a farm count answer: one non-negative number, filtered on place_type",
+  "checks": [
+    {
+      "name": "single value",
+      "sql": "SELECT count(*) FROM {answer} a",
+      "expect": {
+        "value": 1
+      }
+    },
+    {
+      "name": "non-negative",
+      "expect": {
+        "value_min": 0
+      }
+    },
+    {
+      "name": "filters farms",
+      "expect": {
+        "sql_contains": "place_type"
+      }
+    },
+    {
+      "name": "not more than all farms",
+      "sql": "SELECT (SELECT count(*) FROM {answer} a) <= (SELECT count(*) FROM tb_place_info WHERE place_type = 'farm')",
+      "expect": {
+        "value": 1
+      }
+    }
+  ]
+}

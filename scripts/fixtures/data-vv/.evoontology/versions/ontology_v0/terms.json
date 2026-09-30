@@ -1,0 +1,308 @@
+[
+  {
+    "id": "t-farm",
+    "name": "농장",
+    "type": "entity",
+    "definition": "가축 사육 장소. tb_place_info에서 place_type='farm'인 행",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "farm",
+      "농가",
+      "사육농장",
+      "축산농장",
+      "농장 수",
+      "농장 갯수",
+      "농장수"
+    ],
+    "evidence": [
+      "ev-farm-count"
+    ]
+  },
+  {
+    "id": "t-place",
+    "name": "장소",
+    "type": "entity",
+    "definition": "농장/시설/철새도래지를 아우르는 장소 허브 (tb_place_info)",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "place",
+      "시설",
+      "facility",
+      "철새도래지",
+      "habitat"
+    ],
+    "evidence": []
+  },
+  {
+    "id": "t-sido",
+    "name": "시도",
+    "type": "dimension",
+    "definition": "장소·발생의 광역 지역. 약칭으로 저장 (경기, 충남, 충북, 전북, 전남, 경북, 경남, 강원)",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "sido",
+      "지역",
+      "도",
+      "경기",
+      "경기도",
+      "충남",
+      "충청남도",
+      "충북",
+      "충청북도",
+      "전북",
+      "전라북도",
+      "전남",
+      "경북",
+      "경남",
+      "강원"
+    ],
+    "evidence": [
+      "ev-farm-count"
+    ]
+  },
+  {
+    "id": "t-sigungu",
+    "name": "시군구",
+    "type": "dimension",
+    "definition": "시·군·구 이름. 시에는 구가 붙을 수 있어 접두 일치(LIKE '천안시%')로 비교",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "sigungu",
+      "시군구",
+      "시",
+      "군",
+      "천안시",
+      "제천시",
+      "부안군",
+      "안성시"
+    ],
+    "evidence": [
+      "ev-layer-farm"
+    ]
+  },
+  {
+    "id": "t-livestock",
+    "name": "축종",
+    "type": "dimension",
+    "definition": "농장이 기르는 가축 종류. attrs JSON의 livestock_types 쉼표 목록, 부분 일치로 검색",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "livestock",
+      "livestock_types",
+      "가축",
+      "산란계",
+      "육계",
+      "오리",
+      "종계",
+      "토종닭",
+      "메추리",
+      "거위",
+      "가금",
+      "가금류",
+      "닭",
+      "돼지",
+      "한우"
+    ],
+    "evidence": [
+      "ev-layer-farm"
+    ]
+  },
+  {
+    "id": "t-outbreak-farm",
+    "name": "HPAI 발생 농장",
+    "type": "entity",
+    "definition": "농장에서의 고병원성 조류인플루엔자 발생 사건 (tb_hpai_outbreak_farm, 1건 = 1행)",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "hpai",
+      "HPAI",
+      "AI 발생",
+      "발생 농장",
+      "발생농장",
+      "조류인플루엔자",
+      "outbreak",
+      "발생 건수",
+      "발생번호",
+      "outbreak_id"
+    ],
+    "evidence": [
+      "ev-h5n1"
+    ]
+  },
+  {
+    "id": "t-genotype",
+    "name": "유전형",
+    "type": "dimension",
+    "definition": "발생 바이러스의 혈청형/유전형 문자열 (예: H5N1). 부분 일치 LIKE '%H5N1%'",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "genotype",
+      "혈청형",
+      "H5N1",
+      "H5N6",
+      "H5N8",
+      "형"
+    ],
+    "evidence": [
+      "ev-h5n1"
+    ]
+  },
+  {
+    "id": "t-vehicle",
+    "name": "차량",
+    "type": "entity",
+    "definition": "축산 관계 차량 (tb_vehicle_info, 1대 = 1행). 단말 번호 mobile_serial_number가 방문·위험도와의 키",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "vehicle",
+      "축산차량",
+      "차량 수",
+      "단말",
+      "단말 번호",
+      "mobile_serial_number",
+      "차량번호"
+    ],
+    "evidence": [
+      "ev-feed-vehicle"
+    ]
+  },
+  {
+    "id": "t-purpose",
+    "name": "방문 목적",
+    "type": "dimension",
+    "definition": "차량의 방문 목적 (visit_purpose_name: 사료운반, 가축운반, 분뇨운반, 왕진진료, 컨설팅, 계란운반, 약품운반). 부분 일치",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "visit_purpose_name",
+      "목적",
+      "사료운반",
+      "사료 운반",
+      "사료운반차량",
+      "가축운반",
+      "분뇨운반",
+      "왕진진료",
+      "계란운반"
+    ],
+    "evidence": [
+      "ev-feed-vehicle"
+    ]
+  },
+  {
+    "id": "t-visit",
+    "name": "방문",
+    "type": "entity",
+    "definition": "차량이 장소에 도착한 이벤트 (tb_visit_history, 1건 = 1행). 동선은 start_time 순 정렬",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "visit",
+      "방문 이력",
+      "방문이력",
+      "동선",
+      "방문 기록",
+      "방문 횟수",
+      "방문한"
+    ],
+    "evidence": [
+      "ev-route"
+    ]
+  },
+  {
+    "id": "t-visit-date",
+    "name": "방문일",
+    "type": "dimension",
+    "definition": "tb_visit_history.standard_date (YYYY-MM-DD). 월 질의는 BETWEEN 월초 AND 월말",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "standard_date",
+      "날짜",
+      "일자",
+      "2024년 12월",
+      "2025년 2월",
+      "월"
+    ],
+    "evidence": [
+      "ev-route"
+    ]
+  },
+  {
+    "id": "t-risk",
+    "name": "위험 차량",
+    "type": "concept",
+    "definition": "그날 위험도 등급이 '위험'인 차량 (tb_vehicle_risk_daily.risk_level='위험', risk_score>=1.0). 차량·일 단위",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "risk",
+      "위험",
+      "위험도",
+      "risk_level",
+      "위험 등급",
+      "고위험 차량",
+      "위험차량",
+      "주의"
+    ],
+    "evidence": [
+      "ev-risk-level"
+    ]
+  },
+  {
+    "id": "t-distance",
+    "name": "반경",
+    "type": "concept",
+    "definition": "두 좌표 사이 거리(m). sqlite 픽스처는 dist_m(lon1,lat1,lon2,lat2) <= 미터, Postgres는 ST_DWithin(geom, geom, m)",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "distance",
+      "km",
+      "10km",
+      "3km",
+      "주변",
+      "인근",
+      "반경 10km",
+      "근처"
+    ],
+    "evidence": [
+      "ev-dist"
+    ]
+  },
+  {
+    "id": "t-poultry",
+    "name": "가금",
+    "type": "category",
+    "definition": "조류 가축 전체: 닭(산란계, 육계, 종계, 토종닭), 오리, 거위, 칠면조, 메추리. 가금 농장 = livestock_types에 이들 중 하나라도 포함된 농장",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "poultry",
+      "가금류",
+      "가금 농장",
+      "가금농장",
+      "조류",
+      "닭·오리"
+    ],
+    "evidence": [
+      "ev-dist"
+    ]
+  },
+  {
+    "id": "t-outbreak-wild",
+    "name": "야생조류 검출",
+    "type": "entity",
+    "definition": "야생조류 HPAI 검출 건 (tb_hpai_outbreak_wild, 1건 = 1행)",
+    "scope": "vehicle_visit",
+    "aliases": [
+      "wild",
+      "야생조류",
+      "철새",
+      "야생 조류",
+      "검출",
+      "wild bird",
+      "건수",
+      "검출 건수",
+      "야생조류 검출 건수",
+      "야생조류 검출건수",
+      "검출건수"
+    ],
+    "evidence": [
+      "ev-wild"
+    ]
+  }
+]

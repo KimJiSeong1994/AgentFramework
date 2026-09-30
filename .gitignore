@@ -1,0 +1,20 @@
+# framework runtime state (single writer: lca plugin); since stage-2 review the control plane lives outside the
+# worktree ($XDG_STATE_HOME/lca/<repo-hash>), this entry only covers pre-review layouts
+.lca/state/
+# tool state dirs from other harnesses
+.omo/
+.omx/
+.gjc/
+# bun / node
+framework/node_modules/
+node_modules/
+# python
+__pycache__/
+.pytest_cache/
+.venv/
+# task handoffs (per-session runtime output)
+.lca/handoffs/
+# secrets / local env
+.env
+*.env
+!.env.example

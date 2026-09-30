@@ -1,0 +1,8 @@
+{
+  // lca project config, merged over ~/.config/lca/lca.jsonc (project wins per key).
+  // Every key defaults to framework/src/config.ts DEFAULT_CONFIG; list ONLY what this project overrides so that
+  // default changes (budgets, delegate.*) are not shadowed by a stale copy here.
+  "disabled_hooks": [],
+  // Apply optional per-turn skill advice; never automatically load skills or change modes.
+  "skill_router": { "mode": "suggest" }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "lca",
+  "version": "0.1.0",
+  "description": "Local-first coding agent framework for OpenCode (Ollama/Gemma). Stage 1 core + stage 2 ledger/delegate/stop.",
+  "type": "module",
+  "private": true,
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.31",
+    "@opencode-ai/sdk": "1.18.31",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
