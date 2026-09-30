@@ -37,21 +37,43 @@ export async function availableCandidates(deps: HookDeps, signal: AbortSignal): 
   for (const name of names) {
     if (signal.aborted) return []
     if (!permitted(parsed.data, name)) continue
+    const [inOpencode, inAgents] = await Promise.all(SKILL_ROOTS.map((root2) => skillFilePresent(root, root2, name)))
+    // Both roots define the same skill name: ambiguous, exclude rather than guess which wins.
+    if (inOpencode && inAgents) continue
+    const skillRoot = inOpencode ? SKILL_ROOTS[0] : inAgents ? SKILL_ROOTS[1] : undefined
+    if (!skillRoot) continue
     try {
-      const path = await realpath(join(root, ".opencode", "skills", name, "SKILL.md"))
-      const rel = relative(root, path)
-      if (isAbsolute(rel) || rel === ".." || rel.startsWith("../")) continue
-      const info = await stat(path)
-      if (!info.isFile() || info.size > 16384) continue
-      const content = await readFile(path, "utf8")
-      const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content)
-      if (!frontmatter) continue
-      const metadata = metadataSchema.safeParse(Bun.YAML.parse(frontmatter[1]!))
-      if (!metadata.success || metadata.data.name !== name) continue
-      result.push({ name, description: metadata.data.description })
+      const candidate = await loadSkillCandidate(root, skillRoot, name)
+      if (candidate) result.push(candidate)
     } catch {
       // A missing/invalid local skill is not an available candidate.
     }
   }
   return result
+}
+
+/** Checked in order: .opencode/skills first, .agents/skills as fallback. Both defining the same name is ambiguous. */
+const SKILL_ROOTS = [".opencode", ".agents"] as const
+
+async function skillFilePresent(root: string, base: string, name: string): Promise<boolean> {
+  try {
+    await stat(join(root, base, "skills", name, "SKILL.md"))
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function loadSkillCandidate(root: string, base: string, name: string): Promise<SkillCandidate | null> {
+  const path = await realpath(join(root, base, "skills", name, "SKILL.md"))
+  const rel = relative(root, path)
+  if (isAbsolute(rel) || rel === ".." || rel.startsWith("../")) return null
+  const info = await stat(path)
+  if (!info.isFile() || info.size > 16384) return null
+  const content = await readFile(path, "utf8")
+  const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content)
+  if (!frontmatter) return null
+  const metadata = metadataSchema.safeParse(Bun.YAML.parse(frontmatter[1]!))
+  if (!metadata.success || metadata.data.name !== name) return null
+  return { name, description: metadata.data.description }
 }

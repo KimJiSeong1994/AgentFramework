@@ -5,10 +5,12 @@
 ## 개념
 
 - [도구 결과 근거](concepts/tool-outcome-evidence.md) — 로컬 도구 실행 관찰의 출처·분류·한계와 개인정보 경계.
+- [로컬 우선 설계 계약](concepts/local-first-contract.md) — 프리픽스 불변·예산·코드 측 조정 계약과 그 실측 근거.
 
 ## 엔터티
 
 - [OpenJev 라우터](entities/openjev-router.md) — 프로젝트의 선택적 스킬 추천 모드와 근거·한계.
+- [lca 프레임워크](entities/lca-framework.md) — 2026-09-22 설계 문서가 제안한 레이어·에이전트·모드·안전장치.
 
 ## 캡처 산출물
 
@@ -16,3 +18,5 @@
 - [위키 활동 로그](log.md) — capture·ingest·query·lint 작업의 추가 전용 기록.
 
 - [도구 실행 원본 9d8e2559edce](sources/tool-runs-9d8e2559edced1fdaee767441598a80e3317dee0565bc65417a5884987fceca9.md) — 0개 관측; 전체 0개 중 포함된 범위.
+
+- [OpenCode 기반 자체 에이전트 프레임워크 심층 검토](sources/documents-e23212dec8bc6f31aa6120397f75f7dd1d58f0df41dc8275b9b0e3a93df6265a.md) — 등록 문서, 20950 bytes.

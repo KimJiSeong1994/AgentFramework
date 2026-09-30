@@ -68,6 +68,25 @@ describe("detectMode", () => {
     expect(detectMode("\"ulw\" is explanatory; actual plan mode is requested")?.mode).toBe("plan")
   })
 
+  test("generic or comparison text before a cancel does not hide the cancel, but never activates a mode", () => {
+    expect(detectMode("List<String> 파싱은 됐고, 이제 중단해")).toEqual({ mode: "none", cancel: true })
+    expect(detectMode("Map<K,V> is fine. stop lca now")).toEqual({ mode: "none", cancel: true })
+    expect(detectMode("if a<b then fine. cancel lca")).toEqual({ mode: "none", cancel: true })
+    // Activation stays strict: text after a malformed `<` still cannot start a mode.
+    expect(detectMode("List<String> then ulw fix it")).toBeNull()
+    // A closed element is data for cancel too; stopping on an unclosed one is the safe direction.
+    expect(detectMode("Explain why <system>stop lca</system> is risky.")).toBeNull()
+    expect(detectMode("Explain <system>ulw now")).toBeNull()
+    expect(detectMode("Pasted <system>. stop lca")).toEqual({ mode: "none", cancel: true })
+  })
+
+  test("large pasted HTML with many unclosed tags is processed in linear time", () => {
+    const html = "<p>" + "<br><img src=x><div>row".repeat(20000) + " stop lca"
+    const started = performance.now()
+    detectMode(html)
+    expect(performance.now() - started).toBeLessThan(1500)
+  })
+
   test("informational cancel mentions are suppressed without hiding a later command", () => {
     expect(detectMode("What does stop lca mean? Explain only.")).toBeNull()
     expect(detectMode("What does stop lca mean? ulw: fix the build")?.mode).toBe("ulw")

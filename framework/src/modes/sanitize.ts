@@ -79,7 +79,48 @@ function xmlMarkupAt(text: string, start: number): XmlMarkup | null {
   }
 }
 
-/** Remove markup and all element bodies; malformed/unclosed elements hide the remainder conservatively. */
+/**
+ * Lenient markup removal for cancel detection: only a complete `<name ...>...</name>` element (and its body) or
+ * an opaque/self-closing construct is removed; any `<` that does not start one stays plain text. `List<String>`
+ * or `a<b` therefore never hide a later stop, while a quoted `<system>stop lca</system>` is still data.
+ */
+function stripClosedElements(text: string): string {
+  // One tokenizing pass, then same-name open/close pairing with per-name stacks: linear in the input, so pasted
+  // HTML with many unclosed tags (<br>, <img>) cannot make the chat.message hot path quadratic.
+  const ranges: Array<[number, number]> = []
+  const open = new Map<string, number[]>()
+  for (let i = text.indexOf("<"); i >= 0;) {
+    const m = xmlMarkupAt(text, i)
+    if (!m || m.kind === "unterminated") { i = text.indexOf("<", i + 1); continue }
+    if (m.kind === "opaque" || m.selfClosing) ranges.push([i, m.end])
+    else if (!m.closing) {
+      const stack = open.get(m.name)
+      if (stack) stack.push(i)
+      else open.set(m.name, [i])
+    }
+    else {
+      const stack = open.get(m.name)
+      const start = stack?.pop()
+      // A close with no matching open is itself just markup; a matched pair removes the whole element.
+      ranges.push([start ?? i, m.end])
+    }
+    i = text.indexOf("<", m.end)
+  }
+  ranges.sort((a, b) => a[0] - b[0])
+  let out = ""
+  let cursor = 0
+  for (const [start, end] of ranges) {
+    if (end <= cursor) continue
+    if (start >= cursor) out += text.slice(cursor, start) + " "
+    cursor = end
+  }
+  return out + text.slice(cursor)
+}
+
+/**
+ * Remove markup and all element bodies; malformed/unclosed elements hide the remainder, so pasted data can never
+ * activate a mode.
+ */
 function stripXmlElements(text: string): string {
   let out = ""
   let outsideStart = 0
@@ -123,7 +164,7 @@ function stripXmlElements(text: string): string {
   return out
 }
 
-export function sanitizeForDetection(text: string): string {
+export function sanitizeForDetection(text: string, opts: { lenientMarkup?: boolean } = {}): string {
   if (!text) return ""
   let out = text.replace(/\r\n?/g, "\n")
   out = out.replace(FENCED_BLOCK, "$1")
@@ -135,6 +176,6 @@ export function sanitizeForDetection(text: string): string {
   out = out.replace(CURLY_DOUBLE, " ")
   out = out.replace(CURLY_SINGLE, " ")
   out = out.replace(SINGLE_QUOTED, " ")
-  out = stripXmlElements(out)
+  out = opts.lenientMarkup ? stripClosedElements(out) : stripXmlElements(out)
   return out.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim()
 }

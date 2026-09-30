@@ -21,6 +21,7 @@ export const HOOK_IDS = [
   "guard.trim",
   "guard.recover",
   "guard.repetition",
+  "guard.wiki_raw",
   "loop.idle",
   "compaction.checkpoint",
   "tool.delegate",
