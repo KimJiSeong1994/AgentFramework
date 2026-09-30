@@ -135,10 +135,15 @@ export function detectMode(text: string): Detection {
   }
   const force = FORCE_PREFIX.test(trimmed)
   const body = force ? trimmed.replace(FORCE_PREFIX, "") : trimmed
-  const clean = sanitizeForDetection(body)
-  if (!clean) return null
+  // Activation uses strict markup hiding (pasted data must never start a mode); cancel uses lenient hiding so a
+  // stop written after `List<String>` or `a<b` is still honored. Stopping is always the safe direction.
+  const strict = sanitizeForDetection(body)
+  const lenient = sanitizeForDetection(body, { lenientMarkup: true })
+  if (!strict && !lenient) return null
 
   for (const kind of ORDER) {
+    const clean = kind === "cancel" ? lenient : strict
+    if (!clean) continue
     for (const { label, source } of KEYWORDS[kind]) {
       const re = compile(source, "giu")
       let m: RegExpExecArray | null

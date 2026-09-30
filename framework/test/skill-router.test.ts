@@ -7,6 +7,7 @@ import { DEFAULT_CONFIG } from "../src/config.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { createSkillRouter } from "../src/routing/router.ts"
+import { createCommandHook } from "../src/hooks/command.ts"
 import { EMPTY_MODE, readModeState, writeModeState } from "../src/state/store.ts"
 
 let root: string
@@ -21,8 +22,8 @@ let agentLookup: () => Promise<unknown>
 function answer(choice = "plan", probabilities = { plan: 0.99, none: 0.01 }) {
   return { answers: { route: { type: "choice", choice, probabilities, confidence: 0.9 } } }
 }
-function skill(name: string, description = "Read-only investigation and numbered implementation plan.") {
-  const dir = join(root, ".opencode", "skills", name)
+function skill(name: string, description = "Read-only investigation and numbered implementation plan.", base: ".opencode" | ".agents" = ".opencode") {
+  const dir = join(root, base, "skills", name)
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\nPrivate skill instructions must not be sent.\n`)
 }
@@ -95,6 +96,37 @@ describe("OpenJev skill router package", () => {
     expect(requests).toHaveLength(0)
   })
 
+  test("an expanded command template (no literal slash) is not routed; the next plain turn is", async () => {
+    const hook = createChatMessageHook(deps)
+    const command = createCommandHook(deps, { stop: false })
+    await command({ command: "review", sessionID: "s1", arguments: "" } as any, { parts: [] } as any)
+    await turn(hook, part("Investigate the auth module and give numbered implementation steps.", "c1"))
+    expect(requests).toHaveLength(0)
+    await turn(hook, part("Investigate the auth module and give numbered implementation steps.", "c2"))
+    expect(requests).toHaveLength(1)
+  })
+
+  test("back-to-back commands each keep their bypass; a worker turn consumes nothing extra", async () => {
+    const hook = createChatMessageHook(deps)
+    const command = createCommandHook(deps, { stop: false })
+    await command({ command: "a", sessionID: "s1", arguments: "" } as any, { parts: [] } as any)
+    await command({ command: "b", sessionID: "s1", arguments: "" } as any, { parts: [] } as any)
+    await turn(hook, part("Investigate the auth module and give numbered implementation steps.", "d1"))
+    await turn(hook, part("Investigate the auth module and give numbered implementation steps.", "d2"))
+    expect(requests).toHaveLength(0)
+    await command({ command: "c", sessionID: "s1", arguments: "" } as any, { parts: [] } as any)
+    await turn(hook, part("Investigate", "d3"), "worker")
+    await turn(hook, part("Investigate the auth module and give numbered implementation steps.", "d4"))
+    expect(requests).toHaveLength(1)
+  })
+
+  test("invalid router config is reported as invalid_config, never a silent off", async () => {
+    deps.config.skill_router.timeout_ms = 5000
+    expect((await createSkillRouter(deps).recommend("s", "m", "Investigate")).reason).toBe("invalid_config")
+    expect(JSON.stringify(logs)).toContain("timeout_ms")
+    expect(requests).toHaveLength(0)
+  })
+
   test("secrets and oversized input are not transmitted", async () => {
     const router = createSkillRouter(deps)
     for (const [i, text] of ["apikey_abcdefghijklmnopqrstuvwxyz", "Bearer privatecredential", "password=secretpassword", "x".repeat(2001)].entries()) {
@@ -104,8 +136,11 @@ describe("OpenJev skill router package", () => {
   })
 
   test("network endpoints and redirects are refused", async () => {
-    deps.config.skill_router.endpoint = "http://192.168.0.51:8080"
+    deps.config.skill_router.endpoint = "http://user:pw@192.168.0.51:8080"
     expect((await createSkillRouter(deps).recommend("s", "m", "Investigate")).reason).toBe("invalid_endpoint")
+    expect(JSON.stringify(logs)).toContain('"reason":"invalid_endpoint"')
+    expect(JSON.stringify(logs)).not.toContain("192.168.0.51")
+    expect(JSON.stringify(logs)).not.toContain("pw@")
     expect(requests).toHaveLength(0)
     deps.config.skill_router.endpoint = `http://127.0.0.1:${server.port}`
     handler = () => Response.redirect("http://example.com")
@@ -237,5 +272,28 @@ describe("OpenJev skill router package", () => {
     expect(p.text).not.toContain("lca-skill-advice")
     expect(other.text).not.toContain("lca-skill-advice")
     expect(readModeState(root, "s1").stopReason).toBe("user_cancel")
+  })
+
+  test("a skill defined only under .agents/skills is found", async () => {
+    rmSync(join(root, ".opencode", "skills", "plan"), { recursive: true })
+    skill("plan", "Read-only investigation and numbered implementation plan.", ".agents")
+    expect((await createSkillRouter(deps).recommend("s", "a", "Investigate")).skill).toBe("plan")
+  })
+
+  test("a name defined in both .opencode/skills and .agents/skills is excluded as ambiguous", async () => {
+    skill("plan", "Read-only investigation and numbered implementation plan.", ".agents")
+    expect((await createSkillRouter(deps).recommend("s", "a", "Investigate")).reason).toBe("no_candidates")
+  })
+
+  test("an escaping symlink under .agents/skills is excluded like under .opencode/skills", async () => {
+    rmSync(join(root, ".opencode", "skills", "plan"), { recursive: true })
+    const external = mkdtempSync(join(tmpdir(), "lca-external-agents-"))
+    try {
+      writeFileSync(join(external, "SKILL.md"), "---\nname: plan\ndescription: External\n---\n")
+      mkdirSync(join(root, ".agents", "skills"), { recursive: true })
+      symlinkSync(external, join(root, ".agents", "skills", "plan"))
+      expect((await createSkillRouter(deps).recommend("s", "b", "Investigate")).reason).toBe("no_candidates")
+    } finally { rmSync(external, { recursive: true, force: true }) }
+    expect(requests).toHaveLength(0)
   })
 })

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { mkdirSync, symlinkSync } from "node:fs"
+import { join } from "node:path"
 import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
 import { createToolAfterHook, isErrorOutput } from "../src/hooks/tool-after.ts"
 import { createEventHook } from "../src/hooks/event.ts"
@@ -70,6 +72,71 @@ describe("tool.execute.before", () => {
     await hook(before("task", {}, "c2").input, { args: {} })
     writeJsonAtomic(sessionInfoPath(wt.worktree, S), { agent: "worker", createdAt: 1 })
     await expect(hook(before("task", {}, "c3").input, { args: {} })).rejects.toThrow(/lca: the task tool is only available to the main agent/)
+  })
+
+  test("blocks edit/write into knowledge/raw/ by absolute path, relative path, and traversal", async () => {
+    const hook = createToolBeforeHook(makeDeps(client, wt.worktree))
+    const abs = join(wt.worktree, "knowledge", "raw", "documents", "x.md")
+    await expect(hook(before("write", { filePath: abs, content: "x" }, "c1").input, { args: { filePath: abs, content: "x" } }))
+      .rejects.toThrow(/lca: raw wiki sources are immutable; use `bun scripts\/lca-wiki\.ts register`\./)
+    await expect(hook(before("edit", { filePath: "knowledge/raw/x.md", oldString: "a", newString: "b" }, "c2").input, { args: { filePath: "knowledge/raw/x.md", oldString: "a", newString: "b" } }))
+      .rejects.toThrow(/raw wiki sources are immutable/)
+    await expect(hook(before("write", { filePath: "knowledge/wiki/../raw/x.md", content: "x" }, "c3").input, { args: { filePath: "knowledge/wiki/../raw/x.md", content: "x" } }))
+      .rejects.toThrow(/raw wiki sources are immutable/)
+  })
+
+  test("allows edit/write elsewhere under knowledge/, including knowledge/wiki/*.md", async () => {
+    const hook = createToolBeforeHook(makeDeps(client, wt.worktree))
+    const wiki = join(wt.worktree, "knowledge", "wiki", "log.md")
+    await hook(before("write", { filePath: wiki, content: "x" }, "c1").input, { args: { filePath: wiki, content: "x" } })
+    await hook(before("edit", { filePath: "knowledge/wiki/index.md", oldString: "a", newString: "b" }, "c2").input, { args: { filePath: "knowledge/wiki/index.md", oldString: "a", newString: "b" } })
+  })
+
+  test("blocks case variants and symlink aliases of knowledge/raw (case-insensitive volumes)", async () => {
+    const hook = createToolBeforeHook(makeDeps(client, wt.worktree))
+    for (const [id, filePath] of [["c1", "knowledge/RAW/documents/x.md"], ["c2", "Knowledge/Raw/x.md"]] as const) {
+      await expect(hook(before("write", { filePath, content: "x" }, id).input, { args: { filePath, content: "x" } }))
+        .rejects.toThrow(/raw wiki sources are immutable/)
+    }
+    mkdirSync(join(wt.worktree, "knowledge", "raw"), { recursive: true })
+    const alias = join(wt.worktree, "raw-alias")
+    symlinkSync(join(wt.worktree, "knowledge", "raw"), alias)
+    await expect(hook(before("write", { filePath: join(alias, "x.md"), content: "x" }, "c3").input, { args: { filePath: join(alias, "x.md"), content: "x" } }))
+      .rejects.toThrow(/raw wiki sources are immutable/)
+  })
+
+  test("blocks apply_patch/patch whose Add, Update, Delete or Move target is under knowledge/raw", async () => {
+    const hook = createToolBeforeHook(makeDeps(client, wt.worktree))
+    const patches = [
+      "*** Begin Patch\n*** Add File: knowledge/raw/documents/new.md\n+x\n*** End Patch",
+      "*** Begin Patch\n*** Update File: knowledge/raw/documents/a.md\n@@\n-a\n+b\n*** End Patch",
+      "*** Begin Patch\n*** Delete File: knowledge/raw/documents/a.md\n*** End Patch",
+      "*** Begin Patch\n*** Update File: notes.md\n*** Move to: knowledge/raw/documents/moved.md\n*** End Patch",
+    ]
+    for (const [i, patchText] of patches.entries()) {
+      for (const tool of ["apply_patch", "patch"]) {
+        const c = before(tool, { patchText }, `p${tool}${i}`)
+        await expect(hook(c.input, c.output)).rejects.toThrow(/raw wiki sources are immutable/)
+      }
+    }
+    const evasive = [
+      "*** Begin Patch\n   *** Add File: knowledge/raw/documents/y.md\n+x\n*** End Patch",
+      "*** Begin Patch\r\n\t*** Update File: knowledge/raw/a.md\r\n*** End Patch",
+      "*** Begin Patch\n***  add file :  knowledge/raw/b.md  \n*** End Patch",
+      "*** Begin Patch\n*** Add File: \"knowledge/raw/c.md\"\n*** End Patch",
+    ]
+    for (const [i, patchText] of evasive.entries()) {
+      const c = before("apply_patch", { patchText }, `ev${i}`)
+      await expect(hook(c.input, c.output)).rejects.toThrow(/raw wiki sources are immutable/)
+    }
+    const ok = before("apply_patch", { patchText: "*** Begin Patch\n*** Update File: knowledge/wiki/index.md\n@@\n-a\n+b\n*** End Patch" }, "pok")
+    await hook(ok.input, ok.output)
+  })
+
+  test("guard.wiki_raw can be disabled", async () => {
+    const hook = createToolBeforeHook(makeDeps(client, wt.worktree, { disabled_hooks: ["guard.wiki_raw"] }))
+    const abs = join(wt.worktree, "knowledge", "raw", "documents", "x.md")
+    await hook(before("write", { filePath: abs, content: "x" }, "c1").input, { args: { filePath: abs, content: "x" } })
   })
 })
 

@@ -161,8 +161,9 @@ export function recordToolOutcome(worktree: string, part: unknown): boolean {
     }
   }
 
+  // Identity is the observation, not its envelope: the same call re-delivered under a new part id is one row.
   const identity = JSON.stringify([
-    1, partID, sessionID, callID, tool, status, basis, startedAt, finishedAt, durationMs,
+    1, sessionID, callID, tool, status, basis, startedAt, finishedAt, durationMs,
     observedExit, observedExitCode,
   ])
   const id = createHash("sha256").update(identity).digest("hex")

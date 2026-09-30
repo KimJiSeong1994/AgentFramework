@@ -14,6 +14,7 @@ import { enabled } from "./types.ts"
 import { hasModeSuffix, modeSuffix } from "../modes/instructions.ts"
 import type { ActiveMode } from "../modes/instructions.ts"
 import { createSkillRouter } from "../routing/router.ts"
+import { consumeCommandTurn } from "./command-turns.ts"
 
 function lastUserText(parts: Part[]): TextPart | undefined {
   for (let i = parts.length - 1; i >= 0; i--) {
@@ -55,6 +56,8 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       log("chat.message: session info write failed", { sessionID, error: (e as Error).message })
     }
 
+    // Consumed on every turn (before any early return, any agent) so a mark never outlives its own command turn.
+    const commandTurn = consumeCommandTurn(sessionID)
     // Child sessions (worker/reviewer) get their prompt from the queue: never detect modes in them.
     if (input.agent && input.agent !== "main") {
       log("chat.message: non-main agent, no mode detection", { sessionID, agent: input.agent })
@@ -120,7 +123,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     if (!state.active || state.mode === "none") {
       part.text += resume
       // Explicit commands and existing continuation offers retain their own authority.
-      if (input.agent !== "main" || resume || originalText.trimStart().startsWith("/") || readAbort(worktree, sessionID)) return
+      if (input.agent !== "main" || resume || commandTurn || originalText.trimStart().startsWith("/") || readAbort(worktree, sessionID)) return
       const recommendation = await router.recommend(sessionID, output.message.id, originalText)
       if (config.skill_router.mode === "suggest" && recommendation.skill) {
         part.text += `\n\n<lca-skill-advice>Potentially relevant skill: ${recommendation.skill}. This is optional advice, not a request to load a skill, change mode, or execute work. Preserve the user's explicit choices and existing authorization requirements.</lca-skill-advice>`

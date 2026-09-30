@@ -4,5 +4,7 @@
   // default changes (budgets, delegate.*) are not shadowed by a stale copy here.
   "disabled_hooks": [],
   // Apply optional per-turn skill advice; never automatically load skills or change modes.
-  "skill_router": { "mode": "suggest" }
+  "skill_router": { "mode": "suggest" },
+  // Arrays replace defaults; DEFAULT_CONFIG.skills is unchanged.
+  "skills": { "allow": ["ulw", "plan", "llm-wiki"] }
 }

@@ -236,11 +236,14 @@ Set `LCA_DEBUG=1` when starting OpenCode to see `skill.router` outcomes and late
 - Modes: `off`, `shadow`, or explicitly opted-in `suggest`. Suggest appends optional
   per-turn advice, **not** an instruction to load a skill. The probability/margin
   thresholds are experimental, not calibrated correctness or authorization guarantees.
-- Candidates are project-local `.opencode/skills/<name>/SKILL.md` metadata, intersected
-  with `skills.allow` and the live main-agent permission rules returned by OpenCode.
-  Missing, denied, ask-only, external-symlink and malformed skills are excluded.
-  Global skill discovery is deliberately not a router catalog; installing a GJC skill
-  alone does not make it eligible. Catalogs over 16 allowlisted names abstain.
+- Candidates are project-local skill metadata, read from `.opencode/skills/<name>/SKILL.md`
+  and also from `.agents/skills/<name>/SKILL.md`; if a name exists under both roots it is
+  excluded as ambiguous. Both roots get identical realpath-containment, size and
+  frontmatter checks. Candidates are intersected with `skills.allow` and the live
+  main-agent permission rules returned by OpenCode. Missing, denied, ask-only,
+  external-symlink and malformed skills are excluded. Global skill discovery is
+  deliberately not a router catalog; installing a GJC skill alone does not make it
+  eligible. Catalogs over 16 allowlisted names abstain.
 - Only `name` and bounded frontmatter `description` are sent, never skill instructions
   or other repository file contents. Only the current user text is sent (maximum 2,000 characters);
   common credential patterns cause abstention. This is not a complete secret detector:
@@ -248,10 +251,15 @@ Set `LCA_DEBUG=1` when starting OpenCode to see `skill.router` outcomes and late
 - One HTTP call uses `jev-latest`, `samples: 1`, `steps: 1`, and an explicit `none`
   choice. Only literal HTTP loopback endpoints are accepted; redirects are refused.
   Timeout includes host permission lookup and the response body. One request per
-  plugin instance is admitted, with no queue or retries. Errors, invalid responses,
-  revoked permissions, low margins and stale turns yield no suggestion.
+  plugin instance is admitted, with no queue or retries (the single slot is
+  client-side: after a timeout the server may still be computing). Errors, invalid
+  responses, revoked permissions, low margins and stale turns yield no suggestion.
+  An invalid `skill_router` block (e.g. `timeout_ms` over 3000) disables advice with
+  reason `invalid_config` and a logged list of issues, never a silent `off`.
 - Explicit slash commands, detected modes, active modes, resume offers, child agents
-  and synthetic-only turns bypass inference. A newer main-agent turn cancels pending
+  and synthetic-only turns bypass inference. OpenCode expands a command's template
+  before `chat.message`, so `command.execute.before` marks that turn and the router
+  skips it; literal `/` text is also skipped. A newer main-agent turn cancels pending
   advice for its session; mode TTL, permissions and execution authorization are never
   derived from predictions. Disabling `mode.detect` also disables this hook.
 - Client cancellation does **not** prove that already-running MLX work stopped. Other
@@ -287,26 +295,52 @@ Recording is best-effort: a storage error logs a generic `tool outcome recording
 message through the debug logger (`LCA_DEBUG=1`) and does not interrupt tool/guard handling.
 Stored-observation counts are therefore not a guarantee that every executed call was captured.
 
-From the repository root:
+The CLI implementation lives at `framework/src/wiki/wiki.ts` (moved from the old
+`framework/src/telemetry/wiki.ts`). From the repository root:
 
 ```bash
-bun scripts/lca-wiki.ts capture
-bun scripts/lca-wiki.ts lint
+bun scripts/lca-wiki.ts capture|lint|status|unlock [--root DIR]
+bun scripts/lca-wiki.ts register <file> [--title T] [--root DIR]
 ```
+
+Exit 0 is success; 1 is a refusal or failure (stderr `Wiki operation failed: <reason>`);
+2 is a usage error. `--root` defaults to the repository root.
 
 `capture` writes a content-addressed immutable raw snapshot, a source page, a generated
 aggregate report, and updates the index/append-only activity log. It does not pretend to
-be an LLM ingest. The coding agent follows [the wiki schema](../knowledge/AGENTS.md) to
-read sources, maintain cross-linked concepts/entities, answer with citations, and
-record semantic ingest/query/lint operations. Start at [the index](../knowledge/wiki/index.md).
-The structural `lint` checks local links, orphan pages and raw integrity; contradictions,
-stale claims and causal conclusions require agent review. Existing raw files and enriched
+be an LLM ingest. `register <file>` admits a local `.md`/`.txt` document (non-empty, at
+most 131072 bytes, valid UTF-8, no NUL, no detected secret) the same way: it hashes the
+bytes (sha256), writes an immutable `knowledge/raw/documents/<sha256>.<ext>` and a
+generated `knowledge/wiki/sources/documents-<sha256>.md` source page, then updates the
+index and log. Re-registering identical bytes is idempotent and never duplicates the log
+entry; if the raw path for that id already holds different bytes, registration is refused
+with "Immutable raw source hash mismatch". `status` is read-only: it reports
+registered sources, which are compiled (linked from an `ingest` log entry), which are
+still pending, and structural problems, without writing anything.
+
+The coding agent follows [the wiki schema](../knowledge/AGENTS.md) and the `llm-wiki`
+skill (`.agents/skills/llm-wiki/SKILL.md`) to read sources, maintain cross-linked
+concepts/entities, answer with citations, and record semantic ingest/query/lint
+operations. Start at [the index](../knowledge/wiki/index.md). The structural `lint`
+checks local links (skipping `knowledge/raw/`), orphan pages, raw/source-page pairing in
+both directions, content-hash integrity, allowed extensions, the log heading grammar, and
+that every `ingest` entry links at least one existing source page; contradictions, stale
+claims and causal conclusions still require agent review. Existing raw files and enriched
 source pages are never overwritten; aggregate reports are explicitly generated.
 
 The pattern follows [Karpathy's original LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f),
-not a separate hosted product. A wiki capture lock prevents concurrent writers. After a
-crash, verify that the lock's PID is no longer running before removing that one stale
-lock; the CLI never guesses or deletes an existing lock. Git settings remain unchanged.
+not a separate hosted product. A single `knowledge/.wiki.lock` file (created `wx`,
+containing `{pid, at}`) is shared by `capture` and `register` to prevent concurrent
+writers; `lint` and `status` report and refuse (exit 1) while it exists. The owner
+process removes only the lock it created, in a `finally` block; writers never remove a
+lock they did not create. A lock whose recorded PID has exited is reported as stale by
+`lint`/`status`; `bun scripts/lca-wiki.ts unlock` removes it (refusing live, unreadable or
+changed locks). Git settings remain unchanged.
+
+The `guard.wiki_raw` hook (`tool.execute.before`) refuses edit/write/multiedit and
+`apply_patch`/`patch` targets under `knowledge/raw/` (case variants and symlink aliases
+included; patch targets are read from `*** Add/Update/Delete File:` and `*** Move to:`
+lines). It does not parse bash; `lint`'s byte-hash integrity check is the backstop.
 
 ## Delegate config (`.lca/lca.jsonc` → `delegate`)
 
@@ -366,6 +400,9 @@ Hook ids: `tool.data` (drops db_query/schema_lookup and the data agents), `mcp.e
 - `skills.allow` (default `["ulw","plan"]`): OpenCode auto-discovers skills from `~/.claude/skills`, `~/.agents/skills`,
   `.opencode/skills` and lists every description in the skill tool schema (13 skills = ~2K prefix tokens here).
   lca sets `permission.skill` so main sees only the allowlist; worker/reviewer have the skill tool off.
+  This project overrides the list in `.lca/lca.jsonc` to `["ulw","plan","llm-wiki"]` (arrays replace
+  defaults; `DEFAULT_CONFIG.skills` in `config.ts` is unchanged) to enable the `llm-wiki` skill at
+  `.agents/skills/llm-wiki/SKILL.md`.
 - `guards.read_max_tokens` (default 2500) and `guards.relativize_paths` (default true): tool outputs are cut by
   estimated tokens, not just bytes, and worktree-absolute paths are made relative before the model sees them.
 - The `delegate` tool schema costs ~257 est. tokens (doctor D09c and the unit test cap it at 400).

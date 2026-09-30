@@ -6,15 +6,19 @@ import type { Hooks } from "@opencode-ai/plugin"
 import type { HookDeps } from "./types.ts"
 import { EMPTY_MODE, abortPath, readModeState, writeJsonAtomic, writeModeState } from "../state/store.ts"
 import { getQueue } from "../orchestration/queue.ts"
+import { markCommandTurn } from "./command-turns.ts"
 
 export const STOP_COMMAND = "stop"
 export const STOP_TEMPLATE = "stop lca: cancel the active mode and the task queue. Finish the current step, then stop."
 export const STOP_DESCRIPTION = "lca: stop the task queue / continuation loop"
 
-export function createCommandHook(deps: HookDeps): NonNullable<Hooks["command.execute.before"]> {
+export function createCommandHook(deps: HookDeps, opts: { stop?: boolean } = {}): NonNullable<Hooks["command.execute.before"]> {
   const queue = getQueue(deps)
+  const stopOn = opts.stop ?? true
   return async (input) => {
-    if (input.command !== STOP_COMMAND) return
+    // Every explicit command keeps its own authority: its expanded template must not be skill-routed.
+    markCommandTurn(input.sessionID)
+    if (!stopOn || input.command !== STOP_COMMAND) return
     const { sessionID } = input
     try {
       writeJsonAtomic(abortPath(deps.worktree, sessionID), { reason: "user_stop", at: Date.now(), arguments: input.arguments })

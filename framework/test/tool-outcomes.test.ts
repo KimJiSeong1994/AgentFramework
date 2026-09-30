@@ -149,6 +149,13 @@ describe("tool outcome recording", () => {
     expect(listToolOutcomes(wt.worktree).totalCount).toBe(3)
   })
 
+  test("the same observation re-delivered under a different part id is one row", () => {
+    expect(recordToolOutcome(wt.worktree, completed({ id: "part-A" }))).toBe(true)
+    expect(recordToolOutcome(wt.worktree, completed({ id: "part-B" }))).toBe(false)
+    expect(recordToolOutcome(wt.worktree, completed({ id: "part-C" }))).toBe(false)
+    expect(listToolOutcomes(wt.worktree).totalCount).toBe(1)
+  })
+
   test("marks disagreeing exit metadata as unknown", () => {
     const part = completed({
       id: "part_conflicting_exit",

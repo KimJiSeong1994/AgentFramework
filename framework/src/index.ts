@@ -38,7 +38,9 @@ export const LcaPlugin: Plugin = async (input) => {
     hooks.tool.schema_lookup = createSchemaLookupTool(deps)
   }
   if (Object.keys(hooks.tool).length === 0) delete hooks.tool
-  if (enabled(config, "command.stop")) hooks["command.execute.before"] = createCommandHook(deps)
+  // Registered for the router too: it marks command turns so their expanded templates are not skill-routed.
+  const stopOn = enabled(config, "command.stop")
+  if (stopOn || enabled(config, "mode.detect")) hooks["command.execute.before"] = createCommandHook(deps, { stop: stopOn })
   return hooks
 }
 
