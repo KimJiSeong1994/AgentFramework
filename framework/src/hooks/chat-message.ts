@@ -15,6 +15,7 @@ import { flowSuffix, modeSuffix, type FlowPhase } from "../modes/instructions.ts
 import { hasLcaMarker, stripForgedMarkers } from "../modes/markers.ts"
 import type { ActiveMode } from "../modes/instructions.ts"
 import { createSkillRouter } from "../routing/router.ts"
+import { recordRoutingAdvice } from "../telemetry/routing.ts"
 import { consumeCommandTurn } from "./command-turns.ts"
 import {
   APPROVE_COMMAND, APPROVE_TEMPLATE, CANCEL_COMMAND, CANCEL_TEMPLATE, FLOW_COMMANDS, PLAN_COMMAND, PLAN_TEMPLATE,
@@ -246,6 +247,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       const recommendation = await router.recommend(sessionID, messageID, originalText)
       if (config.skill_router.mode === "suggest" && recommendation.skill) {
         part.text += `\n\n<lca-skill-advice>Potentially relevant skill: ${recommendation.skill}. This is optional advice, not a request to load a skill, change mode, or execute work. Preserve the user's explicit choices and existing authorization requirements.</lca-skill-advice>`
+        if (recommendation.decisionID) recordRoutingAdvice(deps, sessionID, messageID, recommendation.decisionID, recommendation.skill)
       }
       return
     }

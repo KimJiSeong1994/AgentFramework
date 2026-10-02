@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { TextPart, UserMessage } from "@opencode-ai/sdk"
@@ -8,7 +8,8 @@ import type { HookDeps } from "../src/hooks/types.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { createSkillRouter } from "../src/routing/router.ts"
 import { createCommandHook } from "../src/hooks/command.ts"
-import { EMPTY_MODE, readModeState, writeModeState } from "../src/state/store.ts"
+import { EMPTY_MODE, readModeState, removeSessionDir, stateRoot, writeModeState } from "../src/state/store.ts"
+import { routingLogPath } from "../src/telemetry/routing.ts"
 
 let root: string
 let deps: HookDeps
@@ -53,9 +54,61 @@ beforeEach(() => {
   }
   skill("plan")
 })
-afterEach(() => { server.stop(true); rmSync(root, { recursive: true, force: true }) })
+afterEach(() => {
+  server.stop(true)
+  rmSync(stateRoot(root), { recursive: true, force: true })
+  rmSync(root, { recursive: true, force: true })
+})
+
+function routingEvents(sessionID = "s1") {
+  return readFileSync(routingLogPath(root, sessionID), "utf8").trim().split("\n").map((line) => JSON.parse(line))
+}
 
 describe("OpenJev skill router package", () => {
+  test("routing history survives router restart and session deletion; duplicate attempts remain distinguishable", async () => {
+    const router = createSkillRouter(deps)
+    await router.recommend("s1", "m1", "Investigate")
+    await router.recommend("s1", "m1", "Investigate")
+    removeSessionDir(root, "s1")
+    await createSkillRouter(deps).recommend("s1", "m2", "Investigate")
+    const events = routingEvents()
+    expect(events.map((event) => event.reason)).toEqual(["recommended", "duplicate", "recommended"])
+    expect(events.map((event) => event.requestSent)).toEqual([true, false, true])
+    expect(new Set(events.map((event) => event.decisionID)).size).toBe(3)
+  })
+
+  test("untrusted response labels and response bodies are never persisted", async () => {
+    handler = () => Response.json(answer("password=private", { plan: 0.9, none: 0.1 }))
+    await createSkillRouter(deps).recommend("s1", "m1", "Investigate")
+    handler = () => new Response("Bearer privatecredential", { status: 503 })
+    await createSkillRouter(deps).recommend("s1", "m2", "Investigate")
+    const events = routingEvents()
+    expect(events.map((event) => event.reason)).toEqual(["invalid_distribution", "unavailable"])
+    expect(events.every((event) => event.scores === null)).toBe(true)
+    expect(JSON.stringify(events)).not.toContain("private")
+  })
+
+  test("log write failure and symlinks do not affect advice or expose errors", async () => {
+    const target = join(root, "untouched.txt")
+    writeFileSync(target, "sentinel")
+    mkdirSync(join(stateRoot(root), "routing"), { recursive: true })
+    symlinkSync(target, routingLogPath(root, "s1"))
+    deps.config.skill_router.mode = "suggest"
+    const p = part("Investigate this module and list the implementation steps.")
+    await turn(createChatMessageHook(deps), p)
+    expect(p.text).toContain("lca-skill-advice")
+    expect(readFileSync(target, "utf8")).toBe("sentinel")
+    expect(JSON.stringify(logs)).toContain("skill.router persistence failed")
+    expect(JSON.stringify(logs)).not.toContain(target)
+  })
+
+  test("path traversal session identities cannot create logs outside routing storage", async () => {
+    expect(() => routingLogPath(root, "../outside")).toThrow("Invalid routing identifier")
+    const result = await createSkillRouter(deps).recommend("../outside", "m1", "Investigate")
+    expect(result.skill).toBe("plan")
+    expect(JSON.stringify(logs)).toContain("skill.router persistence failed")
+  })
+
   test("shadow sends only bounded metadata and never changes text or mode", async () => {
     const p = part("Investigate authentication and provide numbered implementation steps, without edits.")
     const original = p.text
@@ -67,6 +120,19 @@ describe("OpenJev skill router package", () => {
     expect(readModeState(root, "s1")).toEqual(EMPTY_MODE)
     expect(JSON.stringify(logs)).toContain('"reason":"recommended"')
     expect(JSON.stringify(logs)).not.toContain(original)
+    const events = routingEvents()
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      schemaVersion: 1, event: "decision", sessionID: "s1", messageID: "msg1",
+      mode: "shadow", reason: "recommended", skill: "plan", requestSent: true,
+      candidates: ["plan"], scores: { choice: "plan", confidence: 0.9, probabilities: { plan: 0.99, none: 0.01 } },
+      thresholds: { minProbability: 0.95, minMargin: 0.2, timeoutMs: 1000 },
+    })
+    expect(events[0].scores.margin).toBeCloseTo(0.98)
+    expect(events[0].elapsedMs).toBeGreaterThanOrEqual(0)
+    expect(events[0].recordedAt).toBeGreaterThan(0)
+    expect(JSON.stringify(events)).not.toContain(original)
+    expect(statSync(routingLogPath(root, "s1")).mode & 0o777).toBe(0o600)
   })
 
   test("suggest is optional advice only, idempotent per message", async () => {
@@ -80,6 +146,10 @@ describe("OpenJev skill router package", () => {
     await turn(hook, p)
     expect(p.text.split("<lca-skill-advice>")).toHaveLength(2)
     expect(requests).toHaveLength(1)
+    const events = routingEvents()
+    expect(events.map((event) => event.event)).toEqual(["decision", "advice_applied"])
+    expect(events[1].decisionID).toBe(events[0].decisionID)
+    expect(events[1].skill).toBe("plan")
   })
 
   test("off, explicit commands, child agents, synthetic turns and active modes bypass inference", async () => {
@@ -94,6 +164,7 @@ describe("OpenJev skill router package", () => {
     deps.config.skill_router.mode = "off"
     await turn(hook, part("Investigate", "m7"))
     expect(requests).toHaveLength(0)
+    expect(routingEvents().map((event) => event.reason)).toEqual(["off"])
   })
 
   test("an expanded command template (no literal slash) is not routed; the next plain turn is", async () => {
@@ -125,6 +196,7 @@ describe("OpenJev skill router package", () => {
     expect((await createSkillRouter(deps).recommend("s", "m", "Investigate")).reason).toBe("invalid_config")
     expect(JSON.stringify(logs)).toContain("timeout_ms")
     expect(requests).toHaveLength(0)
+    expect(routingEvents("s")[0]).toMatchObject({ mode: "invalid", reason: "invalid_config", requestSent: false, scores: null })
   })
 
   test("secrets and oversized input are not transmitted", async () => {
@@ -133,6 +205,10 @@ describe("OpenJev skill router package", () => {
       expect((await router.recommend("s1", String(i), text)).skill).toBeNull()
     }
     expect(requests).toHaveLength(0)
+    const serialized = JSON.stringify(routingEvents())
+    expect(serialized).not.toContain("secretpassword")
+    expect(serialized).not.toContain("privatecredential")
+    expect(routingEvents().map((event) => event.reason)).toEqual(["sensitive_input", "sensitive_input", "sensitive_input", "input_bound"])
   })
 
   test("network endpoints and redirects are refused", async () => {
@@ -192,6 +268,10 @@ describe("OpenJev skill router package", () => {
       handler = () => Response.json(value)
       expect((await createSkillRouter(deps).recommend("s", "m", "Investigate")).reason).toBe("abstained")
     }
+    const events = routingEvents("s")
+    expect(events.map((event) => event.reason)).toEqual(["abstained", "abstained"])
+    expect(events.map((event) => event.scores.choice)).toEqual(["none", "plan"])
+    expect(events.every((event) => event.skill === null)).toBe(true)
   })
 
   test("permission changes during inference suppress a previously allowed winner", async () => {
@@ -214,6 +294,7 @@ describe("OpenJev skill router package", () => {
     expect((await createSkillRouter(deps).recommend("s", "m", "Investigate")).reason).toBe("aborted")
     expect(performance.now() - start).toBeLessThan(500)
     expect(requests).toHaveLength(0)
+    expect(routingEvents("s")[0]).toMatchObject({ reason: "aborted", requestSent: false, scores: null })
   })
 
   test("deadline covers an incomplete HTTP body", async () => {
@@ -272,6 +353,8 @@ describe("OpenJev skill router package", () => {
     expect(p.text).not.toContain("lca-skill-advice")
     expect(other.text).not.toContain("lca-skill-advice")
     expect(readModeState(root, "s1").stopReason).toBe("user_cancel")
+    expect(routingEvents().map((event) => event.reason)).toEqual(["aborted"])
+    expect(routingEvents("s2").map((event) => event.reason)).toEqual(["busy"])
   })
 
   test("a skill defined only under .agents/skills is found", async () => {
