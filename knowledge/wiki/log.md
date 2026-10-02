@@ -33,3 +33,15 @@
 
 - [로컬 우선 설계 계약](concepts/local-first-contract.md)의 README 인용이 등록 출처가 아닌 저장소 문서임을 명시했다.
 - 구조 lint 통과, status 기준 모든 출처 컴파일 완료.
+
+## [2026-10-02T02:12:38.851Z] capture | 도구 실행 관측
+
+- source_id: 3aca54aae22acabc4ca432c87fd6c552aa65ef0185ba6aaee37403f8df5f1386
+- [원본 요약](sources/tool-runs-3aca54aae22acabc4ca432c87fd6c552aa65ef0185ba6aaee37403f8df5f1386.md); 9/9개 관측.
+- 의미적 ingest는 아직 실행하지 않았습니다.
+
+## [2026-10-02T02:12:38.852Z] capture | Jev routing observations
+
+- source_id: 47ed1186900e8c9302e023b319a6a860cb25601234483d37e123829b38a3f7f7
+- [Sanitized routing snapshot](sources/routing-47ed1186900e8c9302e023b319a6a860cb25601234483d37e123829b38a3f7f7.md); 0 unique valid events.
+- Recommendations and advice insertion are not evidence of skill execution or success.
