@@ -20,3 +20,8 @@
 - [도구 실행 원본 9d8e2559edce](sources/tool-runs-9d8e2559edced1fdaee767441598a80e3317dee0565bc65417a5884987fceca9.md) — 0개 관측; 전체 0개 중 포함된 범위.
 
 - [OpenCode 기반 자체 에이전트 프레임워크 심층 검토](sources/documents-e23212dec8bc6f31aa6120397f75f7dd1d58f0df41dc8275b9b0e3a93df6265a.md) — 등록 문서, 20950 bytes.
+
+- [도구 실행 원본 3aca54aae22a](sources/tool-runs-3aca54aae22acabc4ca432c87fd6c552aa65ef0185ba6aaee37403f8df5f1386.md) — 9개 관측; 전체 9개 중 포함된 범위.
+
+- [Jev routing snapshot 47ed1186900e](sources/routing-47ed1186900e8c9302e023b319a6a860cb25601234483d37e123829b38a3f7f7.md) — 0개 유효 이벤트; complete 범위.
+- [Jev routing report](reports/routing.md)

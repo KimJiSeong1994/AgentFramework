@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "kind": "tool-outcome-snapshot",
+  "coverage": {
+    "totalCount": 9,
+    "included": 9,
+    "limit": 10000
+  },
+  "observations": [
+    {
+      "schemaVersion": 1,
+      "id": "0800a38fe082ed717b0123725f697f4d3ddd1a163abc4923c7f4de5291d5f016",
+      "sessionID": "ses_f10500730ffewEfbl111qUCQDP",
+      "callID": "call_1fsndcp3",
+      "tool": "read",
+      "status": "success",
+      "basis": "completed",
+      "startedAt": 1790727985733,
+      "finishedAt": 1790727985788,
+      "durationMs": 55,
+      "recordedAt": 1790727985788
+    },
+    {
+      "schemaVersion": 1,
+      "id": "3f1cd6b2e43812281cf76153e1d50cf6335e7fd96720f1809f6769d4ba771466",
+      "sessionID": "ses_f10500730ffewEfbl111qUCQDP",
+      "callID": "call_ym11hzb4",
+      "tool": "glob",
+      "status": "success",
+      "basis": "completed",
+      "startedAt": 1790727763280,
+      "finishedAt": 1790727763408,
+      "durationMs": 128,
+      "recordedAt": 1790727763409
+    },
+    {
+      "schemaVersion": 1,
+      "id": "42f944ab12ee50be2bf0af3ac4940633de90a3582b149e3a55dd91b507c096f9",
+      "sessionID": "ses_f10500730ffewEfbl111qUCQDP",
+      "callID": "call_77rceinr",
+      "tool": "grep",
+      "status": "success",
+      "basis": "completed",
+      "startedAt": 1790727979241,
+      "finishedAt": 1790727979306,
+      "durationMs": 65,
+      "recordedAt": 1790727979307
+    },
+    {
+      "schemaVersion": 1,
+      "id": "8cf64ca4cd2ef3e9f25634fdb77e4bd748284d2c856b177417b7a94ab172794e",
+      "sessionID": "ses_f10500730ffewEfbl111qUCQDP",
+      "callID": "call_tkx1nln5",
+      "tool": "glob",
+      "status": "success",
+      "basis": "completed",
+      "startedAt": 1790727797428,
+      "finishedAt": 1790727797493,
+      "durationMs": 65,
+      "recordedAt": 1790727797494
+    },
+    {
+      "schemaVersion": 1,
+      "id": "9ca3fe025164243e5349d9f01ab80c87c05c8264e6b70b34accc165c46562df6",
+      "sessionID": "ses_f10500730ffewEfbl111qUCQDP",
+      "callID": "call_wtnecb4z",
+      "tool": "glob",
+      "status": "success",
+      "basis": "completed",
+      "startedAt": 1790727774519,
+      "finishedAt": 1790727774580,
+      "durationMs": 61,
+      "recordedAt": 1790727774581
+    },
+    {
+      "schemaVersion": 1,
+      "id": "a5569c73c5bacff03a365fb8538db5a4df97fb6bc65f4271c2c7c6269813229e",
+      "sessionID": "ses_f10500730ffewEfbl111qUCQDP",
+      "callID": "call_gwv6lnrs",
+      "tool": "read",
+      "status": "success",
+      "basis": "completed",
+      "startedAt": 1790727785957,
+      "finishedAt": 1790727786015,
+      "durationMs": 58,
+      "recordedAt": 1790727786016
+    },
+    {
+      "schemaVersion": 1,
+      "id": "a6379781673d1306aacf700a6987e58b03eebc6cc36424773687bbe4737b138e",
+      "sessionID": "ses_f10500730ffewEfbl111qUCQDP",
+      "callID": "call_f6sn5z3u",
+      "tool": "grep",
+      "status": "success",
+      "basis": "completed",
+      "startedAt": 1790727977986,
+      "finishedAt": 1790727978063,
+      "durationMs": 77,
+      "recordedAt": 1790727978064
+    },
+    {
+      "schemaVersion": 1,
+      "id": "d2b1e8a6d74f512a2e37b9f7ab70cb4b1351cf9eecc621a8818657d65f915a9d",
+      "sessionID": "ses_f10500730ffewEfbl111qUCQDP",
+      "callID": "call_cc4jm88i",
+      "tool": "read",
+      "status": "success",
+      "basis": "completed",
+      "startedAt": 1790727773166,
+      "finishedAt": 1790727773221,
+      "durationMs": 55,
+      "recordedAt": 1790727773222
+    },
+    {
+      "schemaVersion": 1,
+      "id": "e40e3b0b73e460d4180409ae7ad4bff05730e8628b1a17fbb630d694b9e37e37",
+      "sessionID": "ses_f10500730ffewEfbl111qUCQDP",
+      "callID": "call_prldgzyx",
+      "tool": "read",
+      "status": "success",
+      "basis": "completed",
+      "startedAt": 1790727988437,
+      "finishedAt": 1790727988490,
+      "durationMs": 53,
+      "recordedAt": 1790727988491
+    }
+  ]
+}

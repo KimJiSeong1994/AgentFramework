@@ -3,10 +3,14 @@ import {
   appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync,
   writeFileSync,
 } from "node:fs"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
 import { spawnSync } from "node:child_process"
 import { recordToolOutcome } from "../src/telemetry/outcomes.ts"
+import { recordRoutingAdvice, recordRoutingDecision, routingLogPath, type RoutingDecision } from "../src/telemetry/routing.ts"
+import { stateRoot } from "../src/state/store.ts"
+import { readRoutingLogs } from "../src/telemetry/routing-reader.ts"
+import { createHash } from "node:crypto"
 import { captureWiki, lintWiki, parseLog, registerWiki, statusWiki, summarizeOutcomes, unlockWiki } from "../src/wiki/wiki.ts"
 
 let root: string
@@ -40,6 +44,23 @@ function observed(callID: string, status: "completed" | "error", exit = 0) {
     output: "do-not-store-sentinel", error: "do-not-store-sentinel",
   } }
 }
+function routingDecision(decisionID: string, overrides: Partial<RoutingDecision> = {}): RoutingDecision {
+  return {
+    decisionID, sessionID: "session-1", messageID: `message-${decisionID}`, mode: "suggest", skill: "skill-one",
+    reason: "recommended", elapsedMs: 120, requestSent: true, candidates: ["skill-one", "skill-two"],
+    thresholds: { minProbability: 0.65, minMargin: 0.1, timeoutMs: 1000 },
+    scores: { choice: "skill-one", probabilities: { "skill-one": 0.75, "skill-two": 0.15, none: 0.1 }, confidence: 0.75, margin: 0.6 },
+    ...overrides,
+  }
+}
+function recordDecision(decision: RoutingDecision) {
+  recordRoutingDecision({ worktree: root, log: () => { } } as never, decision)
+}
+function routingFile(sessionID = "session-1"): string {
+  const path = routingLogPath(root, sessionID)
+  mkdirSync(dirname(path), { recursive: true })
+  return path
+}
 function doc(name: string, content: string): string {
   const path = join(docsDir, name)
   writeFileSync(path, content)
@@ -64,11 +85,255 @@ function snapshot() {
 
 // -- Existing capture behaviour (kept meaningful with the new shared lock/log grammar) -----------------------------
 
+test("routing capture joins applied advice and supports immutable replay and compile status", () => {
+  const decision = routingDecision("d1")
+  recordDecision(decision)
+  recordRoutingAdvice({ worktree: root, log: () => {} } as never, decision.sessionID, decision.messageID, decision.decisionID, decision.skill!)
+  const first = captureWiki(root).routing
+  expect(first.events).toBe(2)
+  expect(first.decisions).toBe(1)
+  const report = readFileSync(join(root, first.report), "utf8")
+  expect(report).toContain("exactly matched suggest recommendations: 1")
+  expect(report).toContain("not evidence of skill execution")
+  const before = readFileSync(join(root, first.source), "utf8")
+  const log = readFileSync(join(root, "knowledge/wiki/log.md"), "utf8")
+  expect(statusWiki(root).pending.some((item) => item.kind === "routing")).toBe(true)
+  expect(captureWiki(root).routing).toMatchObject({ source: first.source, created: false })
+  expect(readFileSync(join(root, "knowledge/wiki/log.md"), "utf8")).toBe(log)
+  appendFileSync(join(root, "knowledge/wiki/log.md"), `\n## [2026-10-02T00:00:00Z] ingest | Routing review\n\n- [Source](sources/${first.summary.split("/").at(-1)})\n`)
+  expect(statusWiki(root).pending.some((item) => item.kind === "routing")).toBe(false)
+  recordDecision(routingDecision("d2"))
+  const second = captureWiki(root).routing
+  expect(second.source).not.toBe(first.source)
+  expect(readFileSync(join(root, first.source), "utf8")).toBe(before)
+  expect(lintWiki(root)).toEqual([])
+})
+
+test("routing reports separate shadow abstentions and unmatched applications", () => {
+  recordDecision(routingDecision("shadow", { mode: "shadow" }))
+  recordDecision(routingDecision("abstain", { skill: null, reason: "abstained", thresholds: { minProbability: 0.99, minMargin: 0.2, timeoutMs: 1000 } }))
+  const deps = { worktree: root, log: () => {} } as never
+  recordRoutingAdvice(deps, "session-1", "message-shadow", "shadow", "skill-one")
+  recordRoutingAdvice(deps, "session-1", "message-missing", "missing", "skill-one")
+  const receipt = captureWiki(root).routing
+  const report = readFileSync(join(root, receipt.report), "utf8")
+  expect(report).toContain("| shadow | 1 |")
+  expect(report).toContain("| abstained | 1 |")
+  expect(report).toContain("exactly matched suggest recommendations: 0")
+  expect(report).toContain("unmatched applications: 1")
+  expect(report).toContain("conflicting or ineligible applications: 1")
+})
+
+test("routing import projects metadata and records malformed torn and mismatched lines without their text", () => {
+  recordDecision(routingDecision("d1"))
+  const path = routingFile()
+  const event = JSON.parse(readFileSync(path, "utf8"))
+  event.prompt = "PRIVATE_SENTINEL"
+  event.scores.raw = "PRIVATE_SENTINEL"
+  event.thresholds.note = "PRIVATE_SENTINEL"
+  const mismatch = { ...event, eventID: "mismatch", sessionID: "another-session" }
+  const bad = { ...event, eventID: "bad", scores: { ...event.scores, probabilities: { unexpected: 1 } } }
+  writeFileSync(path, [event, mismatch, bad].map((row) => JSON.stringify(row)).join("\n") + "\nPRIVATE_SENTINEL\n{\"incomplete\":")
+  const receipt = captureWiki(root).routing
+  expect(receipt.coverage).toMatchObject({ valid: 1, invalid: 4, scanned: 5 })
+  const raw = readFileSync(join(root, receipt.source), "utf8")
+  expect(raw).not.toContain("PRIVATE_SENTINEL")
+  expect(raw).not.toContain("incomplete")
+  expect(raw).toContain("torn_line")
+  expect(raw).toContain("session_mismatch")
+  expect(lintWiki(root)).toEqual([])
+})
+
+test("routing duplicate event IDs deduplicate but conflicting replays refuse before wiki mutation", () => {
+  recordDecision(routingDecision("d1"))
+  const path = routingFile()
+  const row = readFileSync(path, "utf8")
+  appendFileSync(path, row)
+  expect(readRoutingLogs(root).coverage).toMatchObject({ valid: 1, duplicates: 1, scanned: 2 })
+  const event = JSON.parse(row)
+  event.elapsedMs++
+  appendFileSync(path, JSON.stringify(event) + "\n")
+  const before = snapshot()
+  expect(() => captureWiki(root)).toThrow("Conflicting routing eventID")
+  expect(snapshot()).toBe(before)
+})
+
+test("routing reader refuses symlink log and directory before capture writes", () => {
+  const path = routingFile()
+  const target = doc("external.txt", "{}\n")
+  symlinkSync(target, path)
+  const before = snapshot()
+  expect(() => captureWiki(root)).toThrow()
+  expect(snapshot()).toBe(before)
+  rmSync(dirname(path), { recursive: true })
+  symlinkSync(docsDir, dirname(path))
+  expect(() => captureWiki(root)).toThrow()
+  expect(snapshot()).toBe(before)
+})
+
+test("routing byte and event limits disclose bounded coverage", () => {
+  const path = routingFile()
+  writeFileSync(path, " ".repeat(1024 * 1024 + 1))
+  const bytes = readRoutingLogs(root)
+  expect(bytes.coverage).toMatchObject({ truncated: true, scope: "bounded" })
+  expect(bytes.coverage.truncationReasons).toContain("file_bytes")
+  writeFileSync(path, "{}\n".repeat(10001))
+  const events = readRoutingLogs(root)
+  expect(events.coverage).toMatchObject({ scanned: 10000, invalid: 10000, truncated: true })
+  expect(events.coverage.truncationReasons).toContain("event_limit")
+})
+
+test("routing file and directory limits disclose bounded coverage", () => {
+  const dir = dirname(routingFile())
+  for (let i = 0; i < 257; i++) writeFileSync(join(dir, `session-${i}.jsonl`), "")
+  expect(readRoutingLogs(root).coverage).toMatchObject({ filesScanned: 256, truncated: true, truncationReasons: ["file_limit"] })
+  for (let i = 0; i < 4097; i++) writeFileSync(join(dir, `ignored-${i}`), "")
+  expect(readRoutingLogs(root).coverage).toMatchObject({ scanned: 0, truncated: true, truncationReasons: ["directory_limit"] })
+})
+
+test("routing lint detects raw tampering and rejects nested extra metadata", () => {
+  recordDecision(routingDecision("d1"))
+  const receipt = captureWiki(root).routing
+  const original = readFileSync(join(root, receipt.source), "utf8")
+  appendFileSync(join(root, receipt.source), "tampered")
+  expect(lintWiki(root).some((problem) => problem.includes("integrity mismatch"))).toBe(true)
+  writeFileSync(join(root, receipt.source), original)
+  const data = JSON.parse(original)
+  data.events[0].scores.privateText = "PRIVATE_SENTINEL"
+  const text = JSON.stringify(data) + "\n"
+  const id = createHash("sha256").update(text).digest("hex")
+  writeFileSync(join(root, "knowledge/raw/routing", `${id}.json`), text)
+  expect(lintWiki(root).some((problem) => /routing snapshot (schema|metadata)/.test(problem))).toBe(true)
+})
+
+test("routing recommendations without scores or thresholds are not admitted as successful decisions", () => {
+  recordDecision(routingDecision("d1"))
+  const path = routingFile()
+  const valid = JSON.parse(readFileSync(path, "utf8"))
+  const invalid = [
+    { ...valid, scores: null },
+    { ...valid, thresholds: null },
+    { ...valid, requestSent: false },
+    { ...valid, thresholds: { ...valid.thresholds, minProbability: 0.99 } },
+  ]
+  writeFileSync(path, invalid.map((row, i) => JSON.stringify({ ...row, eventID: `invalid-${i}` })).join("\n") + "\n")
+  expect(readRoutingLogs(root).coverage).toMatchObject({ valid: 0, invalid: 4 })
+})
+
 test("empty history is explicitly empty, not fabricated observations", () => {
   const receipt = captureWiki(root)
   expect(receipt.observations).toBe(0)
+  expect(receipt.routing.events).toBe(0)
+  expect(receipt.routing.coverage.scope).toBe("complete")
   expect(readFileSync(join(root, receipt.report), "utf8")).toContain("아직 기록된 도구 실행이 없습니다")
+  expect(receipt.routing.events).toBe(0)
+  expect(receipt.routing.coverage).toMatchObject({ scanned: 0, valid: 0, invalid: 0, duplicates: 0, truncated: false, scope: "complete" })
+  expect(readFileSync(join(root, receipt.routing.report), "utf8")).toContain("explicit zero-observation evidence")
   expect(lintWiki(root)).toEqual([])
+})
+
+test("routing capture exports producer decisions and only verifies exact suggest advice applications", () => {
+  recordDecision(routingDecision("decision-1"))
+  recordRoutingAdvice({ worktree: root } as never, "session-1", "message-decision-1", "decision-1", "skill-one")
+  const receipt = captureWiki(root)
+  const raw = JSON.parse(readFileSync(join(root, receipt.routing.source), "utf8"))
+  expect(receipt.routing).toMatchObject({ events: 2, decisions: 1, adviceApplied: 1 })
+  expect(raw.kind).toBe("jev-routing-snapshot")
+  expect(raw.events.map((event: { event: string }) => event.event).sort()).toEqual(["advice_applied", "decision"])
+  expect(readFileSync(join(root, receipt.routing.report), "utf8")).toContain("exactly matched suggest recommendations: 1")
+  expect(statusWiki(root).pending.some((item) => item.kind === "routing" && item.source === receipt.routing.source)).toBe(true)
+  expect(lintWiki(root)).toEqual([])
+})
+
+test("shadow abstention is reported as a decision, not as an application or execution", () => {
+  recordDecision(routingDecision("shadow-1", {
+    mode: "shadow", skill: null, reason: "abstained",
+    scores: { choice: "none", probabilities: { "skill-one": 0.1, "skill-two": 0.1, none: 0.8 }, confidence: 0.8, margin: 0.7 },
+  }))
+  const receipt = captureWiki(root)
+  const report = readFileSync(join(root, receipt.routing.report), "utf8")
+  expect(receipt.routing).toMatchObject({ events: 1, decisions: 1, adviceApplied: 0 })
+  expect(report).toContain("| shadow | 1 |")
+  expect(report).toContain("| abstained | 1 |")
+  expect(report).toContain("unmatched applications: 0")
+  expect(report).toContain("not evidence of skill execution")
+})
+
+
+test("routing capture strips unknown text metadata and visibly rejects malformed, torn, and misfiled rows", () => {
+  recordDecision(routingDecision("decision-sanitized"))
+  const path = routingFile()
+  const event = JSON.parse(readFileSync(path, "utf8"))
+  event.userText = "ROUTING_USER_TEXT_SENTINEL"
+  event.rawErrorBody = "ROUTING_ERROR_SENTINEL"
+  writeFileSync(path, `${JSON.stringify(event)}\n{malformed}\n{torn`)
+  const mismatched = { ...event, eventID: "mismatch-event", sessionID: "session-1" }
+  writeFileSync(routingFile("other-session"), `${JSON.stringify(mismatched)}\n`)
+
+  const receipt = captureWiki(root)
+  const rawText = readFileSync(join(root, receipt.routing.source), "utf8")
+  const raw = JSON.parse(rawText)
+  const report = readFileSync(join(root, receipt.routing.report), "utf8")
+  expect(raw.coverage).toMatchObject({ scanned: 4, valid: 1, invalid: 3 })
+  expect(raw.rejected.map((item: { reason: string }) => item.reason).sort()).toEqual(["malformed_json", "session_mismatch", "torn_line"])
+  expect(rawText).not.toContain("ROUTING_USER_TEXT_SENTINEL")
+  expect(rawText).not.toContain("ROUTING_ERROR_SENTINEL")
+  expect(report).toContain("malformed_json")
+  expect(report).toContain("torn_line")
+  expect(lintWiki(root)).toEqual([])
+})
+
+test("routing reader rejects symlinked directories and files before wiki writes", () => {
+  const stateDirectory = stateRoot(root)
+  mkdirSync(stateDirectory, { recursive: true })
+  const outside = mkdtempSync(join(tmpdir(), "lca-routing-outside-"))
+  try {
+    const before = snapshot()
+    symlinkSync(outside, join(stateDirectory, "routing"))
+    expect(() => captureWiki(root)).toThrow("Routing state directory must be a real directory")
+    expect(snapshot()).toBe(before)
+    rmSync(join(stateDirectory, "routing"))
+    mkdirSync(join(stateDirectory, "routing"))
+    writeFileSync(join(outside, "event.jsonl"), "{}\n")
+    symlinkSync(join(outside, "event.jsonl"), join(stateDirectory, "routing", "session-1.jsonl"))
+    expect(() => captureWiki(root)).toThrow("Routing log must be a regular, non-symlink file")
+    expect(snapshot()).toBe(before)
+    expect(existsSync(join(root, "knowledge/.wiki.lock"))).toBe(false)
+  } finally { rmSync(outside, { recursive: true, force: true }) }
+})
+
+test("routing reader reports byte and directory bounds without inventing totals", () => {
+  const stateDirectory = stateRoot(root)
+  const routingDirectory = join(stateDirectory, "routing")
+  mkdirSync(routingDirectory, { recursive: true })
+  writeFileSync(join(routingDirectory, "session-1.jsonl"), "x".repeat(1024 * 1024 + 1))
+  const byBytes = captureWiki(root)
+  expect(byBytes.routing.coverage).toMatchObject({ scope: "bounded", truncated: true })
+  expect(byBytes.routing.coverage.truncationReasons).toContain("file_bytes")
+
+  rmSync(routingDirectory, { recursive: true, force: true })
+  mkdirSync(routingDirectory, { recursive: true })
+  for (let i = 0; i < 4097; i++) writeFileSync(join(routingDirectory, `noise-${i}.txt`), "")
+  const byDirectory = captureWiki(root)
+  expect(byDirectory.routing.coverage).toMatchObject({ filesScanned: 0, scanned: 0, scope: "bounded", truncated: true })
+  expect(byDirectory.routing.coverage.truncationReasons).toContain("directory_limit")
+  expect(readFileSync(join(root, byDirectory.routing.report), "utf8")).toContain("No unscanned total is inferred")
+})
+
+test("routing status compile and lint pair only through the indexed routing source page", () => {
+  recordDecision(routingDecision("decision-status"))
+  const receipt = captureWiki(root)
+  const pageName = receipt.routing.summary.split("/").pop()!
+  let status = statusWiki(root)
+  expect(status.pending.some((item) => item.kind === "routing" && item.sourceId === pageName.slice("routing-".length, -".md".length))).toBe(true)
+  appendFileSync(join(root, "knowledge/wiki/log.md"), `\n## [2026-01-01T00:00:00Z] ingest | routing findings\n\n[origin](sources/${pageName})\n`)
+  status = statusWiki(root)
+  expect(status.compiled).toBe(1)
+  expect(status.pending.some((item) => item.kind === "routing")).toBe(false)
+  expect(lintWiki(root)).toEqual([])
+
+  appendFileSync(join(root, receipt.routing.source), "tampered")
+  expect(lintWiki(root).some((problem) => problem.includes("integrity mismatch"))).toBe(true)
 })
 
 test("capture preserves raw sources, agent edits, index and append-only log across replay", () => {

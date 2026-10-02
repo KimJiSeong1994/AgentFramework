@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "kind": "jev-routing-snapshot",
+  "coverage": {
+    "filesScanned": 0,
+    "scanned": 0,
+    "valid": 0,
+    "invalid": 0,
+    "duplicates": 0,
+    "invalidFiles": 0,
+    "truncated": false,
+    "truncationReasons": [],
+    "scope": "complete"
+  },
+  "events": [],
+  "rejected": []
+}

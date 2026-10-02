@@ -308,6 +308,12 @@ and plugin restarts, and are not injected into model context. Retention is manua
 (no automatic expiry). Turns that bypass the router entirely—commands, child agents,
 active workflows/modes and synthetic input—do not create routing decisions.
 
+`bun scripts/lca-wiki.ts capture` also imports these logs into the Wiki. It creates
+`knowledge/raw/routing/<sha256>.json`, a `sources/routing-<sha256>.md` source page and
+`wiki/reports/routing.md`, then updates the index and capture log. Routing sources appear
+in `status` and can be compiled by `llm-wiki` just like tool-history and document sources.
+This is an explicit capture step, not a per-message Wiki write or automatic learning.
+
 ```json
 {
   "skill_router": {
@@ -393,8 +399,17 @@ bun scripts/lca-wiki.ts register <file> [--title T] [--root DIR]
 Exit 0 is success; 1 is a refusal or failure (stderr `Wiki operation failed: <reason>`);
 2 is a usage error. `--root` defaults to the repository root.
 
-`capture` writes a content-addressed immutable raw snapshot, a source page, a generated
-aggregate report, and updates the index/append-only activity log. It does not pretend to
+`capture` writes separate content-addressed immutable raw snapshots for tool outcomes
+and Jev routing events, source pages, generated aggregate reports, and updates the
+index/append-only activity log. Routing import validates and projects only approved
+metadata, deduplicates event IDs, rejects conflicting replays and unsafe filesystem
+inputs, and reports malformed records and bounded-scan coverage. Check that coverage
+before treating counts as complete history. A routing scan is capped at 256 log files,
+10,000 records, 1 MiB per file and 16 MiB overall. Directories exceeding 4,096 entries
+produce an explicitly bounded empty scan instead of an arbitrary subset.
+The routing report separates recommendations,
+verified advice insertion and unmatched application events; none prove skill execution
+or task success. Capture does not pretend to
 be an LLM ingest. `register <file>` admits a local `.md`/`.txt` document (non-empty, at
 most 131072 bytes, valid UTF-8, no NUL, no detected secret) the same way: it hashes the
 bytes (sha256), writes an immutable `knowledge/raw/documents/<sha256>.<ext>` and a

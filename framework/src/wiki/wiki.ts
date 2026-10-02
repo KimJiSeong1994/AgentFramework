@@ -5,6 +5,7 @@ import {
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path"
 import { containsSecret } from "../security/secrets.ts"
 import { listToolOutcomes, type ToolOutcome } from "../telemetry/outcomes.ts"
+import { isRoutingSnapshot, readRoutingLogs, type RoutingEvent, type RoutingSnapshot } from "../telemetry/routing-reader.ts"
 
 const digest = (text: string) => createHash("sha256").update(text).digest("hex")
 const digestBytes = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex")
@@ -185,12 +186,105 @@ function renderReport(rows: ToolOutcome[], totalCount: number, sourceName: strin
   return lines.join("\n") + "\n"
 }
 
+type RoutingDecisionEvent = Extract<RoutingEvent, { event: "decision" }>
+
+function summarizeRouting(snapshot: RoutingSnapshot) {
+  const decisions = snapshot.events.filter((event): event is RoutingDecisionEvent => event.event === "decision")
+  const applications = snapshot.events.filter((event): event is Extract<RoutingEvent, { event: "advice_applied" }> => event.event === "advice_applied")
+  const decisionsById = new Map<string, RoutingDecisionEvent[]>()
+  for (const decision of decisions) {
+    const rows = decisionsById.get(decision.decisionID) ?? []
+    rows.push(decision)
+    decisionsById.set(decision.decisionID, rows)
+  }
+  let matchedApplications = 0
+  let unmatchedApplications = 0
+  let conflictingApplications = 0
+  for (const application of applications) {
+    const matches = decisionsById.get(application.decisionID) ?? []
+    if (matches.length === 0) { unmatchedApplications++; continue }
+    if (matches.length !== 1) { conflictingApplications++; continue }
+    const [decision] = matches
+    if (decision!.mode === "suggest" && decision!.reason === "recommended" && decision!.skill === application.skill
+      && decision!.sessionID === application.sessionID && decision!.messageID === application.messageID) matchedApplications++
+    else conflictingApplications++
+  }
+  const modes = new Map<string, number>()
+  const reasons = new Map<string, number>()
+  for (const decision of decisions) {
+    modes.set(decision.mode, (modes.get(decision.mode) ?? 0) + 1)
+    reasons.set(decision.reason, (reasons.get(decision.reason) ?? 0) + 1)
+  }
+  const rejected = new Map<string, number>()
+  for (const item of snapshot.rejected) rejected.set(item.reason, (rejected.get(item.reason) ?? 0) + 1)
+  return { decisions, applications, matchedApplications, unmatchedApplications, conflictingApplications, modes, reasons, rejected }
+}
+
+function renderRoutingReport(snapshot: RoutingSnapshot, sourceName: string): string {
+  const summary = summarizeRouting(snapshot)
+  const coverage = snapshot.coverage
+  const lines = [
+    "# Jev routing observations",
+    "",
+    "> Deterministic, sanitized routing telemetry. Recommendations and advice insertion are not evidence of skill execution, task success, calibration, or causality.",
+    "",
+    `[Wiki index](../index.md) · [Immutable snapshot](../../raw/routing/${sourceName}.json)`,
+    "",
+    `- Scan scope: ${coverage.scope}; files scanned: ${coverage.filesScanned}; event records scanned: ${coverage.scanned}. No unscanned total is inferred.`,
+    `- Unique valid events: ${coverage.valid}; rejected event records: ${coverage.invalid}; identical event replays: ${coverage.duplicates}; rejected filenames: ${coverage.invalidFiles}.`,
+    `- Truncated: ${coverage.truncated ? `yes (${coverage.truncationReasons.join(", ")})` : "no"}.`,
+    `- Decisions: ${summary.decisions.length}; advice-applied events: ${summary.applications.length}; exactly matched suggest recommendations: ${summary.matchedApplications}; unmatched applications: ${summary.unmatchedApplications}; conflicting or ineligible applications: ${summary.conflictingApplications}.`,
+    "- A matched advice-applied event records insertion of advice only; it does not establish that a skill ran or that its work succeeded.",
+    "- Unmatched means no decision was found within this snapshot; conflicting includes mismatched session/message/skill or an ineligible decision.",
+    "",
+    "## Decisions by mode",
+    "",
+    "| Mode | Decisions |",
+    "|---|---:|",
+  ]
+  for (const [mode, count] of [...summary.modes].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) lines.push(`| ${mode} | ${count} |`)
+  lines.push("", "## Decisions by reason", "", "| Reason | Decisions |", "|---|---:|")
+  for (const [reason, count] of [...summary.reasons].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) lines.push(`| ${reason} | ${count} |`)
+  lines.push("", "## Rejected input", "", "| Rejection reason | Count |", "|---|---:|")
+  for (const [reason, count] of [...summary.rejected].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) lines.push(`| ${reason} | ${count} |`)
+  if (!snapshot.events.length && coverage.scanned === 0 && coverage.invalidFiles === 0 && !coverage.truncated) {
+    lines.push("", "No routing observations were found. This is explicit zero-observation evidence; no decisions or applications were synthesized.")
+  }
+  if (coverage.truncated) lines.push("", "This snapshot covers only the bounded scan shown above; additional routing input may exist outside the scanned scope.")
+  return lines.join("\n") + "\n"
+}
+
+function routingSourcePage(snapshot: RoutingSnapshot, sourceId: string): string {
+  const summary = summarizeRouting(snapshot)
+  const coverage = snapshot.coverage
+  return [
+    "# Jev routing observations",
+    "",
+    "> Sanitized, content-addressed capture of routing decisions and advice-insertion observations. This is not a skill execution, success, calibration, or causal record.",
+    "",
+    `[Immutable snapshot](../../raw/routing/${sourceId}.json) · [Index](../index.md) · [Routing report](../reports/routing.md)`,
+    "",
+    `- source_id: ${sourceId}`,
+    `- Unique valid events: ${coverage.valid}; decisions: ${summary.decisions.length}; advice-applied events: ${summary.applications.length}.`,
+    `- Rejected records: ${coverage.invalid}; duplicate replays: ${coverage.duplicates}; bounded scope: ${coverage.scope}.`,
+    "- Original text, error bodies, and unrecognized metadata are not exported.",
+    "",
+    "## Interpretation",
+    "",
+    "A recommendation is a routing observation, not a claim that a skill executed. Advice-applied events are paired only when decision ID, session, message, skill, and a recommended suggest-mode decision all agree. Other applications remain unmatched or conflicting in the report.",
+    "",
+  ].join("\n")
+}
+
 /** Deterministic capture is not semantic ingestion: the coding agent maintains synthesis pages separately. */
 export function captureWiki(worktree: string) {
   const root = realpathSync(worktree)
+  // Validate and bound untrusted routing input before the lock or any wiki output is written.
+  const routingSnapshot = readRoutingLogs(root)
   const lock = acquireLock(root)
   try {
     const raw = safeDirectory(root, ["knowledge", "raw", "tool-runs"])
+    const routingRaw = safeDirectory(root, ["knowledge", "raw", "routing"])
     const wiki = safeDirectory(root, ["knowledge", "wiki"])
     const sources = safeDirectory(root, ["knowledge", "wiki", "sources"])
     const reports = safeDirectory(root, ["knowledge", "wiki", "reports"])
@@ -224,7 +318,41 @@ export function captureWiki(worktree: string) {
       // Append, never regenerate: LLM ingest/query/lint entries must survive future captures.
       writeFileSync(log, `\n## [${new Date().toISOString()}] capture | 도구 실행 관측\n\n- source_id: ${sourceName}\n- [원본 요약](sources/${sourcePage}); ${observations.length}/${totalCount}개 관측.\n- 의미적 ingest는 아직 실행하지 않았습니다.\n`, { flag: "a", mode: 0o600 })
     }
-    return { source: relative(root, rawPath), summary: relative(root, join(sources, sourcePage)), report: relative(root, join(reports, "tool-outcomes.md")), created, observations: observations.length, totalCount }
+
+    const routingContent = JSON.stringify(routingSnapshot, null, 2) + "\n"
+    const routingSourceId = digest(routingContent)
+    const routingRawPath = join(routingRaw, `${routingSourceId}.json`)
+    const routingCreated = createOnly(routingRawPath, routingContent)
+    if (!routingCreated && readFileSync(routingRawPath, "utf8") !== routingContent) throw new Error("Immutable raw routing source hash mismatch; refusing overwrite")
+    const routingPageName = `routing-${routingSourceId}.md`
+    const routingPagePath = join(sources, routingPageName)
+    createOnly(routingPagePath, routingSourcePage(routingSnapshot, routingSourceId))
+    replaceDerived(join(reports, "routing.md"), renderRoutingReport(routingSnapshot, routingSourceId))
+
+    const currentIndex = readFileSync(index, "utf8")
+    let nextIndex = currentIndex.trimEnd()
+    if (!currentIndex.includes(`](sources/${routingPageName})`)) {
+      nextIndex += `\n\n- [Jev routing snapshot ${routingSourceId.slice(0, 12)}](sources/${routingPageName}) — ${routingSnapshot.coverage.valid}개 유효 이벤트; ${routingSnapshot.coverage.scope} 범위.`
+    }
+    if (!currentIndex.includes("](reports/routing.md)")) nextIndex += "\n- [Jev routing report](reports/routing.md)"
+    if (nextIndex !== currentIndex.trimEnd()) replaceDerived(index, `${nextIndex}\n`)
+
+    const currentLog = readFileSync(log, "utf8")
+    const routingLogged = parseLog(currentLog).some((entry) => entry.op === "capture" && hasSourceId(entry, routingSourceId))
+    if (!routingLogged) {
+      writeFileSync(log, `\n## [${new Date().toISOString()}] capture | Jev routing observations\n\n- source_id: ${routingSourceId}\n- [Sanitized routing snapshot](sources/${routingPageName}); ${routingSnapshot.coverage.valid} unique valid events.\n- Recommendations and advice insertion are not evidence of skill execution or success.\n`, { flag: "a", mode: 0o600 })
+    }
+    const routingSummary = summarizeRouting(routingSnapshot)
+    return {
+      source: relative(root, rawPath), summary: relative(root, join(sources, sourcePage)),
+      report: relative(root, join(reports, "tool-outcomes.md")), created, observations: observations.length, totalCount,
+      routing: {
+        source: relative(root, routingRawPath), summary: relative(root, routingPagePath),
+        report: relative(root, join(reports, "routing.md")), created: routingCreated,
+        events: routingSnapshot.coverage.valid, decisions: routingSummary.decisions.length,
+        adviceApplied: routingSummary.applications.length, coverage: routingSnapshot.coverage,
+      },
+    }
   } finally { unlinkSync(lock) }
 }
 
@@ -338,7 +466,7 @@ export function registerWiki(worktree: string, file: string, opts: { title?: str
 }
 
 // -- Status ---------------------------------------------------------------------------------------------------------
-export type PendingItem = { sourceId: string; kind: "documents" | "tool-runs"; source: string; summary: string; title: string; registeredAt: string | null }
+export type PendingItem = { sourceId: string; kind: "documents" | "tool-runs" | "routing"; source: string; summary: string; title: string; registeredAt: string | null }
 export type WikiStatus = { sources: number; compiled: number; pending: PendingItem[]; problems: string[]; locked?: true }
 
 /** Read-only: never creates or modifies any wiki file. */
@@ -356,11 +484,30 @@ export function statusWiki(worktree: string): WikiStatus {
   for (const [dir, kind, pagePrefix] of [
     [join(knowledge, "raw", "documents"), "documents", "documents"],
     [join(knowledge, "raw", "tool-runs"), "tool-runs", "tool-runs"],
+    [join(knowledge, "raw", "routing"), "routing", "routing"],
   ] as const) {
-    if (!existsSync(dir)) continue
+    if (kind === "routing") {
+      let info: ReturnType<typeof lstatSync>
+      try { info = lstatSync(dir) } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
+        if ((error as NodeJS.ErrnoException).code === "ENOTDIR") {
+          problems.push("Routing raw source directory must be a real directory")
+          continue
+        }
+        throw error
+      }
+      if (info.isSymbolicLink() || !info.isDirectory()) {
+        problems.push("Routing raw source directory must be a real directory")
+        continue
+      }
+    } else if (!existsSync(dir)) continue
     for (const entryName of readdirSync(dir).sort()) {
       const full = join(dir, entryName)
       const info = lstatSync(full)
+      if (kind === "routing" && (info.isSymbolicLink() || !info.isFile())) {
+        problems.push(`Routing raw source is not a regular, non-symlink file: ${relative(root, full)}`)
+        continue
+      }
       if (info.isSymbolicLink() || !info.isFile()) continue
       const ext = extname(entryName)
       const id = entryName.slice(0, entryName.length - ext.length)
@@ -422,10 +569,11 @@ export function lintWiki(worktree: string): string[] {
   const index = join(knowledge, "wiki", "index.md")
   const rawDir = join(knowledge, "raw")
   const toolRunsDir = join(rawDir, "tool-runs")
+  const routingDir = join(rawDir, "routing")
   const documentsDir = join(rawDir, "documents")
   const sourcesDir = join(knowledge, "wiki", "sources")
   const indexed = new Set<string>()
-  const knownRawIds = new Map<string, { kind: "documents" | "tool-runs"; ext: string }>()
+  const knownRawIds = new Map<string, { kind: "documents" | "tool-runs" | "routing"; ext: string }>()
   for (const path of files) {
     const underRaw = contained(rawDir, path)
     if (path.endsWith(".md") && !underRaw) {
@@ -456,6 +604,16 @@ export function lintWiki(worktree: string): string[] {
       const id = digestBytes(bytes)
       if (path !== join(dirname(path), `${id}${ext}`)) problems.push(`Raw source integrity mismatch: ${relative(root, path)}`)
       else knownRawIds.set(id, { kind: "documents", ext })
+    } else if (underRaw && contained(routingDir, path)) {
+      if (extname(path) !== ".json") { problems.push(`Disallowed raw source extension: ${relative(root, path)}`); continue }
+      const bytes = readFileSync(path)
+      const id = digestBytes(bytes)
+      if (path !== join(routingDir, `${id}.json`)) problems.push(`Raw source integrity mismatch: ${relative(root, path)}`)
+      else knownRawIds.set(id, { kind: "routing", ext: ".json" })
+      try {
+        const data: unknown = JSON.parse(bytes.toString("utf8"))
+        if (!isRoutingSnapshot(data)) problems.push(`Invalid routing snapshot schema or metadata: ${relative(root, path)}`)
+      } catch { problems.push(`Invalid routing snapshot JSON: ${relative(root, path)}`) }
     } else if (underRaw) {
       problems.push(`Disallowed raw source extension: ${relative(root, path)}`)
     }
@@ -468,12 +626,12 @@ export function lintWiki(worktree: string): string[] {
     const pagePath = join(sourcesDir, `${info.kind}-${id}.md`)
     if (!files.includes(pagePath)) problems.push(`Raw source without matching source page: ${info.kind}/${id}${info.ext}`)
   }
-  const sourcePageRe = /^(documents|tool-runs)-([0-9a-f]{64})\.md$/
+  const sourcePageRe = /^(documents|tool-runs|routing)-([0-9a-f]{64})\.md$/
   if (existsSync(sourcesDir)) {
     for (const entryName of readdirSync(sourcesDir).sort()) {
       const match = sourcePageRe.exec(entryName)
       if (!match) continue
-      const [, kind, id] = match as unknown as [string, "documents" | "tool-runs", string]
+      const [, kind, id] = match as unknown as [string, "documents" | "tool-runs" | "routing", string]
       const info = knownRawIds.get(id)
       if (!info || info.kind !== kind) problems.push(`Source page without matching raw source: ${entryName}`)
     }
