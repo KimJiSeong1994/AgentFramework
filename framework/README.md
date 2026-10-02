@@ -281,7 +281,32 @@ or permission checks. Library defaults are **off**; this repository explicitly o
 **suggest** mode in `.lca/lca.jsonc`. Recommendations now appear as optional per-turn
 advice in the main agent's input. They never automatically load a skill, activate a mode,
 or execute a task. `shadow` remains available for observation without affecting the input.
-Set `LCA_DEBUG=1` when starting OpenCode to see `skill.router` outcomes and latency.
+Routing outcomes are always persisted, independently of `LCA_DEBUG`, as session-scoped
+JSONL at `stateRoot(worktree)/routing/<sessionID>.jsonl` (normally
+`~/.local/state/lca/<worktree-key>/routing/`). `LCA_DEBUG=1` additionally prints
+`skill.router` outcomes and latency to stderr.
+
+Each `decision` event has `schemaVersion: 1`, an event/decision ID, session/message IDs,
+timestamp, router mode, model alias, candidate names, configured probability/margin/timeout
+thresholds, validated choice/probabilities/confidence/margin, final skill/reason, latency
+and `requestSent`. Pre-inference refusals (including sensitive/oversized input, busy,
+duplicates, off and invalid configuration) are recorded too; absent scores are `null`,
+not fabricated probabilities. Invalid distributions and unknown labels are never retained.
+
+An `advice_applied` event with the same `decisionID` is written **after** the hook adds
+the optional advice to the message. A recommendation in `shadow` mode is not applied;
+neither event proves that a skill was loaded or that the task succeeded. For later
+self-evolution analysis, join by session/message IDs with the OpenCode transcript and
+tool outcomes, and deduplicate by `eventID` (not message ID: retries are separate
+decisions). This change stores observations only; it does not train models or change
+routing policy automatically.
+
+Logs exclude user text, skill descriptions, endpoints, raw responses and error bodies.
+Files are append-only with mode `0600`; persistence errors are best-effort and cannot
+block advice. They live outside disposable `sessions/` state, survive session deletion
+and plugin restarts, and are not injected into model context. Retention is manual
+(no automatic expiry). Turns that bypass the router entirely—commands, child agents,
+active workflows/modes and synthetic input—do not create routing decisions.
 
 ```json
 {
