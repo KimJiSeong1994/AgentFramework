@@ -13,6 +13,7 @@ import { bashPolicyProblem } from "../flow/bash-policy.ts"
 import { activeWorkflow, appendEvents, type Workflow } from "../flow/state.ts"
 import { flowOn } from "../flow/status.ts"
 import { isReviewSession, reviewToolCapProblem } from "../flow/review.ts"
+import { observeSkillAttempt } from "../telemetry/skill-observer.ts"
 
 export const MAIN_AGENT = "main"
 
@@ -90,6 +91,7 @@ export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.ex
   const boundaryOn = enabled(deps.config, "guard.plan_boundary")
 
   return async (input, output) => {
+    observeSkillAttempt(deps, input, output.args)
     if (isReviewSession(input.sessionID)) {
       const problem = reviewToolCapProblem(input.sessionID, deps.config.flow.review_max_tool_calls)
       if (problem) {

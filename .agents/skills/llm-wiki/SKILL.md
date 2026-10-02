@@ -28,12 +28,26 @@ first for the schema, ownership boundaries and link rules.
 bad extension, oversized, non-UTF-8, secret detected, bad title, missing schema/index/log,
 or an existing `knowledge/.wiki.lock`). If lint reports a stale lock from an exited
 process, run `bun scripts/lca-wiki.ts unlock`; never delete the lock by hand.
-Never hand-copy a file into `raw/`. Use `capture` for tool-history and Jev routing observations instead.
-The same capture command registers both kinds as immutable sources and updates their
+Never hand-copy a file into `raw/`. Use `capture` for tool-history, Jev routing and admitted skill observations instead.
+The same capture command registers these kinds as immutable sources and updates their
 generated reports. Check its coverage counts before describing a snapshot as complete.
 Routing recommendations and `advice_applied` are not skill execution or task success.
 Join routing evidence by session/message/decision IDs; never infer model accuracy from
 confidence scores alone. Malformed, truncated or unmatched events limit the evidence.
+
+Skill sources use `raw/skill-runs/`, `sources/skill-runs-<sha>.md` and
+`reports/skill-evaluation.md`. Check campaign cutoff/closure, unknown/excluded/censored
+counts, role/config strata and every numerator/denominator (`N/A` when empty).
+Never sum overlapping snapshots, fill missing production evidence with test fixtures,
+or join events outside the admitted campaign to evade its quota.
+Returned skill text is not procedural adherence, and verification success is not
+causal improvement. Compare only hashes with the same basis: a current project file
+hash cannot authenticate originally loaded bytes. Keep unsupported provenance unknown.
+Observation raw facts expire after 30 days; manually captured immutable Wiki evidence
+is retained long-term. A closed campaign must not be reactivated for capture.
+Capture does not automatically compile sources or authorize model training, policy or
+skill changes. Preserve existing source annotations; compile only through source-linked
+ingest entries and verify the resulting status and lint.
 
 ## Compile (= ingest loop)
 

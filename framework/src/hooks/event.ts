@@ -11,6 +11,7 @@ import { getQueue } from "../orchestration/queue.ts"
 import { recordToolOutcome } from "../telemetry/outcomes.ts"
 import { onSessionDeleted } from "../flow/runtime.ts"
 import { flowOn } from "../flow/status.ts"
+import { observeSkillMessage, observeSkillPart, observeRelatedToolPart, observeSkillBoundary } from "../telemetry/skill-observer.ts"
 
 const MAX_TRACKED_MESSAGES = 200
 const MAX_TRACKED_CALLS = 200
@@ -42,6 +43,7 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
     switch (event.type) {
       case "message.updated": {
         const info = event.properties.info
+        observeSkillMessage(deps, info)
         roles.set(info.id, info.role)
         while (roles.size > MAX_TRACKED_MESSAGES) roles.delete(roles.keys().next().value as string)
         return
@@ -50,6 +52,8 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
         const part = event.properties.part
         if (part.type === "text") return onText(part.sessionID, part.messageID, part.id, part.text, event.properties.delta)
         if (part.type === "tool") {
+          observeSkillPart(deps, part)
+          observeRelatedToolPart(deps, part)
           if (toolHistoryOn && (part.state.status === "error" || part.state.status === "completed")) {
             try {
               recordToolOutcome(deps.worktree, part)
@@ -65,6 +69,7 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
       }
       case "session.compacted": {
         const sessionID = event.properties.sessionID
+        observeSkillBoundary(deps, sessionID, "compacted")
         const state = readModeState(deps.worktree, sessionID)
         writeModeState(deps.worktree, sessionID, { ...state, lastCompactedAt: Date.now() })
         deps.log("session compacted", { sessionID })
@@ -79,6 +84,7 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
       case "session.deleted": {
         const id = event.properties.info?.id
         if (id) {
+          observeSkillBoundary(deps, id, "deleted")
           guards.repetition.clear(id)
           guards.repeat.clear(id)
           const running = queue.isRunning(id)

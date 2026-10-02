@@ -7,6 +7,7 @@
 // main session). All decisions read the ledger file and process results; the only model text parsed is the
 // reviewer's verdict line (that agent's output contract) and the worker's "Open issues:" line (report contract).
 import type { HookDeps } from "../hooks/types.ts"
+import { randomUUID } from "node:crypto"
 import { verifyCommandProblem } from "../config.ts"
 import { readAbort, removeSessionDir } from "../state/store.ts"
 import {
@@ -34,6 +35,8 @@ import { scanDiff } from "./gaming.ts"
 import { getBackend } from "../data/backend.ts"
 import { DEFAULT_SUITE, extractAnswer, formatCheckRun, loadSuite, runChecks, sampleRows, type CheckRun } from "../data/check.ts"
 import type { LcaAgentName } from "../agents/prompts.ts"
+import { observeSkillTask, observeSkillVerification } from "../telemetry/skill-observer.ts"
+import type { SkillTaskFactInput, SkillVerificationFactInput } from "../telemetry/skills.ts"
 import { startShell, type RunHandle } from "./shell.ts"
 import { createSnapshotStore, type Snapshot } from "./snapshot.ts"
 import { createTaskWorktree, type TaskWorktree } from "./worktree.ts"
@@ -57,13 +60,16 @@ export type QueueRun = {
   noSnapshot?: boolean
 }
 
+/** Exact delegate provenance only; callers without host context leave lineage unknown. */
+export type QueueOrigin = { messageID?: string; resumed?: boolean }
+
 export type Queue = {
   /** append tasks to the session's ledger (does not run them) */
   add(sessionID: string, tasks: TaskInput[]): LedgerTask[]
   /** cancel every open task (e.g. superseded by a new delegate call); returns the ids */
   cancelOpen(sessionID: string, reason: string): string[]
   /** run every pending task serially; resolves when the queue is empty, aborted or already owned */
-  run(sessionID: string): Promise<QueueRun>
+  run(sessionID: string, origin?: QueueOrigin): Promise<QueueRun>
   isRunning(sessionID: string): boolean
   /** stop after the current step: abort the child session / kill the verify command, cancel the rest.
    *  `discard`: the session was deleted — write nothing more to its state dir. */
@@ -76,8 +82,74 @@ type Active = {
   discard?: boolean
   child?: string
   verify?: RunHandle
+  attempt?: AttemptObservation
   startedAt: number
   promise: Promise<QueueRun>
+}
+
+type AttemptLineage = {
+  ownerSessionID: string
+  taskID: string
+  attemptID: string
+  messageID?: string
+  resumeOfAttemptID?: string
+  resumeRequested?: boolean
+  workflowID?: string
+  planSha256?: string
+}
+
+type AttemptObservation = AttemptLineage & {
+  verificationID: string
+  verificationStartedAt?: number
+  verificationFinishedAt?: number
+  verificationStatus?: SkillVerificationFactInput["status"]
+  verificationExitCode?: number | null
+  taskObserved: boolean
+  codeVerification: boolean
+  review?: ReviewResult
+  completed: boolean
+}
+
+function bestEffortTaskObservation(deps: HookDeps, fact: SkillTaskFactInput): void {
+  try { observeSkillTask(deps, fact) } catch { /* Observation never changes queue behavior. */ }
+}
+
+function bestEffortVerificationObservation(deps: HookDeps, fact: SkillVerificationFactInput): void {
+  try { observeSkillVerification(deps, fact) } catch { /* Observation never changes queue behavior. */ }
+}
+
+function attemptContext(attempt: AttemptObservation) {
+  return {
+    taskID: attempt.taskID, attemptID: attempt.attemptID, ownerSessionID: attempt.ownerSessionID,
+    taskKind: attempt.codeVerification ? "code" as const : "data" as const,
+    messageID: attempt.messageID ?? null, resumeOfAttemptID: attempt.resumeOfAttemptID ?? null,
+    resumeRequested: attempt.resumeRequested ?? null,
+    workflowID: attempt.workflowID ?? null, planSha256: attempt.planSha256 ?? null,
+  }
+}
+
+function observeChild(deps: HookDeps, attempt: AttemptObservation, childSessionID: string, agent: LcaAgentName, status: "started" | "done" | "failed" | "cancelled", childMessageID?: string): void {
+  const role = actorRole(agent)
+  bestEffortTaskObservation(deps, {
+    ...attemptContext(attempt), sessionID: childSessionID,
+    phase: status === "started" ? "pending" : "terminal", status,
+    childSessionID, childMessageID: childMessageID ?? null, actualRole: role,
+    roleBasis: role === "unknown" ? "unknown" : "code_owned",
+  })
+}
+
+function actorRole(agent: LcaAgentName): NonNullable<SkillTaskFactInput["actualRole"]> {
+  if (agent === "worker" || agent === "reviewer" || agent === "data-analyst" || agent === "data-verifier") return agent
+  return "unknown"
+}
+
+function taskStatus(status: LedgerTask["status"] | "open"): NonNullable<SkillVerificationFactInput["taskStatus"]> {
+  if (status === "done" || status === "failed" || status === "cancelled") return status
+  return "open"
+}
+
+function reviewVerdict(review: ReviewResult | undefined): NonNullable<SkillVerificationFactInput["reviewVerdict"]> {
+  return review?.verdict ?? "unknown"
 }
 
 const registry = new WeakMap<HookDeps, Queue>()
@@ -95,6 +167,86 @@ export function createQueue(deps: HookDeps): Queue {
   const active = new Map<string, Active>()
   const cfg = () => deps.config.delegate
 
+  function createAttempt(sessionID: string, task: LedgerTask, origin: QueueOrigin | undefined, resumeOfAttemptID?: string, codeVerification = true): AttemptObservation {
+    return {
+      ownerSessionID: sessionID,
+      taskID: task.id,
+      workflowID: task.wf?.id, planSha256: task.wf?.planSha, resumeRequested: origin?.resumed,
+      attemptID: randomUUID(),
+      ...(origin?.messageID ? { messageID: origin.messageID } : {}),
+      // An explicit resume request is not a stable relation without the predecessor's stored UUID.
+      ...(resumeOfAttemptID ? { resumeOfAttemptID } : {}),
+      verificationID: randomUUID(),
+      taskObserved: false,
+      codeVerification,
+      completed: false,
+    }
+  }
+
+  function observeTaskStart(attempt: AttemptObservation): void {
+    bestEffortTaskObservation(deps, {
+      ...attemptContext(attempt), sessionID: attempt.ownerSessionID,
+      phase: "pending", status: "started", taskStatus: "open",
+    })
+    attempt.taskObserved = true
+  }
+
+  function startCodeVerification(attempt: AttemptObservation): void {
+    const startedAt = Date.now()
+    attempt.verificationStartedAt = startedAt
+    attempt.verificationStatus = "started"
+    bestEffortVerificationObservation(deps, {
+      sessionID: attempt.ownerSessionID, verificationID: attempt.verificationID,
+      taskID: attempt.taskID, attemptID: attempt.attemptID, phase: "pending", status: "started",
+      codeOwned: true, startedAt,
+    })
+  }
+
+  function setCodeVerificationResult(attempt: AttemptObservation, status: SkillVerificationFactInput["status"], exitCode?: number | null): void {
+    attempt.verificationStatus = status
+    attempt.verificationExitCode = exitCode
+    attempt.verificationFinishedAt = Date.now()
+  }
+
+  function finishAttemptObservation(
+    attempt: AttemptObservation | undefined,
+    attemptStatus: "done" | "failed" | "cancelled",
+    taskResult: LedgerTask["status"] | "open",
+    review: ReviewResult | undefined,
+    codeVerification = attempt?.codeVerification ?? true,
+  ): void {
+    if (!attempt || attempt.completed) return
+    const finishedAt = Date.now()
+    if (codeVerification) {
+      let status = attempt.verificationStatus
+      if (!status) {
+        status = "not_run"
+        attempt.verificationFinishedAt = finishedAt
+      } else if (status === "started") {
+        status = "unknown"
+        attempt.verificationFinishedAt = finishedAt
+      }
+      attempt.verificationStatus = status
+      bestEffortVerificationObservation(deps, {
+        sessionID: attempt.ownerSessionID, verificationID: attempt.verificationID,
+        taskID: attempt.taskID, attemptID: attempt.attemptID,
+        phase: "terminal", status,
+        codeOwned: true, exitCode: attempt.verificationExitCode ?? null,
+        ...(attempt.verificationStartedAt === undefined ? {} : { startedAt: attempt.verificationStartedAt }),
+        finishedAt: attempt.verificationFinishedAt ?? finishedAt,
+        ...(attempt.verificationStartedAt !== undefined && (attempt.verificationFinishedAt ?? finishedAt) >= attempt.verificationStartedAt ? {
+          durationMs: (attempt.verificationFinishedAt ?? finishedAt) - attempt.verificationStartedAt,
+        } : {}),
+        taskStatus: taskStatus(taskResult), reviewVerdict: reviewVerdict(review),
+      })
+    }
+    if (attempt.taskObserved) bestEffortTaskObservation(deps, {
+      ...attemptContext(attempt), sessionID: attempt.ownerSessionID,
+      phase: "terminal", status: attemptStatus, taskStatus: taskStatus(taskResult),
+    })
+    attempt.completed = true
+  }
+
   const add: Queue["add"] = (sessionID, tasks) => {
     const { ledger, added } = addTasks(readLedger(deps.worktree, sessionID), tasks)
     writeLedger(deps.worktree, ledger)
@@ -111,16 +263,20 @@ export function createQueue(deps: HookDeps): Queue {
     return ids
   }
 
-  const run: Queue["run"] = (sessionID) => {
+  const run: Queue["run"] = (sessionID, origin) => {
     const existing = active.get(sessionID)
     if (existing) return Promise.resolve({ taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: false, skipped: "already_running" })
     const entry: Active = { aborted: false, startedAt: Date.now(), promise: Promise.resolve() as unknown as Promise<QueueRun> }
     active.set(sessionID, entry)
-    entry.promise = runLoop(sessionID, entry)
+    entry.promise = runLoop(sessionID, entry, origin)
       .catch((e: unknown) => {
         // never leave the ledger with a running marker after an internal failure: the task that was running is
         // `failed (queue error)`, the rest is cancelled
         const msg = (e as Error)?.message ?? String(e)
+        if (entry.attempt) {
+          finishAttemptObservation(entry.attempt, "failed", "failed", entry.attempt.review)
+          entry.attempt = undefined
+        }
         deps.log("queue crashed", { sessionID, error: msg })
         if (!entry.discard) {
           let ledger = readLedger(deps.worktree, sessionID)
@@ -153,10 +309,11 @@ export function createQueue(deps: HookDeps): Queue {
     return undefined
   }
 
-  async function runLoop(sessionID: string, entry: Active): Promise<QueueRun> {
+  async function runLoop(sessionID: string, entry: Active, origin?: QueueOrigin): Promise<QueueRun> {
     const result: QueueRun = { taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: false }
     let ledger = readLedger(deps.worktree, sessionID)
-    // A crashed run may have left a task `running`; give it its attempt back and run it again.
+    // A crashed run may have left a task `running`; give it its attempt back and run it again. The ledger counter is
+    // not a stable identity, so the restarted attempt gets a new UUID and no guessed resumeOfAttemptID.
     if (ledger.tasks.some((t) => t.status === "running")) {
       for (const t of ledger.tasks) {
         if (t.status !== "running") continue
@@ -179,7 +336,7 @@ export function createQueue(deps: HookDeps): Queue {
         result.cancelled += c.ids.length
         break
       }
-      const finished = await runTask(sessionID, entry, task, result)
+      const finished = await runTask(sessionID, entry, task, result, origin)
       if (finished.status === "done") result.done++
       else if (finished.status === "failed") result.failed++
       else if (finished.status === "cancelled") result.cancelled++
@@ -192,12 +349,14 @@ export function createQueue(deps: HookDeps): Queue {
     return result
   }
 
-  async function runTask(sessionID: string, entry: Active, task0: LedgerTask, result: QueueRun): Promise<LedgerTask> {
-    if (task0.kind === "data") return runDataTask(sessionID, entry, task0)
+  async function runTask(sessionID: string, entry: Active, task0: LedgerTask, result: QueueRun, origin?: QueueOrigin): Promise<LedgerTask> {
+    if (task0.kind === "data") return runDataTask(sessionID, entry, task0, origin)
     const c = cfg()
     let task = task0
     let ledger = readLedger(deps.worktree, sessionID)
     let rejectReason: string | undefined
+    let attempt: AttemptObservation | undefined
+    let previousAttemptID: string | undefined
     // Optional isolation: the task runs in its own linked git worktree (worker session + verify bound to it) and its
     // diff is applied to the main worktree only when accepted. Falls back to in-place when there is no commit yet.
     let wt: TaskWorktree | null = null
@@ -213,16 +372,27 @@ export function createQueue(deps: HookDeps): Queue {
     if (!store) result.noSnapshot = true
     const before: Snapshot = store ? await store.snapshot(c.diff_exclude) : null
     const prot = protectedFiles(task)
-    const cancelled = (): LedgerTask => finish(sessionID, entry, ledger, { ...task, status: "cancelled", error: entry.reason ?? "aborted", finishedAt: Date.now() })
+    const finishObserved = (next: LedgerTask, status: "done" | "failed" | "cancelled"): LedgerTask => {
+      const done = finish(sessionID, entry, ledger, next)
+      finishAttemptObservation(attempt, status, status, done.review)
+      attempt = undefined
+      entry.attempt = undefined
+      return done
+    }
+    const cancelled = (): LedgerTask => finishObserved(
+      { ...task, status: "cancelled", error: entry.reason ?? "aborted", finishedAt: Date.now() }, "cancelled")
     try {
       while (task.attempts < c.max_attempts) {
         task = { ...task, status: "running", attempts: task.attempts + 1, startedAt: task.startedAt ?? Date.now() }
         ledger = writeLedger(deps.worktree, { ...updateTask(ledger, task.id, task), running: { taskId: task.id, since: Date.now() } })
         deps.log("task start", { sessionID, task: task.id, attempt: task.attempts })
+        attempt = createAttempt(sessionID, task, origin, previousAttemptID)
+        entry.attempt = attempt
+        observeTaskStart(attempt)
 
         const worker = await runChild(deps, entry, sessionID, "worker", `lca task ${task.n}: ${task.title}`, workerPrompt(ledger, task, rejectReason, c.handoff_context_chars), c.task_ttl_ms, (child) => {
           ledger = writeLedger(deps.worktree, { ...ledger, running: { taskId: task.id, childSessionID: child, since: Date.now() } })
-        }, wt?.path)
+        }, wt?.path, attempt)
         task = { ...task, workerSessionID: worker.sessionID ?? task.workerSessionID, childSessions: [...task.childSessions, ...(worker.sessionID ? [worker.sessionID] : [])] }
         if (worker.status === "aborted") return cancelled()
         task.report = head((worker.text ?? "").trim(), c.report_max_chars) || undefined
@@ -250,10 +420,13 @@ export function createQueue(deps: HookDeps): Queue {
         if (task.verify) {
           const problem = verifyCommandProblem(task.verify, c.verify_allow)
           if (problem) {
+            setCodeVerificationResult(attempt!, "refused", null)
             verify = { command: task.verify, ok: false, exitCode: null, timedOut: false, output: `verify command refused: ${problem}` }
           } else if (report.violations.length) {
+            setCodeVerificationResult(attempt!, "invalidated", null)
             verify = { command: task.verify, ok: false, exitCode: null, timedOut: false, output: `(void: protected file modified: ${report.violations.join(", ")})` }
           } else {
+            startCodeVerification(attempt!)
             const handle = startShell(task.verify, {
               cwd: wt ? wt.path : deps.directory,
               timeoutMs: c.verify_timeout_ms,
@@ -264,11 +437,12 @@ export function createQueue(deps: HookDeps): Queue {
             if (entry.aborted) handle.kill(entry.reason) // /stop arrived between the check above and the spawn
             const r = await handle.result
             entry.verify = undefined
+            setCodeVerificationResult(attempt!, r.timedOut ? "timed_out" : r.killed ? "aborted" : r.ok ? "pass" : "fail", r.exitCode)
             verify = { command: task.verify, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut, output: r.killed ? `(killed: ${entry.reason ?? "aborted"})\n${r.output}` : r.output }
             deps.log("task verify", { sessionID, task: task.id, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut, killed: r.killed, ms: r.ms })
           }
           task.verify_result = verify
-        }
+        } else setCodeVerificationResult(attempt!, "not_run", null)
         if (entry.aborted) return cancelled()
         const verified = !!verify && verify.ok
 
@@ -277,12 +451,14 @@ export function createQueue(deps: HookDeps): Queue {
         if (!store) review = { verdict: "skipped", reason: "no snapshot (not a git repository): review and protected-file guard unavailable" }
         else if (c.review && worker.status === "ok" && !report.violations.length && !scan.strong.length && (!verify || verify.ok)) {
           if (!diff || diff.files.length === 0) review = { verdict: "skipped", reason: "no file changes" }
-          else review = await runReview(sessionID, entry, task, diff.diff, verify, prot, report.suspicious, scan.weak, c.review_ttl_ms, wt?.path)
+          else review = await runReview(sessionID, entry, task, diff.diff, verify, prot, report.suspicious, scan.weak, c.review_ttl_ms, wt?.path, attempt)
         }
         task.review = review
+        attempt!.review = review
         if (review.aborted || entry.aborted) {
           // a /stop during the review of an already verified change: keep the work, note the missing verdict
-          if (verified && !report.violations.length && !scan.strong.length) return finish(sessionID, entry, ledger, { ...task, status: "done", error: `review aborted (${entry.reason ?? "aborted"})`, finishedAt: Date.now() })
+          if (verified && !report.violations.length && !scan.strong.length) return finishObserved(
+            { ...task, status: "done", error: `review aborted (${entry.reason ?? "aborted"})`, finishedAt: Date.now() }, "done")
           return cancelled()
         }
 
@@ -312,24 +488,35 @@ export function createQueue(deps: HookDeps): Queue {
                 copyFileSync(m.patch, kept)
               } catch {}
               deps.log("task worktree merge failed", { sessionID, task: task.id, reason: m.reason, patch: kept })
-              return finish(sessionID, entry, ledger, { ...task, status: "failed", blocked: m.reason, error: `not merged: ${m.reason} (patch: ${kept})`, finishedAt: Date.now() })
+              return finishObserved(
+                { ...task, status: "failed", blocked: m.reason, error: `not merged: ${m.reason} (patch: ${kept})`, finishedAt: Date.now() }, "failed")
             }
             task.filesChanged = m.files
             deps.log("task worktree merged", { sessionID, task: task.id, files: m.files.length })
           }
-          return finish(sessionID, entry, ledger, { ...task, status: "done", error: advisory, finishedAt: Date.now() })
+          return finishObserved({ ...task, status: "done", error: advisory, finishedAt: Date.now() }, "done")
         }
         rejectReason = failure
         task = { ...task, error: failure }
         ledger = writeLedger(deps.worktree, updateTask(ledger, task.id, task))
         deps.log("task attempt failed", { sessionID, task: task.id, attempt: task.attempts, failure: oneLine(failure.split("\n")[0] ?? "", 120) })
         // The worker said the task cannot be done honestly and verify agrees: a retry would only waste the slot.
-        if (task.blocked && verify && !verify.ok && !report.violations.length) {
+        const noRetry = task.blocked && verify && !verify.ok && !report.violations.length
+        const canRetry = !noRetry && task.attempts < c.max_attempts
+        finishAttemptObservation(attempt, "failed", canRetry ? "open" : "failed", review)
+        previousAttemptID = attempt!.attemptID
+        attempt = undefined
+        entry.attempt = undefined
+        if (noRetry) {
           deps.log("task blocked by worker report, no retry", { sessionID, task: task.id, blocked: task.blocked })
           break
         }
       }
-      return finish(sessionID, entry, ledger, { ...task, status: "failed", finishedAt: Date.now() })
+      return finishObserved({ ...task, status: "failed", finishedAt: Date.now() }, "failed")
+    } catch (error) {
+      finishAttemptObservation(attempt, "failed", "failed", task.review)
+      entry.attempt = undefined
+      throw error
     } finally {
       store?.dispose()
       // a failed or cancelled task's worktree changes are discarded with it (the main worktree never saw them)
@@ -343,22 +530,35 @@ export function createQueue(deps: HookDeps): Queue {
    * Same retry/advisory rules as code tasks: a failed check retries once with the reason; a REJECT after passing
    * checks is advisory on the last attempt unless review_strict.
    */
-  async function runDataTask(sessionID: string, entry: Active, task0: LedgerTask): Promise<LedgerTask> {
+  async function runDataTask(sessionID: string, entry: Active, task0: LedgerTask, origin?: QueueOrigin): Promise<LedgerTask> {
     const c = cfg()
     const d = deps.config.data
     let task = task0
     let ledger = readLedger(deps.worktree, sessionID)
     let rejectReason: string | undefined
-    const cancelled = (): LedgerTask => finish(sessionID, entry, ledger, { ...task, status: "cancelled", error: entry.reason ?? "aborted", finishedAt: Date.now() })
+    let attempt: AttemptObservation | undefined
+    let previousAttemptID: string | undefined
+    const finishObservedData = (next: LedgerTask, status: "done" | "failed" | "cancelled"): LedgerTask => {
+      const done = finish(sessionID, entry, ledger, next)
+      finishAttemptObservation(attempt, status, status, done.review, false)
+      attempt = undefined
+      entry.attempt = undefined
+      return done
+    }
+    const cancelled = (): LedgerTask => finishObservedData(
+      { ...task, status: "cancelled", error: entry.reason ?? "aborted", finishedAt: Date.now() }, "cancelled")
     const suiteName = task.verify?.trim() || DEFAULT_SUITE.name
     while (task.attempts < c.max_attempts) {
       task = { ...task, status: "running", attempts: task.attempts + 1, startedAt: task.startedAt ?? Date.now() }
       ledger = writeLedger(deps.worktree, { ...updateTask(ledger, task.id, task), running: { taskId: task.id, since: Date.now() } })
       deps.log("data task start", { sessionID, task: task.id, attempt: task.attempts })
+      attempt = createAttempt(sessionID, task, origin, previousAttemptID, false)
+      entry.attempt = attempt
+      observeTaskStart(attempt)
 
       const analyst = await runChild(deps, entry, sessionID, "data-analyst", `lca data ${task.n}: ${task.title}`, analystPrompt(ledger, task, rejectReason, c.handoff_context_chars), c.task_ttl_ms, (child) => {
         ledger = writeLedger(deps.worktree, { ...ledger, running: { taskId: task.id, childSessionID: child, since: Date.now() } })
-      })
+      }, undefined, attempt)
       task = { ...task, workerSessionID: analyst.sessionID ?? task.workerSessionID, childSessions: [...task.childSessions, ...(analyst.sessionID ? [analyst.sessionID] : [])] }
       if (analyst.status === "aborted") return cancelled()
       const text = (analyst.text ?? "").trim()
@@ -391,11 +591,13 @@ export function createQueue(deps: HookDeps): Queue {
       // ---- verifier gate: only a checked answer is worth a verdict
       let review: ReviewResult = { verdict: "skipped" }
       if (c.review && analyst.status === "ok" && verified && parsed.sql) {
-        review = await runVerify(sessionID, entry, task, parsed.sql, check!, c.review_ttl_ms)
+        review = await runVerify(sessionID, entry, task, parsed.sql, check!, c.review_ttl_ms, attempt!)
       }
       task.review = review
+      attempt!.review = review
       if (review.aborted || entry.aborted) {
-        if (verified) return finish(sessionID, entry, ledger, { ...task, status: "done", error: `verification aborted (${entry.reason ?? "aborted"})`, finishedAt: Date.now() })
+        if (verified) return finishObservedData(
+          { ...task, status: "done", error: `verification aborted (${entry.reason ?? "aborted"})`, finishedAt: Date.now() }, "done")
         return cancelled()
       }
 
@@ -411,19 +613,25 @@ export function createQueue(deps: HookDeps): Queue {
 
       if (!failure) {
         const advisory = review.verdict === "reject" ? `accepted with verifier objection: ${review.reason ?? ""}` : undefined
-        return finish(sessionID, entry, ledger, { ...task, status: "done", error: advisory, finishedAt: Date.now() })
+        return finishObservedData({ ...task, status: "done", error: advisory, finishedAt: Date.now() }, "done")
       }
       rejectReason = failure
       task = { ...task, error: failure }
       ledger = writeLedger(deps.worktree, updateTask(ledger, task.id, task))
       deps.log("data task attempt failed", { sessionID, task: task.id, attempt: task.attempts, failure: oneLine(failure.split("\n")[0] ?? "", 120) })
       if (task.blocked) break
+      if (task.attempts < c.max_attempts) {
+        finishAttemptObservation(attempt, "failed", "open", review, false)
+        previousAttemptID = attempt!.attemptID
+        attempt = undefined
+        entry.attempt = undefined
+      }
     }
-    return finish(sessionID, entry, ledger, { ...task, status: "failed", finishedAt: Date.now() })
+    return finishObservedData({ ...task, status: "failed", finishedAt: Date.now() }, "failed")
   }
 
-  async function runVerify(sessionID: string, entry: Active, task: LedgerTask, sql: string, check: CheckRun, ttl: number): Promise<ReviewResult> {
-    const r = await runChild(deps, entry, sessionID, "data-verifier", `lca verify ${task.n}: ${task.title}`, verifierPrompt(task, sql, check), ttl)
+  async function runVerify(sessionID: string, entry: Active, task: LedgerTask, sql: string, check: CheckRun, ttl: number, attempt: AttemptObservation): Promise<ReviewResult> {
+    const r = await runChild(deps, entry, sessionID, "data-verifier", `lca verify ${task.n}: ${task.title}`, verifierPrompt(task, sql, check), ttl, undefined, undefined, attempt)
     if (r.status === "aborted") return { verdict: "error", reason: "aborted", sessionID: r.sessionID, aborted: true }
     if (r.status !== "ok") return { verdict: "error", reason: r.error ?? r.status, sessionID: r.sessionID }
     return { ...parseVerdict(r.text ?? ""), sessionID: r.sessionID }
@@ -459,8 +667,9 @@ export function createQueue(deps: HookDeps): Queue {
     hints: string[],
     ttl: number,
     directory?: string,
+    attempt?: AttemptObservation,
   ): Promise<ReviewResult> {
-    const r = await runChild(deps, entry, sessionID, "reviewer", `lca review ${task.n}: ${task.title}`, reviewerPrompt(task, diff, verify, prot, suspicious, hints), ttl, undefined, directory)
+    const r = await runChild(deps, entry, sessionID, "reviewer", `lca review ${task.n}: ${task.title}`, reviewerPrompt(task, diff, verify, prot, suspicious, hints), ttl, undefined, directory, attempt)
     if (r.status === "aborted") return { verdict: "error", reason: "aborted", sessionID: r.sessionID, aborted: true }
     if (r.status !== "ok") return { verdict: "error", reason: r.error ?? r.status, sessionID: r.sessionID }
     return { ...parseVerdict(r.text ?? ""), sessionID: r.sessionID }
@@ -570,10 +779,12 @@ async function runChild(
   ttlMs: number,
   onCreated?: (sessionID: string) => void,
   directory?: string,
+  attempt?: AttemptObservation,
 ): Promise<ChildRun> {
   if (entry.aborted) return { status: "aborted" }
   const session = (deps.client as any).session
   let sessionID: string | undefined
+  let childMessageID: string | undefined
   // `directory` binds the child session (and every tool it runs) to another directory: the SDK's per-request
   // `?directory=` (worktree isolation)
   const query = directory ? { directory } : undefined
@@ -585,10 +796,21 @@ async function runChild(
     return { status: "error", error: `session.create threw: ${(e as Error).message}` }
   }
   entry.child = sessionID
-  onCreated?.(sessionID)
+  if (attempt) observeChild(deps, attempt, sessionID, agent, "started")
+  const complete = (run: ChildRun): ChildRun => {
+    if (attempt) observeChild(deps, attempt, sessionID!, agent,
+      run.status === "ok" ? "done" : run.status === "error" ? "failed" : "cancelled", childMessageID)
+    return run
+  }
+  try {
+    onCreated?.(sessionID)
+  } catch (error) {
+    complete({ status: "error", sessionID })
+    throw error
+  }
   if (entry.aborted) {
     entry.child = undefined
-    return { status: "aborted", sessionID }
+    return complete({ status: "aborted", sessionID })
   }
 
   const body: Record<string, unknown> = { agent, tools: CHILD_TOOL_DENY, parts: [{ type: "text", text }] }
@@ -606,22 +828,23 @@ async function runChild(
     const raced = await Promise.race([session.prompt({ path: { id: sessionID }, body, ...(query ? { query } : {}) }), timeout])
     if (raced === "timeout") {
       await abortSession(deps, sessionID)
-      return { status: "error", sessionID, error: `child session timed out after ${Math.round(ttlMs / 1000)}s` }
+      return complete({ status: "error", sessionID, error: `child session timed out after ${Math.round(ttlMs / 1000)}s` })
     }
     const res: any = raced
-    if (entry.aborted) return { status: "aborted", sessionID }
-    if (res?.error) return { status: "error", sessionID, error: `prompt error: ${describeError(res.error)}` }
+    if (entry.aborted) return complete({ status: "aborted", sessionID })
+    if (res?.error) return complete({ status: "error", sessionID, error: `prompt error: ${describeError(res.error)}` })
     const data = res?.data ?? res
     const info = data?.info
+    if (info?.role === "assistant" && info.sessionID === sessionID && typeof info.parentID === "string") childMessageID = info.parentID
     if (info?.error) {
       const name = info.error?.name ?? "error"
       // Aborted by someone else (repetition guard, user closing the child): a failed attempt, not a queue abort.
-      if (name === "MessageAbortedError") return { status: "error", sessionID, error: "child session aborted (repetition guard or external abort)", text: extractText(data?.parts) }
-      return { status: "error", sessionID, error: `${name}: ${info.error?.data?.message ?? ""}`.trim(), text: extractText(data?.parts) }
+      if (name === "MessageAbortedError") return complete({ status: "error", sessionID, error: "child session aborted (repetition guard or external abort)", text: extractText(data?.parts) })
+      return complete({ status: "error", sessionID, error: `${name}: ${info.error?.data?.message ?? ""}`.trim(), text: extractText(data?.parts) })
     }
-    return { status: "ok", sessionID, text: extractText(data?.parts) }
+    return complete({ status: "ok", sessionID, text: extractText(data?.parts) })
   } catch (e) {
-    return { status: entry.aborted ? "aborted" : "error", sessionID, error: (e as Error).message }
+    return complete({ status: entry.aborted ? "aborted" : "error", sessionID, error: (e as Error).message })
   } finally {
     if (timer) clearTimeout(timer)
     if (entry.child === sessionID) entry.child = undefined

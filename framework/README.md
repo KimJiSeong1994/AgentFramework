@@ -388,6 +388,119 @@ Recording is best-effort: a storage error logs a generic `tool outcome recording
 message through the debug logger (`LCA_DEBUG=1`) and does not interrupt tool/guard handling.
 Stored-observation counts are therefore not a guarantee that every executed call was captured.
 
+### Bounded skill evaluation (P1)
+
+Skill observation is **off by default**. It distinguishes recommendations, actual
+`skill` tool attempts, returned skill text, related task attempts and code-owned
+verification. Returned text does not prove that the model read or followed it;
+verification passing does not prove the skill caused an improvement.
+
+One explicitly activated campaign belongs to one canonical project root:
+
+```bash
+bun scripts/lca-skill-observation.ts activate --root /absolute/project --campaign-id approved-campaign
+bun scripts/lca-skill-observation.ts status --root /absolute/project
+bun scripts/lca-skill-observation.ts stop --root /absolute/project --campaign-id approved-campaign
+```
+
+After explicit campaign activation, copy its `ownerBinding` receipt into that
+project's `.lca/lca.jsonc` and opt in:
+
+```json
+{
+  "skill_observation": {
+    "enabled": true,
+    "campaign_id": "approved-campaign",
+    "owner_root": "/absolute/project",
+    "owner_binding": "<64-hex ownerBinding from activation receipt>"
+  }
+}
+```
+
+Configuration alone never initializes a database or replenishes a budget.
+The binding pins the canonical source and state location; retain it after stopping.
+`disabled_hooks: ["tool.history"]` also disables the new observer. Do not change
+state directories, copy campaign databases or create another root to evade limits.
+Existing router settings, tool permissions and queue behavior remain independent.
+
+The first committed **10th actual actor session or 100th unique skill call**
+stops new admissions. Worker/reviewer sessions count separately; a chat-only tenth
+session can close admission before any skill load. Pending exact keys may finish
+for at most five minutes, then unresolved observations are censored. Manual stop
+is immediate. Closed campaigns cannot restart or reset; a second campaign and
+standing enablement require separate approval. Set `enabled` back to `false` after
+closure. Observation failures or cutoff never stop user work.
+Config flag changes require a host reload; the persisted CLI stop takes effect
+across existing instances without changing their tool permissions or queue.
+
+The private store is `stateRoot(owner_root)/skill-observations.sqlite`, separate
+from disposable sessions. New raw facts expire after 30 days; quota controls and
+closed tombstones survive expiry. Cleanup is bounded and requires process activity:
+an offline machine cannot physically delete expired data on schedule. Export
+excludes expired facts regardless. Session-boundary reconciliation processes at
+most 1,024 pending keys; limits also include 50,000 total store rows, 64 MiB database
+pages, 10,000 exported facts and a 25 ms SQLite busy timeout. No secure-erasure
+guarantee is made.
+Fixed health warnings remain visible without `LCA_DEBUG`; missing, disabled,
+partial, expired and closed coverage must not be described as zero utilization.
+
+Fingerprints have separate meanings: terminal-output bytes, supported host-rendered
+body bytes, and the safe current project `SKILL.md` file at observation time.
+The originally loaded file bytes are **unavailable** in this plugin-only design.
+Cached content and a subsequently edited file can differ; hashes with different
+bases are not comparable versions. Secret-pattern, oversized, ambiguous, modified
+or truncated data limits fingerprint coverage. Raw prompts, commands, arguments,
+outputs, errors, credentials and absolute paths are not exported as evidence.
+
+Task linkage uses explicit message/parent/task/attempt/child identities, never a
+nearest timestamp. Main-agent exposure is orchestrator context, not a worker load.
+Unsupported external child streams and unmanaged task outcomes remain unknown.
+Reports distinguish completed/error/unresolved/conflicting calls, attempt and task
+status, verification refusal/timeout/abort, and unknown/excluded/censored counts.
+Rates show numerator/denominator; an empty denominator is `N/A`. Never sum overlapping
+snapshots or interpret missing trigger evidence as confirmed autonomous choice.
+Configuration strata hash bounded LCA routing/observation settings and skill
+allowlisting, not the full host configuration, credentials or endpoints.
+
+`bun scripts/lca-wiki.ts capture` manually adds `raw/skill-runs/<sha256>.json`,
+its source page and `wiki/reports/skill-evaluation.md`. New skill snapshots are
+bounded to 128 files and 64 MiB total (16 MiB per snapshot). Wiki evidence is retained
+long-term: the raw observation store's 30-day expiry does **not** delete previously
+captured immutable Wiki snapshots. Capture does not compile sources, modify skills,
+train models or change routing policy. Review pending sources with `status`, compile
+only with explicit source links and then run `lint`. Operational traffic must never
+be manufactured to fill a campaign; a closed zero-observation campaign is not
+evidence of effectiveness.
+
+The isolated synthetic capability probe is
+`bash scripts/lca-e2e.sh --skill-probe`. Its data is not operational utilization.
+It checks real host tool identity, parent linkage and returned metadata.
+OpenCode 1.18.33 with pinned plugin/SDK 1.18.32 also passed the serialized
+`--skill-probe-off`, `--skill-probe-scenario missing-skill`, `advice-only`,
+`worker-denied`, `worker-allowed`, and `verify-failure` cases. Advice-only also
+passes with observation off and uses a local synthetic router, not production Jev.
+The verification-failure case records a completed worker skill call, an exact
+child-prompt association, and a separate code-owned exit-2 failure/final failed task;
+it does not turn successful loading into successful verification. Worker permission
+overrides and verifier fixtures exist only in isolated test roots. Use
+`--probe-timeout 900` for that longer case. Unsupported renderer
+shapes remain unknown rather than being promoted to exact loaded-source hashes.
+
+`bun scripts/lca-skill-bench.ts` measures 1,000 synthetic adapter callbacks in fresh
+scratch projects, separately checking the disabled path, quota counters, terminal
+facts, database pages, RSS/heap and sampled rollback-journal size. The generated
+receipt at `artifacts/skill-evaluation-p1/benchmark.json` records the measurements
+and limitations for one local uncontended run; the initial added p95 target is
+10 ms, not a hard realtime promise. Memory high-water
+and journal peaks are sampled, not strict allocation or peak-disk guarantees.
+These fixtures never populate an operational campaign.
+
+This checkout's single approved `skill-evaluation-p1-20261002` campaign was manually
+closed with zero recorded actor sessions and skill calls; its binding is retained
+and configuration is off. No synthetic traffic was inserted and no existing host
+was force-reloaded. Operational-use and effectiveness evidence remains unavailable,
+not confirmed zero population use. The closure receipt is not an efficacy verdict.
+
 The CLI implementation lives at `framework/src/wiki/wiki.ts` (moved from the old
 `framework/src/telemetry/wiki.ts`). From the repository root:
 
@@ -399,8 +512,8 @@ bun scripts/lca-wiki.ts register <file> [--title T] [--root DIR]
 Exit 0 is success; 1 is a refusal or failure (stderr `Wiki operation failed: <reason>`);
 2 is a usage error. `--root` defaults to the repository root.
 
-`capture` writes separate content-addressed immutable raw snapshots for tool outcomes
-and Jev routing events, source pages, generated aggregate reports, and updates the
+`capture` writes separate content-addressed immutable raw snapshots for tool outcomes,
+Jev routing events and admitted skill observations, source pages, generated aggregate reports, and updates the
 index/append-only activity log. Routing import validates and projects only approved
 metadata, deduplicates event IDs, rejects conflicting replays and unsafe filesystem
 inputs, and reports malformed records and bounded-scan coverage. Check that coverage

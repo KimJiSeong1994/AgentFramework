@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 import {
   appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync,
-  writeFileSync,
+  truncateSync, writeFileSync,
 } from "node:fs"
 import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
@@ -11,6 +11,11 @@ import { recordRoutingAdvice, recordRoutingDecision, routingLogPath, type Routin
 import { stateRoot } from "../src/state/store.ts"
 import { readRoutingLogs } from "../src/telemetry/routing-reader.ts"
 import { createHash } from "node:crypto"
+import {
+  activateSkillCampaign, admitSkillCall, listSkillObservations, recordSkillCall, recordSkillTurn,
+  type SkillObservationList,
+} from "../src/telemetry/skills.ts"
+import { RETURNED_BODY_BASIS, RETURNED_PAYLOAD_BASIS } from "../src/telemetry/skill-evaluation.ts"
 import { captureWiki, lintWiki, parseLog, registerWiki, statusWiki, summarizeOutcomes, unlockWiki } from "../src/wiki/wiki.ts"
 
 let root: string
@@ -81,6 +86,20 @@ function knowledgeFiles(): string[] {
 function snapshot() {
   const files = knowledgeFiles().sort()
   return files.map((f) => `${f}\n${existsSync(f) ? readFileSync(f, "utf8") : ""}`).join("\0")
+}
+function sortJsonKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonKeys)
+  if (typeof value !== "object" || value === null) return value
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortJsonKeys((value as Record<string, unknown>)[key])]))
+}
+function skillSnapshotText(observations: SkillObservationList): string {
+  const facts = [...observations.facts].sort((left, right) =>
+    left.kind < right.kind ? -1 : left.kind > right.kind ? 1 :
+      left.sessionID < right.sessionID ? -1 : left.sessionID > right.sessionID ? 1 :
+        left.factKey < right.factKey ? -1 : left.factKey > right.factKey ? 1 : 0)
+  return `${JSON.stringify(sortJsonKeys({
+    schemaVersion: 1, kind: "skill-observation-snapshot", observations: { ...observations, facts },
+  }), null, 2)}\n`
 }
 
 // -- Existing capture behaviour (kept meaningful with the new shared lock/log grammar) -----------------------------
@@ -230,6 +249,204 @@ test("empty history is explicitly empty, not fabricated observations", () => {
   expect(receipt.routing.coverage).toMatchObject({ scanned: 0, valid: 0, invalid: 0, duplicates: 0, truncated: false, scope: "complete" })
   expect(readFileSync(join(root, receipt.routing.report), "utf8")).toContain("explicit zero-observation evidence")
   expect(lintWiki(root)).toEqual([])
+})
+
+test("skill capture exports sanitized core facts, replays immutably, and compiles only its linked source", () => {
+  const startedAt = Date.now()
+  activateSkillCampaign(root, "wiki-campaign", startedAt)
+  recordSkillTurn(root, "wiki-campaign", {
+    sessionID: "session_1", messageID: "user_1", phase: "terminal", role: "user",
+    closureReason: "completed",
+    routerExposure: "suggest", routeDecisionID: "decision_1", routeSkillName: "plan", adviceInserted: true,
+    requestEvidence: "unknown",
+  }, Date.now())
+  recordSkillTurn(root, "wiki-campaign", {
+    sessionID: "session_1", messageID: "assistant_1", parentMessageID: "user_1", phase: "terminal", role: "assistant",
+  }, Date.now())
+  const admission = admitSkillCall(root, "wiki-campaign", {
+    sessionID: "session_1", callID: "call_1", stage: "before", requestedName: "plan", routeDecisionID: "decision_1",
+  }, Date.now())
+  if (!admission.admitted) throw new Error("expected a scratch skill call admission")
+  recordSkillCall(root, admission.token, {
+    state: "completed", returnedContent: "observed", requestedName: "plan", returnedName: "plan",
+    messageID: "assistant_1", routeDecisionID: "decision_1", taskRelation: "unknown",
+    returnedPayloadSha256: "a".repeat(64), returnedPayloadBasis: RETURNED_PAYLOAD_BASIS,
+    returnedBodySha256: "b".repeat(64), returnedBodyBasis: RETURNED_BODY_BASIS,
+  }, Date.now())
+
+  const first = captureWiki(root)
+  expect(first.skills).toMatchObject({
+    available: true, health: "ok", campaign: { campaignID: "wiki-campaign", status: "open", callCount: 1 },
+    evaluation: {
+      calls: { includedUniqueCalls: 1, durableQuotaCalls: 1, completedToolCalls: 1 },
+      fingerprints: { terminalPayload: { numerator: 1, denominator: 1 }, returnedBody: { numerator: 1, denominator: 1 } },
+      advice: { exactExposures: 1, callsJoinedToAdvice: 1, followThrough: { numerator: 1, denominator: 1 }, adherenceClaim: false, causalClaim: false },
+    },
+  })
+  const rawPath = join(root, first.skills.source)
+  const originalRaw = readFileSync(rawPath, "utf8")
+  const raw = JSON.parse(originalRaw)
+  expect(raw).toMatchObject({ schemaVersion: 1, kind: "skill-observation-snapshot", observations: { available: true } })
+  expect(raw).not.toHaveProperty("capturedAt")
+  const report = readFileSync(join(root, first.skills.report), "utf8")
+  expect(report).toContain("exact loaded original file SHA is unavailable")
+  expect(report).toContain("not proof of procedure adherence or causal effectiveness")
+  expect(report).toContain("terminal-output-utf8.v1")
+  expect(report).toContain("opencode-1.18.33.trimmed-content.v1")
+  expect(originalRaw).not.toContain("PRIVATE_SENTINEL")
+
+  appendFileSync(join(root, first.skills.summary), "\nManual annotation must survive replay.\n")
+  const logBeforeReplay = readFileSync(join(root, "knowledge/wiki/log.md"), "utf8")
+  const replay = captureWiki(root)
+  expect(replay.skills.created).toBe(false)
+  expect(replay.skills.source).toBe(first.skills.source)
+  expect(readFileSync(rawPath, "utf8")).toBe(originalRaw)
+  expect(readFileSync(join(root, first.skills.summary), "utf8")).toContain("Manual annotation must survive replay.")
+  expect(readFileSync(join(root, "knowledge/wiki/log.md"), "utf8")).toBe(logBeforeReplay)
+
+  const beforeIngest = statusWiki(root)
+  const otherPending = beforeIngest.pending.filter((item) => item.sourceId !== first.skills.source.split("/").at(-1)!.slice(0, -5))
+    .map((item) => item.sourceId).sort()
+  appendFileSync(join(root, "knowledge/wiki/log.md"),
+    `\n## [2026-10-02T00:00:00Z] ingest | Reviewed skill evidence\n\n[Origin](sources/${first.skills.summary.split("/").at(-1)})\n`)
+  const afterIngest = statusWiki(root)
+  expect(afterIngest.compiled).toBe(beforeIngest.compiled + 1)
+  expect(afterIngest.pending.map((item) => item.sourceId).sort()).toEqual(otherPending)
+  expect(lintWiki(root)).toEqual([])
+})
+
+test("missing skill observation store is unavailable evidence rather than zero use", () => {
+  const receipt = captureWiki(root)
+  const raw = JSON.parse(readFileSync(join(root, receipt.skills.source), "utf8"))
+  const report = readFileSync(join(root, receipt.skills.report), "utf8")
+  expect(receipt.skills).toMatchObject({ available: false, health: "database_missing", campaign: { status: null, callCount: 0 } })
+  expect(raw.observations).toMatchObject({ available: false, health: "database_missing", coverage: { populationComplete: false, unscannedTotal: "unknown" } })
+  expect(report).toContain("Unavailable, disabled, missing, expired, capped, or closed telemetry is not evidence of zero skill use")
+  expect(report).toContain("0/0 (N/A)")
+  expect(report).toContain("unobserved population: unknown")
+})
+
+test("skill report keeps quota cutoff and censored pending calls distinct from completion", () => {
+  const startedAt = Date.now()
+  activateSkillCampaign(root, "wiki-cutoff", startedAt)
+  for (let index = 0; index < 99; index++) {
+    const admission = admitSkillCall(root, "wiki-cutoff", {
+      sessionID: "session_1", callID: `call_${index}`, stage: "before", requestedName: "plan",
+    }, Date.now())
+    if (!admission.admitted) throw new Error("expected admitted scratch skill call")
+    recordSkillCall(root, admission.token, {
+      state: "completed", returnedContent: "not_returned", requestedName: "plan",
+    }, Date.now())
+  }
+  const pending = admitSkillCall(root, "wiki-cutoff", {
+    sessionID: "session_1", callID: "call_99", stage: "before", requestedName: "plan",
+  }, Date.now())
+  if (!pending.admitted) throw new Error("expected the quota-triggering call to be admitted")
+
+  const receipt = captureWiki(root)
+  const report = readFileSync(join(root, receipt.skills.report), "utf8")
+  expect(receipt.skills.campaign).toMatchObject({ status: "draining", callCount: 100, cutoffReason: "call_limit", notCollectedAfterStop: true })
+  expect(receipt.skills.evaluation.calls).toMatchObject({ includedUniqueCalls: 100, durableQuotaCalls: 100, completedToolCalls: 99, unresolvedCalls: 1, censoredUnresolvedCalls: 1 })
+  expect(receipt.skills.evaluation.coverage).toMatchObject({ populationComplete: false, notCollectedAfterStop: true })
+  expect(report).toContain("quota calls 100")
+  expect(report).toContain("censored unresolved calls: 1")
+  expect(report).toContain("population complete: no")
+})
+
+test("skill lint rejects nested extra metadata even when its content hash matches its filename", () => {
+  const receipt = captureWiki(root)
+  const raw = JSON.parse(readFileSync(join(root, receipt.skills.source), "utf8"))
+  raw.observations.coverage.privateText = "WIKI_PRIVATE_SENTINEL"
+  const tampered = `${JSON.stringify(raw, null, 2)}\n`
+  const id = createHash("sha256").update(tampered).digest("hex")
+  writeFileSync(join(root, "knowledge/raw/skill-runs", `${id}.json`), tampered, { mode: 0o600 })
+  const problems = lintWiki(root)
+  expect(problems.some((problem) => problem.includes("Invalid skill observation snapshot schema or metadata"))).toBe(true)
+  expect(problems.join("\n")).not.toContain("WIKI_PRIVATE_SENTINEL")
+  const beforeCapture = snapshot()
+  let errorMessage = ""
+  try { captureWiki(root) } catch (error) { errorMessage = (error as Error).message }
+  expect(errorMessage).toContain("Invalid skill observation snapshot schema or metadata")
+  expect(errorMessage).not.toContain("WIKI_PRIVATE_SENTINEL")
+  expect(snapshot()).toBe(beforeCapture)
+  expect(existsSync(join(root, "knowledge/.wiki.lock"))).toBe(false)
+})
+
+test("skill capture rejects corrupt hashes, unsafe symlinks, and over-limit files before Wiki writes", () => {
+  const first = captureWiki(root)
+  const rawPath = join(root, first.skills.source)
+  appendFileSync(rawPath, "tampered")
+  expect(lintWiki(root).some((problem) => problem.includes("Skill raw source integrity mismatch"))).toBe(true)
+  const beforeBadHashCapture = snapshot()
+  expect(() => captureWiki(root)).toThrow("Skill raw source integrity mismatch")
+  expect(snapshot()).toBe(beforeBadHashCapture)
+  expect(existsSync(join(root, "knowledge/.wiki.lock"))).toBe(false)
+
+  rmSync(rawPath)
+  const outside = mkdtempSync(join(tmpdir(), "lca-skill-wiki-outside-"))
+  try {
+    const unsafe = join(root, "knowledge/raw/skill-runs", `${"a".repeat(64)}.json`)
+    symlinkSync(join(outside, "missing.json"), unsafe)
+    const before = snapshot()
+    expect(() => captureWiki(root)).toThrow("regular, non-symlink file")
+    expect(snapshot()).toBe(before)
+    expect(existsSync(join(root, "knowledge/.wiki.lock"))).toBe(false)
+    rmSync(unsafe)
+
+    const oversized = join(root, "knowledge/raw/skill-runs", `${"b".repeat(64)}.json`)
+    writeFileSync(oversized, "", { mode: 0o600 })
+    truncateSync(oversized, 16 * 1024 * 1024 + 1)
+    const beforeOversize = snapshot()
+    expect(() => captureWiki(root)).toThrow("exceeds 16777216 bytes")
+    expect(snapshot()).toBe(beforeOversize)
+    expect(existsSync(join(root, "knowledge/.wiki.lock"))).toBe(false)
+    rmSync(oversized)
+
+    const totalBefore = [
+      readFileSync(join(root, "knowledge/wiki/index.md"), "utf8"),
+      readFileSync(join(root, "knowledge/wiki/log.md"), "utf8"),
+      readFileSync(join(root, "knowledge/wiki/reports/skill-evaluation.md"), "utf8"),
+    ]
+    for (let index = 0; index < 5; index++) {
+      const path = join(root, "knowledge/raw/skill-runs", `${index.toString(16).repeat(64)}.json`)
+      writeFileSync(path, "", { mode: 0o600 })
+      truncateSync(path, 16 * 1024 * 1024)
+    }
+    expect(() => captureWiki(root)).toThrow("exceed 67108864 total bytes")
+    expect([
+      readFileSync(join(root, "knowledge/wiki/index.md"), "utf8"),
+      readFileSync(join(root, "knowledge/wiki/log.md"), "utf8"),
+      readFileSync(join(root, "knowledge/wiki/reports/skill-evaluation.md"), "utf8"),
+    ]).toEqual(totalBefore)
+    expect(existsSync(join(root, "knowledge/.wiki.lock"))).toBe(false)
+  } finally { rmSync(outside, { recursive: true, force: true }) }
+})
+
+test("skill snapshot cap permits identical replay at 128 files and refuses the next distinct capture", () => {
+  const startedAt = Date.now()
+  activateSkillCampaign(root, "wiki-cap", startedAt)
+  const rawDir = join(root, "knowledge/raw/skill-runs")
+  mkdirSync(rawDir, { recursive: true, mode: 0o700 })
+  for (let index = 0; index < 128; index++) {
+    const observedAt = Date.now()
+    recordSkillTurn(root, "wiki-cap", {
+      sessionID: "session_1", messageID: `message_${index}`, phase: "terminal", role: "user",
+    }, observedAt)
+    const content = skillSnapshotText(listSkillObservations(root, { limit: 10_000, observedAt }))
+    const id = createHash("sha256").update(content).digest("hex")
+    writeFileSync(join(rawDir, `${id}.json`), content, { flag: "wx", mode: 0o600 })
+  }
+
+  const replay = captureWiki(root)
+  expect(replay.skills.created).toBe(false)
+  expect(replay.skills.source).toContain("skill-runs/")
+  const beforeOverflow = snapshot()
+  recordSkillTurn(root, "wiki-cap", {
+    sessionID: "session_1", messageID: "message_overflow", phase: "terminal", role: "user",
+  }, Date.now())
+  expect(() => captureWiki(root)).toThrow("cap reached (128 snapshots)")
+  expect(snapshot()).toBe(beforeOverflow)
+  expect(existsSync(join(root, "knowledge/.wiki.lock"))).toBe(false)
 })
 
 test("routing capture exports producer decisions and only verifies exact suggest advice applications", () => {

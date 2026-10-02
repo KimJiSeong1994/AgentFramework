@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "kind": "operational-observation-closure",
+  "campaignID": "skill-evaluation-p1-20261002",
+  "ownerBinding": "cd4d9d661baf48eb48fd0a20c6bdd015daba10b9389e6ed2d25c6ea8ef08948f",
+  "available": true,
+  "health": "ok",
+  "status": "closed",
+  "activatedAt": 1790938717782,
+  "closedAt": 1790938771177,
+  "stopReason": "manual_stop",
+  "closureReason": "manual_stop",
+  "recordedActorSessions": 0,
+  "recordedSkillCalls": 0,
+  "storedFacts": 0,
+  "pendingCount": 0,
+  "censoredCount": 0,
+  "observerEnabledAfterClosure": false,
+  "bindingRetained": true,
+  "routerMode": "suggest",
+  "syntheticTrafficInserted": false,
+  "existingHostsForceReloaded": false,
+  "populationComplete": false,
+  "operationalUsageEvidence": "insufficient",
+  "procedureAdherence": "unmeasured",
+  "causalEffectiveness": "unmeasured",
+  "limitations": [
+    "Only activation, matching configuration and explicit observer-only closure were verified in this operational window.",
+    "No observed traffic is not confirmed zero population use; the operational effectiveness dataset remains unfinished.",
+    "Isolated host fixtures and benchmark activity were not imported into this campaign.",
+    "No operational Wiki capture or automatic compilation was performed."
+  ]
+}

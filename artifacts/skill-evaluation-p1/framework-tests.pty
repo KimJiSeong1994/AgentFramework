@@ -1,0 +1,13 @@
+^Dbun test v1.4.2 (744846f84)
+
+framework/test/skill-observer.test.ts:
+[lca] skill observation: record_refused
+[lca] skill observation: record_refused
+[lca] skill observation: unsupported_cross_instance
+[lca] skill observation: record_refused
+
+ 667 pass
+ 1 skip
+ 0 fail
+ 4483 expect() calls
+Ran 668 tests across 49 files. [18.03s]

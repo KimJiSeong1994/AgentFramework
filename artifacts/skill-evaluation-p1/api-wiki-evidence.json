@@ -1,0 +1,230 @@
+{
+  "schemaVersion": 1,
+  "kind": "api-package-test-report",
+  "synthetic": true,
+  "populationComplete": false,
+  "calls": {
+    "includedUniqueCalls": 1,
+    "durableQuotaCalls": 1,
+    "unrepresentedDurableQuotaCalls": 0,
+    "durableQuotaCountConflict": false,
+    "completedToolCalls": 1,
+    "errorOrAbortedToolCalls": 0,
+    "unresolvedCalls": 0,
+    "conflicts": 0,
+    "invalidTimestampCount": 0,
+    "censoredUnresolvedCalls": 0,
+    "returnedContent": {
+      "observed": 1,
+      "notReturned": 0,
+      "unknown": 0
+    },
+    "duration": {
+      "samples": 1,
+      "missing": 0,
+      "invalid": 0,
+      "totalMs": 19,
+      "meanMs": 19
+    },
+    "stateCoverage": {
+      "numerator": 1,
+      "denominator": 1,
+      "display": "1/1",
+      "unknown": 0,
+      "excluded": 0,
+      "censored": 0,
+      "campaignID": "isolated-skill-probe",
+      "period": {
+        "startAt": 1790937558885,
+        "endAt": 1790937587695,
+        "basis": "campaign-control.v1"
+      },
+      "coverage": {
+        "storedFacts": 15,
+        "unscannedStoredFacts": 0,
+        "expiredFacts": 0,
+        "truncated": false,
+        "unscannedTotal": "known",
+        "notCollectedAfterStop": true
+      }
+    }
+  },
+  "taskAttribution": {
+    "exactWorkerTaskAttemptLinks": 1,
+    "callsWithExactWorkerTaskLinks": 1,
+    "workerTaskAttemptLinkRate": {
+      "numerator": 1,
+      "denominator": 1,
+      "display": "1/1",
+      "unknown": 0,
+      "excluded": 0,
+      "censored": 0,
+      "campaignID": "isolated-skill-probe",
+      "period": {
+        "startAt": 1790937558885,
+        "endAt": 1790937587695,
+        "basis": "campaign-control.v1"
+      },
+      "coverage": {
+        "storedFacts": 15,
+        "unscannedStoredFacts": 0,
+        "expiredFacts": 0,
+        "truncated": false,
+        "unscannedTotal": "known",
+        "notCollectedAfterStop": true
+      }
+    },
+    "orchestratorContextLinks": 0,
+    "attempts": {
+      "total": 1,
+      "statuses": {
+        "done": 0,
+        "failed": 1,
+        "cancelled": 0,
+        "open": 0,
+        "unknown": 0,
+        "conflict": 0,
+        "censored": 0
+      },
+      "taskKinds": {
+        "code": 1,
+        "data": 0,
+        "unknown": 0
+      },
+      "resumeRequested": {
+        "yes": 0,
+        "no": 1,
+        "unknown": 0
+      },
+      "ledgerTaskStatuses": {
+        "done": 0,
+        "failed": 1,
+        "cancelled": 0,
+        "open": 0,
+        "unknown": 0,
+        "conflict": 0
+      },
+      "actualRolesByFact": {
+        "main": 0,
+        "worker": 1,
+        "reviewer": 0,
+        "data-analyst": 0,
+        "data-verifier": 0,
+        "unknown": 1
+      }
+    },
+    "finalOwnerTasks": {
+      "total": 1,
+      "statuses": {
+        "done": 0,
+        "failed": 1,
+        "cancelled": 0,
+        "open": 0,
+        "unknown": 0,
+        "conflict": 0,
+        "censored": 0
+      },
+      "ledgerTaskStatuses": {
+        "done": 0,
+        "failed": 1,
+        "cancelled": 0,
+        "open": 0,
+        "unknown": 0,
+        "conflict": 0
+      },
+      "childActorFactsExcludedFromTaskTotal": 1,
+      "excludedTaskAttemptsWithoutOwnerFact": 0
+    }
+  },
+  "verification": {
+    "statuses": {
+      "pass": 0,
+      "fail": 1,
+      "refused": 0,
+      "invalidated": 0,
+      "timed_out": 0,
+      "aborted": 0,
+      "not_run": 0,
+      "open": 0,
+      "unknown": 0,
+      "conflict": 0,
+      "excluded": 0,
+      "censored": 0
+    },
+    "exitZero": {
+      "numerator": 0,
+      "denominator": 1,
+      "display": "0/1",
+      "unknown": 0,
+      "excluded": 0,
+      "censored": 0,
+      "campaignID": "isolated-skill-probe",
+      "period": {
+        "startAt": 1790937558885,
+        "endAt": 1790937587695,
+        "basis": "campaign-control.v1"
+      },
+      "coverage": {
+        "storedFacts": 15,
+        "unscannedStoredFacts": 0,
+        "expiredFacts": 0,
+        "truncated": false,
+        "unscannedTotal": "known",
+        "notCollectedAfterStop": true
+      }
+    },
+    "durations": {
+      "samples": 1,
+      "missing": 0,
+      "invalid": 0,
+      "totalMs": 6,
+      "meanMs": 6
+    },
+    "invalidTimestampCount": 0,
+    "reviewVerdicts": {
+      "accept": 0,
+      "revise": 0,
+      "reject": 0,
+      "skipped": 1,
+      "error": 0,
+      "unknown": 0
+    },
+    "taskStatuses": {
+      "done": 0,
+      "failed": 1,
+      "cancelled": 0,
+      "open": 0,
+      "unknown": 0
+    }
+  },
+  "coverage": {
+    "returnedFacts": 15,
+    "acceptedFacts": 15,
+    "invalidRows": 0,
+    "duplicateFacts": 0,
+    "duplicateConflictIdentities": 0,
+    "storedFacts": 15,
+    "unscannedStoredFacts": 0,
+    "evaluatorUnscannedFacts": 0,
+    "unscannedSameTurnRelations": 0,
+    "relationsTruncated": false,
+    "expiredFacts": 0,
+    "truncated": false,
+    "unscannedTotal": "known",
+    "notCollectedAfterStop": true,
+    "durableQuotaCalls": 1,
+    "populationComplete": false,
+    "unobservedPopulation": "unknown"
+  },
+  "wiki": {
+    "skillSource": "knowledge/raw/skill-runs/35d8f5ad0ead140e9c2dc98530c02e592d63551e14220528e461ff116d7e1bc3.json",
+    "replayCreated": false,
+    "annotationPreserved": true,
+    "compiled": 1,
+    "pending": [
+      "routing",
+      "tool-runs"
+    ],
+    "problems": []
+  }
+}

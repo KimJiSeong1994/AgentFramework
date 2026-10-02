@@ -4,6 +4,8 @@ import { join } from "node:path"
 import { createQueue, parseVerdict, reviewerPrompt, workerPrompt, CHILD_TOOL_DENY } from "../src/orchestration/queue.ts"
 import { addTasks, emptyLedger, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
 import { abortPath, sessionDir, writeJsonAtomic } from "../src/state/store.ts"
+import { observeSkillTask } from "../src/telemetry/skill-observer.ts"
+import { activateSkillCampaign, listSkillObservations, skillObservationDatabasePath } from "../src/telemetry/skills.ts"
 import { fakeClient, makeDeps, tempGitWorktree, verifyScript, waitFor, type FakeClient } from "./guards-helpers.ts"
 
 const S = "ses_main"
@@ -22,6 +24,16 @@ const noReview = { delegate: { review: false } as any }
 const okVerify = () => verifyScript(wt.worktree, "verify_ok.sh", "exit 0")
 const failVerify = () => verifyScript(wt.worktree, "verify_fail.sh", "echo boom-output; exit 2")
 const existsVerify = (file: string) => verifyScript(wt.worktree, `check_${file}.sh`, `test -f ${file}`)
+const observedDeps = (patch: Parameters<typeof makeDeps>[2] = {}) => {
+  const campaignID = "queue-test"
+  const activated = activateSkillCampaign(wt.worktree, campaignID)
+  return makeDeps(client, wt.worktree, {
+    ...patch,
+    skill_observation: { enabled: true, campaign_id: campaignID, owner_root: wt.worktree, owner_binding: activated.ownerBinding! },
+  })
+}
+const observations = () => listSkillObservations(wt.worktree).facts
+const factPayload = (fact: { payload: unknown }) => fact.payload as Record<string, unknown>
 
 describe("serial queue", () => {
   test("runs three tasks serially in fresh child sessions, verifies in code, reviews, writes ledger + handoffs", async () => {
@@ -86,6 +98,184 @@ describe("serial queue", () => {
     expect(readFileSync(join(wt.worktree, ledger.tasks[2]!.handoff!), "utf8")).toContain("# Task 3: three")
     expect(existsSync(join(wt.worktree, ".lca/handoffs/.gitignore"))).toBe(true)
     expect(deps.logs.some((l) => l === "queue finished")).toBe(true)
+  })
+
+  test("records worker completion separately from a failed code-owned verification without persisting prose", async () => {
+    const deps = observedDeps({ delegate: { review: false, max_attempts: 1 } as any })
+    const q = createQueue(deps)
+    client.replies.worker = { text: "private-worker-report-sentinel", run: () => write("f.py", "x = 1\n") }
+    q.add(S, [{ title: "verify failure", verify: failVerify() }])
+
+    const run = await q.run(S, { messageID: "msg_verify_failure", resumed: false })
+    const facts = observations()
+    const parentTask = facts.find((f) => f.kind === "task_context" && f.sessionID === S)
+    const workerTask = facts.find((f) => f.kind === "task_context" && f.sessionID === "child_1")
+    const verification = facts.find((f) => f.kind === "verification_observation")
+
+    expect(run.failed).toBe(1)
+    expect(parentTask && factPayload(parentTask)).toMatchObject({ phase: "terminal", status: "failed", messageID: "msg_verify_failure" })
+    expect(workerTask && factPayload(workerTask)).toMatchObject({ phase: "terminal", status: "done", ownerSessionID: S, childSessionID: "child_1", actualRole: "worker", roleBasis: "code_owned" })
+    expect(verification && factPayload(verification)).toMatchObject({ phase: "terminal", status: "fail", codeOwned: true, exitCode: 2, taskStatus: "failed" })
+    expect(typeof (verification && factPayload(verification).startedAt)).toBe("number")
+    expect(typeof (verification && factPayload(verification).finishedAt)).toBe("number")
+    expect(typeof (verification && factPayload(verification).durationMs)).toBe("number")
+    expect(JSON.stringify(facts)).not.toContain("private-worker-report-sentinel")
+    expect(JSON.stringify(facts)).not.toContain("boom-output")
+    expect(JSON.stringify(facts)).not.toContain("verify_fail.sh")
+  })
+
+  test("retries get distinct UUID attempts and preserve identical explicit origin message IDs", async () => {
+    const deps = observedDeps({ delegate: { review: false, max_attempts: 2 } as any })
+    const q = createQueue(deps)
+    client.replies.worker = (o, nth) => ({ text: `worker ${nth}`, run: () => { if (nth === 2) write("ready.txt", "ready\n") } })
+    const verify = existsVerify("ready.txt")
+    q.add(S, [{ title: "retry", verify }])
+    await q.run(S, { messageID: "msg_reused", resumed: false })
+    q.add(S, [{ title: "another task" }])
+    await q.run(S, { messageID: "msg_reused", resumed: true })
+
+    const facts = observations()
+    const taskFacts = facts.filter((f) => f.kind === "task_context" && f.sessionID === S).map(factPayload)
+    const retryAttempts = taskFacts.filter((f) => f.taskID === "t1")
+    const verifications = facts.filter((f) => f.kind === "verification_observation").map(factPayload)
+    const retryVerifications = verifications.filter((f) => f.taskID === "t1")
+
+    expect(retryAttempts).toHaveLength(2)
+    expect(retryAttempts.map((f) => f.attemptID)[0]).not.toBe(retryAttempts.map((f) => f.attemptID)[1])
+    expect(retryAttempts.map((f) => f.messageID)).toEqual(["msg_reused", "msg_reused"])
+    expect(retryAttempts[1]?.resumeOfAttemptID).toBe(retryAttempts[0]?.attemptID)
+    expect(retryVerifications.map((f) => f.status)).toEqual(["fail", "pass"])
+    expect(retryVerifications[1]?.attemptID).not.toBe(retryVerifications[0]?.attemptID)
+    expect(taskFacts.find((f) => f.taskID === "t2")?.messageID).toBe("msg_reused")
+    expect(taskFacts.find((f) => f.taskID === "t2")?.resumeOfAttemptID).toBeNull()
+  })
+
+  test("records refused and not-run verification outcomes, plus cancellation, without changing queue results", async () => {
+    const deps = observedDeps({ delegate: { review: false, max_attempts: 1 } as any })
+    const q = createQueue(deps)
+    client.replies.worker = { text: "worker completed", run: () => write("f.py", "x\n") }
+    const refused = q.add(S, [{ title: "refused" }])[0]!
+    const refusedLedger = readLedger(wt.worktree, S)
+    writeLedger(wt.worktree, updateTask(refusedLedger, refused.id, { verify: "rm -rf build" }))
+    await q.run(S, { messageID: "msg_refused" })
+
+    write("test_invalidated.py", "def test_guard():\n    assert True\n")
+    client.replies.worker = { text: "worker completed", run: () => write("test_invalidated.py", "def test_guard():\n    assert False\n") }
+    q.add(S, [{ title: "invalidated", verify: "python3 -m pytest -q test_invalidated.py" }])
+    await q.run(S, { messageID: "msg_invalidated" })
+
+    let stalled = false
+    client.replies.worker = { text: "waiting", run: () => { stalled = true; return new Promise<void>(() => {}) } }
+    const cancelSession = "ses_cancel"
+    q.add(cancelSession, [{ title: "cancelled", verify: okVerify() }])
+    const running = q.run(cancelSession, { messageID: "msg_cancel" })
+    await waitFor(() => stalled)
+    await q.abort(cancelSession, "user_stop")
+    const run = await running
+
+    const facts = observations()
+    const refusal = facts.find((f) => f.kind === "verification_observation" && f.sessionID === S && factPayload(f).taskID === "t1")
+    const invalidation = facts.find((f) => f.kind === "verification_observation" && f.sessionID === S && factPayload(f).taskID === "t2")
+    const cancelledTask = facts.find((f) => f.kind === "task_context" && f.sessionID === cancelSession)
+    const cancelledChild = facts.find((f) => f.kind === "task_context" && f.sessionID === "child_3")
+    const notRun = facts.find((f) => f.kind === "verification_observation" && f.sessionID === cancelSession)
+    expect(refusal && factPayload(refusal)).toMatchObject({ status: "refused", phase: "terminal", exitCode: null })
+    expect((refusal && factPayload(refusal).startedAt) ?? null).toBeNull()
+    expect(typeof (refusal && factPayload(refusal).finishedAt)).toBe("number")
+    expect(invalidation && factPayload(invalidation)).toMatchObject({ status: "invalidated", phase: "terminal", exitCode: null })
+    expect((invalidation && factPayload(invalidation).startedAt) ?? null).toBeNull()
+    expect(cancelledTask && factPayload(cancelledTask)).toMatchObject({ status: "cancelled", phase: "terminal" })
+    expect(cancelledChild && factPayload(cancelledChild)).toMatchObject({ status: "cancelled", phase: "terminal", childSessionID: "child_3" })
+    expect(notRun && factPayload(notRun)).toMatchObject({ status: "not_run", taskStatus: "cancelled" })
+    expect(run).toMatchObject({ aborted: true, cancelled: 1 })
+    expect(JSON.stringify(facts)).not.toContain("rm -rf build")
+  })
+
+  test("reviewer rejection remains separate from a passing verification and advisory task completion", async () => {
+    const deps = observedDeps({ delegate: { review: true, review_strict: false, max_attempts: 1 } as any })
+    const q = createQueue(deps)
+    client.replies.worker = { text: "worker finished", run: () => write("reviewed.py", "x = 1\n") }
+    client.replies.reviewer = { text: "REJECT: keep an advisory note" }
+    q.add(S, [{ title: "review advisory", verify: okVerify() }])
+
+    const run = await q.run(S, { messageID: "msg_review" })
+    const facts = observations()
+    const parentTask = facts.find((f) => f.kind === "task_context" && f.sessionID === S)
+    const reviewerTask = facts.find((f) => f.kind === "task_context" && f.sessionID === "child_2")
+    const verification = facts.find((f) => f.kind === "verification_observation")
+
+    expect(run.done).toBe(1)
+    expect(parentTask && factPayload(parentTask)).toMatchObject({ status: "done", phase: "terminal" })
+    expect(reviewerTask && factPayload(reviewerTask)).toMatchObject({ status: "done", actualRole: "reviewer", ownerSessionID: S })
+    expect(verification && factPayload(verification)).toMatchObject({ status: "pass", taskStatus: "done", reviewVerdict: "reject" })
+  })
+
+  test("data checks never become code-owned verification passes", async () => {
+    const fixtureRoot = join(import.meta.dir, "../../scripts/fixtures/data-vv")
+    const deps = observedDeps({
+      delegate: { review: false, max_attempts: 1 } as any,
+      data: {
+        backend: "sqlite", sqlite_path: join(fixtureRoot, "data/vehicle_visit.sqlite"),
+        schema_file: join(fixtureRoot, "data/schema.json"), checks_dir: "checks",
+      } as any,
+    })
+    const q = createQueue(deps)
+    client.replies["data-analyst"] = { text: "SQL:\nSELECT 1 AS answer\nRESULT:\n1\nANSWER: one" }
+    q.add(S, [{ title: "data question", kind: "data" }])
+    const run = await q.run(S, { messageID: "msg_data" })
+
+    const facts = observations()
+    expect(run.done).toBe(1)
+    expect(readLedger(wt.worktree, S).tasks[0]?.verify_result).toMatchObject({ ok: true, exitCode: 0 })
+    expect(facts.some((f) => f.kind === "verification_observation")).toBe(false)
+    expect(facts.some((f) => f.kind === "task_context" && f.sessionID === S && factPayload(f).status === "done")).toBe(true)
+    expect(facts.some((f) => f.kind === "task_context" && f.sessionID === "child_1" && factPayload(f).ownerSessionID === S)).toBe(true)
+    expect(JSON.stringify(facts)).not.toContain("SELECT 1")
+    expect(JSON.stringify(facts)).not.toContain("ANSWER: one")
+  })
+
+  test("crash recovery assigns a fresh UUID instead of reusing the restored attempt counter", async () => {
+    const deps = observedDeps({ delegate: { review: false, max_attempts: 1 } as any })
+    const q = createQueue(deps)
+    observeSkillTask(deps, { sessionID: S, taskID: "t1", attemptID: "old_attempt_1", phase: "pending", status: "started", ownerSessionID: S })
+    let { ledger } = addTasks(emptyLedger(S), [{ title: "crashed attempt" }])
+    ledger = updateTask(ledger, "t1", { status: "running", attempts: 1 })
+    writeLedger(wt.worktree, { ...ledger, running: { taskId: "t1", since: 1 } })
+    client.replies.worker = { text: "resumed" }
+
+    await q.run(S, { messageID: "msg_restart", resumed: true })
+
+    const taskFacts = observations().filter((f) => f.kind === "task_context" && f.sessionID === S && factPayload(f).taskID === "t1")
+    const restarted = taskFacts.map(factPayload).find((f) => f.phase === "terminal")
+    expect(readLedger(wt.worktree, S).tasks[0]).toMatchObject({ attempts: 1, status: "done" })
+    expect(taskFacts.some((f) => factPayload(f).attemptID === "old_attempt_1" && factPayload(f).phase === "pending")).toBe(true)
+    expect(restarted?.attemptID).not.toBe("old_attempt_1")
+    expect(restarted).toMatchObject({ messageID: "msg_restart", resumeOfAttemptID: null })
+  })
+
+  test("legacy Queue.run calls keep missing origin lineage explicitly unknown", async () => {
+    const deps = observedDeps({ delegate: { review: false, max_attempts: 1 } as any })
+    const q = createQueue(deps)
+    client.replies.worker = { text: "done" }
+    q.add(S, [{ title: "no origin" }])
+    await q.run(S)
+
+    const taskFact = observations().find((f) => f.kind === "task_context" && f.sessionID === S)
+    const task = taskFact && factPayload(taskFact)
+    expect(task).toMatchObject({ status: "done", messageID: null, originTaskID: null, resumeOfAttemptID: null })
+  })
+
+  test("disabled observation leaves queue behavior unchanged and creates no database", async () => {
+    const deps = makeDeps(client, wt.worktree, { delegate: { review: false, max_attempts: 1 } as any })
+    const q = createQueue(deps)
+    const databasePath = skillObservationDatabasePath(wt.worktree)
+    client.replies.worker = { text: "worker report", run: () => write("ok.txt", "ok\n") }
+    q.add(S, [{ title: "disabled observer", verify: okVerify() }])
+
+    const run = await q.run(S)
+    expect(run.done).toBe(1)
+    expect(readLedger(wt.worktree, S).tasks[0]?.verify_result?.ok).toBe(true)
+    expect(existsSync(databasePath)).toBe(false)
   })
 
   test("verify failure re-runs the worker once with the reason, then marks the task failed; the queue goes on", async () => {

@@ -1,11 +1,16 @@
 import { createHash, randomUUID } from "node:crypto"
 import {
-  existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync,
+  constants, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readSync,
+  readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync,
 } from "node:fs"
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path"
 import { containsSecret } from "../security/secrets.ts"
 import { listToolOutcomes, type ToolOutcome } from "../telemetry/outcomes.ts"
 import { isRoutingSnapshot, readRoutingLogs, type RoutingEvent, type RoutingSnapshot } from "../telemetry/routing-reader.ts"
+import { listSkillObservations, validateSkillObservationSnapshot, type SkillObservationList } from "../telemetry/skills.ts"
+import {
+  OBSERVED_FILE_BASIS, RETURNED_BODY_BASIS, RETURNED_PAYLOAD_BASIS, summarizeSkillEvaluation,
+} from "../telemetry/skill-evaluation.ts"
 
 const digest = (text: string) => createHash("sha256").update(text).digest("hex")
 const digestBytes = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex")
@@ -276,15 +281,342 @@ function routingSourcePage(snapshot: RoutingSnapshot, sourceId: string): string 
   ].join("\n")
 }
 
+const MAX_SKILL_SNAPSHOT_FACTS = 10_000
+const MAX_SKILL_SNAPSHOT_BYTES = 16 * 1024 * 1024
+const MAX_SKILL_SNAPSHOTS = 128
+const MAX_SKILL_SNAPSHOT_TOTAL_BYTES = 64 * 1024 * 1024
+const SKILL_SNAPSHOT_KIND = "skill-observation-snapshot"
+
+type SkillSnapshotEnvelope = {
+  schemaVersion: 1
+  kind: typeof SKILL_SNAPSHOT_KIND
+  observations: SkillObservationList
+}
+
+type SkillRawFile = { id: string; path: string; size: number }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function sortJsonKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonKeys)
+  if (!isRecord(value)) return value
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortJsonKeys(value[key])]))
+}
+
+function stableJson(value: unknown): string {
+  const text = JSON.stringify(sortJsonKeys(value))
+  if (text === undefined) throw new Error("Skill snapshot contains a non-JSON value")
+  return text
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+function skillSnapshotContent(snapshot: SkillObservationList): string {
+  if (!validateSkillObservationSnapshot(snapshot)) throw new Error("Invalid skill observation snapshot; refusing Wiki capture")
+  if (snapshot.facts.length > MAX_SKILL_SNAPSHOT_FACTS) {
+    throw new Error(`Skill observation snapshot exceeds ${MAX_SKILL_SNAPSHOT_FACTS} facts`)
+  }
+  const facts = [...snapshot.facts].sort((left, right) =>
+    compareText(left.kind, right.kind) || compareText(left.sessionID, right.sessionID) ||
+    compareText(left.factKey, right.factKey) || compareText(stableJson(left), stableJson(right)))
+  const envelope: SkillSnapshotEnvelope = {
+    schemaVersion: 1,
+    kind: SKILL_SNAPSHOT_KIND,
+    observations: { ...snapshot, facts },
+  }
+  const serialized = JSON.stringify(sortJsonKeys(envelope), null, 2)
+  if (serialized === undefined) throw new Error("Skill snapshot contains a non-JSON value")
+  const content = `${serialized}\n`
+  if (Buffer.byteLength(content, "utf8") > MAX_SKILL_SNAPSHOT_BYTES) {
+    throw new Error(`Skill observation snapshot exceeds ${MAX_SKILL_SNAPSHOT_BYTES} bytes`)
+  }
+  return content
+}
+
+function validSkillSnapshotEnvelope(value: unknown): value is SkillSnapshotEnvelope {
+  if (!isRecord(value) || Object.keys(value).length !== 3 ||
+      value.schemaVersion !== 1 || value.kind !== SKILL_SNAPSHOT_KIND || !Object.hasOwn(value, "observations")) return false
+  return validateSkillObservationSnapshot(value.observations)
+}
+
+/** Resolve only repository-owned Wiki components; a symlinked parent is never followed for skill evidence. */
+function existingSkillRawDirectory(root: string): string | null {
+  let path = root
+  for (const segment of ["knowledge", "raw", "skill-runs"]) {
+    path = join(path, segment)
+    let info: ReturnType<typeof lstatSync>
+    try { info = lstatSync(path) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR") return null
+      throw error
+    }
+    if (info.isSymbolicLink()) throw new Error(`Skill raw source directory must not be a symlink: ${relative(root, path)}`)
+    if (!info.isDirectory()) throw new Error(`Skill raw source path must be a real directory: ${relative(root, path)}`)
+    if (segment === "skill-runs" && (info.mode & 0o077) !== 0) {
+      throw new Error(`Skill raw source directory must be private (0700): ${relative(root, path)}`)
+    }
+  }
+  return path
+}
+
+function skillRawFiles(root: string): { directory: string | null; files: SkillRawFile[]; totalBytes: number } {
+  const directory = existingSkillRawDirectory(root)
+  if (!directory) return { directory: null, files: [], totalBytes: 0 }
+  const dir = opendirSync(directory)
+  const files: SkillRawFile[] = []
+  let totalBytes = 0
+  try {
+    for (;;) {
+      const entry = dir.readSync()
+      if (!entry) break
+      if (files.length >= MAX_SKILL_SNAPSHOTS) {
+        throw new Error(`Skill raw source directory exceeds ${MAX_SKILL_SNAPSHOTS} snapshots`)
+      }
+      const id = /^([0-9a-f]{64})\.json$/.exec(entry.name)?.[1]
+      if (!id || basename(entry.name) !== entry.name) {
+        throw new Error("Invalid skill raw source filename")
+      }
+      const path = join(directory, entry.name)
+      const info = lstatSync(path)
+      if (info.isSymbolicLink() || !info.isFile()) {
+        throw new Error(`Skill raw source must be a regular, non-symlink file: ${relative(root, path)}`)
+      }
+      if ((info.mode & 0o077) !== 0) {
+        throw new Error(`Skill raw source file must be private (0600): ${relative(root, path)}`)
+      }
+      if (!Number.isSafeInteger(info.size) || info.size < 0 || info.size > MAX_SKILL_SNAPSHOT_BYTES) {
+        throw new Error(`Skill raw source exceeds ${MAX_SKILL_SNAPSHOT_BYTES} bytes: ${relative(root, path)}`)
+      }
+      totalBytes += info.size
+      if (totalBytes > MAX_SKILL_SNAPSHOT_TOTAL_BYTES) {
+        throw new Error(`Skill raw sources exceed ${MAX_SKILL_SNAPSHOT_TOTAL_BYTES} total bytes`)
+      }
+      files.push({ id, path, size: info.size })
+    }
+  } finally { dir.closeSync() }
+  files.sort((left, right) => compareText(left.id, right.id))
+  return { directory, files, totalBytes }
+}
+
+function sameSkillFile(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof fstatSync>): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
+    left.mode === right.mode && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs
+}
+
+function readSkillRawFile(root: string, file: SkillRawFile): Buffer {
+  let fd: number | null = null
+  try {
+    fd = openSync(file.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    const before = fstatSync(fd)
+    if (!before.isFile() || before.size > MAX_SKILL_SNAPSHOT_BYTES || before.size !== file.size) {
+      throw new Error(`Skill raw source changed or is unsafe: ${relative(root, file.path)}`)
+    }
+    if ((before.mode & 0o077) !== 0) throw new Error(`Skill raw source file must be private (0600): ${relative(root, file.path)}`)
+    const bytes = Buffer.alloc(before.size)
+    let offset = 0
+    while (offset < bytes.length) {
+      const read = readSync(fd, bytes, offset, bytes.length - offset, offset)
+      if (read === 0) break
+      offset += read
+    }
+    if (offset !== bytes.length) throw new Error(`Skill raw source changed while reading: ${relative(root, file.path)}`)
+    const extra = Buffer.alloc(1)
+    if (readSync(fd, extra, 0, 1, offset) !== 0) throw new Error(`Skill raw source grew while reading: ${relative(root, file.path)}`)
+    const after = fstatSync(fd)
+    const pathAfter = lstatSync(file.path)
+    if (pathAfter.isSymbolicLink() || !sameSkillFile(before, after) ||
+        before.dev !== pathAfter.dev || before.ino !== pathAfter.ino) {
+      throw new Error(`Skill raw source changed while reading: ${relative(root, file.path)}`)
+    }
+    return bytes
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Skill raw source")) throw error
+    throw new Error(`Skill raw source is unsafe or unavailable: ${relative(root, file.path)}`)
+  } finally {
+    if (fd !== null) closeSync(fd)
+  }
+}
+
+function validateSkillRawBytes(bytes: Buffer, id: string, root: string, path: string): void {
+  if (digestBytes(bytes) !== id) throw new Error(`Skill raw source integrity mismatch: ${relative(root, path)}`)
+  let value: unknown
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+    value = JSON.parse(text)
+  } catch {
+    throw new Error(`Invalid skill raw source JSON: ${relative(root, path)}`)
+  }
+  if (!validSkillSnapshotEnvelope(value)) {
+    throw new Error(`Invalid skill observation snapshot schema or metadata: ${relative(root, path)}`)
+  }
+}
+
+/** Bounded preflight also verifies every retained skill snapshot before any Wiki write or lock acquisition. */
+function preflightSkillRawStore(root: string, candidateId: string, candidateContent: string): void {
+  const { files, totalBytes } = skillRawFiles(root)
+  const candidateBytes = Buffer.from(candidateContent, "utf8")
+  let candidateExists = false
+  for (const file of files) {
+    const bytes = readSkillRawFile(root, file)
+    validateSkillRawBytes(bytes, file.id, root, file.path)
+    if (file.id === candidateId) {
+      if (!bytes.equals(candidateBytes)) throw new Error("Immutable raw skill source hash mismatch; refusing overwrite")
+      candidateExists = true
+    }
+  }
+  if (candidateExists) return
+  if (files.length >= MAX_SKILL_SNAPSHOTS) throw new Error(`Skill raw source cap reached (${MAX_SKILL_SNAPSHOTS} snapshots)`)
+  if (totalBytes + candidateBytes.length > MAX_SKILL_SNAPSHOT_TOTAL_BYTES) {
+    throw new Error(`Skill raw source byte cap reached (${MAX_SKILL_SNAPSHOT_TOTAL_BYTES} bytes)`)
+  }
+}
+
+function ratioLine(label: string, value: { numerator: number; denominator: number; display: string; unknown: number; excluded: number; censored: number }): string {
+  return `- ${label}: ${value.numerator}/${value.denominator} (${value.display}); unknown=${value.unknown}; excluded=${value.excluded}; censored=${value.censored}.`
+}
+
+function durationLine(label: string, value: { samples: number; meanMs: number | null; missing: number; invalid: number }): string {
+  return `- ${label}: samples=${value.samples}; mean ms=${value.meanMs ?? "N/A"}; missing=${value.missing}; invalid=${value.invalid}.`
+}
+
+function sortedCounts(value: Record<string, number>): string {
+  return Object.entries(value).sort(([left], [right]) => compareText(left, right)).map(([key, count]) => `${key}=${count}`).join(", ")
+}
+
+function fingerprintReasonCounts(value: { byReason: Record<string, number>; conflicts: number; unknown: number }): string {
+  return `${sortedCounts(value.byReason)}; conflicts=${value.conflicts}; unknown=${value.unknown}`
+}
+
+function renderSkillEvaluationReport(snapshot: SkillObservationList, sourceId: string, evaluation: ReturnType<typeof summarizeSkillEvaluation>): string {
+  const campaign = snapshot.campaign
+  const coverage = snapshot.coverage
+  const count = (value: number) => snapshot.available ? value : "N/A"
+  const times = snapshot.facts.map((fact) => fact.recordedAt)
+  const period = times.length ? `${Math.min(...times)}–${Math.max(...times)} (recorded epoch milliseconds)` : "N/A"
+  return [
+    "# Skill evaluation observations",
+    "",
+    "> Deterministic, sanitized skill-observation projection. A call, returned-text fingerprint, or current-file fingerprint is not proof of procedure adherence or causal effectiveness.",
+    "",
+    `[Wiki index](../index.md) · [Immutable snapshot](../../raw/skill-runs/${sourceId}.json) · [Source record](../sources/skill-runs-${sourceId}.md)`,
+    "",
+    "## Availability and campaign",
+    "",
+    `- Snapshot availability: ${snapshot.available ? "available" : "unavailable"}; health: ${snapshot.health}.`,
+    `- Campaign: ${campaign.campaignID ?? "N/A"}; status: ${campaign.status ?? "N/A"}; stop reason: ${campaign.stopReason ?? "N/A"}; cutoff reason: ${campaign.cutoffReason ?? "N/A"}; closure reason: ${campaign.closureReason ?? "N/A"}.`,
+    `- Actual recorded campaign counters: sessions ${count(campaign.sessionCount)}; quota calls ${count(campaign.callCount)}; pending ${count(campaign.pendingCount)}; stored facts ${count(campaign.storedFactCount)}; expired facts ${count(campaign.expiredFactCount)}.`,
+    `- Censored at closure: ${count(campaign.censoredCount)}; bounded rejection counters: ${snapshot.available ? sortedCounts(campaign.rejections) || "none recorded" : "N/A"}. Unavailable/busy losses are not an exact census.`,
+    `- Campaign activated at: ${campaign.activatedAt ?? "N/A"}; included record period: ${period}. Every ratio below shares this campaign, immutable source and bounded coverage; it is not a population estimate.`,
+    `- Cutoff sequence: ${campaign.cutoffSeq ?? "N/A"}; drain deadline: ${campaign.drainDeadline ?? "N/A"}; closed at: ${campaign.closedAt ?? "N/A"}.`,
+    "- Unavailable, disabled, missing, expired, capped, or closed telemetry is not evidence of zero skill use. Campaign counters describe only admitted observations; they are not a census of all repository skill use.",
+    "",
+    "## Calls and returned content",
+    "",
+    `- Included unique calls: ${evaluation.calls.includedUniqueCalls}; durable quota calls: ${evaluation.calls.durableQuotaCalls ?? "N/A"}; quota calls not represented here: ${evaluation.calls.unrepresentedDurableQuotaCalls ?? "unknown"}.`,
+    `- Completed skill-tool calls: ${evaluation.calls.completedToolCalls}; error/aborted calls: ${evaluation.calls.errorOrAbortedToolCalls}; unresolved calls: ${evaluation.calls.unresolvedCalls}; censored unresolved calls: ${evaluation.calls.censoredUnresolvedCalls}; conflicts: ${evaluation.calls.conflicts}.`,
+    `- Returned content states: observed ${evaluation.calls.returnedContent.observed}; not returned ${evaluation.calls.returnedContent.notReturned}; unknown ${evaluation.calls.returnedContent.unknown}.`,
+    ratioLine("Known call-state coverage among included calls", evaluation.calls.stateCoverage),
+    durationLine("Skill-call duration", evaluation.calls.duration),
+    "- Completed tool-call counts do not establish that a model followed returned skill text, that a task passed, or that a skill caused an outcome.",
+    "",
+    "## Fingerprint coverage and hash bases",
+    "",
+    ratioLine("Terminal output payload fingerprint", evaluation.fingerprints.terminalPayload),
+    `  Basis: \`${RETURNED_PAYLOAD_BASIS}\`; this is the exact bounded terminal output payload basis.`,
+    `  Missing/conflicting reasons: ${fingerprintReasonCounts(evaluation.fingerprints.terminalPayload.reasons)}.`,
+    ratioLine("Returned skill body fingerprint", evaluation.fingerprints.returnedBody),
+    `  Basis: \`${RETURNED_BODY_BASIS}\`; this is the supported renderer's trimmed returned body, not the complete on-disk file.`,
+    `  Missing/conflicting reasons: ${fingerprintReasonCounts(evaluation.fingerprints.returnedBody.reasons)}.`,
+    ratioLine("Current project skill file fingerprint", evaluation.fingerprints.currentProjectFile),
+    `  Basis: \`${OBSERVED_FILE_BASIS}\`; it is a current-file observation and is not guaranteed to be the originally loaded bytes.`,
+    `  Missing/conflicting reasons: ${fingerprintReasonCounts(evaluation.fingerprints.currentProjectFile.reasons)}.`,
+    "- The exact loaded original file SHA is unavailable. Fingerprint ratios use completed calls as their denominator; zero denominators are N/A, never 0%.",
+    "- Returned skill text is not proof of procedure adherence; a loaded skill and a later outcome do not establish causal effectiveness.",
+    "",
+    "## Skill/body-basis/role/model/configuration strata",
+    "",
+    "| Skill | Returned body SHA / basis | Actual role / basis | Model / basis | Config generation | Calls / completed / errors / unresolved / conflicts | Body fingerprint n/N; unknown/excluded/censored |",
+    "|---|---|---|---|---|---|---|",
+    ...evaluation.strata.map((row) => `| ${markdown(row.skillName ?? "unknown")} | ${markdown(row.returnedBodySha256 ?? "unavailable")} / ${markdown(row.returnedBodyBasis ?? "unknown")} | ${markdown(row.actualRole ?? "unknown")} / ${markdown(row.roleBasis ?? "unknown")} | ${markdown(row.actualModel ?? "unknown")} / ${markdown(row.modelBasis ?? "unknown")} | ${row.configGeneration ?? "unknown"} | ${row.includedUniqueCalls} / ${row.completedToolCalls} / ${row.errorOrAbortedToolCalls} / ${row.unresolvedCalls} / ${row.conflicts} | ${row.returnedBodyFingerprint.numerator}/${row.returnedBodyFingerprint.denominator} (${row.returnedBodyFingerprint.display}); ${row.returnedBodyFingerprint.unknown}/${row.returnedBodyFingerprint.excluded}/${row.returnedBodyFingerprint.censored} |`),
+    ...(evaluation.strata.length ? [] : ["No included skill-call strata; this is not evidence of zero population use."]),
+    "",
+    "## Task attribution and verification",
+    "",
+    ratioLine("Exact worker task-attempt links among eligible calls", evaluation.taskAttribution.workerTaskAttemptLinkRate),
+    `- Exact worker task-attempt relations: ${evaluation.taskAttribution.exactWorkerTaskAttemptLinks}; orchestrator-context relations: ${evaluation.taskAttribution.orchestratorContextLinks}.`,
+    `- Task attempts: ${evaluation.taskAttribution.attempts.total}; statuses: ${sortedCounts(evaluation.taskAttribution.attempts.statuses)}; kinds: ${sortedCounts(evaluation.taskAttribution.attempts.taskKinds)}.`,
+    `- Final owner tasks: ${evaluation.taskAttribution.finalOwnerTasks.total}; statuses: ${sortedCounts(evaluation.taskAttribution.finalOwnerTasks.statuses)}; child actor facts excluded from task totals: ${evaluation.taskAttribution.finalOwnerTasks.childActorFactsExcludedFromTaskTotal}.`,
+    `- Verification statuses: ${sortedCounts(evaluation.verification.statuses)}.`,
+    `- Review verdicts: ${sortedCounts(evaluation.verification.reviewVerdicts)}; verification-associated task statuses: ${sortedCounts(evaluation.verification.taskStatuses)}.`,
+    ratioLine("Known verification exit-zero rate", evaluation.verification.exitZero),
+    durationLine("Code verification duration", evaluation.verification.durations),
+    "- Tool-call outcomes, task-attempt states, and verification results are separate evidence; a successful tool call is not a successful verification.",
+    "",
+    "## Recommendation association",
+    "",
+    `- Exact advice exposures: ${evaluation.advice.exactExposures}; completed exposures with a same-turn skill call: ${evaluation.advice.exposuresWithSameTurnSkillCall}; exact skill-call relations: ${evaluation.advice.callsJoinedToAdvice}; unknown ancestry: ${evaluation.advice.callAncestry.unknown}; conflicting ancestry: ${evaluation.advice.callAncestry.conflicts}.`,
+    ratioLine("Advice follow-through among complete eligible turns", evaluation.advice.followThrough),
+    `- Request evidence: ${sortedCounts(evaluation.advice.requestEvidenceCounts)}. Router exposure: ${sortedCounts(evaluation.advice.routingExposureCounts)}.`,
+    `- Complete user turns: ${evaluation.advice.completeUserTurns}; censored user turns: ${evaluation.advice.censoredUserTurns}. No observed trigger is not confirmed autonomous choice.`,
+    "- Association is reported only from exact admitted turn/call facts; unrelated routing and tool-outcome histories are not imported or summed into this report.",
+    "- Adherence claim: false. Causal-effectiveness claim: false.",
+    "",
+    "## Related non-skill tool observations",
+    "",
+    `- Included unique calls: ${evaluation.relatedTools.includedUniqueCalls}; statuses: ${sortedCounts(evaluation.relatedTools.statuses)}.`,
+    `- Same-turn tool calls/relations: ${evaluation.relatedTools.sameTurn.uniqueToolCalls}/${evaluation.relatedTools.sameTurn.relations}; after-load same-turn calls/relations: ${evaluation.relatedTools.afterLoadSameTurn.uniqueToolCalls}/${evaluation.relatedTools.afterLoadSameTurn.relations}. These are distinct associations, not procedure adherence.`,
+    `- Unknown/conflicting turn ancestry: ${evaluation.relatedTools.unknownTurnAncestry}/${evaluation.relatedTools.conflictingTurnAncestry}; unscanned relations: ${evaluation.relatedTools.sameTurn.unscannedRelations}.`,
+    durationLine("Related tool duration", evaluation.relatedTools.durations),
+    "",
+    "## Snapshot coverage and censoring",
+    "",
+    `- Returned facts: ${coverage.returnedFacts}; stored facts: ${coverage.storedFacts}; unscanned stored facts: ${coverage.unscannedStoredFacts}; expired facts: ${coverage.expiredFacts}.`,
+    `- Truncated: ${coverage.truncated ? "yes" : "no"}; unscanned total: ${coverage.unscannedTotal}; not collected after stop: ${coverage.notCollectedAfterStop ? "yes" : "no"}; population complete: no.`,
+    `- Evaluator accepted facts: ${evaluation.coverage.acceptedFacts}; invalid rows: ${evaluation.coverage.invalidRows}; evaluator unscanned stored facts: ${evaluation.coverage.unscannedStoredFacts}; expired facts: ${evaluation.coverage.expiredFacts}; unobserved population: ${evaluation.coverage.unobservedPopulation}.`,
+    "- Stored totals, unscanned totals, expired facts, quota cutoff, closed state, and censored values are retained as distinct fields; snapshots are not summed.",
+    "",
+  ].join("\n")
+}
+
+function skillSourcePage(snapshot: SkillObservationList, sourceId: string): string {
+  const campaign = snapshot.campaign
+  return [
+    "# Skill evaluation snapshot",
+    "",
+    "> Immutable, sanitized evidence captured manually from the bounded skill-observation store. This record does not claim complete population, procedure adherence, or causal effectiveness.",
+    "",
+    `[Immutable snapshot](../../raw/skill-runs/${sourceId}.json) · [Index](../index.md) · [Skill evaluation report](../reports/skill-evaluation.md)`,
+    "",
+    `- source_id: ${sourceId}`,
+    `- Available: ${snapshot.available}; health: ${snapshot.health}; campaign status: ${campaign.status ?? "N/A"}.`,
+    `- Recorded sessions: ${snapshot.available ? campaign.sessionCount : "N/A"}; quota calls: ${snapshot.available ? campaign.callCount : "N/A"}; stored facts: ${snapshot.coverage.storedFacts}; returned facts: ${snapshot.coverage.returnedFacts}.`,
+    `- Truncated: ${snapshot.coverage.truncated}; unscanned total: ${snapshot.coverage.unscannedTotal}; expired facts: ${snapshot.coverage.expiredFacts}; not collected after stop: ${snapshot.coverage.notCollectedAfterStop}.`,
+    "- The snapshot contains sanitized facts only; raw prompt, input/output bodies, commands, errors, config, endpoints, and absolute paths are not exported.",
+    "",
+    "## Interpretation",
+    "",
+    "Returned-text and current-file fingerprints have different documented hash bases. A current file is not proof of the exact loaded text; loading is not procedure adherence; observed outcomes do not establish causal effectiveness.",
+    "",
+  ].join("\n")
+}
+
 /** Deterministic capture is not semantic ingestion: the coding agent maintains synthesis pages separately. */
 export function captureWiki(worktree: string) {
   const root = realpathSync(worktree)
-  // Validate and bound untrusted routing input before the lock or any wiki output is written.
+  // Validate and bound telemetry input before the lock or any wiki output is written.
   const routingSnapshot = readRoutingLogs(root)
+  const skillSnapshot = listSkillObservations(root, { limit: MAX_SKILL_SNAPSHOT_FACTS })
+  const skillContent = skillSnapshotContent(skillSnapshot)
+  const skillSourceId = digest(skillContent)
+  preflightSkillRawStore(root, skillSourceId, skillContent)
   const lock = acquireLock(root)
   try {
     const raw = safeDirectory(root, ["knowledge", "raw", "tool-runs"])
     const routingRaw = safeDirectory(root, ["knowledge", "raw", "routing"])
+    const skillRaw = safeDirectory(root, ["knowledge", "raw", "skill-runs"])
     const wiki = safeDirectory(root, ["knowledge", "wiki"])
     const sources = safeDirectory(root, ["knowledge", "wiki", "sources"])
     const reports = safeDirectory(root, ["knowledge", "wiki", "reports"])
@@ -292,6 +624,7 @@ export function captureWiki(worktree: string) {
     const log = join(wiki, "log.md")
     safeFile(index); safeFile(log)
     if (!existsSync(index) || !existsSync(log) || !existsSync(join(root, "knowledge", "AGENTS.md"))) throw new Error("Wiki schema, index and log must exist before capture")
+    preflightSkillRawStore(root, skillSourceId, skillContent)
     const { rows, totalCount } = listToolOutcomes(root)
     // Explicit projection keeps raw exports narrow even if the database schema grows later.
     const observations = rows.map((r) => ({ schemaVersion: r.schemaVersion, id: r.id, sessionID: r.sessionID, callID: r.callID,
@@ -343,6 +676,37 @@ export function captureWiki(worktree: string) {
       writeFileSync(log, `\n## [${new Date().toISOString()}] capture | Jev routing observations\n\n- source_id: ${routingSourceId}\n- [Sanitized routing snapshot](sources/${routingPageName}); ${routingSnapshot.coverage.valid} unique valid events.\n- Recommendations and advice insertion are not evidence of skill execution or success.\n`, { flag: "a", mode: 0o600 })
     }
     const routingSummary = summarizeRouting(routingSnapshot)
+    const skillRawPath = join(skillRaw, `${skillSourceId}.json`)
+    const skillCreated = createOnly(skillRawPath, skillContent)
+    if (!skillCreated && readFileSync(skillRawPath, "utf8") !== skillContent) {
+      throw new Error("Immutable raw skill source hash mismatch; refusing overwrite")
+    }
+    const skillSourceName = `skill-runs-${skillSourceId}.md`
+    const skillSourcePath = join(sources, skillSourceName)
+    createOnly(skillSourcePath, skillSourcePage(skillSnapshot, skillSourceId))
+    const skillEvaluation = summarizeSkillEvaluation(skillSnapshot.facts, {
+      ...skillSnapshot.coverage,
+      campaignID: skillSnapshot.campaign.campaignID,
+      durableQuotaCalls: skillSnapshot.available ? skillSnapshot.campaign.callCount : null,
+      period: { startAt: skillSnapshot.campaign.activatedAt, endAt: skillSnapshot.campaign.closedAt, basis: "campaign-control.v1" },
+    })
+    const skillReportPath = join(reports, "skill-evaluation.md")
+    replaceDerived(skillReportPath, renderSkillEvaluationReport(skillSnapshot, skillSourceId, skillEvaluation))
+
+    const indexAfterRouting = readFileSync(index, "utf8")
+    let nextSkillIndex = indexAfterRouting.trimEnd()
+    if (!indexAfterRouting.includes(`](sources/${skillSourceName})`)) {
+      nextSkillIndex += `\n\n- [Skill evaluation snapshot ${skillSourceId.slice(0, 12)}](sources/${skillSourceName}) — ${skillSnapshot.coverage.returnedFacts} sanitized facts; population completeness is unknown.`
+    }
+    if (!indexAfterRouting.includes("](reports/skill-evaluation.md)")) nextSkillIndex += "\n- [Skill evaluation report](reports/skill-evaluation.md)"
+    if (nextSkillIndex !== indexAfterRouting.trimEnd()) replaceDerived(index, `${nextSkillIndex}\n`)
+
+    const skillLogText = readFileSync(log, "utf8")
+    const skillLogged = parseLog(skillLogText).some((entry) => entry.op === "capture" && hasSourceId(entry, skillSourceId) &&
+      entry.body.split("\n").some((line) => line.trim() === "- kind: skill-runs"))
+    if (!skillLogged) {
+      writeFileSync(log, `\n## [${new Date().toISOString()}] capture | Skill evaluation observations\n\n- source_id: ${skillSourceId}\n- kind: skill-runs\n- [Sanitized skill evaluation source](sources/${skillSourceName}); ${skillSnapshot.coverage.returnedFacts}/${skillSnapshot.coverage.storedFacts} facts returned.\n- This manual snapshot is bounded; population completeness, adherence, and causal effectiveness are not claimed.\n`, { flag: "a", mode: 0o600 })
+    }
     return {
       source: relative(root, rawPath), summary: relative(root, join(sources, sourcePage)),
       report: relative(root, join(reports, "tool-outcomes.md")), created, observations: observations.length, totalCount,
@@ -351,6 +715,13 @@ export function captureWiki(worktree: string) {
         report: relative(root, join(reports, "routing.md")), created: routingCreated,
         events: routingSnapshot.coverage.valid, decisions: routingSummary.decisions.length,
         adviceApplied: routingSummary.applications.length, coverage: routingSnapshot.coverage,
+      },
+      skills: {
+        sourceId: skillSourceId, kind: "skill-runs", source: relative(root, skillRawPath),
+        summary: relative(root, skillSourcePath), report: relative(root, skillReportPath),
+        bytes: Buffer.byteLength(skillContent, "utf8"), created: skillCreated,
+        available: skillSnapshot.available, health: skillSnapshot.health,
+        campaign: skillSnapshot.campaign, coverage: skillSnapshot.coverage, evaluation: skillEvaluation,
       },
     }
   } finally { unlinkSync(lock) }
@@ -466,7 +837,7 @@ export function registerWiki(worktree: string, file: string, opts: { title?: str
 }
 
 // -- Status ---------------------------------------------------------------------------------------------------------
-export type PendingItem = { sourceId: string; kind: "documents" | "tool-runs" | "routing"; source: string; summary: string; title: string; registeredAt: string | null }
+export type PendingItem = { sourceId: string; kind: "documents" | "tool-runs" | "routing" | "skill-runs"; source: string; summary: string; title: string; registeredAt: string | null }
 export type WikiStatus = { sources: number; compiled: number; pending: PendingItem[]; problems: string[]; locked?: true }
 
 /** Read-only: never creates or modifies any wiki file. */
@@ -485,7 +856,51 @@ export function statusWiki(worktree: string): WikiStatus {
     [join(knowledge, "raw", "documents"), "documents", "documents"],
     [join(knowledge, "raw", "tool-runs"), "tool-runs", "tool-runs"],
     [join(knowledge, "raw", "routing"), "routing", "routing"],
+    [join(knowledge, "raw", "skill-runs"), "skill-runs", "skill-runs"],
   ] as const) {
+    if (kind === "skill-runs") {
+      let skillFiles: SkillRawFile[]
+      try {
+        skillFiles = skillRawFiles(root).files
+        for (const file of skillFiles) validateSkillRawBytes(readSkillRawFile(root, file), file.id, root, file.path)
+      } catch (error) {
+        problems.push((error as Error).message)
+        continue
+      }
+      try {
+        const sourceDirectoryInfo = lstatSync(sourcesDir)
+        if (sourceDirectoryInfo.isSymbolicLink() || !sourceDirectoryInfo.isDirectory()) {
+          problems.push("Skill source pages directory must be a real directory")
+          continue
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+      }
+      for (const file of skillFiles) {
+        const sourcePagePath = join(sourcesDir, `${pagePrefix}-${file.id}.md`)
+        let pageInfo: ReturnType<typeof lstatSync>
+        try { pageInfo = lstatSync(sourcePagePath) } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            problems.push(`Raw source without source page: ${relative(root, file.path)}`)
+            continue
+          }
+          throw error
+        }
+        if (pageInfo.isSymbolicLink() || !pageInfo.isFile()) {
+          problems.push(`Skill source page must be a regular, non-symlink file: ${relative(root, sourcePagePath)}`)
+          continue
+        }
+        const own = entries.find((entry) => (entry.op === "capture" || entry.op === "register") && hasSourceId(entry, file.id) &&
+          entry.body.split("\n").some((line) => line.trim() === "- kind: skill-runs"))
+        if (!own) problems.push(`Raw source without capture/register log entry: ${relative(root, file.path)}`)
+        const title = own ? unescapeMarkdown(own.title) : file.id
+        items.push({
+          sourceId: file.id, kind, source: relative(root, file.path), summary: relative(root, sourcePagePath),
+          title, registeredAt: own ? own.at : null, sourcePagePath,
+        })
+      }
+      continue
+    }
     if (kind === "routing") {
       let info: ReturnType<typeof lstatSync>
       try { info = lstatSync(dir) } catch (error) {
@@ -529,11 +944,11 @@ export function statusWiki(worktree: string): WikiStatus {
       if (!contained(sourcesDir, target) && target !== sourcesDir) continue
       if (existsSync(target)) {
         const item = items.find((it) => it.sourcePagePath === target)
-        if (item) compiledIds.add(item.sourceId)
+        if (item) compiledIds.add(`${item.kind}\0${item.sourceId}`)
       } else problems.push(`Ingest entry links unknown source: ${link}`)
     }
   }
-  const pending = items.filter((it) => !compiledIds.has(it.sourceId))
+  const pending = items.filter((it) => !compiledIds.has(`${it.kind}\0${it.sourceId}`))
     .map(({ sourcePagePath: _sourcePagePath, ...rest }) => rest)
     .sort((a, b) => {
       if (a.registeredAt === null && b.registeredAt === null) return a.sourceId.localeCompare(b.sourceId)
@@ -555,14 +970,26 @@ export function lintWiki(worktree: string): string[] {
   const problems: string[] = []
   if (existsSync(lockPath(root))) return [lockProblem(root)]
   const files: string[] = []
+  const rawSkillFiles = new Map<string, SkillRawFile>()
+  const skillRunsDir = join(knowledge, "raw", "skill-runs")
   function walk(path: string) {
     if (!existsSync(path)) return
     const info = lstatSync(path)
     if (info.isSymbolicLink()) { problems.push(`Symlink is not allowed in wiki evidence: ${relative(root, path)}`); return }
+    if (path === skillRunsDir) return
     if (info.isDirectory()) for (const entry of readdirSync(path).sort()) walk(join(path, entry))
     else if (info.isFile()) files.push(path)
   }
   walk(knowledge)
+  try {
+    const skillFiles = skillRawFiles(root).files
+    for (const file of skillFiles) {
+      rawSkillFiles.set(file.path, file)
+      files.push(file.path)
+    }
+  } catch (error) {
+    problems.push((error as Error).message)
+  }
   for (const path of ["AGENTS.md", "wiki/index.md", "wiki/log.md", "wiki/reports/tool-outcomes.md"]) {
     if (!files.includes(join(knowledge, path))) problems.push(`Missing required wiki file: ${path}`)
   }
@@ -573,7 +1000,7 @@ export function lintWiki(worktree: string): string[] {
   const documentsDir = join(rawDir, "documents")
   const sourcesDir = join(knowledge, "wiki", "sources")
   const indexed = new Set<string>()
-  const knownRawIds = new Map<string, { kind: "documents" | "tool-runs" | "routing"; ext: string }>()
+  const knownRawIds = new Map<string, { id: string; kind: "documents" | "tool-runs" | "routing" | "skill-runs"; ext: string }>()
   for (const path of files) {
     const underRaw = contained(rawDir, path)
     if (path.endsWith(".md") && !underRaw) {
@@ -592,7 +1019,7 @@ export function lintWiki(worktree: string): string[] {
       const bytes = readFileSync(path)
       const id = digestBytes(bytes)
       if (path !== join(dirname(path), `${id}.json`)) problems.push(`Raw source integrity mismatch: ${relative(root, path)}`)
-      else knownRawIds.set(id, { kind: "tool-runs", ext: ".json" })
+      else knownRawIds.set(`tool-runs\0${id}`, { id, kind: "tool-runs", ext: ".json" })
       try {
         const data = JSON.parse(text)
         if (data.schemaVersion !== 1 || data.kind !== "tool-outcome-snapshot" || !Array.isArray(data.observations)) problems.push(`Invalid raw source schema: ${relative(root, path)}`)
@@ -603,17 +1030,28 @@ export function lintWiki(worktree: string): string[] {
       const bytes = readFileSync(path)
       const id = digestBytes(bytes)
       if (path !== join(dirname(path), `${id}${ext}`)) problems.push(`Raw source integrity mismatch: ${relative(root, path)}`)
-      else knownRawIds.set(id, { kind: "documents", ext })
+      else knownRawIds.set(`documents\0${id}`, { id, kind: "documents", ext })
     } else if (underRaw && contained(routingDir, path)) {
       if (extname(path) !== ".json") { problems.push(`Disallowed raw source extension: ${relative(root, path)}`); continue }
       const bytes = readFileSync(path)
       const id = digestBytes(bytes)
       if (path !== join(routingDir, `${id}.json`)) problems.push(`Raw source integrity mismatch: ${relative(root, path)}`)
-      else knownRawIds.set(id, { kind: "routing", ext: ".json" })
+      else knownRawIds.set(`routing\0${id}`, { id, kind: "routing", ext: ".json" })
       try {
         const data: unknown = JSON.parse(bytes.toString("utf8"))
         if (!isRoutingSnapshot(data)) problems.push(`Invalid routing snapshot schema or metadata: ${relative(root, path)}`)
       } catch { problems.push(`Invalid routing snapshot JSON: ${relative(root, path)}`) }
+    } else if (underRaw && contained(skillRunsDir, path)) {
+      const file = rawSkillFiles.get(path)
+      if (!file || extname(path) !== ".json") { problems.push(`Invalid skill raw source path: ${relative(root, path)}`); continue }
+      try {
+        const bytes = readSkillRawFile(root, file)
+        const id = digestBytes(bytes)
+        if (path !== join(skillRunsDir, `${id}.json`) || id !== file.id) {
+          problems.push(`Skill raw source integrity mismatch: ${relative(root, path)}`)
+        } else knownRawIds.set(`skill-runs\0${id}`, { id, kind: "skill-runs", ext: ".json" })
+        validateSkillRawBytes(bytes, file.id, root, path)
+      } catch (error) { problems.push((error as Error).message) }
     } else if (underRaw) {
       problems.push(`Disallowed raw source extension: ${relative(root, path)}`)
     }
@@ -622,17 +1060,17 @@ export function lintWiki(worktree: string): string[] {
     if (!indexed.has(path)) problems.push(`Wiki page missing from index: ${relative(root, path)}`)
   }
   // Raw <-> source-page pairing, both directions.
-  for (const [id, info] of knownRawIds) {
-    const pagePath = join(sourcesDir, `${info.kind}-${id}.md`)
-    if (!files.includes(pagePath)) problems.push(`Raw source without matching source page: ${info.kind}/${id}${info.ext}`)
+  for (const info of knownRawIds.values()) {
+    const pagePath = join(sourcesDir, `${info.kind}-${info.id}.md`)
+    if (!files.includes(pagePath)) problems.push(`Raw source without matching source page: ${info.kind}/${info.id}${info.ext}`)
   }
-  const sourcePageRe = /^(documents|tool-runs|routing)-([0-9a-f]{64})\.md$/
+  const sourcePageRe = /^(documents|tool-runs|routing|skill-runs)-([0-9a-f]{64})\.md$/
   if (existsSync(sourcesDir)) {
     for (const entryName of readdirSync(sourcesDir).sort()) {
       const match = sourcePageRe.exec(entryName)
       if (!match) continue
-      const [, kind, id] = match as unknown as [string, "documents" | "tool-runs" | "routing", string]
-      const info = knownRawIds.get(id)
+      const [, kind, id] = match as unknown as [string, "documents" | "tool-runs" | "routing" | "skill-runs", string]
+      const info = knownRawIds.get(`${kind}\0${id}`)
       if (!info || info.kind !== kind) problems.push(`Source page without matching raw source: ${entryName}`)
     }
   }
