@@ -31,7 +31,7 @@ describe("/stop", () => {
     expect(own.command.stop.template).toBe("mine")
     const off: any = {}
     await createConfigHook(fakeDeps(wt.worktree, { disabled_hooks: ["command.stop"] }))(off)
-    expect(off.command).toBeUndefined()
+    expect(off.command?.stop).toBeUndefined()
   })
 
   test("the template text is itself a cancel keyword for chat.message", () => {

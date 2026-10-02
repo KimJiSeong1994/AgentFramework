@@ -70,6 +70,8 @@ describe("chat.message hook", () => {
   })
 
   test("uses the last non-synthetic text part", async () => {
+    // flow off: legacy plan suffix mode (with flow on, D3 maps the plan keyword to the /plan workflow instead)
+    deps = { ...deps, config: { ...DEFAULT_CONFIG, flow: { ...DEFAULT_CONFIG.flow, enabled: false } } }
     const real = textPart("plan mode for auth")
     const synthetic = textPart("ultrawork", true)
     await run([real, synthetic])

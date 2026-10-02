@@ -6,12 +6,27 @@
 #
 #   scripts/lca-e2e.sh --dry-run     # print every step and the exact command; touches nothing
 #   scripts/lca-e2e.sh --check       # build the isolated env and verify isolation; NO model call
+#   scripts/lca-e2e.sh --smoke-command NAME  # isolated env like --check, then `opencode run --command NAME`
+#                                     (120s cap); PASS when the transcript's user text contains the code-rendered
+#                                     marker for that command (e.g. "[lca status]" for /status, M0 AC0.9)
 #   scripts/lca-e2e.sh               # full run: opencode run ... (loads the model, GPU, up to --timeout s)
 #
 # Options: --fixture NAME (fib)  --scratch DIR (default ~/.cache/lca/e2e, env LCA_E2E_SCRATCH)
 #          --timeout S (fib 600 / ulw3 1800)  --max-wall S (fib 300 / ulw3 900)  --budget-tokens N (8000)
 #          --worker-budget N / --reviewer-budget N (defaults: DEFAULT_CONFIG.budget)  --prompt "..."  --agent NAME (main)
 #          --no-auto (do not pass --auto to opencode run)  --keep (keep the work dir on success)
+#
+# M1 plan-workflow flags (ralplan section 6, AC1.1-AC1.9):
+#   --flow plan                    drive lca_flow's /plan -> /approve -> delegate cycle instead of a plain prompt
+#   --entry command|keyword (command)   command: `opencode run --command plan "<request>"`;
+#                                        keyword: plain `opencode run ... "ralplan <request>"`
+#   --repeat N --stop-after pending_approval   AC1.7: N fresh scratch repos + isolated state, each stops at the
+#                                        first pending_approval or 600s; writes ~/.cache/lca/e2e/flow-repeat-<ts>.json
+#   --seed-open-task                F07: pre-seed an untagged open ledger task before /approve
+#   scripts/lca-e2e.sh --flow plan --fixture plan3                       F01-F05
+#   scripts/lca-e2e.sh --flow plan --entry keyword --fixture plan3       F01-F06
+#   scripts/lca-e2e.sh --flow plan --fixture plan3 --seed-open-task      F07
+#   scripts/lca-e2e.sh --flow plan --fixture plan3 --repeat 10 --stop-after pending_approval   AC1.7
 # Exit: 0 all criteria met, 1 warnings only (check mode), 2 a criterion/check failed, 3 setup failed.
 #
 # Isolation design (verified on opencode 1.18.32, 2026-09-22 — `opencode debug paths` / `opencode debug config`):
@@ -45,14 +60,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH_DEFAULT="$HOME/.cache/lca/e2e"
 SCRATCH="${LCA_E2E_SCRATCH:-$SCRATCH_DEFAULT}"
 MODE=run; TIMEOUT=""; MAX_WALL=""; BUDGET=8000; WORKER_BUDGET=""; REVIEWER_BUDGET=""; AGENT=main; AUTO=1; KEEP=0
-FIXTURE_NAME=fib; PROMPT=""; WORKTREE=0
+FIXTURE_NAME=fib; PROMPT=""; WORKTREE=0; SMOKE_COMMAND=""
+FLOW=""; ENTRY=command; REPEAT=""; STOP_AFTER=""; SEED_OPEN_TASK=0
 USER_JSONC="$HOME/.config/opencode/opencode.jsonc"
 BASELINE="$ROOT/scripts/lca-baseline.py"
+STATUS_MARKER_TXT="[lca status]"  # framework/src/flow/status.ts STATUS_MARKER
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) MODE=dry ;;
     --check) MODE=check ;;
+    --smoke-command) MODE=smoke-command; SMOKE_COMMAND="$2"; shift ;;
     --fixture) FIXTURE_NAME="$2"; shift ;;
     --scratch) SCRATCH="$2"; shift ;;
     --worker-budget) WORKER_BUDGET="$2"; shift ;;
@@ -65,6 +83,11 @@ while [ $# -gt 0 ]; do
     --no-auto) AUTO=0 ;;
     --keep) KEEP=1 ;;
     --worktree) WORKTREE=1 ;;
+    --flow) FLOW="$2"; shift ;;
+    --entry) ENTRY="$2"; shift ;;
+    --repeat) REPEAT="$2"; shift ;;
+    --stop-after) STOP_AFTER="$2"; shift ;;
+    --seed-open-task) SEED_OPEN_TASK=1 ;;
     -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 3 ;;
   esac
@@ -84,10 +107,16 @@ case "$FIXTURE_NAME" in
   ulw-fail)
     : "${PROMPT:=ulw: Implement circle.py, rect.py and triangle.py so that test_circle.py, test_rect.py and test_triangle.py pass. One module per task; verify each with 'python3 -m pytest -q <its test file>'.}"
     : "${TIMEOUT:=1800}"; : "${MAX_WALL:=900}"; N_TASKS=3; EXPECT_STATUS="done,failed,done"; EXPECT_REVIEWS="accept,skipped,accept"; TASK_WALL=240 ;;
+  plan3)
+    : "${PROMPT:=Implement three independent data structures: a Stack class in stack.py (push, pop, peek, is_empty), a Queue class in queue_.py (enqueue, dequeue FIFO order, is_empty, dequeue raises IndexError when empty), and an LRUCache(capacity) class in lru_cache.py (get, put, evicts the least-recently-used key when capacity is exceeded). Plan one step per class; verify each with 'python3 -m pytest -q <its test file>'.}"
+    : "${TIMEOUT:=1800}"; : "${MAX_WALL:=900}"; N_TASKS=3; EXPECT_STATUS="done,done,done" ;;
   *)
     [ -d "$FIXTURE" ] || { echo "unknown fixture: $FIXTURE_NAME ($FIXTURE missing)" >&2; exit 3; }
     : "${PROMPT:=Make the tests in this directory pass.}"; : "${TIMEOUT:=1800}"; : "${MAX_WALL:=900}" ;;
 esac
+
+# --flow plan: keyword entry prepends the ralplan keyword to the same request text instead of using --command plan.
+if [ -n "$FLOW" ] && [ "$ENTRY" = keyword ]; then FLOW_PROMPT="ralplan $PROMPT"; else FLOW_PROMPT="$PROMPT"; fi
 
 E2E="$SCRATCH/lca-e2e"
 CFG_HOME="$E2E/config"; DATA_HOME="$E2E/data"; STATE_HOME="$E2E/state"; LOGS="$E2E/logs"
@@ -111,6 +140,7 @@ oc() {
       XDG_CONFIG_HOME="$CFG_HOME" XDG_DATA_HOME="$DATA_HOME" XDG_STATE_HOME="$STATE_HOME" "$@"
 }
 RUN_CMD="perl -e 'alarm $TIMEOUT; exec @ARGV' opencode run --format json --agent $AGENT $AUTO_FLAG \"$PROMPT\" </dev/null"
+FLOW_HELPER="$ROOT/scripts/lca-flow-e2e-helper.py"
 
 # ------------------------------------------------------------------ dry run
 if [ "$MODE" = dry ]; then
@@ -237,6 +267,256 @@ PY
   if [ "$KEEP" = 1 ]; then say "work dir kept: $WORK"; else rm -rf "$WORK"; fi
   say "check: $N_WARN warn, $N_FAIL fail (logs: $LOGS)"
   [ "$N_FAIL" -gt 0 ] && exit 2; [ "$N_WARN" -gt 0 ] && exit 1; exit 0
+fi
+
+# ------------------------------------------------------------------ smoke-command mode (M0 AC0.9)
+# Isolated env like --check, but proves a registered command (e.g. /status) is delivered and produces the
+# expected code-rendered output. No stage-1/2 criteria apply; PASS/FAIL only.
+if [ "$MODE" = smoke-command ]; then
+  step "smoke-command: $SMOKE_COMMAND"
+  SMOKE_TIMEOUT=120
+  OUT="$LOGS/smoke-$SMOKE_COMMAND-$STAMP.jsonl"; ERR="$LOGS/smoke-$SMOKE_COMMAND-$STAMP.err"
+  ( cd "$WORK" && oc perl -e "alarm $SMOKE_TIMEOUT; exec @ARGV or exit 127" opencode run --format json --agent "$AGENT" --command "$SMOKE_COMMAND" $AUTO_FLAG </dev/null > "$OUT" 2> "$ERR" )
+  rc=$?
+  say "opencode exit=$rc events=$(wc -l < "$OUT" | tr -d ' ') stderr=$(wc -l < "$ERR" | tr -d ' ') lines"
+  [ "$rc" -eq 142 ] && say "  (exit 142 = SIGALRM: timed out after ${SMOKE_TIMEOUT}s)"
+  # The marker is code-rendered into the user text part of the command's own message (chat.message rewrite,
+  # ARCH-08). `opencode run --format json` streams only assistant parts (verified on 1.18.33), so the user-role
+  # text is read from the isolated DB: it must contain the marker (proving code, not the model, produced it).
+  SID="$(python3 -c 'import json,sys
+for l in open(sys.argv[1]):
+    try: print(json.loads(l)["sessionID"]); break
+    except Exception: pass' "$OUT" 2>/dev/null)"
+  found="$(python3 - "$ISO_DB" "$SID" "$STATUS_MARKER_TXT" <<'PY' 2>/dev/null
+import json, sqlite3, sys
+db, sid, marker = sys.argv[1], sys.argv[2], sys.argv[3]
+found = 0
+try:
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    rows = con.execute(
+        "select m.data, p.data from part p join message m on m.id = p.message_id where p.session_id = ?", (sid,)
+    ).fetchall()
+    for mdata, pdata in rows:
+        if json.loads(mdata).get("role") != "user":
+            continue
+        part = json.loads(pdata)
+        if part.get("type") == "text" and marker in (part.get("text") or ""):
+            found = 1
+except Exception:
+    pass
+print(found)
+PY
+)"
+  if [ "$KEEP" = 1 ]; then say "work dir kept: $WORK"; else rm -rf "$WORK"; fi
+  if [ "$found" = 1 ]; then say "smoke-command: PASS ($SMOKE_COMMAND transcript contains the marker; log: $OUT)"; exit 0
+  else say "smoke-command: FAIL ($SMOKE_COMMAND transcript missing the marker; exit=$rc; log: $OUT err: $ERR)"; exit 2; fi
+fi
+
+# ------------------------------------------------------------------ --flow plan --repeat N --stop-after pending_approval
+# AC1.7: N fresh scratch repos + isolated state, each stops at the first pending_approval or 600s. Metric: runs
+# with >= 1 plan_submitted event. Never runs against the real model beyond what the caller invokes; this script
+# itself does not fake the model. Summary JSON -> ~/.cache/lca/e2e/flow-repeat-<ts>.json.
+if [ -n "$FLOW" ] && [ -n "$REPEAT" ]; then
+  [ "$STOP_AFTER" = pending_approval ] || { echo "--repeat requires --stop-after pending_approval" >&2; exit 3; }
+  REPEAT_TIMEOUT=600
+  SUMMARY_DIR="$HOME/.cache/lca/e2e"; mkdir -p "$SUMMARY_DIR"
+  SUMMARY_JSON="$SUMMARY_DIR/flow-repeat-$STAMP.json"
+  RESULTS_TMP="$(mktemp -d "${TMPDIR:-/tmp}/lca-e2e-repeat.XXXXXX")"
+  trap 'rm -rf "$RESULTS_TMP"' EXIT
+  n_pass=0
+  for i in $(seq 1 "$REPEAT"); do
+    step "repeat $i/$REPEAT: fresh scratch repo + isolated state"
+    RSCRATCH="$RESULTS_TMP/run-$i"
+    RE2E="$RSCRATCH/lca-e2e"; RCFG="$RE2E/config"; RDATA="$RE2E/data"; RSTATE="$RE2E/state"; RLOGS="$RE2E/logs"
+    mkdir -p "$RCFG/opencode" "$RDATA" "$RSTATE" "$RLOGS" "$RE2E/work"
+    RCFGJSON="$RCFG/opencode/opencode.json"
+    python3 - "$USER_JSONC" "$RCFGJSON" "" <<'PY' >/dev/null || exit 3
+import json, re, sys
+src, dst, model_override = sys.argv[1], sys.argv[2], sys.argv[3]
+t = open(src).read()
+t = re.sub(r"/\*[\s\S]*?\*/", "", t)
+t = re.sub(r'(^|[^:"\'\\\\])//.*$', r"\1", t, flags=re.M)
+t = re.sub(r",(\s*[}\]])", r"\1", t)
+u = json.loads(t)
+prov = (u.get("provider") or {}).get("ollama")
+if not prov: sys.exit("provider.ollama missing")
+cfg = {"$schema": "https://opencode.ai/config.json", "model": u.get("model"), "small_model": u.get("small_model", u.get("model")), "provider": {"ollama": prov}}
+json.dump(cfg, open(dst, "w"), indent=2)
+PY
+    RWORK="$RE2E/work/plan3-$i"
+    mkdir -p "$RWORK/.opencode/plugins" && cp -R "$FIXTURE/." "$RWORK/"
+    rm -rf "$RWORK/__pycache__" "$RWORK/.pytest_cache"
+    printf '// e2e loader\nexport { LcaPlugin } from "%s/framework/src/index.ts"\n' "$ROOT" > "$RWORK/.opencode/plugins/lca.ts"
+    ( cd "$RWORK" && git init -q && git add -A && git -c user.name=lca-e2e -c user.email=lca-e2e@localhost commit -q -m plan3 ) || exit 3
+    roc() { env -u OPENCODE_CONFIG_DIR -u ORCA_OPENCODE_CONFIG_DIR -u OPENCODE_CONFIG -u OPENCODE_CONFIG_CONTENT \
+        XDG_CONFIG_HOME="$RCFG" XDG_DATA_HOME="$RDATA" XDG_STATE_HOME="$RSTATE" "$@"; }
+    RSTATE_ROOT="$(python3 "$FLOW_HELPER" state-root "$RSTATE" "$RWORK")"
+    RCMD=command; RREQ="$PROMPT"; [ "$ENTRY" = keyword ] && { RCMD=""; RREQ="ralplan $PROMPT"; }
+    if [ "$RCMD" = command ]; then
+      ( cd "$RWORK" && roc perl -e 'alarm shift; exec @ARGV or exit 127' "$REPEAT_TIMEOUT" opencode run --format json --agent "$AGENT" --command plan $AUTO_FLAG "$RREQ" </dev/null > "$RLOGS/run.jsonl" 2> "$RLOGS/run.err" )
+    else
+      ( cd "$RWORK" && roc perl -e 'alarm shift; exec @ARGV or exit 127' "$REPEAT_TIMEOUT" opencode run --format json --agent "$AGENT" $AUTO_FLAG "$RREQ" </dev/null > "$RLOGS/run.jsonl" 2> "$RLOGS/run.err" )
+    fi
+    t0="$(date +%s)"; reached=0
+    while [ "$(( $(date +%s) - t0 ))" -lt "$REPEAT_TIMEOUT" ]; do
+      phase="$(python3 "$FLOW_HELPER" workflow "$RSTATE_ROOT" 2>/dev/null | grep '^phase=' | cut -d= -f2-)"
+      [ "$phase" = pending_approval ] && { reached=1; break; }
+      sleep 2
+    done
+    submitted=0
+    wfid="$(python3 "$FLOW_HELPER" workflow "$RSTATE_ROOT" 2>/dev/null | grep '^id=' | cut -d= -f2-)"
+    if [ -n "$wfid" ] && python3 "$FLOW_HELPER" events "$RSTATE_ROOT" "$wfid" 2>/dev/null | grep -q ' plan_submitted '; then submitted=1; fi
+    say "  run $i: pending_approval=$reached plan_submitted=$submitted"
+    [ "$submitted" = 1 ] && n_pass=$((n_pass + 1))
+    printf '{"run":%d,"pending_approval":%s,"plan_submitted":%s}\n' "$i" "$( [ $reached = 1 ] && echo true || echo false)" "$( [ $submitted = 1 ] && echo true || echo false)" >> "$RESULTS_TMP/results.ndjson"
+  done
+  python3 - "$RESULTS_TMP/results.ndjson" "$REPEAT" "$SUMMARY_JSON" "$STAMP" <<'PY'
+import json, sys
+path, n, out, stamp = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+runs = []
+try:
+    with open(path) as f:
+        runs = [json.loads(l) for l in f if l.strip()]
+except FileNotFoundError:
+    pass
+passed = sum(1 for r in runs if r.get("plan_submitted"))
+summary = {"stamp": stamp, "repeat": n, "runs": runs, "pass": passed, "total": n, "rate": passed / n if n else 0}
+json.dump(summary, open(out, "w"), indent=2)
+print(json.dumps(summary))
+PY
+  say ""
+  say "AC1.7: $n_pass/$REPEAT runs had >= 1 plan_submitted event; summary: $SUMMARY_JSON"
+  [ "$KEEP" = 1 ] || rm -rf "$RESULTS_TMP"
+  # >= 9/10 pass; 8/10 pass with a watch note (still exit 0, the doc records the note); <= 7/10 fail
+  if [ "$REPEAT" -gt 0 ] && [ "$n_pass" -ge $(( (REPEAT * 8 + 9) / 10 )) ]; then exit 0; else exit 2; fi
+fi
+
+# ------------------------------------------------------------------ --flow plan (single run: command or keyword entry)
+if [ -n "$FLOW" ]; then
+  step "flow plan ($ENTRY entry) on fixture $FIXTURE_NAME, timeout ${TIMEOUT}s"
+  STATE_ROOT="$(python3 "$FLOW_HELPER" state-root "$STATE_HOME" "$WORK")"
+  OUT="$LOGS/flow-$STAMP.jsonl"; ERR="$LOGS/flow-$STAMP.err"
+  if [ "$ENTRY" = command ]; then
+    ( cd "$WORK" && oc perl -e 'alarm shift; exec @ARGV or exit 127' "$TIMEOUT" opencode run --format json --agent "$AGENT" --command plan $AUTO_FLAG "$PROMPT" </dev/null > "$OUT" 2> "$ERR" )
+  else
+    ( cd "$WORK" && oc perl -e 'alarm shift; exec @ARGV or exit 127' "$TIMEOUT" opencode run --format json --agent "$AGENT" $AUTO_FLAG "$FLOW_PROMPT" </dev/null > "$OUT" 2> "$ERR" )
+  fi
+  SID="$(python3 -c 'import json,sys
+for l in open(sys.argv[1]):
+    try: print(json.loads(l)["sessionID"]); break
+    except Exception: pass' "$OUT" 2>/dev/null)"
+  t0="$(date +%s)"
+  while [ "$(( $(date +%s) - t0 ))" -lt "$TIMEOUT" ]; do
+    phase="$(python3 "$FLOW_HELPER" workflow "$STATE_ROOT" 2>/dev/null | grep '^phase=' | cut -d= -f2-)"
+    [ "$phase" = pending_approval ] && break
+    sleep 2
+  done
+  WF_SUMMARY="$(python3 "$FLOW_HELPER" workflow "$STATE_ROOT" 2>/dev/null)"
+  wv() { printf '%s\n' "$WF_SUMMARY" | grep "^$1=" | head -1 | cut -d= -f2-; }
+  WFID="$(wv id)"; PHASE="$(wv phase)"
+  say "workflow: id=$WFID phase=$PHASE session=$(wv session_id)"
+  if [ "$PHASE" != pending_approval ] || [ -z "$WFID" ]; then
+    res FAIL F01 "workflow never reached pending_approval (phase=$PHASE) within ${TIMEOUT}s"
+  else
+    PLAN_CHECK="$(python3 "$FLOW_HELPER" plan-check "$STATE_ROOT" "$WORK" "$WFID")"
+    pv() { printf '%s\n' "$PLAN_CHECK" | grep "^$1=" | head -1 | cut -d= -f2-; }
+    if [ "$(pv json_ok)" = 1 ] && [ "$(pv md_ok)" = 1 ]; then res PASS F01 "plan json validates ($(pv steps) steps), md exists"
+    else res FAIL F01 "plan json_ok=$(pv json_ok) md_ok=$(pv md_ok)"; fi
+    printf '%s' "$(pv titles)" | tr '|' '\n' > "$LOGS/plan-titles-$STAMP.txt"
+
+    # F07: seed an untagged open task directly in the ledger, then approve, then assert it never ran and was
+    # cancelled as superseded (checked after approve below).
+    SEED_TITLE="pre-existing interrupted task (seeded by --seed-open-task)"
+    if [ "$SEED_OPEN_TASK" = 1 ] && [ -n "$SID" ]; then
+      python3 - "$STATE_ROOT" "$SID" "$SEED_TITLE" <<'PY'
+import json, os, sys, time
+root, sid, title = sys.argv[1], sys.argv[2], sys.argv[3]
+path = os.path.join(root, "sessions", sid, "ledger.json")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+ledger = {"version": 1, "sessionID": sid, "createdAt": int(time.time() * 1000), "updatedAt": int(time.time() * 1000), "tasks": []}
+if os.path.isfile(path):
+    with open(path) as f:
+        ledger = json.load(f)
+ledger["tasks"].append({"id": "seed1", "n": 0, "batch": 0, "title": title, "status": "pending", "attempts": 0, "createdAt": int(time.time() * 1000), "childSessions": []})
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(ledger, f, indent=2)
+os.replace(tmp, path)
+PY
+      say "seeded an untagged open task in the ledger for F07"
+    fi
+
+    ( cd "$WORK" && oc perl -e 'alarm shift; exec @ARGV or exit 127' 120 opencode run --format json --session "$SID" --command approve $AUTO_FLAG </dev/null > "$LOGS/approve-$STAMP.jsonl" 2> "$LOGS/approve-$STAMP.err" )
+
+    t0="$(date +%s)"
+    while [ "$(( $(date +%s) - t0 ))" -lt "$TIMEOUT" ]; do
+      phase="$(python3 "$FLOW_HELPER" workflow "$STATE_ROOT" 2>/dev/null | grep '^phase=' | cut -d= -f2-)"
+      case "$phase" in done|cancelled|stuck) break ;; esac
+      if [ "$phase" = executing ]; then
+        ( cd "$WORK" && oc perl -e 'alarm shift; exec @ARGV or exit 127' 300 opencode run --format json --session "$SID" $AUTO_FLAG "continue" </dev/null >> "$LOGS/continue-$STAMP.jsonl" 2>> "$LOGS/continue-$STAMP.err" )
+      fi
+      sleep 3
+    done
+    FINAL_PHASE="$(python3 "$FLOW_HELPER" workflow "$STATE_ROOT" 2>/dev/null | grep '^phase=' | cut -d= -f2-)"
+    EVENTS="$(python3 "$FLOW_HELPER" events "$STATE_ROOT" "$WFID")"
+    if printf '%s\n' "$EVENTS" | grep -q ' created ' && printf '%s\n' "$EVENTS" | grep -q ' plan_submitted ' && \
+       printf '%s\n' "$EVENTS" | grep -q ' approved ' && printf '%s\n' "$EVENTS" | grep -q ' tasks_created ' && \
+       [ "$FINAL_PHASE" = done ]; then
+      res PASS F02 "event sequence created..plan_submitted..approved..tasks_created present; settled to done"
+    else res FAIL F02 "event sequence incomplete (final phase=$FINAL_PHASE); see $LOGS"; fi
+
+    # F03: main (the session) never COMPLETED a write tool call in the whole run: refused calls (boundary) do not
+    # count, workers run in child sessions. An unreadable DB or missing session is a FAIL, never a silent 0.
+    MAIN_WRITES="$(python3 - "$ISO_DB" "$SID" <<'PY' 2>&1
+import json, sqlite3, sys
+db, sid = sys.argv[1], sys.argv[2]
+if not sid:
+    print("error: no session id"); sys.exit(0)
+con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+rows = con.execute("select p.data from part p where p.session_id = ?", (sid,)).fetchall()
+if not rows:
+    print("error: no parts for session"); sys.exit(0)
+n = 0
+for (pdata,) in rows:
+    part = json.loads(pdata)
+    if part.get("type") == "tool" and part.get("tool") in ("edit", "write", "multiedit", "patch", "apply_patch") \
+            and (part.get("state") or {}).get("status") == "completed":
+        n += 1
+print(n)
+PY
+)"
+    case "$MAIN_WRITES" in
+      0) res PASS F03 "main completed 0 write/edit/patch calls in the session (refused calls excluded)" ;;
+      ''|*[!0-9]*) res FAIL F03 "write-call probe failed: $(printf '%s' "$MAIN_WRITES" | tail -1)" ;;
+      *) res FAIL F03 "main completed $MAIN_WRITES write/edit/patch calls itself" ;;
+    esac
+
+    LEDGER_CHECK="$(python3 "$FLOW_HELPER" ledger-check "$STATE_ROOT" "$SID" "$WFID" "$LOGS/plan-titles-$STAMP.txt")"
+    lv() { printf '%s\n' "$LEDGER_CHECK" | grep "^$1=" | head -1 | cut -d= -f2-; }
+    if [ "$(lv titles_match)" = 1 ] && [ "$(lv all_done)" = 1 ]; then
+      res PASS F04 "ledger tagged task count == plan step count ($(lv n)), titles identical, all done"
+    else res FAIL F04 "n=$(lv n) titles_match=$(lv titles_match) all_done=$(lv all_done) statuses=[$(lv statuses)]"; fi
+
+    ( cd "$WORK" && python3 -m pytest -q > "$LOGS/pytest-$STAMP.txt" 2>&1 ); pyrc=$?
+    [ "$pyrc" -eq 0 ] && res PASS F05 "pytest passes ($(tail -1 "$LOGS/pytest-$STAMP.txt"))" || res FAIL F05 "pytest failed: $(tail -2 "$LOGS/pytest-$STAMP.txt" | tr '\n' ' ')"
+
+    if [ "$ENTRY" = keyword ]; then
+      WF_ENTRY="$(python3 "$FLOW_HELPER" workflow "$STATE_ROOT" 2>/dev/null | grep '^entry=' | cut -d= -f2-)"
+      [ "$WF_ENTRY" = keyword ] && res PASS F06 "workflow entry == keyword" || res FAIL F06 "workflow entry == $WF_ENTRY (expected keyword)"
+    fi
+
+    if [ "$SEED_OPEN_TASK" = 1 ] && [ -n "$SID" ]; then
+      SEED_CHECK="$(python3 "$FLOW_HELPER" seed-task-check "$STATE_ROOT" "$SID" "$SEED_TITLE")"
+      sv() { printf '%s\n' "$SEED_CHECK" | grep "^$1=" | head -1 | cut -d= -f2-; }
+      if [ "$(sv found)" = 1 ] && [ "$(sv ran)" = 0 ] && [ "$(sv superseded)" = 1 ]; then
+        res PASS F07 "seeded open task cancelled as superseded, never run"
+      else res FAIL F07 "seed found=$(sv found) ran=$(sv ran) superseded=$(sv superseded) status=$(sv status)"; fi
+    fi
+  fi
+  [ "$KEEP" = 1 ] && say "work dir kept: $WORK" || rm -rf "$WORK"
+  say ""
+  if [ "$N_FAIL" -eq 0 ]; then say "e2e (flow plan): PASS (logs: $LOGS)"; exit 0
+  else say "e2e (flow plan): FAIL ($N_FAIL criteria) — logs: $LOGS"; exit 2; fi
 fi
 
 # ------------------------------------------------------------------ run mode

@@ -16,11 +16,19 @@
 #                                        D08 configured model present in `ollama ls`
 #   D09 stage-2 wiring: /stop command in effective config, effective tools of worker/reviewer/main (opencode debug
 #       agent: task/delegate/todowrite hidden, steps set), delegate tool schema <= 400 est. tokens
+#   D12a lca_flow tool schema <= 300 est. tokens and only visible on main; D12b M1 command set: effective config
+#       contains stop,status,plan,approve,reject,cancel (WARN if missing); D12c PLAN_REVIEW_TEMPLATE <= 350 est. tokens
 #   D10 chat.params option keys are AI-SDK camelCase keys also used by the user's model options (reasoningEffort)
 #   D11 stage-3 data layer: vendored EvoOntology MCP server answers initialize/tools/list (python3, stdio), the sqlite
 #       query helper runs a read-only query, and the fixture ontology validates; D11d = effective config when the
 #       project enables a data backend (data-analyst agent + evo-semantic MCP present), SKIP when backend is none;
 #       D11e = stage-4 evolution driver self-test (scripts/lca-evo-evolve.py --self-test)
+#   D12e opencode pin: OPENCODE_PIN vs opencode --version, framework/package.json plugin+sdk, installed
+#       framework/node_modules plugin+sdk, .opencode/package.json plugin, installed .opencode/node_modules plugin.
+#       Any mismatch or missing source = WARN (D01 keeps its semantics: below MIN = WARN, no binary = FAIL).
+#
+# Env: LCA_DOCTOR_ONLY=<id,id>  run only these check ids (supported early exit for D01,D12e; other ids are
+#      filtered from the output).   LCA_DOCTOR_ROOT=<dir>  repo root override (tests).
 #
 # Notes (verified 2026-09-22, opencode 1.18.32):
 #   * `opencode debug config` output is TRUNCATED at 64 KiB when stdout is a pipe; always redirect to a file.
@@ -31,17 +39,21 @@
 # bash 3.2 compatible (no associative arrays, no mapfile). `set -e` is deliberately NOT used.
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${LCA_DOCTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+ONLY="${LCA_DOCTOR_ONLY:-}"
+# want ID: true when no filter is set or ID is in the comma list.
+want() { [ -z "$ONLY" ] || case ",$ONLY," in *",$1,"*) return 0;; *) return 1;; esac; }
 JSON=0
 for a in "$@"; do
   case "$a" in
     --json) JSON=1 ;;
-    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $a" >&2; exit 2 ;;
   esac
 done
 
-OPENCODE_MIN="1.18.31"
+OPENCODE_MIN="1.18.32"
+OPENCODE_PIN="1.18.32"
 BUDGET_MAIN=1500; BUDGET_WORKER=800; BUDGET_REVIEWER=600
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lca-doctor.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
@@ -52,6 +64,7 @@ with_timeout() { perl -e 'alarm shift; exec @ARGV or exit 127' "$@"; }
 clean() { printf '%s' "$1" | tr '\n\t' '  ' | sed 's/  */ /g'; }
 
 report() { # status id name observed expected [fix]
+  want "$2" || return 0
   local st="$1" id="$2" name="$3" obs fix
   obs="$(clean "$4")"; local exp="$(clean "$5")"; fix="$(clean "${6:-}")"
   case "$st" in WARN) N_WARN=$((N_WARN+1));; FAIL) N_FAIL=$((N_FAIL+1));; esac
@@ -130,6 +143,59 @@ if command -v opencode >/dev/null 2>&1; then
   fi
 else
   report FAIL D01 opencode-binary "not in PATH" "opencode >= $OPENCODE_MIN" "curl -fsSL https://opencode.ai/install | bash"
+fi
+
+# ---------------------------------------------------------------- D12e opencode pin
+pkg_version() { # file -> "version" field, empty when missing/unreadable
+  [ -f "$1" ] && python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$1" 2>/dev/null
+}
+dep_version() { # package.json dependency-name -> declared spec, empty when missing
+  [ -f "$1" ] && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print({**d.get('devDependencies',{}),**d.get('dependencies',{})}.get(sys.argv[2],''))" "$1" "$2" 2>/dev/null
+}
+if want D12e; then
+  pin_bad=""; pin_seen=""
+  pin_src() { # label value
+    pin_seen="$pin_seen $1=${2:-missing}"
+    if [ -z "$2" ]; then pin_bad="$pin_bad $1:not-installed"
+    elif [ "$2" != "$OPENCODE_PIN" ]; then pin_bad="$pin_bad $1:$2"; fi
+  }
+  bin_ver=""; command -v opencode >/dev/null 2>&1 && bin_ver="$(with_timeout 20 opencode --version 2>/dev/null | head -1)"
+  pin_src opencode "$bin_ver"
+  pin_src framework/package.json:plugin "$(dep_version "$ROOT/framework/package.json" @opencode-ai/plugin)"
+  pin_src framework/package.json:sdk "$(dep_version "$ROOT/framework/package.json" @opencode-ai/sdk)"
+  pin_src framework/node_modules:plugin "$(pkg_version "$ROOT/framework/node_modules/@opencode-ai/plugin/package.json")"
+  pin_src framework/node_modules:sdk "$(pkg_version "$ROOT/framework/node_modules/@opencode-ai/sdk/package.json")"
+  pin_src .opencode/package.json:plugin "$(dep_version "$ROOT/.opencode/package.json" @opencode-ai/plugin)"
+  pin_src .opencode/node_modules:plugin "$(pkg_version "$ROOT/.opencode/node_modules/@opencode-ai/plugin/package.json")"
+  if [ -z "$pin_bad" ]; then report PASS D12e opencode-pin "all sources $OPENCODE_PIN" "= $OPENCODE_PIN"
+  else report WARN D12e opencode-pin "mismatch:$pin_bad" "all = $OPENCODE_PIN" "align versions (opencode upgrade $OPENCODE_PIN / cd framework && bun install)"; fi
+fi
+
+finish() { # emit results and exit
+  if [ "$N_FAIL" -gt 0 ]; then EXIT=2; elif [ "$N_WARN" -gt 0 ]; then EXIT=1; else EXIT=0; fi
+  if [ "$JSON" = 1 ]; then
+    python3 - "$RESULTS" "$EXIT" "$N_WARN" "$N_FAIL" <<'PY'
+import json, sys
+rows=[]
+for line in open(sys.argv[1]):
+    f=line.rstrip("\n").split("\t")
+    while len(f)<6: f.append("")
+    rows.append(dict(zip(("status","id","name","observed","expected","fix"),f)))
+print(json.dumps({"ok": int(sys.argv[2])==0, "exit": int(sys.argv[2]), "warn": int(sys.argv[3]), "fail": int(sys.argv[4]),
+                  "pass": sum(1 for r in rows if r["status"]=="PASS"), "skip": sum(1 for r in rows if r["status"]=="SKIP"),
+                  "checks": rows}, ensure_ascii=False, indent=1))
+PY
+  else
+    echo
+    echo "doctor: $(grep -c '^PASS' "$RESULTS") pass, $N_WARN warn, $N_FAIL fail, $(grep -c '^SKIP' "$RESULTS") skip -> exit $EXIT"
+  fi
+  exit "$EXIT"
+}
+# Fast path: a filter that only names cheap early checks skips the slow config/model probes below. An empty/unset
+# ONLY means no filter (every check runs); only a NON-empty filter naming only D01/D12e short-circuits here.
+if [ -n "$ONLY" ]; then
+  rest="$(printf '%s' "$ONLY" | tr ',' '\n' | grep -v -x -e D01 -e D12e -e '')"
+  [ -z "$rest" ] && finish
 fi
 
 # ---------------------------------------------------------------- D02 bun
@@ -280,6 +346,8 @@ d = json.load(open(sys.argv[1]))
 cmd = (d.get("command") or {}).get("stop") or {}
 print("stop=" + ("1" if cmd.get("template") else "0"))
 print("stop_template=" + str(cmd.get("template", ""))[:60])
+names = sorted((d.get("command") or {}).keys())
+print("commands=" + ",".join(names))
 PY
   # effective tool visibility per agent (permission-based; agent `tools` keys are ignored post-decode)
   for a in worker reviewer main; do ( cd "$ROOT" && with_timeout 60 $ENVCMD opencode debug agent "$a" > "$TMP/agent-$a.json" 2>/dev/null </dev/null ); done
@@ -315,6 +383,13 @@ print("warn=" + "; ".join(warn))
 PY
   if [ "$(val "$TMP/s2.txt" stop)" = 1 ]; then report PASS D09a stop-command "command.stop present: '$(val "$TMP/s2.txt" stop_template)'" "registered by config hook"
   else report FAIL D09a stop-command "command.stop missing in effective config" "registered by config hook" "check disabled_hooks in .lca/lca.jsonc (command.stop)"; fi
+  # D12b: the milestone's command set must be a subset of the effective config's registered commands.
+  # M1: flow is on by default, so the full set is stop,status,plan,approve,reject,cancel.
+  present_cmds=",$(val "$TMP/s2.txt" commands),"
+  missing_cmds=""
+  for c in stop status plan approve reject cancel; do case "$present_cmds" in *",$c,"*) ;; *) missing_cmds="$missing_cmds $c";; esac; done
+  if [ -z "$missing_cmds" ]; then report PASS D12b commands "effective command set: [$(val "$TMP/s2.txt" commands)]" "contains stop,status,plan,approve,reject,cancel"
+  else report WARN D12b commands "missing:$missing_cmds (present: [$(val "$TMP/s2.txt" commands)])" "contains stop,status,plan,approve,reject,cancel" "check disabled_hooks (command.stop/command.status) and config.flow.enabled"; fi
   if [ -n "$(val "$TMP/s2b.txt" bad)" ]; then report FAIL D09b agent-tools "$(val "$TMP/s2b.txt" bad)" "task/delegate/todowrite hidden via permission; reviewer read-only" "framework/src/agents/prompts.ts denied_tools / hooks/config.ts; remove other plugins (OMO) when using lca"
   elif [ -n "$(val "$TMP/s2b.txt" warn)" ]; then report WARN D09b agent-tools "$(val "$TMP/s2b.txt" warn)" "only lca + built-in tools visible" "remove oh-my-openagent from the plugin list before using lca (extra tool schemas cost prefix)"
   else report PASS D09b agent-tools "worker=[$(val "$TMP/s2b.txt" worker_tools)] reviewer=[$(val "$TMP/s2b.txt" reviewer_tools)] main has delegate, steps 40/15" "task/delegate/todowrite hidden via permission"; fi
@@ -337,6 +412,56 @@ console.log("desc_chars=" + DELEGATE_DESCRIPTION.length);
   else report WARN D09c delegate-schema "bun eval failed: $(tail -1 "$TMP/dt.txt")" "schema measurable" "cd framework && bun install"; fi
 else
   report SKIP D09c delegate-schema "bun or framework/src/tools/delegate.ts missing" "" ""
+fi
+
+# ---------------------------------------------------------------- D12a lca_flow schema budget + main-only visibility
+FLOW_BUDGET=300
+if command -v bun >/dev/null 2>&1 && [ -f "$ROOT/framework/src/tools/lca-flow.ts" ]; then
+  ( cd "$ROOT/framework" && with_timeout 60 bun -e '
+import { z } from "zod";
+import { LCA_FLOW_DESCRIPTION, lcaFlowArgs } from "./src/tools/lca-flow.ts";
+import { estimateToolSchemaTokens } from "./src/tokens.ts";
+const json = z.toJSONSchema(z.object(lcaFlowArgs));
+console.log("tokens=" + estimateToolSchemaTokens(LCA_FLOW_DESCRIPTION, json));
+' > "$TMP/lf.txt" 2>&1 </dev/null )
+  lftok="$(val "$TMP/lf.txt" tokens)"
+  lf_ok=1
+  if [ "$CFG_OK" = 1 ]; then
+    # lca_flow must only be visible on main (worker/reviewer/data agents deny it; build/plan deny it too)
+    for a in worker reviewer; do
+      d="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(1 if (d.get('tools') or {}).get('lca_flow') else 0)" "$TMP/agent-$a.json" 2>/dev/null || echo 0)"
+      [ "$d" = 1 ] && lf_ok=0
+    done
+  fi
+  if [ -n "$lftok" ] && [ "$lftok" -le "$FLOW_BUDGET" ] 2>/dev/null && [ "$lf_ok" = 1 ]; then
+    report PASS D12a flow-tool-schema "~$lftok est. tokens, only on main" "<= $FLOW_BUDGET, main-only"
+  elif [ -n "$lftok" ]; then
+    report FAIL D12a flow-tool-schema "~$lftok est. tokens, main-only=$lf_ok" "<= $FLOW_BUDGET, main-only" "shorten LCA_FLOW_DESCRIPTION / lcaFlowArgs in framework/src/tools/lca-flow.ts, or check denied_tools for worker/reviewer"
+  else
+    report WARN D12a flow-tool-schema "bun eval failed: $(tail -1 "$TMP/lf.txt")" "schema measurable" "cd framework && bun install"
+  fi
+else
+  report SKIP D12a flow-tool-schema "bun or framework/src/tools/lca-flow.ts missing" "" ""
+fi
+
+# ---------------------------------------------------------------- D12c PLAN_REVIEW_TEMPLATE budget
+REVIEW_TEMPLATE_BUDGET=350
+if command -v bun >/dev/null 2>&1 && [ -f "$ROOT/framework/src/flow/review.ts" ]; then
+  ( cd "$ROOT/framework" && with_timeout 60 bun -e '
+import { PLAN_REVIEW_TEMPLATE } from "./src/flow/review.ts";
+import { estimateTokens } from "./src/tokens.ts";
+console.log("tokens=" + estimateTokens(PLAN_REVIEW_TEMPLATE));
+' > "$TMP/prt.txt" 2>&1 </dev/null )
+  prtok="$(val "$TMP/prt.txt" tokens)"
+  if [ -n "$prtok" ] && [ "$prtok" -le "$REVIEW_TEMPLATE_BUDGET" ] 2>/dev/null; then
+    report PASS D12c review-template "~$prtok est. tokens" "<= $REVIEW_TEMPLATE_BUDGET"
+  elif [ -n "$prtok" ]; then
+    report FAIL D12c review-template "~$prtok est. tokens" "<= $REVIEW_TEMPLATE_BUDGET" "shorten PLAN_REVIEW_TEMPLATE in framework/src/flow/review.ts"
+  else
+    report WARN D12c review-template "bun eval failed: $(tail -1 "$TMP/prt.txt")" "template measurable" "cd framework && bun install"
+  fi
+else
+  report SKIP D12c review-template "bun or framework/src/flow/review.ts missing" "" ""
 fi
 
 # ---------------------------------------------------------------- D10 chat.params option keys
@@ -412,21 +537,4 @@ else
 fi
 
 # ---------------------------------------------------------------- result
-if [ "$N_FAIL" -gt 0 ]; then EXIT=2; elif [ "$N_WARN" -gt 0 ]; then EXIT=1; else EXIT=0; fi
-if [ "$JSON" = 1 ]; then
-  python3 - "$RESULTS" "$EXIT" "$N_WARN" "$N_FAIL" <<'PY'
-import json, sys
-rows=[]
-for line in open(sys.argv[1]):
-    f=line.rstrip("\n").split("\t")
-    while len(f)<6: f.append("")
-    rows.append(dict(zip(("status","id","name","observed","expected","fix"),f)))
-print(json.dumps({"ok": int(sys.argv[2])==0, "exit": int(sys.argv[2]), "warn": int(sys.argv[3]), "fail": int(sys.argv[4]),
-                  "pass": sum(1 for r in rows if r["status"]=="PASS"), "skip": sum(1 for r in rows if r["status"]=="SKIP"),
-                  "checks": rows}, ensure_ascii=False, indent=1))
-PY
-else
-  echo
-  echo "doctor: $(grep -c '^PASS' "$RESULTS") pass, $N_WARN warn, $N_FAIL fail, $(grep -c '^SKIP' "$RESULTS") skip -> exit $EXIT"
-fi
-exit "$EXIT"
+finish

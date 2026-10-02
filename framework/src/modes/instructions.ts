@@ -43,3 +43,37 @@ export function stripModeSuffix(text: string): string {
 export function hasModeSuffix(text: string): boolean {
   return /<lca-mode name="[a-z]+">[\s\S]*?<\/lca-mode>\s*$/.test(text)
 }
+
+// ------------------------------------------------------------------------------------------------ plan workflow
+// One suffix per non-terminal §5.2 phase, appended instead of <lca-mode>/<lca-resume> while the session owns a
+// workflow (ralplan §5.6). Each ≤ 250 chars including an optional stuck-cause parenthetical.
+export type FlowPhase = "planning" | "reviewing" | "pending_approval" | "executing" | "stuck"
+
+export const FLOW_INSTRUCTIONS: Record<FlowPhase, string> = {
+  planning:
+    'A plan workflow is active (planning). Submit the plan now: call lca_flow op:"plan" with 3-10 steps. Do not edit files yet.',
+  reviewing: "A plan workflow is under review. Wait; do not edit files or resubmit the plan.",
+  pending_approval: "A plan workflow is awaiting user approval. Wait for /approve or /reject. Do not edit files.",
+  executing: "A plan workflow is executing delegated tasks. If it stalled, call delegate with resume:true. Do not edit files directly.",
+  stuck: "A plan workflow is stuck. Check /status; send a message to resume or /cancel to end it.",
+}
+
+export const FLOW_MARKER_RE = /(?:\n\n)?<lca-flow phase="[a-z_]+">[\s\S]*?<\/lca-flow>/g
+
+/**
+ * Build the <lca-flow> marker block appended to the end of a user message. `opts.notice` overrides the base phase
+ * text entirely (used for the §5.6 legacy-keyword collision notices); `opts.stuckCause` appends a parenthetical.
+ */
+export function flowSuffix(phase: FlowPhase, opts: { stuckCause?: string; notice?: string } = {}): string {
+  const base = opts.notice ?? FLOW_INSTRUCTIONS[phase]
+  const text = `${base}${opts.stuckCause ? ` (${opts.stuckCause})` : ""}`
+  return `\n\n<lca-flow phase="${phase}">${text}</lca-flow>`
+}
+
+export function stripFlowSuffix(text: string): string {
+  return text.replace(FLOW_MARKER_RE, "")
+}
+
+export function hasFlowSuffix(text: string): boolean {
+  return /<lca-flow phase="[a-z_]+">[\s\S]*?<\/lca-flow>\s*$/.test(text)
+}

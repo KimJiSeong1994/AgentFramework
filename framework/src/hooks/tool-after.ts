@@ -8,6 +8,10 @@ import { getGuards } from "../guards/registry.ts"
 import { errorExcerpt } from "../guards/repeat.ts"
 import { trimToolOutput } from "../guards/trim.ts"
 import { appendHint, recoveryHint } from "../guards/recover.ts"
+import { activeWorkflow } from "../flow/state.ts"
+import { flowOn } from "../flow/status.ts"
+import { settle } from "../flow/runtime.ts"
+import { getQueue } from "../orchestration/queue.ts"
 
 /** Tools whose output is mostly paths; the worktree prefix is pure prefill cost for the model. */
 export const PATH_TOOLS: ReadonlySet<string> = new Set(["glob", "grep", "list", "read", "bash"])
@@ -66,6 +70,19 @@ export function createToolAfterHook(deps: HookDeps): NonNullable<Hooks["tool.exe
     output.output = text
     const meta = output.metadata && typeof output.metadata === "object" ? output.metadata : {}
     output.metadata = { ...meta, lca: { trimmed, hinted } }
+
+    // §5.5/§5.2: a delegate call returning in the owning session settles the workflow (T15/T16, or the T18
+    // pendingCancel completion once the queue has wound down).
+    if (input.tool === "delegate" && flowOn(deps.config)) {
+      const wf = activeWorkflow(deps.worktree)
+      if (wf && wf.sessionID === input.sessionID) {
+        try {
+          settle(deps, wf, getQueue(deps).isRunning(input.sessionID))
+        } catch (e) {
+          deps.log("tool.execute.after: settle failed", { sessionID: input.sessionID, error: (e as Error).message })
+        }
+      }
+    }
   }
 }
 

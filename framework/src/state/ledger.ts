@@ -18,7 +18,10 @@ export type TaskKind = "code" | "data"
  * data-analyst answers it (SQL:/RESULT:/ANSWER: contract), `verify` names a check suite (`default` built in), the
  * framework re-executes the SQL + runs the checks, the data-verifier judges. Nothing on disk is touched.
  */
-export type TaskInput = { title: string; detail?: string; verify?: string; kind?: TaskKind }
+/** Tag of an approved plan workflow; tasks without a tag belong to ordinary delegate calls. */
+export type WorkflowTag = { id: string; planSha: string }
+
+export type TaskInput = { title: string; detail?: string; verify?: string; kind?: TaskKind; wf?: WorkflowTag }
 
 export type VerifyResult = { command: string; ok: boolean; exitCode: number | null; timedOut: boolean; output: string }
 export type ReviewResult = { verdict: "accept" | "reject" | "skipped" | "error"; reason?: string; sessionID?: string; aborted?: boolean }
@@ -110,7 +113,7 @@ export function writeLedger(worktree: string, ledger: Ledger): Ledger {
 }
 
 /** Append tasks as one batch; ids continue the existing numbering so handoff files never collide. */
-export function addTasks(ledger: Ledger, inputs: TaskInput[], now = Date.now()): { ledger: Ledger; added: LedgerTask[] } {
+export function addTasks(ledger: Ledger, inputs: TaskInput[], now = Date.now(), tag?: WorkflowTag): { ledger: Ledger; added: LedgerTask[] } {
   let n = ledger.tasks.reduce((m, t) => Math.max(m, t.n), 0)
   const batch = ledger.tasks.reduce((m, t) => Math.max(m, t.batch ?? 1), 0) + 1
   const added: LedgerTask[] = inputs.map((input) => {
@@ -123,6 +126,7 @@ export function addTasks(ledger: Ledger, inputs: TaskInput[], now = Date.now()):
       detail: input.detail?.trim() || undefined,
       verify: input.verify?.trim() || undefined,
       kind: input.kind === "data" ? "data" : undefined,
+      ...((tag ?? input.wf) ? { wf: tag ?? input.wf } : {}),
       status: "pending",
       attempts: 0,
       createdAt: now,
@@ -153,6 +157,35 @@ export function cancelOpen(ledger: Ledger, reason: string, now = Date.now()): { 
     return { ...t, status: "cancelled" as const, error: reason, finishedAt: now }
   })
   return { ledger: { ...ledger, tasks, running: undefined }, ids }
+}
+
+export function tasksForWorkflow(ledger: Ledger, wfId: string): LedgerTask[] {
+  return ledger.tasks.filter((t) => t.wf?.id === wfId)
+}
+
+/**
+ * Approved plan -> ledger, one pure transformation (written by the caller in a single ledger write). Idempotent per
+ * planSha: tasks already tagged with this plan are never added twice. Every other open task is cancelled so the
+ * approved plan is the only work the next `delegate resume` runs, and the new ids are marked as already offered so
+ * the chat/idle resume offer does not misfire on the approve turn.
+ */
+export function approvePlanTasks(
+  ledger: Ledger,
+  inputs: TaskInput[],
+  tag: WorkflowTag,
+  now = Date.now(),
+): { ledger: Ledger; added: LedgerTask[]; cancelledForeign: string[] } {
+  const existing = ledger.tasks.filter((t) => t.wf?.id === tag.id && t.wf.planSha === tag.planSha)
+  if (existing.length > 0) return { ledger, added: [], cancelledForeign: [] }
+  const cancelledForeign: string[] = []
+  const tasks = ledger.tasks.map((t) => {
+    if (!OPEN_STATUSES.has(t.status) || t.wf?.id === tag.id) return t
+    cancelledForeign.push(t.id)
+    return { ...t, status: "cancelled" as const, error: `superseded by approved plan ${tag.id}`, finishedAt: now }
+  })
+  const r = addTasks({ ...ledger, tasks, running: undefined }, inputs, now, tag)
+  const notified = new Set([...(r.ledger.resumeNotifiedFor ?? []), ...r.added.map((t) => t.id)])
+  return { ledger: { ...r.ledger, resumeNotifiedFor: [...notified] }, added: r.added, cancelledForeign }
 }
 
 /** Stable hash of (id, status, attempts) — the idle loop's stagnation input for ledger-driven sessions. */
