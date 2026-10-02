@@ -9,6 +9,10 @@ import { enabled, type HookDeps } from "./types.ts"
 import { readJson, sessionInfoPath, type SessionInfo } from "../state/store.ts"
 import { getGuards } from "../guards/registry.ts"
 import { repeatBlockMessage } from "../guards/repeat.ts"
+import { bashPolicyProblem } from "../flow/bash-policy.ts"
+import { activeWorkflow, appendEvents, type Workflow } from "../flow/state.ts"
+import { flowOn } from "../flow/status.ts"
+import { isReviewSession, reviewToolCapProblem } from "../flow/review.ts"
 
 export const MAIN_AGENT = "main"
 
@@ -65,15 +69,77 @@ export function wikiRawTarget(deps: HookDeps, tool: string, args: unknown): stri
   return writeTargets(tool, args as Record<string, unknown>).find((t) => insideRaw(deps, t)) ?? null
 }
 
+// §5.4 planning boundary allowlist: read-only tools while the owning session's workflow is planning/reviewing/
+// pending_approval or stuck(plan_invalid|no_submission). bash is allowed subject to bashPolicyProblem.
+const BOUNDARY_ALLOWED_TOOLS = new Set(["read", "glob", "grep", "list", "skill", "todowrite", "todoread", "lca_flow", "bash"])
+const BOUNDARY_PHASES = new Set(["planning", "reviewing", "pending_approval"])
+// While an approved plan executes, main may read, inspect with read-only bash, and resume the queue; writes go
+// through the workers only.
+const EXECUTING_ALLOWED_TOOLS = new Set([...BOUNDARY_ALLOWED_TOOLS, "delegate"])
+const BOUNDARY_STUCK_CAUSES = new Set(["plan_invalid", "no_submission"])
+
+function inPlanningBoundary(wf: Workflow): boolean {
+  if (BOUNDARY_PHASES.has(wf.phase)) return true
+  return wf.phase === "stuck" && !!wf.stuckCause && BOUNDARY_STUCK_CAUSES.has(wf.stuckCause)
+}
+
 export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.execute.before"]> {
   const guards = getGuards(deps)
   const repeatOn = enabled(deps.config, "guard.repeat")
   const wikiRawOn = enabled(deps.config, "guard.wiki_raw")
+  const boundaryOn = enabled(deps.config, "guard.plan_boundary")
 
   return async (input, output) => {
+    if (isReviewSession(input.sessionID)) {
+      const problem = reviewToolCapProblem(input.sessionID, deps.config.flow.review_max_tool_calls)
+      if (problem) {
+        deps.log("blocked tool in plan review session (tool-call cap)", { sessionID: input.sessionID, tool: input.tool })
+        throw new Error(`lca: ${problem}`)
+      }
+    }
+
     if (wikiRawOn && wikiRawTarget(deps, input.tool, output.args)) {
       deps.log("blocked write to knowledge/raw", { sessionID: input.sessionID, tool: input.tool })
       throw new Error("lca: raw wiki sources are immutable; use `bun scripts/lca-wiki.ts register`.")
+    }
+
+    if (boundaryOn && flowOn(deps.config)) {
+      const wf = activeWorkflow(deps.worktree)
+      if (wf && wf.sessionID === input.sessionID) {
+        if (inPlanningBoundary(wf)) {
+          const args = (output.args ?? {}) as Record<string, unknown>
+          let ok = BOUNDARY_ALLOWED_TOOLS.has(input.tool)
+          if (ok && input.tool === "bash") {
+            ok = bashPolicyProblem(typeof args.command === "string" ? args.command : "") === null
+          }
+          if (!ok) {
+            deps.log("blocked tool in planning boundary", { sessionID: input.sessionID, tool: input.tool })
+            appendEvents(deps.worktree, [{ wf: wf.id, type: "boundary_denied", actor: "model_tool", data: { tool: input.tool } }])
+            throw new Error('lca: planning phase — read-only. Submit the plan with lca_flow op:"plan", or /cancel.')
+          }
+        } else if (wf.phase === "executing") {
+          const args = (output.args ?? {}) as Record<string, unknown>
+          if (input.tool === "delegate") {
+            if (args.resume !== true) {
+              deps.log("blocked delegate in executing without forced resume", { sessionID: input.sessionID })
+              throw new Error("lca: an approved plan is running; call delegate with resume:true only")
+            }
+            // Weak models re-send the approved task list with resume:true. The approved tasks already exist in the
+            // ledger, so the list is dropped (never appended, never superseding the approved tasks) and the call
+            // proceeds as a plain resume instead of looping on a refusal (observed live, M1 keyword e2e).
+            if (Array.isArray(args.tasks) && args.tasks.length > 0) {
+              deps.log("delegate in executing: dropped re-sent task list, resuming approved tasks", { sessionID: input.sessionID, dropped: args.tasks.length })
+              appendEvents(deps.worktree, [{ wf: wf.id, type: "boundary_coerced", actor: "model_tool", data: { tool: "delegate", dropped: args.tasks.length } }])
+              delete args.tasks
+            }
+          } else if (!EXECUTING_ALLOWED_TOOLS.has(input.tool) || (input.tool === "bash" && bashPolicyProblem(typeof args.command === "string" ? args.command : "") !== null)) {
+            // The approved plan runs through the worker queue only; main must not implement it directly.
+            deps.log("blocked tool while an approved plan is executing", { sessionID: input.sessionID, tool: input.tool })
+            appendEvents(deps.worktree, [{ wf: wf.id, type: "boundary_denied", actor: "model_tool", data: { tool: input.tool, phase: "executing" } }])
+            throw new Error("lca: an approved plan is running; call delegate with resume:true (workers implement it), or /cancel.")
+          }
+        }
+      }
     }
 
     if (input.tool === "task") {

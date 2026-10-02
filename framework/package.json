@@ -10,8 +10,8 @@
     "typecheck": "bunx tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.18.31",
-    "@opencode-ai/sdk": "1.18.31",
+    "@opencode-ai/plugin": "1.18.32",
+    "@opencode-ai/sdk": "1.18.32",
     "zod": "^4.0.0"
   },
   "devDependencies": {

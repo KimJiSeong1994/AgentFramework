@@ -15,6 +15,10 @@ import { createCommandHook } from "./hooks/command.ts"
 import { createDelegateTool } from "./tools/delegate.ts"
 import { createDbQueryTool } from "./tools/db-query.ts"
 import { createSchemaLookupTool } from "./tools/schema-lookup.ts"
+import { createLcaFlowTool } from "./tools/lca-flow.ts"
+import { flowOn } from "./flow/status.ts"
+import { repairOnLoad } from "./flow/runtime.ts"
+import { getQueue } from "./orchestration/queue.ts"
 
 export const LcaPlugin: Plugin = async (input) => {
   const config = loadConfig(input.worktree)
@@ -23,10 +27,19 @@ export const LcaPlugin: Plugin = async (input) => {
   }
   const deps: HookDeps = { client: input.client, directory: input.directory, worktree: input.worktree, config, log }
 
+  // repairOnLoad is authority-free (ARCH-14) and must never break plugin startup.
+  try {
+    repairOnLoad(deps, (sessionID) => getQueue(deps).isRunning(sessionID))
+  } catch (e) {
+    log("repairOnLoad failed", { error: (e as Error).message })
+  }
+
   const hooks: Hooks = {}
   if (enabled(config, "config.agents")) hooks.config = createConfigHook(deps)
   if (enabled(config, "chat.params")) hooks["chat.params"] = createChatParamsHook(deps)
-  if (enabled(config, "mode.detect")) hooks["chat.message"] = createChatMessageHook(deps)
+  // ARCH-13: chat.message is registered when mode.detect OR flow is on; legacy keyword detection inside it still
+  // gates on mode.detect itself.
+  if (enabled(config, "mode.detect") || flowOn(config)) hooks["chat.message"] = createChatMessageHook(deps)
   hooks["tool.execute.before"] = createToolBeforeHook(deps)
   hooks["tool.execute.after"] = createToolAfterHook(deps)
   hooks.event = createEventHook(deps)
@@ -37,10 +50,15 @@ export const LcaPlugin: Plugin = async (input) => {
     hooks.tool.db_query = createDbQueryTool(deps)
     hooks.tool.schema_lookup = createSchemaLookupTool(deps)
   }
+  if (flowOn(config)) hooks.tool.lca_flow = createLcaFlowTool(deps)
   if (Object.keys(hooks.tool).length === 0) delete hooks.tool
   // Registered for the router too: it marks command turns so their expanded templates are not skill-routed.
   const stopOn = enabled(config, "command.stop")
-  if (stopOn || enabled(config, "mode.detect")) hooks["command.execute.before"] = createCommandHook(deps, { stop: stopOn })
+  const statusOn = flowOn(config) && enabled(config, "command.status")
+  const flowCmdsOn = flowOn(config)
+  if (stopOn || statusOn || flowCmdsOn || enabled(config, "mode.detect")) {
+    hooks["command.execute.before"] = createCommandHook(deps, { stop: stopOn, status: statusOn, flow: flowCmdsOn })
+  }
   return hooks
 }
 

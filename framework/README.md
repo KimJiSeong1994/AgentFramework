@@ -5,6 +5,66 @@ Local-first agent framework for OpenCode with Ollama/Gemma as the only backend. 
 prefix (system prompt + tool list + thinking toggle) is fixed at session start and small; repeat
 blocking, output trimming and orchestration are done in code, not by the model.
 
+## Plan workflow (harness M1) — `/plan` → `/approve` → workers
+
+```text
+/plan add an LRU cache module     (or: ralplan … / plan mode … / hyperplan … / 계획부터 … / 계획 모드 …)
+  -> planning: main may only read (read/glob/grep/list + read-only bash argv policy); every other tool is refused
+  -> main calls lca_flow op:"plan" once (goal, 3-10 steps {title, files, detail, verify}, 1-5 risks)
+  -> code gates (verify_allow, paths inside the repo, no .git/.lca/knowledge/raw, gaming check) -> errors back to main
+  -> advisory reviewer child inside the tool call (VERDICT OKAY|ITERATE; max 2 iterations; never a gate)
+  -> pending_approval: .lca/plans/<id>.md (code-rendered; editing it blocks /approve)
+/approve   -> steps become ledger tasks tagged with the plan sha (other open tasks are cancelled as superseded)
+           -> main runs delegate resume:true; workers implement + verify + review; main itself cannot write
+           -> settle -> done (or stuck(tasks_failed) / stuck(user_stop))
+/reject <reason>   back to planning with your reason        /cancel   ends the workflow (keeps the plan file)
+/status            code-rendered state, any phase            /stop     unchanged (stops the queue)
+```
+
+Approval only ever comes from your typed `/approve` command (never from model text). Workflow state lives outside
+the repo in `<stateRoot>/workflow/` (`workflow.json`, `archive/`, `events.jsonl`, `plans/<id>.json`); a new
+`opencode` process continues the same session (owning-session takeover). `flow.enabled: false` in `.lca/lca.jsonc`
+restores the legacy suffix-only plan mode. Results and numbers: `docs/lca-harness-m1-2026-10-01.md`.
+
+E2E: `scripts/lca-e2e.sh --flow plan --fixture plan3 [--entry keyword] [--seed-open-task]` (F01-F07) and
+`--repeat 10 --stop-after pending_approval` (tool-call reliability, AC1.7). Doctor: D12a (lca_flow schema <= 300
+tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c (review template <= 350).
+
+## lca harness M0 (pin, flow core, live `/status`) — ralplan M0
+
+- **Pin:** `@opencode-ai/plugin`/`@opencode-ai/sdk` locked to `1.18.32` in both `framework/` and `.opencode/`;
+  `scripts/lca-doctor.sh` **D12e** cross-checks `opencode --version`, both `package.json` declarations and both
+  installed `node_modules` copies (WARN on any mismatch or missing source, D01 keeps its existing below-MIN WARN).
+- **Flow core** (`framework/src/flow/{machine,state,owner,status}.ts`, `framework/src/flow/runtime.ts`): the plan
+  workflow state machine, event log and ownership/authority rules from ralplan §5.2/§5.3 are implemented and unit
+  tested; M0 had no user-facing entry (`/plan`, `/approve`, `lca_flow` and the reviewer shipped in M1, see above).
+  Workflow state lives at `<stateRoot(worktree)>/workflow/` (`workflow.json` the single active workflow,
+  `archive/<id>.json` terminal ones, `events.jsonl` an append-only global-seq event log) — outside the worktree,
+  next to the ledger, so a worker cannot edit it. Tests create workflows directly via `flow/state.ts`/`flow/runtime.ts`.
+- **`/status` (live, M0):** a code-rendered, read-only status command. `command.execute.before` marks the command
+  turn with its literal name; `chat.message` consumes that mark and, only for `status`, rewrites the command's own
+  text part in place (same proven path as the mode suffix, ARCH-08 — no `output.parts` replacement) to
+  `renderStatus()` (≤ 25 lines: workflow id/phase/owner incl. "owner dead"/plan path/review/task counts, legacy
+  mode, ledger counts, queue running, last 5 events) followed by `Reply only: ok`, starting with the marker
+  `[lca status]` so e2e can prove the model never produced it. Per §5.3: the owning session with a dead recorded
+  owner **takes over** first (owner rewritten, heartbeat started, `owner_takeover` emitted) and then renders like
+  the live-owner cell; any other session always renders read-only and never mutates workflow state.
+- **Config wiring (ARCH-13):** the `config` hook registers `status` (template `"Reply only: ok"`) only when
+  `config.flow.enabled` and hook id `command.status` are both on, and records exactly the command names it wrote
+  (a user-defined `status`/`stop` command of the same name wins and is left alone — `hooks/command.ts` never acts
+  on a name it did not itself inject). `lca_flow` is **not** registered in M0 (ARCH-06/C2-03): M0 adds 0 main-prefix
+  tokens. `chat.message` is registered when `mode.detect` **or** the flow feature is on; `command.execute.before` is
+  registered when `command.stop`, `command.status`, or `mode.detect` is on. `repairOnLoad` (authority-free: T8 for
+  an orphaned `reviewing`, finishing an interrupted approve, settle) runs once at plugin init inside a try/catch
+  that never throws.
+- New hook ids: `flow`, `command.status`, `guard.plan_boundary` (planning-phase tool allowlist + bash argv policy,
+  M1-facing but present as of M0 step 2). New `config.flow` block: `enabled`, `max_code_invalid` (3),
+  `max_review_iterations` (2), `nudge_max` (1), `review_max_tool_calls` (6).
+- Live smoke: `scripts/lca-e2e.sh --smoke-command status` runs `opencode run --format json --agent main --command
+  status` in the same isolated XDG env as `--check`, with a 120 s cap; PASS (exit 0) when the JSON transcript's
+  user-role text contains `[lca status]`, FAIL (exit 2) otherwise. Doctor **D12b** checks the milestone's command
+  set is present in the effective config (M0: `stop`, `status`; WARN if missing).
+
 ## Stage 3 scope (data layer: db_query, schema_lookup, EvoOntology) — 2026-09-23, first slice
 
 - Off by default (`data.backend: "none"`). With `sqlite` or `postgres` the plugin registers two tools and two agents:
@@ -166,10 +226,11 @@ blocking, output trimming and orchestration are done in code, not by the model.
 framework/src/index.ts        plugin entry (assembly of hook factories)
 framework/src/config.ts       lca config: ~/.config/lca/lca.jsonc -> <repo>/.lca/lca.jsonc (project wins)
 framework/src/hooks/*.ts      config, chat.params, chat.message, tool-before, tool-after, event, compacting
+framework/src/flow/*.ts       plan workflow core (M0): machine, state, owner, status, runtime, bash-policy
 framework/src/agents/         prompts;  src/guards/  src/modes/  src/state/  src/tokens.ts
 framework/src/state/ledger.ts task ledger + handoffs;  src/state/store.ts  state root (outside the worktree)
 framework/src/orchestration/{queue,snapshot,shell}.ts  serial worker queue, temp-object-dir snapshots, process-group shell
-framework/src/tools/delegate.ts  the `delegate` tool;  src/hooks/command.ts  `/stop`;  src/loop/idle.ts  resume offer + todo loop
+framework/src/tools/delegate.ts  the `delegate` tool;  src/hooks/command.ts  `/stop`, `/status`;  src/loop/idle.ts  resume offer + todo loop
 .opencode/plugins/lca.ts      project loader: re-exports framework/src/index.ts (OpenCode auto-loads it)
 scripts/lca-*.{py,sh}         measurement / verification tooling (below)
 ```
@@ -186,6 +247,7 @@ bash scripts/lca-e2e.sh --check               # verify isolation, no model call
 bash scripts/lca-e2e.sh                       # real run: fib fixture, ~10 min budget, GPU
 bash scripts/lca-e2e.sh --fixture ulw3        # stage-2 run: ulw -> delegate 3 tasks (E01-E14), ~2-4 min
 bash scripts/lca-e2e.sh --fixture ulw-fail    # stage-2 negative run: [done, failed, done], queue continues
+bash scripts/lca-e2e.sh --smoke-command status  # M0 live smoke: /status delivered, transcript has [lca status]
 ```
 
 `lca-baseline.py` reads OpenCode's SQLite DB read-only (`~/.local/share/opencode/opencode.db`).
@@ -359,7 +421,10 @@ lines). It does not parse bash; `lint`'s byte-hash integrity check is the backst
 | `diff_exclude` | `__pycache__`, `.pytest_cache`, `node_modules`, `.venv`, `*.pyc`, `.env`, `*.pem`, … | globs never counted as task changes (any depth); `.lca/state` and `.lca/handoffs` are always excluded (`.lca/lca.jsonc` edits do show up). Without this the reviewer rejects "files outside the task" for test-run artifacts (seen in the first e2e) |
 
 Hook ids for `disabled_hooks`: `tool.delegate` (drops the tool; main's prompt and the `ulw` suffix then fall back to the
-stage-1 direct task list) and `command.stop`. Full list in `src/hooks/types.ts` (`HOOK_IDS`).
+stage-1 direct task list), `command.stop`, `command.status` (drops `/status`), `flow` (drops the plan workflow core
+and its `/status` and boundary integration; `config.flow.enabled` is the master switch, checked together with this
+hook id everywhere the flow feature is gated), `guard.plan_boundary` (drops the planning-phase tool allowlist).
+Full list in `src/hooks/types.ts` (`HOOK_IDS`).
 
 Known limits (from the reviews, not addressed): a plugin tool's `ctx.metadata()` is a no-op on OpenCode 1.18.32, so
 the TUI shows only the tool name while the queue runs (the child sessions' titles `lca task N: …` are the progress

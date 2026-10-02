@@ -1,4 +1,7 @@
 // Continuation loop ("loop.idle"): on session.idle of a main session.
+//   0. (§5.6) The owning session of a non-terminal plan workflow: settle first (runs even when loop.idle is
+//      disabled — it is state repair, not continuation), then apply nudge/executing-resume rules per §5.2. This
+//      branch never falls through to offerResume/CONTINUE_PROMPT.
 //   1. Ledger has open tasks and no queue is running (a delegate call was interrupted: crash, restart, Esc) ->
 //      tell main ONCE that it can call `delegate` with resume:true. The queue itself only runs inside a tool call,
 //      so main is busy while workers run and the user cannot race it (review F4). This works in every mode.
@@ -12,11 +15,16 @@ import { getGuards } from "../guards/registry.ts"
 import { fetchTodos, incompleteTodos, todoFingerprint } from "../guards/todos.ts"
 import { openTasks, readLedger, writeLedger } from "../state/ledger.ts"
 import { getQueue } from "../orchestration/queue.ts"
+import { activeWorkflow, type Workflow } from "../flow/state.ts"
+import { flowOn } from "../flow/status.ts"
+import { applyEvent, settle } from "../flow/runtime.ts"
 
 export { abortPath }
 
 export const CONTINUE_PROMPT = "Continue with the next incomplete task from your list. Do not restate the plan."
 export const IDLE_DEBOUNCE_MS = 3000
+export const NUDGE_PROMPT = 'Submit the plan now: call lca_flow op:"plan" with 3-10 steps.'
+export const EXECUTING_RESUME_PROMPT = "Call delegate with resume:true now."
 
 export type StopReason = "aborted" | "max_iterations" | "ttl" | "stagnation" | "failures" | "todos_done"
 
@@ -25,6 +33,7 @@ export type IdleOutcome =
   | { action: "stopped"; reason: StopReason }
   | { action: "continued"; iterations: number; stagnation: number; remaining: number }
   | { action: "resume_offered"; open: number }
+  | { action: "workflow"; wfId: string; event?: string }
 
 /** Breakers evaluated against the persisted state before we touch todos. */
 export function checkBreakers(deps: HookDeps, sessionID: string, state: ModeState, now: number): StopReason | null {
@@ -42,9 +51,34 @@ export function resumeMessage(open: number, titles: string[]): string {
   return `[lca] ${open} delegated task(s) from an interrupted run are unfinished:\n${list}${titles.length > 5 ? "\n- …" : ""}\nCall the delegate tool with resume: true to run them, or tell the user they were left unfinished.`
 }
 
+/** Best-effort: does the session's last assistant message end with a question? Failure = not asking (never blocks a nudge on a broken client). */
+async function lastAssistantAsks(deps: HookDeps, sessionID: string): Promise<boolean> {
+  const session = (deps.client as any)?.session
+  if (!session || typeof session.messages !== "function") return false
+  try {
+    const res = await session.messages({ path: { id: sessionID } })
+    const data = res && typeof res === "object" && "data" in res ? (res as { data: unknown }).data : res
+    if (!Array.isArray(data)) return false
+    for (let i = data.length - 1; i >= 0; i--) {
+      const info = (data[i] as any)?.info
+      if (info?.role !== "assistant") continue
+      const parts: any[] = Array.isArray((data[i] as any)?.parts) ? (data[i] as any).parts : []
+      const texts = parts.filter((p) => p?.type === "text" && typeof p.text === "string" && !p.synthetic).map((p) => p.text as string)
+      if (texts.length === 0) return false
+      return texts[texts.length - 1]!.trimEnd().endsWith("?")
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
 export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number) => Promise<IdleOutcome> {
   const guards = getGuards(deps)
   const queue = getQueue(deps)
+  const loopOn = enabled(deps.config, "loop.idle")
+  /** T11 (executing resume) nudge sent at most once per distinct task-id set. */
+  const executingNotified = new Map<string, string>()
 
   const stop = (sessionID: string, reason: StopReason): IdleOutcome => {
     // write on top of the latest state so a concurrent writer's change is not lost
@@ -54,7 +88,55 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
     return { action: "stopped", reason }
   }
 
+  /** §5.6 workflow branch, run first while the session owns a non-terminal workflow. Never falls through. */
+  const runWorkflow = async (sessionID: string, wf: Workflow): Promise<IdleOutcome> => {
+    const settled = settle(deps, wf, queue.isRunning(sessionID))
+    const current = settled?.ok ? settled.wf : wf
+    if (!loopOn) return { action: "workflow", wfId: current.id }
+
+    if (current.phase === "executing" && !current.pendingCancel) {
+      const key = (current.taskIds ?? []).slice().sort().join(",")
+      if (key && executingNotified.get(current.id) !== key) {
+        executingNotified.set(current.id, key)
+        await sendMessage(deps, sessionID, EXECUTING_RESUME_PROMPT)
+        deps.log("workflow: executing resume prompt sent", { sessionID, wfId: current.id })
+      }
+      return { action: "workflow", wfId: current.id }
+    }
+
+    if (current.phase === "planning") {
+      const asking = await lastAssistantAsks(deps, sessionID)
+      if (asking) return { action: "workflow", wfId: current.id }
+      if (current.counters.nudges < deps.config.flow.nudge_max) {
+        const r = applyEvent(deps, current, "nudge", "code")
+        if (r.ok) {
+          await sendMessage(deps, sessionID, NUDGE_PROMPT)
+          deps.log("workflow: nudge sent", { sessionID, wfId: current.id })
+          return { action: "workflow", wfId: current.id, event: "nudge" }
+        }
+      } else {
+        const r = applyEvent(deps, current, "nudge_exhausted", "code")
+        if (r.ok) {
+          await showToast(deps, r.toast ?? "no plan submitted")
+          deps.log("workflow: stuck(no_submission)", { sessionID, wfId: current.id })
+          return { action: "workflow", wfId: current.id, event: "nudge_exhausted" }
+        }
+      }
+      return { action: "workflow", wfId: current.id }
+    }
+
+    return { action: "workflow", wfId: current.id }
+  }
+
   return async (sessionID, now = Date.now()) => {
+    // §5.6: the workflow branch runs first and never falls through to the legacy paths while a workflow is owned.
+    // It runs even when loop.idle is disabled (settle is state repair, not continuation).
+    if (flowOn(deps.config)) {
+      const wf = activeWorkflow(deps.worktree)
+      if (wf && wf.sessionID === sessionID) return runWorkflow(sessionID, wf)
+    }
+
+    if (!loopOn) return { action: "ignored", why: "inactive" }
     if (queue.isRunning(sessionID)) return { action: "ignored", why: "queue_running" }
 
     // ---- interrupted delegation: offer a resume once (any mode); an already-notified ledger falls through to the
@@ -154,5 +236,16 @@ async function sendMessage(deps: HookDeps, sessionID: string, text: string): Pro
   } catch (e) {
     deps.log("continuation prompt threw", { sessionID, error: (e as Error).message })
     return false
+  }
+}
+
+/** Best-effort toast (T12 stuck(no_submission)); failures are logged and swallowed. */
+async function showToast(deps: HookDeps, message: string): Promise<void> {
+  const tui = (deps.client as any)?.tui
+  if (!tui || typeof tui.showToast !== "function") return
+  try {
+    await tui.showToast({ body: { message } })
+  } catch (e) {
+    deps.log("showToast failed", { error: (e as Error).message })
   }
 }

@@ -90,6 +90,17 @@ export type LcaConfig = {
    * prefix tokens). Everything not listed here is denied via the agent's permission.skill, which hides it.
    */
   skills: { allow: string[] }
+  /**
+   * Plan workflow (harness M0/M1): code-owned phase state, a read-only planning boundary, user-only approval.
+   * Caps: invalid plan submissions before stuck, reviewer iterations before pending_approval, idle nudges before stuck.
+   */
+  flow: {
+    enabled: boolean
+    max_code_invalid: number
+    max_review_iterations: number
+    nudge_max: number
+    review_max_tool_calls: number
+  }
   /** Optional per-turn advice, never execution authorization. Only project-local skills are considered. */
   skill_router: {
     mode: "off" | "shadow" | "suggest"
@@ -217,6 +228,7 @@ export const DEFAULT_CONFIG: LcaConfig = {
   models: {},
   max_output: { main: 8192, worker: 4096, reviewer: 2048, "data-analyst": 2048, "data-verifier": 1024, "ontology-evolver": 4096, "answer-judge": 512 },
   skills: { allow: ["ulw", "plan"] },
+  flow: { enabled: true, max_code_invalid: 3, max_review_iterations: 2, nudge_max: 1, review_max_tool_calls: 6 },
   skill_router: {
     mode: "off",
     endpoint: "http://127.0.0.1:8080",

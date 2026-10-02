@@ -8,7 +8,13 @@ import { dirname, isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { estimateTokens } from "../tokens.ts"
 import { enabled, type HookDeps } from "./types.ts"
-import { STOP_COMMAND, STOP_DESCRIPTION, STOP_TEMPLATE } from "./command.ts"
+import {
+  APPROVE_COMMAND, APPROVE_DESCRIPTION, APPROVE_TEMPLATE, CANCEL_COMMAND, CANCEL_DESCRIPTION, CANCEL_TEMPLATE,
+  PLAN_COMMAND, PLAN_DESCRIPTION, PLAN_TEMPLATE, REJECT_COMMAND, REJECT_DESCRIPTION, REJECT_TEMPLATE,
+  STATUS_COMMAND, STATUS_DESCRIPTION, STATUS_TEMPLATE, STOP_COMMAND, STOP_DESCRIPTION, STOP_TEMPLATE,
+  recordInjectedCommands,
+} from "./command.ts"
+import { flowOn } from "../flow/status.ts"
 
 /**
  * The plugin package types the hook input with the v1 SDK Config, which lacks keys the running
@@ -60,7 +66,7 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
     for (const name of AGENT_NAMES) {
       const { denied_tools, ...def } = AGENT_DEFS[name] as LcaAgentDef
       const injected: AgentConfig = { ...def }
-      if (name === "main") injected.prompt = mainPrompt(enabled(deps.config, "tool.delegate"), dataOn)
+      if (name === "main") injected.prompt = mainPrompt(enabled(deps.config, "tool.delegate"), dataOn, flowOn(deps.config))
       const model = deps.config.models[name]
       if (model) injected.model = model
       if (name !== "main") injected.temperature = 0.2
@@ -87,7 +93,7 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
     // OpenCode's built-in primary agents (Tab-switchable) so their prefix does not pay for them.
     for (const other of ["build", "plan"]) {
       const a = (config.agent[other] ??= {})
-      a.permission = { ...a.permission, delegate: "deny", db_query: "deny", schema_lookup: "deny", "evo-semantic_*": "deny" } as AgentConfig["permission"]
+      a.permission = { ...a.permission, delegate: "deny", db_query: "deny", schema_lookup: "deny", "evo-semantic_*": "deny", lca_flow: "deny" } as AgentConfig["permission"]
     }
 
     // (b3) EvoOntology semantic MCP (stdio, vendored server). Registered only with a data backend and an existing
@@ -109,10 +115,32 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
       }
     }
 
-    // (b2) /stop command: hard stop for the queue + loop (handled in hooks/command.ts). User-defined `stop` wins.
+    // (b2) /stop and /status commands (handled in hooks/command.ts). A user-defined command with the same name
+    // wins (spread after the lca default); `injectedNames` records only the names lca actually wrote so
+    // hooks/command.ts never acts on a shadowed name (ARCH-13). `lca_flow` is not registered in M0 (ARCH-06).
+    const injectedNames = new Set<string>()
     if (enabled(deps.config, "command.stop")) {
       config.command = { [STOP_COMMAND]: { template: STOP_TEMPLATE, description: STOP_DESCRIPTION }, ...config.command }
+      if (!config.command[STOP_COMMAND] || config.command[STOP_COMMAND].template === STOP_TEMPLATE) injectedNames.add(STOP_COMMAND)
     }
+    if (flowOn(deps.config) && enabled(deps.config, "command.status")) {
+      config.command = { [STATUS_COMMAND]: { template: STATUS_TEMPLATE, description: STATUS_DESCRIPTION }, ...config.command }
+      if (config.command[STATUS_COMMAND]?.template === STATUS_TEMPLATE) injectedNames.add(STATUS_COMMAND)
+    }
+    // M1: plan/approve/reject/cancel, gated on flow being on (same feature switch as lca_flow/the boundary/status).
+    if (flowOn(deps.config)) {
+      const flowCmds: Array<[string, string, string]> = [
+        [PLAN_COMMAND, PLAN_TEMPLATE, PLAN_DESCRIPTION],
+        [APPROVE_COMMAND, APPROVE_TEMPLATE, APPROVE_DESCRIPTION],
+        [REJECT_COMMAND, REJECT_TEMPLATE, REJECT_DESCRIPTION],
+        [CANCEL_COMMAND, CANCEL_TEMPLATE, CANCEL_DESCRIPTION],
+      ]
+      for (const [name, template, description] of flowCmds) {
+        config.command = { [name]: { template, description }, ...config.command }
+        if (config.command[name]?.template === template) injectedNames.add(name)
+      }
+    }
+    recordInjectedCommands(deps, injectedNames)
 
     // (c)-(e) runtime defaults; user config wins where already set.
     config.default_agent ??= "main"

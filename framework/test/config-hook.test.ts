@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Config } from "@opencode-ai/plugin"
 import type { LcaConfig } from "../src/config.ts"
-import { AGENT_DEFS, MAIN_PROMPT, MAIN_RULE3_NO_DELEGATE, WORKER_PROMPT } from "../src/agents/prompts.ts"
+import { AGENT_DEFS, MAIN_PROMPT, MAIN_RULE3_NO_DELEGATE, WORKER_PROMPT, mainPrompt } from "../src/agents/prompts.ts"
 import { createConfigHook, type LcaOpenCodeConfig } from "../src/hooks/config.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
 import { fakeDeps, type LogEntry } from "./helpers.ts"
@@ -30,7 +30,8 @@ describe("config hook", () => {
   test("injects main/worker/reviewer from AGENT_DEFS into an empty config", async () => {
     const c = await run({})
     expect(c.agent?.main?.mode).toBe("primary")
-    expect(c.agent?.main?.prompt).toBe(MAIN_PROMPT)
+    // flow is on by default (M1): main's prompt gains the <lca-flow> rule
+    expect(c.agent?.main?.prompt).toBe(mainPrompt(true, false, true))
     expect(c.agent?.worker?.mode).toBe("subagent")
     expect(c.agent?.worker?.prompt).toBe(WORKER_PROMPT)
     expect(c.agent?.reviewer?.permission?.edit).toBe("deny")
@@ -113,7 +114,7 @@ describe("config hook", () => {
 
   test("keeps unrelated user agents untouched apart from hiding delegate", async () => {
     const c = await run({ agent: { build: { prompt: "b" }, plan: { model: "x/y" }, other: { prompt: "o" } } })
-    const hidden = { delegate: "deny", db_query: "deny", schema_lookup: "deny", "evo-semantic_*": "deny" }
+    const hidden = { delegate: "deny", db_query: "deny", schema_lookup: "deny", "evo-semantic_*": "deny", lca_flow: "deny" }
     expect(c.agent?.build).toEqual({ prompt: "b", permission: hidden } as any)
     expect(c.agent?.plan).toEqual({ model: "x/y", permission: hidden } as any)
     expect(c.agent?.other).toEqual({ prompt: "o" })

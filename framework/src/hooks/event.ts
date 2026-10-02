@@ -9,6 +9,8 @@ import { getGuards } from "../guards/registry.ts"
 import { abortPath, createIdleLoop } from "../loop/idle.ts"
 import { getQueue } from "../orchestration/queue.ts"
 import { recordToolOutcome } from "../telemetry/outcomes.ts"
+import { onSessionDeleted } from "../flow/runtime.ts"
+import { flowOn } from "../flow/status.ts"
 
 const MAX_TRACKED_MESSAGES = 200
 const MAX_TRACKED_CALLS = 200
@@ -18,7 +20,6 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
   const repetitionOn = enabled(deps.config, "guard.repetition")
   const repeatOn = enabled(deps.config, "guard.repeat")
   const toolHistoryOn = enabled(deps.config, "tool.history")
-  const loopOn = enabled(deps.config, "loop.idle")
   const idle = createIdleLoop(deps)
   const queue = getQueue(deps)
 
@@ -70,7 +71,8 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
         return
       }
       case "session.idle": {
-        if (!loopOn) return
+        // The workflow branch inside idle() must run even when loop.idle is disabled (settle is state repair,
+        // not continuation); idle() itself decides whether it is on the workflow path.
         await idle(event.properties.sessionID)
         return
       }
@@ -79,11 +81,22 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
         if (id) {
           guards.repetition.clear(id)
           guards.repeat.clear(id)
-          if (queue.isRunning(id)) {
+          const running = queue.isRunning(id)
+          if (flowOn(deps.config)) {
+            try {
+              onSessionDeleted(deps, id, running, () => {
+                void queue.abort(id, "session deleted", { discard: true })
+              })
+            } catch (e) {
+              deps.log("session.deleted: workflow handling failed", { sessionID: id, error: (e as Error).message })
+            }
+          }
+          if (running) {
             // discard: the queue must not resurrect the deleted session's state dir while it winds down
             void queue.abort(id, "session deleted", { discard: true }).finally(() => removeSessionDir(deps.worktree, id))
+          } else {
+            removeSessionDir(deps.worktree, id)
           }
-          removeSessionDir(deps.worktree, id)
         }
         return
       }

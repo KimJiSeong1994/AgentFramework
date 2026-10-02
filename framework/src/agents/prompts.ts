@@ -21,13 +21,19 @@ export const MAIN_RULE3_NO_DELEGATE =
   "3. Big task (many files, several steps): write a numbered task list first, one line per task, then do the tasks in order, verifying each."
 
 /** Appended when a database backend is configured: main has no db tools, the analyst answers through delegate. */
-export const MAIN_RULE_DATA =
-  '9. Question about the project database (counts, lists, "how many", "which"): do not answer from memory or files. Call delegate with one task per question, kind "data", title = the question in the user\'s words, no verify. Report its SQL and ANSWER lines.'
+const MAIN_RULE_DATA_BODY =
+  'Question about the project database (counts, lists, "how many", "which"): do not answer from memory or files. Call delegate with one task per question, kind "data", title = the question in the user\'s words, no verify. Report its SQL and ANSWER lines.'
+export const MAIN_RULE_DATA = `9. ${MAIN_RULE_DATA_BODY}`
 
-export function mainPrompt(delegateEnabled: boolean, dataEnabled = false): string {
+/** M1 (ralplan §6): the flow tool rule, appended only when config.flow.enabled (lca_flow is registered then). */
+const MAIN_RULE_FLOW_BODY = "When a message carries <lca-flow>, follow it; submit plans only with lca_flow."
+
+export function mainPrompt(delegateEnabled: boolean, dataEnabled = false, flowEnabled = false): string {
   let p = MAIN_PROMPT
   if (!delegateEnabled) p = p.replace(/^3\. .*$/m, MAIN_RULE3_NO_DELEGATE)
-  if (dataEnabled && delegateEnabled) p = `${p}\n${MAIN_RULE_DATA}`
+  let n = 9
+  if (dataEnabled && delegateEnabled) p += `\n${n++}. ${MAIN_RULE_DATA_BODY}`
+  if (flowEnabled) p += `\n${n++}. ${MAIN_RULE_FLOW_BODY}`
   return p
 }
 
@@ -148,7 +154,7 @@ export const AGENT_DEFS: Record<LcaAgentName, LcaAgentDef> = {
     description: "lca data analyst: answers one question from the database via the ontology, read-only SQL",
     prompt: DATA_ANALYST_PROMPT,
     color: "#9B59B6",
-    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list"],
+    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "lca_flow"],
     steps: 12,
     permission: {
       edit: "deny",
@@ -163,7 +169,7 @@ export const AGENT_DEFS: Record<LcaAgentName, LcaAgentDef> = {
     description: "lca data verifier: judges a SQL answer against its question and checks",
     prompt: DATA_VERIFIER_PROMPT,
     color: "#E67E22",
-    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "db_query", "schema_lookup"],
+    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "db_query", "schema_lookup", "lca_flow"],
     steps: 4,
     permission: {
       edit: "deny",
@@ -178,7 +184,7 @@ export const AGENT_DEFS: Record<LcaAgentName, LcaAgentDef> = {
     description: "lca ontology evolver: proposes alias/term/constraint patches from failed data cases (batch only)",
     prompt: ONTOLOGY_EVOLVER_PROMPT,
     color: "#1ABC9C",
-    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "db_query", "schema_lookup"],
+    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "db_query", "schema_lookup", "lca_flow"],
     steps: 2,
     permission: {
       edit: "deny",
@@ -193,7 +199,7 @@ export const AGENT_DEFS: Record<LcaAgentName, LcaAgentDef> = {
     description: "lca answer judge: anonymous A/B comparison of two SQL answers (evolution batch only)",
     prompt: ANSWER_JUDGE_PROMPT,
     color: "#F1C40F",
-    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "db_query", "schema_lookup"],
+    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "db_query", "schema_lookup", "lca_flow"],
     steps: 2,
     permission: {
       edit: "deny",
@@ -223,7 +229,7 @@ export const AGENT_DEFS: Record<LcaAgentName, LcaAgentDef> = {
     description: "lca worker: executes exactly one task and reports",
     prompt: WORKER_PROMPT,
     color: "#70AD47",
-    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "db_query", "schema_lookup"],
+    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "db_query", "schema_lookup", "lca_flow"],
     steps: 40,
     permission: {
       edit: "allow",
@@ -240,7 +246,7 @@ export const AGENT_DEFS: Record<LcaAgentName, LcaAgentDef> = {
     color: "#ED7D31",
     // No bash: verification is run by the framework and its output is in the prompt; "ask" would stall the
     // unattended queue on a permission prompt (review §5.2 wanted read-only commands only).
-    denied_tools: ["write", "edit", "patch", "bash", "task", "delegate", "todowrite", "todoread", "webfetch", "skill", "db_query", "schema_lookup"],
+    denied_tools: ["write", "edit", "patch", "bash", "task", "delegate", "todowrite", "todoread", "webfetch", "skill", "db_query", "schema_lookup", "lca_flow"],
     steps: 15,
     permission: {
       edit: "deny",
