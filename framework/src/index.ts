@@ -19,6 +19,7 @@ import { createLcaFlowTool } from "./tools/lca-flow.ts"
 import { flowOn } from "./flow/status.ts"
 import { repairOnLoad } from "./flow/runtime.ts"
 import { getQueue } from "./orchestration/queue.ts"
+import { initializeSkillObservation } from "./telemetry/skill-observer.ts"
 
 export const LcaPlugin: Plugin = async (input) => {
   const config = loadConfig(input.worktree)
@@ -26,6 +27,7 @@ export const LcaPlugin: Plugin = async (input) => {
     if (process.env.LCA_DEBUG) console.error(`[lca] ${msg}`, extra ?? "")
   }
   const deps: HookDeps = { client: input.client, directory: input.directory, worktree: input.worktree, config, log }
+  initializeSkillObservation(deps)
 
   // repairOnLoad is authority-free (ARCH-14) and must never break plugin startup.
   try {
@@ -37,9 +39,8 @@ export const LcaPlugin: Plugin = async (input) => {
   const hooks: Hooks = {}
   if (enabled(config, "config.agents")) hooks.config = createConfigHook(deps)
   if (enabled(config, "chat.params")) hooks["chat.params"] = createChatParamsHook(deps)
-  // ARCH-13: chat.message is registered when mode.detect OR flow is on; legacy keyword detection inside it still
-  // gates on mode.detect itself.
-  if (enabled(config, "mode.detect") || flowOn(config)) hooks["chat.message"] = createChatMessageHook(deps)
+  // Observation-only registration must not activate legacy mode/session handling.
+  if (enabled(config, "mode.detect") || flowOn(config) || config.skill_observation?.enabled === true) hooks["chat.message"] = createChatMessageHook(deps)
   hooks["tool.execute.before"] = createToolBeforeHook(deps)
   hooks["tool.execute.after"] = createToolAfterHook(deps)
   hooks.event = createEventHook(deps)

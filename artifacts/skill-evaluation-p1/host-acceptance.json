@@ -1,0 +1,956 @@
+{
+  "schemaVersion": 1,
+  "kind": "api-package-test-report",
+  "synthetic": true,
+  "populationComplete": false,
+  "successfulCases": 8,
+  "cases": [
+    {
+      "sourceReceipt": "skill-probe-20261002-193609-968-26497.json",
+      "sourceSha256": "9a2b434f2b16636f42c818a088163402d387213a54b0cb87b946d77892dac6b0",
+      "receipt": {
+        "kind": "isolated-skill-host-capability-probe",
+        "synthetic": true,
+        "scenario": "advice-only",
+        "isolation": {
+          "homeIsolated": true,
+          "callerCredentialEnvironmentForwarded": false,
+          "opencodeServerAuthEnvironmentForwarded": false,
+          "pwdSetToWork": true
+        },
+        "calls": [],
+        "hostVersion": "1.18.33",
+        "actualHost": {
+          "outcome": "absent",
+          "classification": "advice_inserted_without_skill_invocation",
+          "skillToolPartCount": 0,
+          "completedCount": 0,
+          "errorCount": 0,
+          "timedOut": false,
+          "returnCode": 0
+        },
+        "supportMatrix": {
+          "main_skill_load": "not_tested",
+          "missing_skill_error": "not_tested",
+          "advice_insertion": "supported",
+          "worker_default_denied": "not_tested",
+          "worker_explicit_allowed": "not_tested",
+          "persisted_actual_agent_basis": "not_tested",
+          "recorder_off_no_database": "supported",
+          "worker_skill_with_verify_failure": "not_tested"
+        },
+        "recorder": {
+          "enabled": false,
+          "databaseCreated": false
+        },
+        "notes": [
+          "Synthetic fixture evidence is not operational usage.",
+          "Returned text does not prove procedural adherence or causal benefit.",
+          "Current file hash cannot authenticate originally loaded bytes.",
+          "Rendered payload SHA may include a scratch path; compare stable returned-body fingerprints or fixture semantics across on/off runs, never assert whole-payload byte identity.",
+          "Advice routing used a deterministic synthetic local HTTP stub, not Jev production traffic; no efficacy or calibration claim."
+        ],
+        "sessionIDsObserved": 1,
+        "routingFixture": {
+          "kind": "synthetic_local_http_router",
+          "requests": 1,
+          "validCandidateSet": true,
+          "expectedChoiceSent": true,
+          "productionEfficacyOrCalibrationClaim": false
+        },
+        "hostMessageEvidence": {
+          "adviceInsertedInActualUserParts": true,
+          "matchingActualUserTextPartCount": 1
+        },
+        "acceptance": {
+          "status": "supported",
+          "reasonCode": "scenario_invariants_verified"
+        },
+        "routerFixtureCleanupComplete": true
+      }
+    },
+    {
+      "sourceReceipt": "skill-probe-20261002-193520-99640-21312.json",
+      "sourceSha256": "06254164fa1aba9b454381153ae3445dd3595851be669fd13cdae143a8712a66",
+      "receipt": {
+        "kind": "isolated-skill-host-capability-probe",
+        "synthetic": true,
+        "scenario": "advice-only",
+        "isolation": {
+          "homeIsolated": true,
+          "callerCredentialEnvironmentForwarded": false,
+          "opencodeServerAuthEnvironmentForwarded": false,
+          "pwdSetToWork": true
+        },
+        "calls": [],
+        "hostVersion": "1.18.33",
+        "actualHost": {
+          "outcome": "absent",
+          "classification": "advice_inserted_without_skill_invocation",
+          "skillToolPartCount": 0,
+          "completedCount": 0,
+          "errorCount": 0,
+          "timedOut": false,
+          "returnCode": 0
+        },
+        "supportMatrix": {
+          "main_skill_load": "not_tested",
+          "missing_skill_error": "not_tested",
+          "advice_insertion": "supported",
+          "worker_default_denied": "not_tested",
+          "worker_explicit_allowed": "not_tested",
+          "persisted_actual_agent_basis": "not_tested",
+          "recorder_off_no_database": "not_tested",
+          "worker_skill_with_verify_failure": "not_tested"
+        },
+        "recorder": {
+          "enabled": true,
+          "databaseCreated": true,
+          "campaign": {
+            "status": "open",
+            "sessionCount": 1,
+            "callCount": 0
+          },
+          "calls": 0,
+          "closure": {
+            "available": true,
+            "health": "ok",
+            "campaignID": "isolated-skill-probe",
+            "ownerBinding": "544163097810f61a22e4cb9ea084ffc4eedd3c86f4a45dbefab79cb2f40ce485",
+            "status": "closed",
+            "sessionCount": 1,
+            "callCount": 0,
+            "activatedAt": 1790937320363,
+            "cutoffSeq": null,
+            "cutoffReason": null,
+            "stopReason": "manual_stop",
+            "closureReason": "manual_stop",
+            "drainDeadline": null,
+            "closedAt": 1790937362036,
+            "pendingCount": 0,
+            "censoredCount": 0,
+            "rejections": {
+              "invalid_identifier": 0,
+              "invalid_fact": 0,
+              "preactivation": 0
+            },
+            "storedFactCount": 2,
+            "expiredFactCount": 0,
+            "notCollectedAfterStop": true,
+            "populationComplete": false
+          }
+        },
+        "notes": [
+          "Synthetic fixture evidence is not operational usage.",
+          "Returned text does not prove procedural adherence or causal benefit.",
+          "Current file hash cannot authenticate originally loaded bytes.",
+          "Rendered payload SHA may include a scratch path; compare stable returned-body fingerprints or fixture semantics across on/off runs, never assert whole-payload byte identity.",
+          "Advice routing used a deterministic synthetic local HTTP stub, not Jev production traffic; no efficacy or calibration claim."
+        ],
+        "sessionIDsObserved": 1,
+        "routingFixture": {
+          "kind": "synthetic_local_http_router",
+          "requests": 1,
+          "validCandidateSet": true,
+          "expectedChoiceSent": true,
+          "productionEfficacyOrCalibrationClaim": false
+        },
+        "hostMessageEvidence": {
+          "adviceInsertedInActualUserParts": true,
+          "matchingActualUserTextPartCount": 1
+        },
+        "turnEvidence": {
+          "turnFactCount": 2,
+          "adviceTurnCount": 1,
+          "adviceTurnEvidence": [
+            {
+              "sessionID": "ses_f03d12de4ffe2MI270fh4WuITE",
+              "routeSkillName": "observation-fixture",
+              "adviceInserted": true,
+              "hasDecisionID": true
+            }
+          ],
+          "workerTurnCount": 0,
+          "workerTurnEvidence": []
+        },
+        "acceptance": {
+          "status": "supported",
+          "reasonCode": "scenario_invariants_verified"
+        },
+        "routerFixtureCleanupComplete": true
+      }
+    },
+    {
+      "sourceReceipt": "skill-probe-20261002-193303-96694-13326.json",
+      "sourceSha256": "842f6e5c0c5ca97dfb34edd1e793911f5534466830f175ebb4a38eb347e2591e",
+      "receipt": {
+        "kind": "isolated-skill-host-capability-probe",
+        "synthetic": true,
+        "scenario": "main",
+        "isolation": {
+          "homeIsolated": true,
+          "callerCredentialEnvironmentForwarded": false,
+          "opencodeServerAuthEnvironmentForwarded": false,
+          "pwdSetToWork": true
+        },
+        "calls": [
+          {
+            "sessionID": "ses_f03d343a7ffeJvnX21TrI6qTiU",
+            "status": "completed",
+            "requestedName": "observation-fixture",
+            "requestedNameMatchesExpected": true,
+            "returnedName": "observation-fixture",
+            "hasDirectoryMetadata": true,
+            "hasCallID": true,
+            "callID": "call_ujtsrfsq",
+            "hasMessageID": true,
+            "messageID": "msg_0fc2cbd1c0015d2gUhpXvG5oGL",
+            "hasAssistantParent": true,
+            "parentMessageID": "msg_0fc2cbc71001RqIx2MccVpy1fA",
+            "hasActualAgent": true,
+            "actualAgent": "main",
+            "hasSkillWrapper": true,
+            "hasTruncationMetadata": true,
+            "payloadSha256": "ff0bfd8c72c3b0b2b6cce2d5e6642a2f79ec3a2f7cefc14f5199b85b44199c7a",
+            "stableReturnedBodySha256": "d6700ed827195e61c8ffa8b0bf2d9638fdfe7ac1fb47d375dbe7666da6270111",
+            "stableReturnedBodyBasis": "opencode-1.18.33.trimmed-content.v1",
+            "containsFixtureInstruction": true,
+            "hasErrorDetails": false,
+            "loadedOriginalFileSha256": null
+          }
+        ],
+        "hostVersion": "1.18.33",
+        "actualHost": {
+          "outcome": "completed",
+          "classification": "actual_completed_skill_load",
+          "skillToolPartCount": 1,
+          "completedCount": 1,
+          "errorCount": 0,
+          "timedOut": false,
+          "returnCode": 0
+        },
+        "supportMatrix": {
+          "main_skill_load": "supported",
+          "missing_skill_error": "not_tested",
+          "advice_insertion": "not_tested",
+          "worker_default_denied": "not_tested",
+          "worker_explicit_allowed": "not_tested",
+          "persisted_actual_agent_basis": "not_tested",
+          "recorder_off_no_database": "supported",
+          "worker_skill_with_verify_failure": "not_tested"
+        },
+        "recorder": {
+          "enabled": false,
+          "databaseCreated": false
+        },
+        "notes": [
+          "Synthetic fixture evidence is not operational usage.",
+          "Returned text does not prove procedural adherence or causal benefit.",
+          "Current file hash cannot authenticate originally loaded bytes.",
+          "Rendered payload SHA may include a scratch path; compare stable returned-body fingerprints or fixture semantics across on/off runs, never assert whole-payload byte identity."
+        ],
+        "sessionIDsObserved": 1,
+        "acceptance": {
+          "status": "supported",
+          "reasonCode": "scenario_invariants_verified"
+        }
+      }
+    },
+    {
+      "sourceReceipt": "skill-probe-20261002-193238-96129-7429.json",
+      "sourceSha256": "2683f5cadb0c9e76ca5aa8da8bff8fe83581190b56666d736f0d0ebcfec06c82",
+      "receipt": {
+        "kind": "isolated-skill-host-capability-probe",
+        "synthetic": true,
+        "scenario": "main",
+        "isolation": {
+          "homeIsolated": true,
+          "callerCredentialEnvironmentForwarded": false,
+          "opencodeServerAuthEnvironmentForwarded": false,
+          "pwdSetToWork": true
+        },
+        "calls": [
+          {
+            "sessionID": "ses_f03d3a784ffeb3jDcU7nF3NCZi",
+            "status": "completed",
+            "requestedName": "observation-fixture",
+            "requestedNameMatchesExpected": true,
+            "returnedName": "observation-fixture",
+            "hasDirectoryMetadata": true,
+            "hasCallID": true,
+            "callID": "call_9owj5bnx",
+            "hasMessageID": true,
+            "messageID": "msg_0fc2c5943001ROgCtvE7ps4h3G",
+            "hasAssistantParent": true,
+            "parentMessageID": "msg_0fc2c5896001r4gMoa7Ki82XYY",
+            "hasActualAgent": true,
+            "actualAgent": "main",
+            "hasSkillWrapper": true,
+            "hasTruncationMetadata": true,
+            "payloadSha256": "a2aaf701fe0af611b739125bd8b771b7b218524be1ba065adf0bd0f14e76da84",
+            "stableReturnedBodySha256": "d6700ed827195e61c8ffa8b0bf2d9638fdfe7ac1fb47d375dbe7666da6270111",
+            "stableReturnedBodyBasis": "opencode-1.18.33.trimmed-content.v1",
+            "containsFixtureInstruction": true,
+            "hasErrorDetails": false,
+            "loadedOriginalFileSha256": null
+          }
+        ],
+        "hostVersion": "1.18.33",
+        "actualHost": {
+          "outcome": "completed",
+          "classification": "actual_completed_skill_load",
+          "skillToolPartCount": 1,
+          "completedCount": 1,
+          "errorCount": 0,
+          "timedOut": false,
+          "returnCode": 0
+        },
+        "supportMatrix": {
+          "main_skill_load": "supported",
+          "missing_skill_error": "not_tested",
+          "advice_insertion": "not_tested",
+          "worker_default_denied": "not_tested",
+          "worker_explicit_allowed": "not_tested",
+          "persisted_actual_agent_basis": "not_tested",
+          "recorder_off_no_database": "not_tested",
+          "worker_skill_with_verify_failure": "not_tested"
+        },
+        "recorder": {
+          "enabled": true,
+          "databaseCreated": true,
+          "campaign": {
+            "status": "open",
+            "sessionCount": 1,
+            "callCount": 1
+          },
+          "calls": 1,
+          "closure": {
+            "available": true,
+            "health": "ok",
+            "campaignID": "isolated-skill-probe",
+            "ownerBinding": "6a38c16b7259ee3921331d241f1f90adf67a71ab33e2a4a3511db504cbcc1b17",
+            "status": "closed",
+            "sessionCount": 1,
+            "callCount": 1,
+            "activatedAt": 1790937158472,
+            "cutoffSeq": null,
+            "cutoffReason": null,
+            "stopReason": "manual_stop",
+            "closureReason": "manual_stop",
+            "drainDeadline": null,
+            "closedAt": 1790937171172,
+            "pendingCount": 0,
+            "censoredCount": 0,
+            "rejections": {
+              "invalid_identifier": 0,
+              "invalid_fact": 0,
+              "preactivation": 0
+            },
+            "storedFactCount": 4,
+            "expiredFactCount": 0,
+            "notCollectedAfterStop": true,
+            "populationComplete": false
+          }
+        },
+        "notes": [
+          "Synthetic fixture evidence is not operational usage.",
+          "Returned text does not prove procedural adherence or causal benefit.",
+          "Current file hash cannot authenticate originally loaded bytes.",
+          "Rendered payload SHA may include a scratch path; compare stable returned-body fingerprints or fixture semantics across on/off runs, never assert whole-payload byte identity."
+        ],
+        "sessionIDsObserved": 1,
+        "acceptance": {
+          "status": "supported",
+          "reasonCode": "scenario_invariants_verified"
+        }
+      }
+    },
+    {
+      "sourceReceipt": "skill-probe-20261002-193321-97179-28850.json",
+      "sourceSha256": "fca1bd5e62144fb86d5a105eb747ad29d0a20c330bc44c0014a78412963ea024",
+      "receipt": {
+        "kind": "isolated-skill-host-capability-probe",
+        "synthetic": true,
+        "scenario": "missing-skill",
+        "isolation": {
+          "homeIsolated": true,
+          "callerCredentialEnvironmentForwarded": false,
+          "opencodeServerAuthEnvironmentForwarded": false,
+          "pwdSetToWork": true
+        },
+        "calls": [
+          {
+            "sessionID": "ses_f03d2fc86ffedsik8NhVYHYjEU",
+            "status": "error",
+            "requestedName": "missing-observation-fixture",
+            "requestedNameMatchesExpected": true,
+            "returnedName": null,
+            "hasDirectoryMetadata": false,
+            "hasCallID": true,
+            "callID": "call_dit3wfwz",
+            "hasMessageID": true,
+            "messageID": "msg_0fc2d0446001iZttrzWV5sr6pz",
+            "hasAssistantParent": true,
+            "parentMessageID": "msg_0fc2d0391001m7cWw5NE78G4oC",
+            "hasActualAgent": true,
+            "actualAgent": "main",
+            "hasSkillWrapper": false,
+            "hasTruncationMetadata": false,
+            "payloadSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stableReturnedBodySha256": null,
+            "stableReturnedBodyBasis": null,
+            "containsFixtureInstruction": false,
+            "hasErrorDetails": true,
+            "loadedOriginalFileSha256": null
+          }
+        ],
+        "hostVersion": "1.18.33",
+        "actualHost": {
+          "outcome": "error",
+          "classification": "actual_missing_skill_error",
+          "skillToolPartCount": 1,
+          "completedCount": 0,
+          "errorCount": 1,
+          "timedOut": false,
+          "returnCode": 0
+        },
+        "supportMatrix": {
+          "main_skill_load": "not_tested",
+          "missing_skill_error": "supported",
+          "advice_insertion": "not_tested",
+          "worker_default_denied": "not_tested",
+          "worker_explicit_allowed": "not_tested",
+          "persisted_actual_agent_basis": "not_tested",
+          "recorder_off_no_database": "not_tested",
+          "worker_skill_with_verify_failure": "not_tested"
+        },
+        "recorder": {
+          "enabled": true,
+          "databaseCreated": true,
+          "campaign": {
+            "status": "open",
+            "sessionCount": 1,
+            "callCount": 1
+          },
+          "calls": 1,
+          "closure": {
+            "available": true,
+            "health": "ok",
+            "campaignID": "isolated-skill-probe",
+            "ownerBinding": "eb96fc9db31952ce29b9dc733deebbdecdf0eb3a5a7285787f87c6acd9028a5e",
+            "status": "closed",
+            "sessionCount": 1,
+            "callCount": 1,
+            "activatedAt": 1790937202224,
+            "cutoffSeq": null,
+            "cutoffReason": null,
+            "stopReason": "manual_stop",
+            "closureReason": "manual_stop",
+            "drainDeadline": null,
+            "closedAt": 1790937213340,
+            "pendingCount": 0,
+            "censoredCount": 0,
+            "rejections": {
+              "invalid_identifier": 0,
+              "invalid_fact": 0,
+              "preactivation": 0
+            },
+            "storedFactCount": 4,
+            "expiredFactCount": 0,
+            "notCollectedAfterStop": true,
+            "populationComplete": false
+          }
+        },
+        "notes": [
+          "Synthetic fixture evidence is not operational usage.",
+          "Returned text does not prove procedural adherence or causal benefit.",
+          "Current file hash cannot authenticate originally loaded bytes.",
+          "Rendered payload SHA may include a scratch path; compare stable returned-body fingerprints or fixture semantics across on/off runs, never assert whole-payload byte identity."
+        ],
+        "sessionIDsObserved": 1,
+        "missingSkillEvidence": {
+          "fixtureAbsentOnDisk": true,
+          "exactTestOnlyPermissionConfigured": true
+        },
+        "acceptance": {
+          "status": "supported",
+          "reasonCode": "scenario_invariants_verified"
+        }
+      }
+    },
+    {
+      "sourceReceipt": "skill-probe-20261002-193918-5255-28356.json",
+      "sourceSha256": "23667499693acc15eb76dbb3e4be655f7e4f5343a1537967654d50fdf062227c",
+      "receipt": {
+        "kind": "isolated-skill-host-capability-probe",
+        "synthetic": true,
+        "scenario": "verify-failure",
+        "isolation": {
+          "homeIsolated": true,
+          "callerCredentialEnvironmentForwarded": false,
+          "opencodeServerAuthEnvironmentForwarded": false,
+          "pwdSetToWork": true
+        },
+        "calls": [
+          {
+            "sessionID": "ses_f03cd552affea11O8fL1pzcbcF",
+            "status": "completed",
+            "requestedName": "observation-fixture",
+            "requestedNameMatchesExpected": true,
+            "returnedName": "observation-fixture",
+            "hasDirectoryMetadata": true,
+            "hasCallID": true,
+            "callID": "call_hajk44m8",
+            "hasMessageID": true,
+            "messageID": "msg_0fc32aae0001MVCbw0V9RX5NPK",
+            "hasAssistantParent": true,
+            "parentMessageID": "msg_0fc32aad9001luX54ttKubiJHS",
+            "hasActualAgent": true,
+            "actualAgent": "worker",
+            "hasSkillWrapper": true,
+            "hasTruncationMetadata": true,
+            "payloadSha256": "5be645c2535db16cd4e5cc0dfcfd16b88bff9edea6fa6595b968fcfdf3da8b9f",
+            "stableReturnedBodySha256": "4ac4d9146c4d93b67c351de8ce00ec88ca00a210d932c9e83d3156943cfe7203",
+            "stableReturnedBodyBasis": "opencode-1.18.33.trimmed-content.v1",
+            "containsFixtureInstruction": true,
+            "hasErrorDetails": false,
+            "loadedOriginalFileSha256": null
+          }
+        ],
+        "hostVersion": "1.18.33",
+        "actualHost": {
+          "outcome": "completed",
+          "classification": "completed_child_skill_with_code_owned_verify_failure",
+          "skillToolPartCount": 1,
+          "completedCount": 1,
+          "errorCount": 0,
+          "timedOut": false,
+          "returnCode": 0
+        },
+        "supportMatrix": {
+          "main_skill_load": "not_tested",
+          "missing_skill_error": "not_tested",
+          "advice_insertion": "not_tested",
+          "worker_default_denied": "not_tested",
+          "worker_explicit_allowed": "not_tested",
+          "persisted_actual_agent_basis": "supported",
+          "recorder_off_no_database": "not_tested",
+          "worker_skill_with_verify_failure": "supported"
+        },
+        "recorder": {
+          "enabled": true,
+          "databaseCreated": true,
+          "calls": 1,
+          "campaign": {
+            "status": "open",
+            "sessionCount": 2,
+            "callCount": 1
+          },
+          "closure": {
+            "available": true,
+            "health": "ok",
+            "campaignID": "isolated-skill-probe",
+            "ownerBinding": "95eae644685409c98befe17880621ec930cde95cf8e71e82dd6c60cf592b0748",
+            "status": "closed",
+            "sessionCount": 2,
+            "callCount": 1,
+            "activatedAt": 1790937558885,
+            "cutoffSeq": null,
+            "cutoffReason": null,
+            "stopReason": "manual_stop",
+            "closureReason": "manual_stop",
+            "drainDeadline": null,
+            "closedAt": 1790937587695,
+            "pendingCount": 0,
+            "censoredCount": 0,
+            "rejections": {
+              "invalid_identifier": 0,
+              "invalid_fact": 0,
+              "preactivation": 0
+            },
+            "storedFactCount": 15,
+            "expiredFactCount": 0,
+            "notCollectedAfterStop": true,
+            "populationComplete": false
+          }
+        },
+        "notes": [
+          "Synthetic fixture evidence is not operational usage.",
+          "Returned text does not prove procedural adherence or causal benefit.",
+          "Current file hash cannot authenticate originally loaded bytes.",
+          "Rendered payload SHA may include a scratch path; compare stable returned-body fingerprints or fixture semantics across on/off runs, never assert whole-payload byte identity."
+        ],
+        "sessionIDsObserved": 1,
+        "verifyFailure": {
+          "ownerSessionID": "ses_f03cd8916ffe2oWHLEXkUyhaSF",
+          "childSessionID": "ses_f03cd552affea11O8fL1pzcbcF",
+          "childMessageID": "msg_0fc32aad9001luX54ttKubiJHS",
+          "taskID": "t1",
+          "attemptID": "0b832cb5-1a17-40d8-8bf0-77bb28c15f8e",
+          "verificationID": "494a3053-7b28-4cbc-b9cd-aa98caaf8047",
+          "ledger": {
+            "taskStatus": "failed",
+            "attemptCount": 1,
+            "childSessionCount": 1,
+            "verifyCommandMatchesFixture": true,
+            "verifyExitCode": 2,
+            "reviewVerdict": "skipped",
+            "maxAttemptsConfigured": 1,
+            "maxRetriesConfigured": 0,
+            "reviewEnabled": false,
+            "workerSkillOverrideConfigured": true,
+            "scenarioSpecificScratchSkill": true,
+            "verifyFixtureUnchanged": true
+          },
+          "actualHost": {
+            "workerCallCount": 1,
+            "workerCallStatus": "completed",
+            "workerCallPhase": "terminal",
+            "workerCallConflict": false,
+            "workerCallSessionMatchesChild": true,
+            "workerAgent": "worker",
+            "stableReturnedBodySha256": "4ac4d9146c4d93b67c351de8ce00ec88ca00a210d932c9e83d3156943cfe7203",
+            "payloadShaIsPathSensitive": true
+          },
+          "observationFacts": {
+            "ownerTask": {
+              "phase": "terminal",
+              "status": "failed",
+              "ownerSessionMatches": true
+            },
+            "workerChildTask": {
+              "phase": "terminal",
+              "status": "done",
+              "ownerSessionMatches": true,
+              "childSessionMatches": true,
+              "actualRole": "worker",
+              "roleBasis": "code_owned"
+            },
+            "verification": {
+              "phase": "terminal",
+              "status": "fail",
+              "codeOwned": true,
+              "exitCode": 2,
+              "taskStatus": "failed",
+              "taskAttemptIDsMatch": true
+            },
+            "workerTurnCount": 5,
+            "skillCallExactChildTurnRelation": true,
+            "skillCallDirectTaskAttemptRelation": "unknown"
+          },
+          "recorderCampaign": {
+            "status": "open",
+            "sessionCount": 2,
+            "callCount": 1
+          }
+        },
+        "turnEvidence": {
+          "workerTurnCount": 5
+        },
+        "acceptance": {
+          "status": "supported",
+          "reasonCode": "scenario_invariants_verified"
+        }
+      }
+    },
+    {
+      "sourceReceipt": "skill-probe-20261002-193701-2131-5039.json",
+      "sourceSha256": "3061263e23b7992737b8efd48036804b15f2c41095f1d307d79808c92ab1418d",
+      "receipt": {
+        "kind": "isolated-skill-host-capability-probe",
+        "synthetic": true,
+        "scenario": "worker-allowed",
+        "isolation": {
+          "homeIsolated": true,
+          "callerCredentialEnvironmentForwarded": false,
+          "opencodeServerAuthEnvironmentForwarded": false,
+          "pwdSetToWork": true
+        },
+        "calls": [
+          {
+            "sessionID": "ses_f03cfa306ffe7MgXl6UigwQUZm",
+            "status": "completed",
+            "requestedName": "observation-fixture",
+            "requestedNameMatchesExpected": true,
+            "returnedName": "observation-fixture",
+            "hasDirectoryMetadata": true,
+            "hasCallID": true,
+            "callID": "call_9fhvje9t",
+            "hasMessageID": true,
+            "messageID": "msg_0fc305db7001Rpo8InF6dviWKe",
+            "hasAssistantParent": true,
+            "parentMessageID": "msg_0fc305cff001g0yTCVRiVDgBHV",
+            "hasActualAgent": true,
+            "actualAgent": "worker",
+            "hasSkillWrapper": true,
+            "hasTruncationMetadata": true,
+            "payloadSha256": "28ae6332bdd708bdb1755773a354892859d38b03395f511beb84cb947bedd399",
+            "stableReturnedBodySha256": "d6700ed827195e61c8ffa8b0bf2d9638fdfe7ac1fb47d375dbe7666da6270111",
+            "stableReturnedBodyBasis": "opencode-1.18.33.trimmed-content.v1",
+            "containsFixtureInstruction": true,
+            "hasErrorDetails": false,
+            "loadedOriginalFileSha256": null
+          }
+        ],
+        "hostVersion": "1.18.33",
+        "actualHost": {
+          "outcome": "completed",
+          "classification": "actual_completed_child_skill_load",
+          "skillToolPartCount": 1,
+          "completedCount": 1,
+          "errorCount": 0,
+          "timedOut": false
+        },
+        "supportMatrix": {
+          "main_skill_load": "not_tested",
+          "missing_skill_error": "not_tested",
+          "advice_insertion": "not_tested",
+          "worker_default_denied": "not_tested",
+          "worker_explicit_allowed": "supported",
+          "persisted_actual_agent_basis": "supported",
+          "recorder_off_no_database": "not_tested",
+          "worker_skill_with_verify_failure": "not_tested"
+        },
+        "recorder": {
+          "enabled": true,
+          "databaseCreated": true,
+          "calls": 1,
+          "campaign": {
+            "status": "open",
+            "sessionCount": 1,
+            "callCount": 1
+          },
+          "closure": {
+            "available": true,
+            "health": "ok",
+            "campaignID": "isolated-skill-probe",
+            "ownerBinding": "a3dcf1504af703675d5827f370797b3e027066035b76550caaaf593dfe3f111b",
+            "status": "closed",
+            "sessionCount": 1,
+            "callCount": 1,
+            "activatedAt": 1790937421659,
+            "cutoffSeq": null,
+            "cutoffReason": null,
+            "stopReason": "manual_stop",
+            "closureReason": "manual_stop",
+            "drainDeadline": null,
+            "closedAt": 1790937430463,
+            "pendingCount": 0,
+            "censoredCount": 0,
+            "rejections": {
+              "invalid_identifier": 0,
+              "invalid_fact": 0,
+              "preactivation": 0
+            },
+            "storedFactCount": 4,
+            "expiredFactCount": 0,
+            "notCollectedAfterStop": true,
+            "populationComplete": false
+          }
+        },
+        "notes": [
+          "Synthetic fixture evidence is not operational usage.",
+          "Returned text does not prove procedural adherence or causal benefit.",
+          "Current file hash cannot authenticate originally loaded bytes.",
+          "Rendered payload SHA may include a scratch path; compare stable returned-body fingerprints or fixture semantics across on/off runs, never assert whole-payload byte identity.",
+          "A denied or unoffered skill with no ToolPart is absence of invocation, not a failed load."
+        ],
+        "sessionIDsObserved": 1,
+        "childSession": {
+          "apiSupported": true,
+          "parentHasNoMessages": true,
+          "childParentMatched": true,
+          "promptAgentIsWorker": true,
+          "workerPermission": {
+            "wildcardDenied": true,
+            "fixtureExplicitlyAllowed": true,
+            "skillPermissionRuleCount": 2
+          },
+          "reviewerPermission": {
+            "wildcardDenied": true,
+            "fixtureExplicitlyAllowed": false,
+            "skillPermissionRuleCount": 1
+          },
+          "parentSessionID": "ses_f03cfa30effe5YJk4utltzgx6I",
+          "childSessionID": "ses_f03cfa306ffe7MgXl6UigwQUZm",
+          "childParentID": "ses_f03cfa30effe5YJk4utltzgx6I",
+          "promptAgent": "worker",
+          "serverCleanupComplete": true
+        },
+        "turnEvidence": {
+          "turnFactCount": 3,
+          "adviceTurnCount": 0,
+          "adviceTurnEvidence": [],
+          "workerTurnCount": 3,
+          "workerTurnEvidence": [
+            {
+              "sessionID": "ses_f03cfa306ffe7MgXl6UigwQUZm",
+              "actualAgent": "worker",
+              "agentBasis": "sdk_agent_field"
+            }
+          ]
+        },
+        "hostSessionEvidence": {
+          "childSessionID": "ses_f03cfa306ffe7MgXl6UigwQUZm",
+          "parentSessionID": "ses_f03cfa30effe5YJk4utltzgx6I",
+          "childParentMatched": true,
+          "parentHadNoMessages": true,
+          "callFactSessionMatchesChild": true,
+          "persistedWorkerTurnMatchesChild": true
+        },
+        "acceptance": {
+          "status": "supported",
+          "reasonCode": "scenario_invariants_verified"
+        }
+      }
+    },
+    {
+      "sourceReceipt": "skill-probe-20261002-193644-1695-12231.json",
+      "sourceSha256": "dbb75424de86b123ba6749930a088a4d0f884c88d805cc874f62d3648ed2c654",
+      "receipt": {
+        "kind": "isolated-skill-host-capability-probe",
+        "synthetic": true,
+        "scenario": "worker-denied",
+        "isolation": {
+          "homeIsolated": true,
+          "callerCredentialEnvironmentForwarded": false,
+          "opencodeServerAuthEnvironmentForwarded": false,
+          "pwdSetToWork": true
+        },
+        "calls": [],
+        "hostVersion": "1.18.33",
+        "actualHost": {
+          "outcome": "absent",
+          "classification": "policy_denied_or_unoffered_no_invocation",
+          "skillToolPartCount": 0,
+          "completedCount": 0,
+          "errorCount": 0,
+          "timedOut": false,
+          "invocationAbsenceIsNotError": true
+        },
+        "supportMatrix": {
+          "main_skill_load": "not_tested",
+          "missing_skill_error": "not_tested",
+          "advice_insertion": "not_tested",
+          "worker_default_denied": "supported",
+          "worker_explicit_allowed": "not_tested",
+          "persisted_actual_agent_basis": "supported",
+          "recorder_off_no_database": "not_tested",
+          "worker_skill_with_verify_failure": "not_tested"
+        },
+        "recorder": {
+          "enabled": true,
+          "databaseCreated": true,
+          "calls": 0,
+          "campaign": {
+            "status": "open",
+            "sessionCount": 1,
+            "callCount": 0
+          },
+          "closure": {
+            "available": true,
+            "health": "ok",
+            "campaignID": "isolated-skill-probe",
+            "ownerBinding": "0671e4d18e650ad446b7d6d18153fbf5935cd82cd50f5a7345b6a259552d3887",
+            "status": "closed",
+            "sessionCount": 1,
+            "callCount": 0,
+            "activatedAt": 1790937404555,
+            "cutoffSeq": null,
+            "cutoffReason": null,
+            "stopReason": "manual_stop",
+            "closureReason": "manual_stop",
+            "drainDeadline": null,
+            "closedAt": 1790937415023,
+            "pendingCount": 0,
+            "censoredCount": 0,
+            "rejections": {
+              "invalid_identifier": 0,
+              "invalid_fact": 0,
+              "preactivation": 0
+            },
+            "storedFactCount": 8,
+            "expiredFactCount": 0,
+            "notCollectedAfterStop": true,
+            "populationComplete": false
+          }
+        },
+        "notes": [
+          "Synthetic fixture evidence is not operational usage.",
+          "Returned text does not prove procedural adherence or causal benefit.",
+          "Current file hash cannot authenticate originally loaded bytes.",
+          "Rendered payload SHA may include a scratch path; compare stable returned-body fingerprints or fixture semantics across on/off runs, never assert whole-payload byte identity.",
+          "A denied or unoffered skill with no ToolPart is absence of invocation, not a failed load."
+        ],
+        "sessionIDsObserved": 1,
+        "childSession": {
+          "apiSupported": true,
+          "parentHasNoMessages": true,
+          "childParentMatched": true,
+          "promptAgentIsWorker": true,
+          "workerPermission": {
+            "wildcardDenied": true,
+            "fixtureExplicitlyAllowed": false,
+            "skillPermissionRuleCount": 1
+          },
+          "reviewerPermission": {
+            "wildcardDenied": true,
+            "fixtureExplicitlyAllowed": false,
+            "skillPermissionRuleCount": 1
+          },
+          "parentSessionID": "ses_f03cfe5caffeLN2yot9ovjQvHU",
+          "childSessionID": "ses_f03cfe5c2ffeqngy7IOpRs24IJ",
+          "childParentID": "ses_f03cfe5caffeLN2yot9ovjQvHU",
+          "promptAgent": "worker",
+          "serverCleanupComplete": true
+        },
+        "turnEvidence": {
+          "turnFactCount": 5,
+          "adviceTurnCount": 0,
+          "adviceTurnEvidence": [],
+          "workerTurnCount": 5,
+          "workerTurnEvidence": [
+            {
+              "sessionID": "ses_f03cfe5c2ffeqngy7IOpRs24IJ",
+              "actualAgent": "worker",
+              "agentBasis": "sdk_agent_field"
+            }
+          ]
+        },
+        "hostSessionEvidence": {
+          "childSessionID": "ses_f03cfe5c2ffeqngy7IOpRs24IJ",
+          "parentSessionID": "ses_f03cfe5caffeLN2yot9ovjQvHU",
+          "childParentMatched": true,
+          "parentHadNoMessages": true,
+          "callFactSessionMatchesChild": true,
+          "persistedWorkerTurnMatchesChild": true
+        },
+        "acceptance": {
+          "status": "supported",
+          "reasonCode": "scenario_invariants_verified"
+        }
+      }
+    }
+  ],
+  "earlierFailedAttempts": [
+    {
+      "receipt": "skill-probe-20261002-193731-2819-3551.json",
+      "status": "failed",
+      "reasonCode": "code_owned_queue_verifier_did_not_fail_with_exit_2"
+    },
+    {
+      "receipt": "skill-probe-20261002-193342-97667-14332.json",
+      "status": "unsupported",
+      "reasonCode": "advice_turn_fact_unavailable"
+    },
+    {
+      "receipt": "skill-probe-20261002-192840-91406-30991.json",
+      "status": "failed",
+      "reasonCode": "observer_skill_call_mismatch"
+    }
+  ],
+  "limitations": [
+    "Isolated installed-host validation, not operational usage or causal-effectiveness evidence.",
+    "Earlier failed attempts were repaired and the affected scenarios rerun; they are retained here as failure receipts."
+  ]
+}

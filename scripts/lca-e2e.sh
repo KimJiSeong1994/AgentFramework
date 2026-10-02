@@ -6,12 +6,16 @@
 #
 #   scripts/lca-e2e.sh --dry-run     # print every step and the exact command; touches nothing
 #   scripts/lca-e2e.sh --check       # build the isolated env and verify isolation; NO model call
+#   scripts/lca-e2e.sh --skill-probe # real skill load in isolated synthetic fixture; sanitized capability receipt
+#   scripts/lca-e2e.sh --skill-probe-off # same host load with observation disabled
+#   scripts/lca-e2e.sh --skill-probe-scenario NAME # main|missing-skill|advice-only|worker-denied|worker-allowed|verify-failure
 #   scripts/lca-e2e.sh --smoke-command NAME  # isolated env like --check, then `opencode run --command NAME`
 #                                     (120s cap); PASS when the transcript's user text contains the code-rendered
 #                                     marker for that command (e.g. "[lca status]" for /status, M0 AC0.9)
 #   scripts/lca-e2e.sh               # full run: opencode run ... (loads the model, GPU, up to --timeout s)
 #
 # Options: --fixture NAME (fib)  --scratch DIR (default ~/.cache/lca/e2e, env LCA_E2E_SCRATCH)
+#          --probe-timeout S (skill scenario cap; 180s default, verify-failure 900s)
 #          --timeout S (fib 600 / ulw3 1800)  --max-wall S (fib 300 / ulw3 900)  --budget-tokens N (8000)
 #          --worker-budget N / --reviewer-budget N (defaults: DEFAULT_CONFIG.budget)  --prompt "..."  --agent NAME (main)
 #          --no-auto (do not pass --auto to opencode run)  --keep (keep the work dir on success)
@@ -35,8 +39,8 @@
 #     and ~/.local/share/opencode/opencode.db are therefore never touched. XDG_STATE_HOME is isolated too;
 #     XDG_CACHE_HOME is left alone (it only holds the opencode binary cache).
 #   * OPENCODE_CONFIG_DIR is an ADDITIONAL global config dir (orca sets it in this shell and its opencode.json
-#     also loads oh-my-openagent). It, ORCA_OPENCODE_CONFIG_DIR, OPENCODE_CONFIG and OPENCODE_CONFIG_CONTENT
-#     are unset for every opencode call here.
+#     also loads oh-my-openagent). It, ORCA_OPENCODE_CONFIG_DIR, OPENCODE_CONFIG, OPENCODE_CONFIG_CONTENT and
+#     OPENCODE_SERVER_PASSWORD/USERNAME are unset for every scratch OpenCode call here.
 #   * ~/.opencode/opencode.json(c) is also probed by OpenCode and is NOT covered by XDG; --check warns if it exists.
 #   * --pure is NOT used: it would drop the project plugin (lca) as well.
 #   * The lca plugin is loaded per project via <work>/.opencode/plugins/lca.ts re-exporting the absolute path of
@@ -62,6 +66,7 @@ SCRATCH="${LCA_E2E_SCRATCH:-$SCRATCH_DEFAULT}"
 MODE=run; TIMEOUT=""; MAX_WALL=""; BUDGET=8000; WORKER_BUDGET=""; REVIEWER_BUDGET=""; AGENT=main; AUTO=1; KEEP=0
 FIXTURE_NAME=fib; PROMPT=""; WORKTREE=0; SMOKE_COMMAND=""
 FLOW=""; ENTRY=command; REPEAT=""; STOP_AFTER=""; SEED_OPEN_TASK=0
+PROBE_OBSERVE=on; PROBE_SCENARIO=main; PROBE_TIMEOUT=180; PROBE_TIMEOUT_EXPLICIT=0
 USER_JSONC="$HOME/.config/opencode/opencode.jsonc"
 BASELINE="$ROOT/scripts/lca-baseline.py"
 STATUS_MARKER_TXT="[lca status]"  # framework/src/flow/status.ts STATUS_MARKER
@@ -70,6 +75,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) MODE=dry ;;
     --check) MODE=check ;;
+    --skill-probe) MODE=skill-probe; FIXTURE_NAME=skill-observe; PROBE_OBSERVE=on; PROBE_SCENARIO=main ;;
+    --skill-probe-off) MODE=skill-probe; FIXTURE_NAME=skill-observe; PROBE_OBSERVE=off; PROBE_SCENARIO=main ;;
+    --skill-probe-scenario) MODE=skill-probe; PROBE_SCENARIO="$2"; shift ;;
+    --probe-timeout) PROBE_TIMEOUT="$2"; PROBE_TIMEOUT_EXPLICIT=1; shift ;;
     --smoke-command) MODE=smoke-command; SMOKE_COMMAND="$2"; shift ;;
     --fixture) FIXTURE_NAME="$2"; shift ;;
     --scratch) SCRATCH="$2"; shift ;;
@@ -114,6 +123,14 @@ case "$FIXTURE_NAME" in
     [ -d "$FIXTURE" ] || { echo "unknown fixture: $FIXTURE_NAME ($FIXTURE missing)" >&2; exit 3; }
     : "${PROMPT:=Make the tests in this directory pass.}"; : "${TIMEOUT:=1800}"; : "${MAX_WALL:=900}" ;;
 esac
+if [ "$MODE" = skill-probe ]; then
+  case "$PROBE_SCENARIO" in
+    main|missing-skill|advice-only|worker-denied|worker-allowed|verify-failure) ;;
+    *) echo "unknown skill probe scenario: $PROBE_SCENARIO" >&2; exit 3 ;;
+  esac
+  if [ "$PROBE_SCENARIO" = verify-failure ] && [ "$PROBE_TIMEOUT_EXPLICIT" = 0 ]; then PROBE_TIMEOUT=900; fi
+  FIXTURE_NAME=skill-observe; FIXTURE="$ROOT/scripts/fixtures/skill-observe"
+fi
 
 # --flow plan: keyword entry prepends the ralplan keyword to the same request text instead of using --command plan.
 if [ -n "$FLOW" ] && [ "$ENTRY" = keyword ]; then FLOW_PROMPT="ralplan $PROMPT"; else FLOW_PROMPT="$PROMPT"; fi
@@ -123,6 +140,7 @@ CFG_HOME="$E2E/config"; DATA_HOME="$E2E/data"; STATE_HOME="$E2E/state"; LOGS="$E
 SCRATCH_CFG="$CFG_HOME/opencode/opencode.json"
 ISO_DB="$DATA_HOME/opencode/opencode.db"
 STAMP="$(date +%Y%m%d-%H%M%S)"
+if [ "$MODE" = skill-probe ]; then STAMP="${STAMP}-$$-$RANDOM"; fi
 WORK="$E2E/work/$FIXTURE_NAME-$STAMP"
 AUTO_FLAG=""; [ "$AUTO" = 1 ] && AUTO_FLAG="--auto"
 
@@ -137,6 +155,7 @@ with_timeout() { perl -e 'alarm shift; exec @ARGV or exit 127' "$@"; }
 # every opencode invocation goes through here
 oc() {
   env -u OPENCODE_CONFIG_DIR -u ORCA_OPENCODE_CONFIG_DIR -u OPENCODE_CONFIG -u OPENCODE_CONFIG_CONTENT \
+      -u OPENCODE_SERVER_PASSWORD -u OPENCODE_SERVER_USERNAME -u LCA_STATE_HOME \
       XDG_CONFIG_HOME="$CFG_HOME" XDG_DATA_HOME="$DATA_HOME" XDG_STATE_HOME="$STATE_HOME" "$@"
 }
 RUN_CMD="perl -e 'alarm $TIMEOUT; exec @ARGV' opencode run --format json --agent $AGENT $AUTO_FLAG \"$PROMPT\" </dev/null"
@@ -200,6 +219,13 @@ printf '// e2e loader: lca plugin from the repo under test (absolute path).\nexp
 if [ "$WORKTREE" = 1 ]; then mkdir -p "$WORK/.lca" && printf '{ "delegate": { "worktree": true } }\n' > "$WORK/.lca/lca.jsonc"; fi
 ( cd "$WORK" && git init -q && git add -A && git -c user.name=lca-e2e -c user.email=lca-e2e@localhost commit -q -m "fixture: $FIXTURE_NAME" ) || exit 3
 say "work dir: $WORK"
+
+if [ "$MODE" = skill-probe ]; then
+  oc python3 "$ROOT/scripts/lca-skill-probe.py" --work "$WORK" --db "$ISO_DB" \
+    --report "$LOGS/skill-probe-$STAMP.json" --timeout "$PROBE_TIMEOUT" --observation "$PROBE_OBSERVE" \
+    --scenario "$PROBE_SCENARIO"
+  exit $?
+fi
 
 # ------------------------------------------------------------------ check mode
 if [ "$MODE" = check ]; then
@@ -348,7 +374,7 @@ PY
     rm -rf "$RWORK/__pycache__" "$RWORK/.pytest_cache"
     printf '// e2e loader\nexport { LcaPlugin } from "%s/framework/src/index.ts"\n' "$ROOT" > "$RWORK/.opencode/plugins/lca.ts"
     ( cd "$RWORK" && git init -q && git add -A && git -c user.name=lca-e2e -c user.email=lca-e2e@localhost commit -q -m plan3 ) || exit 3
-    roc() { env -u OPENCODE_CONFIG_DIR -u ORCA_OPENCODE_CONFIG_DIR -u OPENCODE_CONFIG -u OPENCODE_CONFIG_CONTENT \
+    roc() { env -u OPENCODE_CONFIG_DIR -u ORCA_OPENCODE_CONFIG_DIR -u OPENCODE_CONFIG -u OPENCODE_CONFIG_CONTENT -u LCA_STATE_HOME \
         XDG_CONFIG_HOME="$RCFG" XDG_DATA_HOME="$RDATA" XDG_STATE_HOME="$RSTATE" "$@"; }
     RSTATE_ROOT="$(python3 "$FLOW_HELPER" state-root "$RSTATE" "$RWORK")"
     RCMD=command; RREQ="$PROMPT"; [ "$ENTRY" = keyword ] && { RCMD=""; RREQ="ralplan $PROMPT"; }

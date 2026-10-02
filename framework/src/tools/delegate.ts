@@ -108,7 +108,7 @@ export function createDelegateTool(deps: HookDeps): ToolDefinition {
       const onAbort = () => void queue.abort(sessionID, "main session aborted")
       ctx.abort.addEventListener("abort", onAbort)
       try {
-        const runPromise = queue.run(sessionID)
+        const runPromise = queue.run(sessionID, { messageID: ctx.messageID, resumed: args.resume === true })
         if (ctx.abort.aborted) onAbort() // aborted between the check above and run(): the entry now exists
         const run = await runPromise
         const ledger = readLedger(deps.worktree, sessionID)

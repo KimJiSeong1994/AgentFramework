@@ -5,6 +5,13 @@
   "disabled_hooks": [],
   // Apply optional per-turn skill advice; never automatically load skills or change modes.
   "skill_router": { "mode": "suggest" },
+  // The approved P1 campaign is closed. Retain its binding; do not reset or reopen it.
+  "skill_observation": {
+    "enabled": false,
+    "campaign_id": "skill-evaluation-p1-20261002",
+    "owner_root": "/Users/gimjiseong/orca/projects/AgentFramework",
+    "owner_binding": "cd4d9d661baf48eb48fd0a20c6bdd015daba10b9389e6ed2d25c6ea8ef08948f"
+  },
   // Arrays replace defaults; DEFAULT_CONFIG.skills is unchanged.
   "skills": { "allow": ["ulw", "plan", "llm-wiki"] }
 }

@@ -1,0 +1,247 @@
+{
+  "schema": "ac10-skill-bench.v1",
+  "workload": {
+    "expected_callbacks": 1000,
+    "enabled_callbacks": 1000,
+    "disabled_callbacks": 1000,
+    "actor_count": 1,
+    "skill_calls": 99,
+    "related_tools": 234,
+    "assistant_closures": 1,
+    "setup_turn_facts_outside_timed_window": 3
+  },
+  "per_callback_ms": {
+    "enabled": {
+      "skill_before": {
+        "count": 99,
+        "p50_ms": 1.0882080000000087,
+        "p95_ms": 1.3783750000000055,
+        "max_ms": 2.6254579999999805
+      },
+      "skill_running": {
+        "count": 99,
+        "p50_ms": 0.9136249999999961,
+        "p95_ms": 1.1091669999999851,
+        "max_ms": 1.2116249999999695
+      },
+      "skill_completed": {
+        "count": 99,
+        "p50_ms": 0.982332999999997,
+        "p95_ms": 1.2770000000000437,
+        "max_ms": 1.5802910000000168
+      },
+      "tool_pending": {
+        "count": 234,
+        "p50_ms": 0.5746250000000828,
+        "p95_ms": 0.7266670000000204,
+        "max_ms": 1.1362080000000105
+      },
+      "tool_running": {
+        "count": 234,
+        "p50_ms": 0.3935000000000173,
+        "p95_ms": 0.5499579999999469,
+        "max_ms": 0.6113330000000019
+      },
+      "tool_completed": {
+        "count": 234,
+        "p50_ms": 0.4984580000000278,
+        "p95_ms": 0.6132920000000013,
+        "max_ms": 1.2882089999999948
+      },
+      "assistant_closure": {
+        "count": 1,
+        "p50_ms": 1.1515419999999494,
+        "p95_ms": 1.1515419999999494,
+        "max_ms": 1.1515419999999494
+      },
+      "overall": {
+        "count": 1000,
+        "p50_ms": 0.5515839999999912,
+        "p95_ms": 1.1320830000000015,
+        "max_ms": 2.6254579999999805
+      }
+    },
+    "disabled": {
+      "skill_before": {
+        "count": 99,
+        "p50_ms": 0.00008300000001781882,
+        "p95_ms": 0.00024999999993724487,
+        "max_ms": 0.002166999999985819
+      },
+      "skill_running": {
+        "count": 99,
+        "p50_ms": 0.00008300000001781882,
+        "p95_ms": 0.00020900000004075991,
+        "max_ms": 0.0013750000000527507
+      },
+      "skill_completed": {
+        "count": 99,
+        "p50_ms": 0.00004200000000764703,
+        "p95_ms": 0.00012500000002546585,
+        "max_ms": 0.0028329999998959465
+      },
+      "tool_pending": {
+        "count": 234,
+        "p50_ms": 0.00016699999991942605,
+        "p95_ms": 0.00020900000004075991,
+        "max_ms": 0.002166999999985819
+      },
+      "tool_running": {
+        "count": 234,
+        "p50_ms": 0.00016600000003563764,
+        "p95_ms": 0.00020799999992959783,
+        "max_ms": 0.0005830000000059954
+      },
+      "tool_completed": {
+        "count": 234,
+        "p50_ms": 0.00016600000003563764,
+        "p95_ms": 0.00020800000004328467,
+        "max_ms": 0.0005840000000034706
+      },
+      "assistant_closure": {
+        "count": 1,
+        "p50_ms": 0.005084000000010747,
+        "p95_ms": 0.005084000000010747,
+        "max_ms": 0.005084000000010747
+      },
+      "overall": {
+        "count": 1000,
+        "p50_ms": 0.00012500000002546585,
+        "p95_ms": 0.00020800000004328467,
+        "max_ms": 0.005084000000010747
+      }
+    },
+    "delta": {
+      "skill_before": {
+        "p50_ms": 1.088124999999991,
+        "p95_ms": 1.3781250000000682,
+        "max_ms": 2.6232909999999947
+      },
+      "skill_running": {
+        "p50_ms": 0.9135419999999783,
+        "p95_ms": 1.1089579999999444,
+        "max_ms": 1.2102499999999168
+      },
+      "skill_completed": {
+        "p50_ms": 0.9822909999999894,
+        "p95_ms": 1.2768750000000182,
+        "max_ms": 1.5774580000001208
+      },
+      "tool_pending": {
+        "p50_ms": 0.5744580000001633,
+        "p95_ms": 0.7264579999999796,
+        "max_ms": 1.1340410000000247
+      },
+      "tool_running": {
+        "p50_ms": 0.39333399999998164,
+        "p95_ms": 0.5497500000000173,
+        "max_ms": 0.6107499999999959
+      },
+      "tool_completed": {
+        "p50_ms": 0.4982919999999922,
+        "p95_ms": 0.613083999999958,
+        "max_ms": 1.2876249999999914
+      },
+      "assistant_closure": {
+        "p50_ms": 1.1464579999999387,
+        "p95_ms": 1.1464579999999387,
+        "max_ms": 1.1464579999999387
+      },
+      "overall": {
+        "p50_ms": 0.5514589999999657,
+        "p95_ms": 1.1318749999999582,
+        "max_ms": 2.62037399999997
+      }
+    },
+    "p95_additional_target_ms": 10,
+    "measured_p95_additional_target_met": true
+  },
+  "persisted": {
+    "enabled": {
+      "available": true,
+      "owner_quota_within_limits": true,
+      "one_actor": true,
+      "skill_call_count": 99,
+      "related_tool_count": 234,
+      "terminal_nonconflicted_calls": true,
+      "pending_zero": true,
+      "off_database_absent": null,
+      "campaign_stopped": true,
+      "database": {
+        "page_size_bytes": 4096,
+        "page_count": 85,
+        "page_bytes": 348160,
+        "file_bytes": 348160
+      }
+    },
+    "disabled": {
+      "available": false,
+      "owner_quota_within_limits": null,
+      "one_actor": null,
+      "skill_call_count": null,
+      "related_tool_count": null,
+      "terminal_nonconflicted_calls": null,
+      "pending_zero": null,
+      "off_database_absent": true,
+      "campaign_stopped": null,
+      "database": null
+    },
+    "resource_pass_enabled": {
+      "available": true,
+      "owner_quota_within_limits": true,
+      "one_actor": true,
+      "skill_call_count": 99,
+      "related_tool_count": 234,
+      "terminal_nonconflicted_calls": true,
+      "pending_zero": true,
+      "off_database_absent": null,
+      "campaign_stopped": true,
+      "database": {
+        "page_size_bytes": 4096,
+        "page_count": 85,
+        "page_bytes": 348160,
+        "file_bytes": 348160
+      }
+    },
+    "resource_pass_disabled": {
+      "available": false,
+      "owner_quota_within_limits": null,
+      "one_actor": null,
+      "skill_call_count": null,
+      "related_tool_count": null,
+      "terminal_nonconflicted_calls": null,
+      "pending_zero": null,
+      "off_database_absent": true,
+      "campaign_stopped": null,
+      "database": null
+    }
+  },
+  "resources": {
+    "enabled": {
+      "rss_delta_bytes": 28966912,
+      "rss_highwater_delta_bytes": 28966912,
+      "heap_used_delta_bytes": 2520807,
+      "heap_used_highwater_delta_bytes": 3766272,
+      "sample_interval_events": 25
+    },
+    "disabled": {
+      "rss_delta_bytes": 2211840,
+      "rss_highwater_delta_bytes": 2211840,
+      "heap_used_delta_bytes": 196608,
+      "heap_used_highwater_delta_bytes": 196608,
+      "sample_interval_events": 25
+    },
+    "rollback_journal_peak_sampled_lower_bound_bytes": 41552,
+    "rollback_journal_samples": 275,
+    "rollback_journal_sample_interval_ms": 2
+  },
+  "limitations": [
+    "local_cpu_sqlite_only",
+    "synthetic_events",
+    "timing_and_resource_passes_separate",
+    "not_universal_realtime",
+    "rss_heap_highwater_is_sampled",
+    "rollback_journal_peak_is_a_sampled_lower_bound",
+    "host_filesystem_and_process_state_affect_results"
+  ]
+}

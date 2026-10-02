@@ -4,7 +4,10 @@ import { parseArgs } from "node:util"
 import { captureWiki, lintWiki, registerWiki, statusWiki, unlockWiki } from "../framework/src/wiki/wiki.ts"
 
 const DEFAULT_ROOT = resolve(import.meta.dir, "..")
-const USAGE = "Usage: bun scripts/lca-wiki.ts <capture|lint|status|unlock|register> [file] [--title TITLE] [--root DIR]"
+const USAGE = [
+  "Usage: bun scripts/lca-wiki.ts <capture|lint|status|unlock|register> [file] [--title TITLE] [--root DIR]",
+  "capture is explicit, manual evidence collection; it never compiles or ingests sources.",
+].join("\n")
 
 function usageError(message: string): never {
   console.error(message)

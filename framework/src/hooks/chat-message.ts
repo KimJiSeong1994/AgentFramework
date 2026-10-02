@@ -16,6 +16,7 @@ import { hasLcaMarker, stripForgedMarkers } from "../modes/markers.ts"
 import type { ActiveMode } from "../modes/instructions.ts"
 import { createSkillRouter } from "../routing/router.ts"
 import { recordRoutingAdvice } from "../telemetry/routing.ts"
+import { observeSkillTurn, observationConfigGeneration } from "../telemetry/skill-observer.ts"
 import { consumeCommandTurn } from "./command-turns.ts"
 import {
   APPROVE_COMMAND, APPROVE_TEMPLATE, CANCEL_COMMAND, CANCEL_TEMPLATE, FLOW_COMMANDS, PLAN_COMMAND, PLAN_TEMPLATE,
@@ -65,17 +66,37 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
   const { worktree, config, log } = deps
   const router = createSkillRouter(deps)
   return async (input, output) => {
+    const textPart = lastUserText(output.parts)
+    const replay = !!textPart && alreadySuffixed(textPart)
     try {
-      await handle(input, output)
+      const routed = await handle(input, output, !replay)
+      if (!replay && !routed && lastUserText(output.parts)) observeSkillTurn(deps, {
+        sessionID: input.sessionID, messageID: output.message.id, role: "user", phase: "pending",
+        routerExposure: "bypass", routerEligibility: "ineligible",
+      })
     } catch (e) {
       // a read-only state dir must never break message handling
       log("chat.message hook error", { sessionID: input.sessionID, error: (e as Error).message })
     }
   }
 
-  async function handle(input: Parameters<NonNullable<Hooks["chat.message"]>>[0], output: Parameters<NonNullable<Hooks["chat.message"]>>[1]) {
+  async function handle(input: Parameters<NonNullable<Hooks["chat.message"]>>[0], output: Parameters<NonNullable<Hooks["chat.message"]>>[1], recordTurn: boolean) {
     const { sessionID } = input
     const now = Date.now()
+    if (config.skill_observation?.enabled === true && enabled(config, "tool.history") && recordTurn && lastUserText(output.parts)) {
+      const fact = {
+        sessionID, messageID: output.message.id, role: "user" as const, phase: "pending" as const,
+        startedAt: output.message.time?.created ?? null,
+        actualAgent: input.agent ?? null, agentBasis: "host_metadata" as const,
+        configGeneration: observationConfigGeneration(deps),
+        actualModel: input.model ? `${input.model.providerID}/${input.model.modelID}` : null,
+        modelBasis: input.model ? "host_metadata" as const : "unknown" as const,
+        routerExposure: "unknown" as const, routerEligibility: "unknown" as const,
+      }
+      observeSkillTurn(deps, fact)
+    }
+    // When observation alone registered this hook, do not activate legacy session/mode bookkeeping.
+    if (!enabled(config, "mode.detect") && !flowOn(config) && config.skill_observation?.enabled === true) return
 
     // session -> agent map (chat.message is the only hook that reliably sees the agent). Its own try/catch: a
     // read-only state dir must not silently drop the mode suffix below.
@@ -143,7 +164,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     // Every path below may append a suffix; the final text is recorded in `finally` so a re-delivery of exactly the
     // text lca produced is not suffixed twice.
     try {
-      await handlePart(input, part, commandTurn, now, output.message.id)
+      return await handlePart(input, part, commandTurn, now, output.message.id)
     } finally {
       markSuffixed(part)
     }
@@ -245,11 +266,20 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       // Explicit commands and existing continuation offers retain their own authority.
       if (input.agent !== "main" || resume || commandTurn || originalText.trimStart().startsWith("/") || readAbort(worktree, sessionID)) return
       const recommendation = await router.recommend(sessionID, messageID, originalText)
+      let adviceInserted = false
       if (config.skill_router.mode === "suggest" && recommendation.skill) {
         part.text += `\n\n<lca-skill-advice>Potentially relevant skill: ${recommendation.skill}. This is optional advice, not a request to load a skill, change mode, or execute work. Preserve the user's explicit choices and existing authorization requirements.</lca-skill-advice>`
+        adviceInserted = true
         if (recommendation.decisionID) recordRoutingAdvice(deps, sessionID, messageID, recommendation.decisionID, recommendation.skill)
       }
-      return
+      observeSkillTurn(deps, {
+        sessionID, messageID, role: "user", phase: "pending",
+        routerExposure: config.skill_router.mode === "off" ? "none" : config.skill_router.mode,
+        routerEligibility: config.skill_router.mode === "off" ? "ineligible" : recommendation.reason === "recommended" || recommendation.reason === "abstained" ? "eligible" : "unknown",
+        routeDecisionID: recommendation.decisionID ?? null, routeSkillName: recommendation.skill,
+        adviceInserted,
+      })
+      return true
     }
     if (now - state.startedAt > config.loop.ttl_ms) {
       writeModeState(worktree, sessionID, { ...state, active: false, stopReason: "ttl_expired" })

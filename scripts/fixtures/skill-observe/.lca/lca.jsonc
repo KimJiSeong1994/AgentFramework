@@ -1,0 +1,6 @@
+{
+  "skills": { "allow": ["observation-fixture"] },
+  "skill_router": { "mode": "off" },
+  "flow": { "enabled": false },
+  "disabled_hooks": ["loop.idle", "tool.delegate"]
+}
