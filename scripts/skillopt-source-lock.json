@@ -1,0 +1,31 @@
+{
+  "schema": "skillopt.source-lock.v1",
+  "upstream": {
+    "repository": "https://github.com/microsoft/SkillOpt.git",
+    "commit": "fa4ca184573e42ec11472959dd57422381418096",
+    "version": "0.2.0"
+  },
+  "license": {
+    "path": "LICENSE",
+    "spdx": "MIT",
+    "sha256": "9515a04280cf50ce154eb3ab8fa375c7cc5e6b45ea5cb23b7ff3830737020c15"
+  },
+  "importManifest": {
+    "algorithm": "sorted-path-nul-sha256-nul-size-v1",
+    "package": "skillopt",
+    "includeExtensions": [".md", ".py"],
+    "files": 141,
+    "bytes": 963171,
+    "sha256": "342138966970886a70fa9092b93018cfad8d7b33708f81897d6ec32fc14b2441"
+  },
+  "dependencyLock": {
+    "path": "scripts/skillopt-requirements.lock",
+    "sha256": "7aa8625ff690a58f90921cc8a86ff19f6496f55e89d94142ba66bec227a5e280",
+    "verified": true
+  },
+  "runtimeProof": {
+    "schema": "skillopt.private-runtime-proof.v1",
+    "sha256": "0a40523a6ca18d41df270b7c541793a620076dd3539ec4156b1942a92e7c9019",
+    "verified": true
+  }
+}

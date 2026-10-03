@@ -1,0 +1,43 @@
+{
+  "schema": "skillopt.preflight-evidence.v1",
+  "command": "bun scripts/lca-skillopt.ts preflight",
+  "exitCode": 1,
+  "evidenceScope": "Observed non-inference version commands and launcher smoke test; not actual-role containment or a live skill load",
+  "snapshotSha256": "f77fc50489ddc41c3ce07079100f3d4c7563f815873fc59f17878f603a3e225f",
+  "originalSkillSha256": "ed89aae4ffa07e585d4977f4964b0638ad3bb58c85e35fd7ff219551bcc1583b",
+  "capability": {
+    "schema": "skillopt.capability.v1",
+    "status": "blocked",
+    "host": {
+      "launcherSha256": "139ddeb6a46ba276827bb8f79c7b28208621746e4fd6914d9ae71cc1a0a57524",
+      "observedVersion": "1.18.33",
+      "basis": "resolved-launcher-file-and-version-command"
+    },
+    "modelService": {
+      "launcherSha256": "2557e9f2d88703d6050ad8a7d439b3d5d92a6d6ce77d8ee9055659a190541e58",
+      "observedVersion": "0.34.3",
+      "basis": "resolved-launcher-file-and-version-command"
+    },
+    "sandboxPrimitive": "passed",
+    "actualRoleContainment": "unverified",
+    "liveSkillWitness": "unverified",
+    "originalLoadedByteAttestation": false,
+    "backendRequests": 0,
+    "experimentAdmitted": false,
+    "productionApplied": false,
+    "code": "isolation_unavailable",
+    "reason": "Ollama 0.34.3 selects and releases an ephemeral internal runner port before spawning its child. No supported fixed/reserved runner route was verified. A fixed outer OLLAMA_HOST does not satisfy the approved internal-route boundary; broad loopback, a host patch and a different renderer are not admitted alternatives.",
+    "evidence": [
+      "https://github.com/ollama/ollama/blob/v0.34.3/llm/llama_server.go#L360-L505",
+      "https://github.com/ollama/ollama/blob/v0.34.3/server/sched.go",
+      "https://github.com/ollama/ollama/blob/v0.34.3/envconfig/config.go"
+    ]
+  },
+  "outcome": {
+    "optimizerCandidate": null,
+    "independentQualification": "not_run",
+    "candidateSpecificApproval": "not_requested",
+    "productionApplication": "not_performed",
+    "fullGoalComplete": false
+  }
+}

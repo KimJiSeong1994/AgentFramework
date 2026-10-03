@@ -1,0 +1,48 @@
+{
+  "schema": "skillopt.non-inference-verification.v1",
+  "scope": "Partial implementation and scratch mechanics, not experiment admission or full-goal completion",
+  "framework": {
+    "command": "bun test framework/test",
+    "passed": 702,
+    "skipped": 1,
+    "failed": 0,
+    "assertions": 4813,
+    "files": 52,
+    "diagnosticsObserved": ["record_refused", "unsupported_cross_instance"]
+  },
+  "typecheck": {"command": "bun run --cwd framework typecheck", "exitCode": 0},
+  "python": {
+    "command": "\"$SKILLOPT_PYTHON\" -I -m unittest discover -s tests -p 'test_skillopt_*.py'",
+    "passed": 36,
+    "failed": 0,
+    "adapterTests": 27,
+    "nativeScratchTests": 9
+  },
+  "promotion": {
+    "command": "bun test framework/test/skillopt-promotion.test.ts",
+    "passed": 22,
+    "failed": 0,
+    "assertions": 236,
+    "helperProtocol": "skillopt-darwin.v2",
+    "compilerFlags": ["-std=c11", "-Wall", "-Wextra", "-Werror"],
+    "faultInstrumentation": "Separate test-only SKILLOPT_TEST_FAULTS build",
+    "witnesses": "Injected mechanics fixtures; not actual host loads"
+  },
+  "review": {
+    "role": "architect",
+    "scope": "Bounded adapter, preflight and native retention implementation reviews",
+    "resolvedFindings": ["ARCH-SKILLOPT-004", "ARCH-SKILLOPT-005"],
+    "fullBoundaryApproved": false,
+    "promotionSourceSha256": "b0069da3fa68cbed8fe0e51b40cd11e29cb3f5719c97ebdf3bc41c37a516e14f",
+    "promotionTestsSha256": "3f8f6b8ba2a7e1b29e52e8b6d855fa3ba370f62d16f7cc5621bd7b32f8c9cd2b",
+    "nativeSourceSha256": "4c7a8a2b0cdba846b0548744e02b05c0e6393b8744b0f0dca62b36e0e193332b"
+  },
+  "runtimeReceipt": "runtime.json",
+  "capabilityReceipt": "capability.json",
+  "backendRequests": 0,
+  "experimentAdmitted": false,
+  "independentQualification": "not_run",
+  "candidateSpecificApproval": "not_requested",
+  "productionApplied": false,
+  "fullGoalComplete": false
+}
