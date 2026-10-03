@@ -557,6 +557,32 @@ The `guard.wiki_raw` hook (`tool.execute.before`) refuses edit/write/multiedit a
 included; patch targets are read from `*** Add/Update/Delete File:` and `*** Move to:`
 lines). It does not parse bash; `lint`'s byte-hash integrity check is the backstop.
 
+## SkillOpt pilot — blocked before inference
+
+The separate, explicitly authorized Microsoft/SkillOpt pilot is **not a completed
+optimization or deployment**. The production `llm-wiki` skill and closed/off P1
+campaign remain unchanged. No candidate or efficacy result exists.
+
+```sh
+bun scripts/lca-skillopt.ts snapshot
+bun scripts/lca-skillopt.ts preflight
+```
+
+`snapshot` emits bounded hash-only source metadata, including the immutable research
+note and its separate A13 correction. `preflight` checks installed launchers and a
+minimal sandbox primitive without starting inference; the observed environment
+returns exit 1 with `isolation_unavailable`. This primitive check is not proof of
+actual-role containment or a live skill load.
+
+Ollama 0.34.3 chooses an ephemeral internal runner port. Fixing its public
+`OLLAMA_HOST` does not satisfy the approved fixed/reserved internal-route boundary.
+Broad loopback access, replacing its renderer, or patching/upgrading the host is
+not authorized by this pilot. `optimize` and `apply` are deliberately not exposed
+by this CLI; unsupported commands fail, rather than reporting a no-op success.
+The full experiment, independent qualification, exact-candidate approval and
+verified production application remain unmet. See the
+[pilot runbook and capability boundary](../docs/lca-skillopt-pipeline-2026-10-03.md).
+
 ## Delegate config (`.lca/lca.jsonc` → `delegate`)
 
 | key | default | meaning |

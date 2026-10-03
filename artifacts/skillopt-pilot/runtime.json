@@ -1,0 +1,13 @@
+{
+  "schema": "skillopt.runtime-proof.v1",
+  "ok": true,
+  "upstreamCommit": "fa4ca184573e42ec11472959dd57422381418096",
+  "upstreamVersion": "0.2.0",
+  "sourceLockSha256": "6a7b64d22baf6e4233f024110449c9e656ac42a77364cad2d1a42ec64b71e8eb",
+  "runtimeProofSha256": "0a40523a6ca18d41df270b7c541793a620076dd3539ec4156b1942a92e7c9019",
+  "licenseSha256": "9515a04280cf50ce154eb3ab8fa375c7cc5e6b45ea5cb23b7ff3830737020c15",
+  "importManifestSha256": "342138966970886a70fa9092b93018cfad8d7b33708f81897d6ec32fc14b2441",
+  "dependencyLockSha256": "7aa8625ff690a58f90921cc8a86ff19f6496f55e89d94142ba66bec227a5e280",
+  "pythonVersion": "3.13.2",
+  "pythonSha256": "3a1f077a333905eaac57197c9f2060ed95e05208daf83da4827d92e0474574d8"
+}
