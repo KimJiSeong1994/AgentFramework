@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { AGENT_DEFS, MAIN_PROMPT, REVIEWER_PROMPT, WORKER_PROMPT } from "../src/agents/prompts.ts"
+import { AGENT_DEFS, mainPrompt, MAIN_PROMPT, REVIEWER_PROMPT, WORKER_PROMPT } from "../src/agents/prompts.ts"
 import { estimateTokens } from "../src/tokens.ts"
 
 describe("prompt budgets", () => {
@@ -15,6 +15,36 @@ describe("prompt budgets", () => {
 })
 
 describe("prompt content", () => {
+  test.each(["main", "worker", "reviewer"] as const)("%s includes minimal-code guidance without sacrificing safeguards", (name) => {
+    const prompt = AGENT_DEFS[name].prompt!
+    expect(prompt.split("Coding conventions:")).toHaveLength(2)
+    expect(prompt).toContain("Trace the real flow and callers first; fix shared root causes.")
+    expect(prompt).toContain("reuse existing code, standard library, native platform features, and installed dependencies")
+    expect(prompt).toContain("simplify or delete only within task scope")
+    expect(prompt).toContain("Readability over clever one-liners")
+    expect(prompt).toContain("Keep trust-boundary validation, data-loss error handling, security and accessibility.")
+    expect(prompt).toContain("runnable checks within role permissions; performance claims need measurements")
+  })
+
+  test("main prompt variants retain conventions and conditional rule numbering within budget", () => {
+    for (const delegate of [false, true]) {
+      for (const data of [false, true]) {
+        for (const flow of [false, true]) {
+          const prompt = mainPrompt(delegate, data, flow)
+          expect(prompt.split("Coding conventions:")).toHaveLength(2)
+          expect(estimateTokens(prompt)).toBeLessThanOrEqual(1500)
+          expect(prompt.includes("Call the delegate tool once")).toBe(delegate)
+          expect(prompt.includes("write a numbered task list first")).toBe(!delegate)
+          expect(prompt.includes("Question about the project database")).toBe(data && delegate)
+          expect(prompt.includes("submit plans only with lca_flow")).toBe(flow)
+          const numbers = [...prompt.matchAll(/^(\d+)\. /gm)].map((match) => Number(match[1]))
+          const count = 8 + Number(data && delegate) + Number(flow)
+          expect(numbers).toEqual(Array.from({ length: count }, (_, i) => i + 1))
+        }
+      }
+    }
+  })
+
   test("main: talk to user, delegate big tasks, no task tool, no repeats, edit over write, stop when done", () => {
     expect(MAIN_PROMPT).toMatch(/task list/i)
     // stage 2: big work goes through the plugin's delegate tool, called once with the whole list

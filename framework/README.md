@@ -5,6 +5,23 @@ Local-first agent framework for OpenCode with Ollama/Gemma as the only backend. 
 prefix (system prompt + tool list + thinking toggle) is fixed at session start and small; repeat
 blocking, output trimming and orchestration are done in code, not by the model.
 
+## Default coding conventions
+
+Main, worker and reviewer share compact [Ponytail-inspired](https://github.com/DietrichGebert/ponytail)
+guidance: trace the real flow and callers, fix root causes, then prefer no new code,
+existing code, the standard library, native platform features and installed dependencies
+before writing the smallest clear implementation. Avoid speculative abstractions,
+dependencies and boilerplate; prefer readable code over clever one-liners.
+Simplification stays within task scope and never removes necessary validation,
+data-loss handling, security or accessibility. Nontrivial changes need runnable checks
+within the role's existing permissions; performance claims need measurements.
+
+These are default prompt instructions, not a new enforcement hook or a performance
+guarantee. Existing worker verification and read-only reviewer rules remain unchanged.
+No external plugin or dependency is installed. The guidance is part of the static
+prefix: restart OpenCode and start a new session to load it, rather than changing an
+active session's prefix.
+
 ## Plan workflow (harness M1) — `/plan` → `/approve` → workers
 
 ```text
