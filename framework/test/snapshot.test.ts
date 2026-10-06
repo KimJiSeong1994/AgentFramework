@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { createSnapshotStore, diffSnapshots, snapshotTree } from "../src/orchestration/snapshot.ts"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { runShell, startShell } from "../src/orchestration/shell.ts"
+import { stateRoot } from "../src/state/store.ts"
 import { tempGitWorktree, tempWorktree } from "./guards-helpers.ts"
 
 let wt: ReturnType<typeof tempGitWorktree>
@@ -93,6 +94,71 @@ describe("snapshot / diff", () => {
     } finally {
       store!.dispose()
     }
+  })
+
+  test("durable task baseline reopens with private objects and still diffs orphan edits", async () => {
+    const directory = join(wt.stateHome, "snapshots", "task-baseline")
+    writeFileSync(join(wt.worktree, "before-task.py"), "BASELINE = True\n")
+    const userObjects = execFileSync("git", ["count-objects", "-v"], { cwd: wt.worktree }).toString()
+    const initial = (await createSnapshotStore(wt.worktree, directory))!
+    const baseline = await initial.baseline(["ignored.txt"])
+    expect(baseline).not.toBeNull()
+    expect(existsSync(join(directory, "objects"))).toBe(true)
+    expect(execFileSync("git", ["count-objects", "-v"], { cwd: wt.worktree }).toString()).toBe(userObjects)
+    writeFileSync(join(wt.worktree, "orphan.py"), "ORPHAN = True\n")
+
+    const reopened = (await createSnapshotStore(wt.worktree, directory))!
+    try {
+      const original = await reopened.baseline(["ignored.txt"], true)
+      const current = await reopened.snapshot(["ignored.txt"])
+      const diff = await reopened.diff(original, current, 10_000)
+      expect(diff?.files).toEqual(["orphan.py"])
+      expect(diff?.diff).toContain("+ORPHAN = True")
+    } finally { reopened.dispose() }
+  })
+
+  test("durable baselines fail closed when missing, corrupt, or bound to another worktree or exclusions", async () => {
+    const directory = join(wt.stateHome, "snapshots", "task-baseline-invalid")
+    const store = (await createSnapshotStore(wt.worktree, directory))!
+    try {
+      await expect(store.baseline([], true)).rejects.toThrow(/baseline is missing/)
+      const baseline = await store.baseline()
+      expect(baseline).not.toBeNull()
+      const metadataPath = join(directory, "baseline.json")
+      const metadata = readFileSync(metadataPath, "utf8")
+
+      await expect(store.baseline(["README.md"], true)).rejects.toThrow(/does not match/)
+      const other = tempGitWorktree({ "README.md": "other\n" })
+      try {
+        const mismatched = (await createSnapshotStore(other.worktree, directory))!
+        await expect(mismatched.baseline([], true)).rejects.toThrow(/does not match/)
+      } finally { other.cleanup() }
+
+      writeFileSync(metadataPath, "{")
+      await expect(store.baseline([], true)).rejects.toThrow(/metadata is corrupt/)
+      writeFileSync(metadataPath, metadata)
+      const invalidTree = JSON.parse(metadata) as { tree: string }
+      invalidTree.tree = "0".repeat(40)
+      writeFileSync(metadataPath, JSON.stringify(invalidTree))
+      await expect(store.baseline([], true)).rejects.toThrow(/tree is missing or corrupt/)
+    } finally { store.dispose() }
+  })
+
+  test("snapshot stores refuse symlinked worktree control and durable directories", async () => {
+    const outside = join(wt.stateHome, "snapshot-outside")
+    mkdirSync(outside)
+    symlinkSync(outside, join(wt.stateHome, "snapshot-link"))
+    await expect(createSnapshotStore(wt.worktree, join(wt.stateHome, "snapshot-link"))).rejects.toThrow(/control directory is unsafe/)
+
+    const state = stateRoot(wt.worktree)
+    mkdirSync(state, { recursive: true })
+    symlinkSync(outside, join(state, "sessions"))
+    await expect(createSnapshotStore(wt.worktree, join(state, "sessions", "s1", "snapshots", "task"))).rejects.toThrow(/control directory is unsafe/)
+
+    symlinkSync(outside, join(wt.worktree, ".lca"))
+    const store = (await createSnapshotStore(wt.worktree))!
+    try { expect(await store.snapshot()).toBeNull() }
+    finally { store.dispose() }
   })
 
   test("restore recreates original symlink entries", async () => {

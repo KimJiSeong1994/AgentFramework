@@ -8,7 +8,7 @@
 // reviewer's verdict line (that agent's output contract) and the worker's "Open issues:" line (report contract).
 import { createHash, randomUUID } from "node:crypto"
 import { verifyCommandProblem } from "../config.ts"
-import { readAbort, removeSessionDir } from "../state/store.ts"
+import { readAbort, removeSessionDir, sessionDir } from "../state/store.ts"
 import {
   addTasks,
   cancelOpen,
@@ -39,7 +39,7 @@ import { beginExecutionActivity } from "../hosts/runtime.ts"
 import type { ExecutionHandle, ExecutionReconciliation, ExecutionReference, ExecutionRole, ExecutionRuntime } from "../hosts/types.ts"
 import type { VerificationHandle, VerificationResult } from "./verifier.ts"
 import { createSnapshotStore, type Snapshot } from "./snapshot.ts"
-import { createTaskWorktree, type TaskWorktree } from "./worktree.ts"
+import { createTaskWorktree, type TaskWorktree, worktreeRoot } from "./worktree.ts"
 import { readWorkflow } from "../flow/state.ts"
 import { copyFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
@@ -89,6 +89,7 @@ type Active = {
   cancelWaiter?: () => void
   claim?: ExecutionClaim
   unresolved?: boolean
+  recoveryBlocked?: boolean
   verify?: { id: string; handle: VerificationHandle; claim: ExecutionClaim; run?: Promise<VerificationResult>; cancelled?: VerificationResult }
   attempt?: AttemptObservation
   startedAt: number
@@ -311,15 +312,15 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     }
     entry.promise = runLoop(sessionID, entry, origin)
       .catch((e: unknown) => {
-        // Never leave a running marker. A user stop with unresolved child execution
-        // remains cancelled but fenced; an unrelated internal failure is failed.
+        // Do not rewrite the ledger when startup recovery cannot prove quiescence: a later safe retry needs its exact
+        // running/pending task state. After dispatch starts, retain the existing failed/cancelled repair behavior.
         const msg = (e as Error)?.message ?? String(e)
         if (entry.attempt) {
           finishAttemptObservation(entry.attempt, "failed", "failed", entry.attempt.review)
           entry.attempt = undefined
         }
         deps.log("queue crashed", { sessionID, error: msg })
-        if (!entry.discard) {
+        if (!entry.discard && !entry.recoveryBlocked) {
           let ledger = readLedger(deps.worktree, sessionID)
           const running = ledger.tasks.find((t) => t.status === "running")
           if (running) ledger = updateTask(ledger, running.id, {
@@ -428,6 +429,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
 
   async function runLoop(sessionID: string, entry: Active, origin?: QueueOrigin): Promise<QueueRun> {
     const result: QueueRun = { taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: false }
+    entry.recoveryBlocked = true
     entry.claim = deps.runs.claim(sessionID, deps.instance, process.pid)
     // A previous process may have stopped after dispatch. Never replay its ledger task until
     // every persisted execution has affirmative terminal/quiescence evidence.
@@ -467,6 +469,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     }
     try { deps.runs.assertQuiescent(entry.claim) }
     catch (error) { entry.unresolved = true; throw error }
+    entry.recoveryBlocked = false
     let ledger = readLedger(deps.worktree, sessionID)
     // A crashed run may have left a task `running`; give it its attempt back and run it again. The ledger counter is
     // not a stable identity, so the restarted attempt gets a new UUID and no guessed resumeOfAttemptID.
@@ -517,17 +520,25 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     // Optional isolation: the task runs in its own linked git worktree (worker session + verify bound to it) and its
     // diff is applied to the main worktree only when accepted. Falls back to in-place when there is no commit yet.
     let wt: TaskWorktree | null = null
-    if (c.worktree) {
+    const interruptedIsolatedTask = c.worktree && task.startedAt !== undefined
+    const interruptedWorktreePath = interruptedIsolatedTask ? join(worktreeRoot(deps.worktree), sessionID, task.id) : undefined
+    if (c.worktree && !interruptedIsolatedTask) {
       wt = await createTaskWorktree(deps.worktree, sessionID, task.id, c.diff_exclude)
       if (wt) deps.log("task worktree", { sessionID, task: task.id, path: wt.path })
       else deps.log("task worktree unavailable (no git repository or no commit yet): running in place", { sessionID, task: task.id })
     }
     const root = wt?.path ?? deps.worktree
+    const snapshotDirectory = join(sessionDir(deps.worktree, sessionID), "snapshots", task.id)
     // One snapshot store + one "before" tree per task: a retry is judged on the task's cumulative diff (attempt 1 may
     // already have done the work; the retry then changes little or nothing).
-    const store = await createSnapshotStore(root)
-    if (!store) result.noSnapshot = true
-    const before: Snapshot = store ? await store.snapshot(c.diff_exclude) : null
+    const store = interruptedIsolatedTask ? null : await createSnapshotStore(root, snapshotDirectory)
+    if (!store && !interruptedIsolatedTask) result.noSnapshot = true
+    let before: Snapshot = null
+    let baselineError: string | undefined
+    if (store && !interruptedIsolatedTask) {
+      try { before = await store.baseline(c.diff_exclude, task.startedAt !== undefined) }
+      catch (error) { baselineError = (error as Error).message ?? String(error) }
+    }
     const prot = protectedFiles(task)
     const finishObserved = (next: LedgerTask, status: "done" | "failed" | "cancelled"): LedgerTask => {
       const done = finish(sessionID, entry, ledger, next)
@@ -539,8 +550,10 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     const cancelled = (): LedgerTask => finishObserved(
       { ...task, status: "cancelled", error: entry.reason ?? "aborted", finishedAt: Date.now() }, "cancelled")
     try {
+      if (interruptedIsolatedTask) return finishObserved(
+        { ...task, status: "failed", error: `cannot safely resume an interrupted isolated task: deterministic worktree path is ${interruptedWorktreePath}; recreating it may discard unreviewed edits or mismatch its original baseline, so no worker was dispatched`, finishedAt: Date.now() }, "failed")
       if (!store || !before) return finishObserved(
-        { ...task, status: "failed", error: "could not snapshot the task baseline", finishedAt: Date.now() }, "failed")
+        { ...task, status: "failed", error: baselineError ? `could not ${task.startedAt === undefined ? "snapshot" : "reuse"} the task baseline: ${head(baselineError, 200)}` : "could not snapshot the task baseline", finishedAt: Date.now() }, "failed")
       while (task.attempts < c.max_attempts) {
         observeWorkflowCancellation(sessionID, entry)
         if (entry.aborted) return cancelled()
@@ -853,7 +866,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
       entry.attempt = undefined
       throw error
     } finally {
-      if (!entry.unresolved) store?.dispose()
+      if (!entry.unresolved && !baselineError) store?.dispose()
       // a failed or cancelled task's worktree changes are discarded with it (the main worktree never saw them)
       if (wt && !entry.unresolved) await wt.remove()
     }

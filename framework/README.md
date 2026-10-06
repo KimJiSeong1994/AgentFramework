@@ -92,6 +92,18 @@ pending while execution retirement is unproven; acknowledgement is not quiescenc
 SIGINT/SIGTERM during a run requests cancellation. A detached
 process from a worker shell command cannot currently be proven stopped by a prompt response:
 such an execution remains fenced rather than verifying, merging, or releasing its claim.
+After a coordinator crash, OpenCode recovery must match the persisted execution, child,
+parent and request-message identity against a completed final SDK response. An idle status
+alone, a completed intermediate tool-call step, or an abort acknowledgement is insufficient.
+Incomplete tools, mismatched evidence and durable shell/process risk keep the execution fenced.
+An inconclusive recovery leaves the interrupted ledger intact for a later explicit retry.
+Code tasks retain their original private Git baseline outside the worktree across restart:
+edits made before the crash remain part of verification and independent review, even if the
+replacement worker changes nothing. Missing or invalid recovery baselines are refused rather
+than replaced with a snapshot of already-modified files; this also applies to older interrupted
+runs without retained baselines. Completed tasks are not dispatched again.
+Interrupted `delegate.worktree: true` tasks are not automatically resumed: their existing
+linked worktree and private baseline are preserved for inspection instead of being recreated.
 Trusted scripted fixtures can use read/write/edit tools and the code-owned verifier.
 The current Darwin/shared-server verifier is `legacy-unowned`: its durable record states
 `isolationEstablished=false`, `domainState=unknown`, `descendantRisk=unproven`, and status
