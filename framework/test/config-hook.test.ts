@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Config } from "@opencode-ai/plugin"
-import type { LcaConfig } from "../src/config.ts"
+import { effectiveOutputLimit, parseModelSelection, type LcaConfig } from "../src/config.ts"
 import { AGENT_DEFS, MAIN_PROMPT, MAIN_RULE3_NO_DELEGATE, WORKER_PROMPT, mainPrompt } from "../src/agents/prompts.ts"
 import { createConfigHook, type LcaOpenCodeConfig } from "../src/hooks/config.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
@@ -27,6 +27,16 @@ async function run(config: Config, d: HookDeps = deps()): Promise<LcaOpenCodeCon
 }
 
 describe("config hook", () => {
+  test("model parsing preserves slash-containing model IDs and output limits reject invalid values", () => {
+    expect(parseModelSelection("openai-compatible/org/model-v2")).toEqual({
+      providerID: "openai-compatible",
+      modelID: "org/model-v2",
+    })
+    expect(() => parseModelSelection("provider/ model")).toThrow(/Invalid model selection/)
+    expect(effectiveOutputLimit(4096, 2048, 8192)).toBe(2048)
+    expect(() => effectiveOutputLimit(4096, undefined, 0)).toThrow(/Invalid model output limit/)
+  })
+
   test("injects main/worker/reviewer from AGENT_DEFS into an empty config", async () => {
     const c = await run({})
     expect(c.agent?.main?.mode).toBe("primary")
@@ -66,11 +76,36 @@ describe("config hook", () => {
     expect(c.agent?.main?.prompt).not.toMatch(/delegate tool/i)
   })
 
-  test("worker/reviewer get temperature 0.2, main does not", async () => {
+  test("leaves temperature unset when no effective provider is known", async () => {
     const c = await run({})
-    expect(c.agent?.worker?.temperature).toBe(0.2)
-    expect(c.agent?.reviewer?.temperature).toBe(0.2)
+    expect(c.agent?.worker?.temperature).toBeUndefined()
+    expect(c.agent?.reviewer?.temperature).toBeUndefined()
     expect(c.agent?.main?.temperature).toBeUndefined()
+  })
+
+  test("applies local temperature from top-level default but not cloud or user-agent cloud models", async () => {
+    const local = await run({ model: "ollama/gemma4:26b" })
+    expect(local.agent?.worker?.temperature).toBe(0.2)
+    expect(local.agent?.reviewer?.temperature).toBe(0.2)
+
+    const cloud = await run({ model: "anthropic/claude-sonnet" })
+    expect(cloud.agent?.worker?.temperature).toBeUndefined()
+    expect(cloud.agent?.reviewer?.temperature).toBeUndefined()
+
+    const userCloud = await run({ agent: { worker: { model: "anthropic/claude-sonnet" } } })
+    expect(userCloud.agent?.worker?.temperature).toBeUndefined()
+    expect(userCloud.agent?.reviewer?.temperature).toBeUndefined()
+
+    const userCloudOverLocal = await run(
+      { model: "ollama/gemma4:26b", agent: { worker: { model: "anthropic/claude-sonnet" } } },
+      deps({ models: { worker: "ollama/gemma4:26b" } }),
+    )
+    expect(userCloudOverLocal.agent?.worker?.temperature).toBeUndefined()
+  })
+
+  test("preserves explicit user temperature with local model selection", async () => {
+    const c = await run({ model: "ollama/gemma4:26b", agent: { worker: { temperature: 0.8 } } })
+    expect(c.agent?.worker?.temperature).toBe(0.8)
   })
 
   test("applies deps.config.models as model when set", async () => {
@@ -78,6 +113,13 @@ describe("config hook", () => {
     expect(c.agent?.main?.model).toBe("ollama/gemma4:26b")
     expect(c.agent?.worker?.model).toBe("ollama/gemma4:26b")
     expect(c.agent?.reviewer?.model).toBeUndefined()
+  })
+
+  test("rejects malformed provider/model selections and does not force cloud temperature", async () => {
+    await expect(run({}, deps({ models: { worker: "/model" } }))).rejects.toThrow(/Invalid model selection/)
+    const c = await run({}, deps({ models: { worker: "anthropic/claude-sonnet" } }))
+    expect(c.agent?.worker?.model).toBe("anthropic/claude-sonnet")
+    expect(c.agent?.worker?.temperature).toBeUndefined()
   })
 
   test("does not mutate AGENT_DEFS", async () => {

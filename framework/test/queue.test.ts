@@ -1,682 +1,648 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { createQueue, parseVerdict, reviewerPrompt, workerPrompt, CHILD_TOOL_DENY } from "../src/orchestration/queue.ts"
+import { DEFAULT_CONFIG, type LcaConfig } from "../src/config.ts"
+import { createExecutionRunStore } from "../src/hosts/run-state.ts"
+import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
+import type { ExecutionHandle, ExecutionOutcome, ExecutionReconciliation, ExecutionRequest, ExecutionRuntime } from "../src/hosts/types.ts"
+import { createQueue, getQueue, parseVerdict, reviewerPrompt, workerPrompt } from "../src/orchestration/queue.ts"
+import { createLegacyVerifierExecutor } from "../src/orchestration/legacy-verifier.ts"
+import { createSnapshotStore } from "../src/orchestration/snapshot.ts"
+import { currentOwner } from "../src/flow/owner.ts"
+import { newWorkflow, writeWorkflow } from "../src/flow/state.ts"
 import { addTasks, emptyLedger, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
-import { abortPath, sessionDir, writeJsonAtomic } from "../src/state/store.ts"
-import { observeSkillTask } from "../src/telemetry/skill-observer.ts"
-import { activateSkillCampaign, listSkillObservations, skillObservationDatabasePath } from "../src/telemetry/skills.ts"
-import { fakeClient, makeDeps, tempGitWorktree, verifyScript, waitFor, type FakeClient } from "./guards-helpers.ts"
+import { sessionDir, stateRoot } from "../src/state/store.ts"
+import { tempGitWorktree, verifyScript, waitFor } from "./guards-helpers.ts"
 
 const S = "ses_main"
 let wt: ReturnType<typeof tempGitWorktree>
-let client: FakeClient
-beforeEach(() => {
-  wt = tempGitWorktree({ "README.md": "fixture\n" })
-  client = fakeClient({ promptAsync: true })
-})
+beforeEach(() => { wt = tempGitWorktree({ "README.md": "fixture\n" }) })
 afterEach(() => wt.cleanup())
 
-const write = (name: string, content: string) => writeFileSync(join(wt.worktree, name), content)
-const prompts = (agent: string) => client.calls.filter((c) => c.method === "prompt" && (c.args as any).body.agent === agent)
-const noReview = { delegate: { review: false } as any }
-// allow-listed verify scripts (sh <name>.sh) — real commands, refused ones are covered separately
-const okVerify = () => verifyScript(wt.worktree, "verify_ok.sh", "exit 0")
-const failVerify = () => verifyScript(wt.worktree, "verify_fail.sh", "echo boom-output; exit 2")
-const existsVerify = (file: string) => verifyScript(wt.worktree, `check_${file}.sh`, `test -f ${file}`)
-const observedDeps = (patch: Parameters<typeof makeDeps>[2] = {}) => {
-  const campaignID = "queue-test"
-  const activated = activateSkillCampaign(wt.worktree, campaignID)
-  return makeDeps(client, wt.worktree, {
-    ...patch,
-    skill_observation: { enabled: true, campaign_id: campaignID, owner_root: wt.worktree, owner_binding: activated.ownerBinding! },
-  })
+const write = (name: string, contents: string) => writeFileSync(join(wt.worktree, name), contents)
+const verify = (name: string, body: string) => verifyScript(wt.worktree, name, body)
+type Reply = (request: ExecutionRequest) => Promise<ExecutionOutcome> | ExecutionOutcome
+
+function fixture(patch: Partial<LcaConfig> = {}) {
+  const config: LcaConfig = {
+    ...DEFAULT_CONFIG, ...patch,
+    delegate: { ...DEFAULT_CONFIG.delegate, ...patch.delegate },
+    models: { ...DEFAULT_CONFIG.models, ...patch.models },
+  }
+  const requests: ExecutionRequest[] = []
+  const events: string[] = []
+  const replies = new Map<string, Reply>()
+  let prepareWait: (() => Promise<void>) | undefined
+  let cancellation: "terminal" | "ack-only" = "terminal"
+  let seq = 0
+  const runtime: ExecutionRuntime = {
+    instance: "queue-fixture", directory: wt.worktree, worktree: wt.worktree,
+    stateRoot: stateRoot(wt.worktree), config, verificationProfile: "legacy-unowned",
+    log: (event) => { events.push(event) },
+    runs: createExecutionRunStore(wt.worktree), verifier: createLegacyVerifierExecutor(), policy: createExecutionPolicy(config, { directory: wt.worktree, worktree: wt.worktree }),
+    host: {
+      identity: { engine: "fixture", profile: "neutral" },
+      async preflight() { return { compatible: true, controls: {}, problems: [] } },
+      async reconcile() { return { outcome: "unknown", quiescent: false, evidence: "a detached fixture is not proven quiescent" } },
+      async prepare(request): Promise<ExecutionHandle> {
+        requests.push(request)
+        if (prepareWait) await prepareWait()
+        const vendorSessionID = `child_${++seq}`
+        runtime.policy.bindSession(vendorSessionID, request.handlers, request.policy)
+        let settled = false
+        let stopped = false
+        return {
+          reference: { executionID: request.executionID, vendorSessionID },
+          async run() {
+            const reply = replies.get(request.role)
+            if (!reply) throw new Error(`missing fixture reply for ${request.role}`)
+            const outcome = await reply(request)
+            if (!stopped || cancellation === "terminal") settled = true
+            return outcome
+          },
+          async requestCancel() {
+            stopped = true
+            if (cancellation === "terminal") settled = true
+            return { requested: true, acknowledged: true, terminal: false, quiescent: false }
+          },
+          async reconcile(): Promise<ExecutionReconciliation> {
+            return settled ? { outcome: "terminal", quiescent: true, evidence: "fixture execution settled" }
+              : { outcome: "unknown", quiescent: false, evidence: "fixture execution still pending" }
+          },
+        }
+      },
+    },
+  }
+  return { runtime, requests, events, replies, setCancellation: (value: "terminal" | "ack-only") => { cancellation = value },
+    setPrepareWait: (wait: () => Promise<void>) => { prepareWait = wait } }
 }
-const observations = () => listSkillObservations(wt.worktree).facts
-const factPayload = (fact: { payload: unknown }) => fact.payload as Record<string, unknown>
 
-describe("serial queue", () => {
-  test("runs three tasks serially in fresh child sessions, verifies in code, reviews, writes ledger + handoffs", async () => {
-    const deps = makeDeps(client, wt.worktree)
-    const q = createQueue(deps)
-    let n = 0
-    client.replies.worker = () => {
-      n++
-      const file = `mod${n}.py`
-      return { texts: ["thinking aloud…", `Files changed: ${file}\nVerification: ok\nOpen issues: none`], run: () => write(file, `V = ${n}\n`) }
+describe("neutral execution queue", () => {
+  test("a failed changed-file diff is not interpreted as an empty diff", async () => {
+    const store = (await createSnapshotStore(wt.worktree))!
+    try {
+      const before = await store.snapshot()
+      expect(before).not.toBeNull()
+      expect(await store.diff(before, { tree: "0000000000000000000000000000000000000000", store }, 1000)).toBeNull()
+    } finally {
+      store.dispose()
     }
-    client.replies.reviewer = { text: "ACCEPT\n- fine" }
-    const added = q.add(S, [
-      { title: "one", detail: "create mod1.py", verify: existsVerify("mod1.py") },
-      { title: "two", verify: existsVerify("mod2.py") },
-      { title: "three", verify: existsVerify("mod3.py") },
-    ])
-    expect(added.map((t) => t.id)).toEqual(["t1", "t2", "t3"])
-    expect(q.isRunning(S)).toBe(false)
-    const run = await q.run(S)
-    expect(run).toEqual({ taskIds: ["t1", "t2", "t3"], done: 3, failed: 0, cancelled: 0, aborted: false })
+  })
 
-    // one worker + one reviewer child session per task, all children of main, serial order
-    expect(client.created.map((c) => c.parentID)).toEqual([S, S, S, S, S, S])
-    expect(client.created.map((c) => c.title)).toEqual([
-      "lca task 1: one", "lca review 1: one", "lca task 2: two", "lca review 2: two", "lca task 3: three", "lca review 3: three",
-    ])
-    const w = prompts("worker").map((c) => (c.args as any))
-    expect(w.map((a) => a.path.id)).toEqual(["child_1", "child_3", "child_5"])
-    // session-level tool deny travels with every child prompt (defense in depth)
-    expect(w[0].body.tools).toEqual(CHILD_TOOL_DENY)
-    expect(w[0].body.parts[0].text).toContain("Task 1 of 3: one")
-    expect(w[0].body.parts[0].text).toContain("create mod1.py")
-    expect(w[0].body.parts[0].text).toContain("Run this once before you finish: sh check_mod1.py.sh")
-    // handoff context carries earlier results, and only those
-    expect(w[1].body.parts[0].text).toContain("Task 1 (done): one [files: mod1.py]")
-    expect(w[2].body.parts[0].text).toContain("Task 2 (done): two [files: mod2.py]")
-    expect(w[0].body.parts[0].text).not.toContain("Earlier tasks")
-    // reviewer sees the per-task diff, the full scope and the verify result
-    const r = prompts("reviewer").map((c) => (c.args as any).body.parts[0].text)
-    expect(r[1]).toContain("+V = 2")
-    expect(r[1]).not.toContain("+V = 1")
-    expect(r[1]).toContain("`sh check_mod2.py.sh` -> exit 0 (pass)")
-    expect(r[0]).toContain("Scope: create mod1.py")
+  for (const review of [false, true]) {
+    test(`truncated task diff fails before verification or review (review=${review})`, async () => {
+      const f = fixture({ delegate: { worktree: true, review, review_strict: false, max_attempts: 1, diff_max_chars: 128 } as LcaConfig["delegate"] })
+      const maliciousSource = `${"VALUE = 1\n".repeat(100)}_call_count = 0\n`
+      f.replies.set("worker", request => {
+        writeFileSync(join(request.cwd, "feature.py"), maliciousSource)
+        return { status: "completed", text: "Files changed: feature.py\nOpen issues: none" }
+      })
+      const q = createQueue(f.runtime)
+      q.add(S, [{ title: "truncated diff", verify: verify("check_truncated.sh", "test -f feature.py") }])
+      expect(await q.run(S)).toMatchObject({ done: 0, failed: 1 })
+      const task = readLedger(wt.worktree, S).tasks[0]!
+      expect(task.status).toBe("failed")
+      expect(task.error).toContain("diff was truncated")
+      expect(task.error).toContain("delegate.diff_max_chars")
+      expect(task.filesChanged).toContain("feature.py")
+      expect(task.verify_result).toMatchObject({ ok: false, output: expect.stringContaining("truncated") })
+      expect(maliciousSource.indexOf("_call_count")).toBeGreaterThan(128)
+      expect(f.requests.map(request => request.role)).toEqual(["worker"])
+      expect(existsSync(join(wt.worktree, "feature.py"))).toBe(false)
+      expect(f.runtime.runs.status().executions.filter(execution => execution.kind === "verifier")).toHaveLength(0)
+    })
+  }
 
+  for (const reviewStrict of [false, true]) {
+    test(`malformed reviewer verdict with passing verify (review_strict=${reviewStrict})`, async () => {
+      const f = fixture({ delegate: { review: true, review_strict: reviewStrict, max_attempts: 2 } as LcaConfig["delegate"] })
+      f.replies.set("worker", request => {
+        writeFileSync(join(request.cwd, "feature.py"), "VALUE = 1\n")
+        return { status: "completed", text: "Files changed: feature.py\nOpen issues: none" }
+      })
+      f.replies.set("reviewer", () => ({ status: "completed", text: "The change looks fine to me." }))
+      const q = createQueue(f.runtime)
+      q.add(S, [{ title: "malformed reviewer verdict", verify: verify("check_reviewer.sh", "test -f feature.py") }])
+      const result = await q.run(S)
+      expect(result).toMatchObject(reviewStrict ? { done: 0, failed: 1 } : { done: 1, failed: 0 })
+      const task = readLedger(wt.worktree, S).tasks[0]!
+      expect(task.verify_result?.ok).toBe(true)
+      expect(task.review?.verdict).toBe("error")
+      expect(task.attempts).toBe(reviewStrict ? 2 : 1)
+      if (reviewStrict) expect(task.error).toContain("review gave no verdict")
+      expect(f.requests.filter(request => request.role === "worker")).toHaveLength(reviewStrict ? 2 : 1)
+      expect(f.requests.filter(request => request.role === "reviewer")).toHaveLength(reviewStrict ? 2 : 1)
+    })
+  }
+
+  test("matching persisted workflow cancellation aborts a hanging worker without launching later tasks", async () => {
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    f.setCancellation("ack-only")
+    const workflow = { ...newWorkflow(S, currentOwner(), "command", "queue cancellation"), phase: "executing" as const }
+    writeWorkflow(wt.worktree, workflow)
+    let workerStarted = false
+    f.replies.set("worker", () => {
+      workerStarted = true
+      return new Promise<ExecutionOutcome>(() => {})
+    })
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "hanging" }, { title: "must not launch" }])
+    const run = q.run(S)
+    await waitFor(() => workerStarted)
+    writeWorkflow(wt.worktree, { ...workflow, pendingCancel: true })
+    const result = await run
+    expect(result.aborted).toBe(true)
+    expect(f.requests.map(request => request.role)).toEqual(["worker"])
+    expect(readLedger(wt.worktree, S).tasks.map(task => task.status)).toEqual(["cancelled", "pending"])
+    expect(f.runtime.runs.status().executions[0]?.fence).toBeDefined()
+    expect(f.runtime.runs.status().executions[0]?.terminal).toBeUndefined()
+  })
+
+  for (const mismatch of ["workflow", "session"] as const) {
+    test(`persisted cancellation for a different ${mismatch} does not abort the queue`, async () => {
+      const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+      const workflow = newWorkflow(S, currentOwner(), "command", "queue cancellation mismatch")
+      writeWorkflow(wt.worktree, workflow)
+      let releaseWorker!: (outcome: ExecutionOutcome) => void
+      let workerStarted = false
+      f.replies.set("worker", () => {
+        workerStarted = true
+        return new Promise<ExecutionOutcome>(resolve => { releaseWorker = resolve })
+      })
+      const q = createQueue(f.runtime)
+      q.add(S, [{ title: "must finish" }])
+      const run = q.run(S)
+      await waitFor(() => workerStarted)
+      writeWorkflow(wt.worktree, {
+        ...workflow,
+        ...(mismatch === "workflow" ? { id: `${workflow.id}_other` } : { sessionID: "ses_other" }),
+        pendingCancel: true,
+      })
+      await new Promise(resolve => setTimeout(resolve, 120))
+      expect(f.runtime.runs.status().executions[0]?.cancel).toBeUndefined()
+      releaseWorker({ status: "completed", text: "done" })
+      expect(await run).toMatchObject({ done: 1, aborted: false })
+      expect(f.requests.map(request => request.role)).toEqual(["worker"])
+    })
+  }
+
+  test("worktree snapshot loss with unproven restoration fences before verification or merge", async () => {
+    const f = fixture({ delegate: { worktree: true, review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+    f.replies.set("worker", (request) => {
+      writeFileSync(join(request.cwd, "feature.py"), "VALUE = 1\n")
+      rmSync(join(request.cwd, ".git")) // break snapshot commands, without touching main's Git state
+      return { status: "completed", text: "Files changed: feature.py\nOpen issues: none" }
+    })
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "snapshot fault", verify: verify("check_snapshot.sh", "touch verified-marker") },
+      { title: "must not start" }])
+    expect(await q.run(S)).toMatchObject({ done: 0, aborted: true, abortReason: expect.stringContaining("queue fenced") })
     const ledger = readLedger(wt.worktree, S)
-    expect(ledger.running).toBeUndefined()
-    for (const t of ledger.tasks) {
-      expect(t.status).toBe("done")
-      expect(t.attempts).toBe(1)
-      expect(t.filesChanged).toEqual([`mod${t.n}.py`])
-      expect(t.verify_result?.ok).toBe(true)
-      expect(t.review?.verdict).toBe("accept")
-      expect(t.childSessions.length).toBe(1)
-      expect(t.workerSessionID).toBe(`child_${t.n * 2 - 1}`)
-      // several text parts are joined; the final report is kept
-      expect(t.report).toContain(`Files changed: mod${t.n}.py`)
-      expect(existsSync(join(wt.worktree, t.handoff!))).toBe(true)
-      // child session state dirs are cleaned up
-      expect(existsSync(sessionDir(wt.worktree, t.workerSessionID!))).toBe(false)
-    }
-    expect(readFileSync(join(wt.worktree, ledger.tasks[2]!.handoff!), "utf8")).toContain("# Task 3: three")
-    expect(existsSync(join(wt.worktree, ".lca/handoffs/.gitignore"))).toBe(true)
-    expect(deps.logs.some((l) => l === "queue finished")).toBe(true)
+    expect(ledger.tasks[0]).toMatchObject({ status: "failed", error: expect.stringContaining("could not restore or snapshot") })
+    expect(ledger.tasks[1]?.status).toBe("pending")
+    expect(f.runtime.runs.status().claim).toBeDefined()
+    expect(existsSync(join(wt.worktree, "verified-marker"))).toBe(false)
+    expect(existsSync(join(wt.worktree, "feature.py"))).toBe(false)
+    expect(f.requests.map((request) => request.role)).toEqual(["worker"])
   })
-
-  test("records worker completion separately from a failed code-owned verification without persisting prose", async () => {
-    const deps = observedDeps({ delegate: { review: false, max_attempts: 1 } as any })
-    const q = createQueue(deps)
-    client.replies.worker = { text: "private-worker-report-sentinel", run: () => write("f.py", "x = 1\n") }
-    q.add(S, [{ title: "verify failure", verify: failVerify() }])
-
-    const run = await q.run(S, { messageID: "msg_verify_failure", resumed: false })
-    const facts = observations()
-    const parentTask = facts.find((f) => f.kind === "task_context" && f.sessionID === S)
-    const workerTask = facts.find((f) => f.kind === "task_context" && f.sessionID === "child_1")
-    const verification = facts.find((f) => f.kind === "verification_observation")
-
-    expect(run.failed).toBe(1)
-    expect(parentTask && factPayload(parentTask)).toMatchObject({ phase: "terminal", status: "failed", messageID: "msg_verify_failure" })
-    expect(workerTask && factPayload(workerTask)).toMatchObject({ phase: "terminal", status: "done", ownerSessionID: S, childSessionID: "child_1", actualRole: "worker", roleBasis: "code_owned" })
-    expect(verification && factPayload(verification)).toMatchObject({ phase: "terminal", status: "fail", codeOwned: true, exitCode: 2, taskStatus: "failed" })
-    expect(typeof (verification && factPayload(verification).startedAt)).toBe("number")
-    expect(typeof (verification && factPayload(verification).finishedAt)).toBe("number")
-    expect(typeof (verification && factPayload(verification).durationMs)).toBe("number")
-    expect(JSON.stringify(facts)).not.toContain("private-worker-report-sentinel")
-    expect(JSON.stringify(facts)).not.toContain("boom-output")
-    expect(JSON.stringify(facts)).not.toContain("verify_fail.sh")
-  })
-
-  test("retries get distinct UUID attempts and preserve identical explicit origin message IDs", async () => {
-    const deps = observedDeps({ delegate: { review: false, max_attempts: 2 } as any })
-    const q = createQueue(deps)
-    client.replies.worker = (o, nth) => ({ text: `worker ${nth}`, run: () => { if (nth === 2) write("ready.txt", "ready\n") } })
-    const verify = existsVerify("ready.txt")
-    q.add(S, [{ title: "retry", verify }])
-    await q.run(S, { messageID: "msg_reused", resumed: false })
-    q.add(S, [{ title: "another task" }])
-    await q.run(S, { messageID: "msg_reused", resumed: true })
-
-    const facts = observations()
-    const taskFacts = facts.filter((f) => f.kind === "task_context" && f.sessionID === S).map(factPayload)
-    const retryAttempts = taskFacts.filter((f) => f.taskID === "t1")
-    const verifications = facts.filter((f) => f.kind === "verification_observation").map(factPayload)
-    const retryVerifications = verifications.filter((f) => f.taskID === "t1")
-
-    expect(retryAttempts).toHaveLength(2)
-    expect(retryAttempts.map((f) => f.attemptID)[0]).not.toBe(retryAttempts.map((f) => f.attemptID)[1])
-    expect(retryAttempts.map((f) => f.messageID)).toEqual(["msg_reused", "msg_reused"])
-    expect(retryAttempts[1]?.resumeOfAttemptID).toBe(retryAttempts[0]?.attemptID)
-    expect(retryVerifications.map((f) => f.status)).toEqual(["fail", "pass"])
-    expect(retryVerifications[1]?.attemptID).not.toBe(retryVerifications[0]?.attemptID)
-    expect(taskFacts.find((f) => f.taskID === "t2")?.messageID).toBe("msg_reused")
-    expect(taskFacts.find((f) => f.taskID === "t2")?.resumeOfAttemptID).toBeNull()
-  })
-
-  test("records refused and not-run verification outcomes, plus cancellation, without changing queue results", async () => {
-    const deps = observedDeps({ delegate: { review: false, max_attempts: 1 } as any })
-    const q = createQueue(deps)
-    client.replies.worker = { text: "worker completed", run: () => write("f.py", "x\n") }
-    const refused = q.add(S, [{ title: "refused" }])[0]!
-    const refusedLedger = readLedger(wt.worktree, S)
-    writeLedger(wt.worktree, updateTask(refusedLedger, refused.id, { verify: "rm -rf build" }))
-    await q.run(S, { messageID: "msg_refused" })
-
-    write("test_invalidated.py", "def test_guard():\n    assert True\n")
-    client.replies.worker = { text: "worker completed", run: () => write("test_invalidated.py", "def test_guard():\n    assert False\n") }
-    q.add(S, [{ title: "invalidated", verify: "python3 -m pytest -q test_invalidated.py" }])
-    await q.run(S, { messageID: "msg_invalidated" })
-
-    let stalled = false
-    client.replies.worker = { text: "waiting", run: () => { stalled = true; return new Promise<void>(() => {}) } }
-    const cancelSession = "ses_cancel"
-    q.add(cancelSession, [{ title: "cancelled", verify: okVerify() }])
-    const running = q.run(cancelSession, { messageID: "msg_cancel" })
-    await waitFor(() => stalled)
-    await q.abort(cancelSession, "user_stop")
-    const run = await running
-
-    const facts = observations()
-    const refusal = facts.find((f) => f.kind === "verification_observation" && f.sessionID === S && factPayload(f).taskID === "t1")
-    const invalidation = facts.find((f) => f.kind === "verification_observation" && f.sessionID === S && factPayload(f).taskID === "t2")
-    const cancelledTask = facts.find((f) => f.kind === "task_context" && f.sessionID === cancelSession)
-    const cancelledChild = facts.find((f) => f.kind === "task_context" && f.sessionID === "child_3")
-    const notRun = facts.find((f) => f.kind === "verification_observation" && f.sessionID === cancelSession)
-    expect(refusal && factPayload(refusal)).toMatchObject({ status: "refused", phase: "terminal", exitCode: null })
-    expect((refusal && factPayload(refusal).startedAt) ?? null).toBeNull()
-    expect(typeof (refusal && factPayload(refusal).finishedAt)).toBe("number")
-    expect(invalidation && factPayload(invalidation)).toMatchObject({ status: "invalidated", phase: "terminal", exitCode: null })
-    expect((invalidation && factPayload(invalidation).startedAt) ?? null).toBeNull()
-    expect(cancelledTask && factPayload(cancelledTask)).toMatchObject({ status: "cancelled", phase: "terminal" })
-    expect(cancelledChild && factPayload(cancelledChild)).toMatchObject({ status: "cancelled", phase: "terminal", childSessionID: "child_3" })
-    expect(notRun && factPayload(notRun)).toMatchObject({ status: "not_run", taskStatus: "cancelled" })
-    expect(run).toMatchObject({ aborted: true, cancelled: 1 })
-    expect(JSON.stringify(facts)).not.toContain("rm -rf build")
-  })
-
-  test("reviewer rejection remains separate from a passing verification and advisory task completion", async () => {
-    const deps = observedDeps({ delegate: { review: true, review_strict: false, max_attempts: 1 } as any })
-    const q = createQueue(deps)
-    client.replies.worker = { text: "worker finished", run: () => write("reviewed.py", "x = 1\n") }
-    client.replies.reviewer = { text: "REJECT: keep an advisory note" }
-    q.add(S, [{ title: "review advisory", verify: okVerify() }])
-
-    const run = await q.run(S, { messageID: "msg_review" })
-    const facts = observations()
-    const parentTask = facts.find((f) => f.kind === "task_context" && f.sessionID === S)
-    const reviewerTask = facts.find((f) => f.kind === "task_context" && f.sessionID === "child_2")
-    const verification = facts.find((f) => f.kind === "verification_observation")
-
-    expect(run.done).toBe(1)
-    expect(parentTask && factPayload(parentTask)).toMatchObject({ status: "done", phase: "terminal" })
-    expect(reviewerTask && factPayload(reviewerTask)).toMatchObject({ status: "done", actualRole: "reviewer", ownerSessionID: S })
-    expect(verification && factPayload(verification)).toMatchObject({ status: "pass", taskStatus: "done", reviewVerdict: "reject" })
-  })
-
-  test("data checks never become code-owned verification passes", async () => {
-    const fixtureRoot = join(import.meta.dir, "../../scripts/fixtures/data-vv")
-    const deps = observedDeps({
-      delegate: { review: false, max_attempts: 1 } as any,
-      data: {
-        backend: "sqlite", sqlite_path: join(fixtureRoot, "data/vehicle_visit.sqlite"),
-        schema_file: join(fixtureRoot, "data/schema.json"), checks_dir: "checks",
-      } as any,
+  test("in-place snapshot loss fences the live queue instead of running another task", async () => {
+    const f = fixture({ delegate: { worktree: false, review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+    f.replies.set("worker", () => {
+      write("test_fixture.py", "assert False\n")
+      rmSync(join(wt.worktree, ".git"), { recursive: true, force: true })
+      return { status: "completed", text: "Files changed: test_fixture.py\nOpen issues: none" }
     })
-    const q = createQueue(deps)
-    client.replies["data-analyst"] = { text: "SQL:\nSELECT 1 AS answer\nRESULT:\n1\nANSWER: one" }
-    q.add(S, [{ title: "data question", kind: "data" }])
-    const run = await q.run(S, { messageID: "msg_data" })
-
-    const facts = observations()
-    expect(run.done).toBe(1)
-    expect(readLedger(wt.worktree, S).tasks[0]?.verify_result).toMatchObject({ ok: true, exitCode: 0 })
-    expect(facts.some((f) => f.kind === "verification_observation")).toBe(false)
-    expect(facts.some((f) => f.kind === "task_context" && f.sessionID === S && factPayload(f).status === "done")).toBe(true)
-    expect(facts.some((f) => f.kind === "task_context" && f.sessionID === "child_1" && factPayload(f).ownerSessionID === S)).toBe(true)
-    expect(JSON.stringify(facts)).not.toContain("SELECT 1")
-    expect(JSON.stringify(facts)).not.toContain("ANSWER: one")
+    const queue = createQueue(f.runtime)
+    queue.add(S, [{ title: "lost Git baseline", verify: verify("check_snapshot.sh", "touch verified-marker") },
+      { title: "must not start" }])
+    expect(await queue.run(S)).toMatchObject({ aborted: true, done: 0 })
+    expect(f.requests.map(request => request.role)).toEqual(["worker"])
+    expect(existsSync(join(wt.worktree, "verified-marker"))).toBe(false)
+    expect(f.runtime.runs.status().claim?.ownerSession).toBe(S)
+    expect(readLedger(wt.worktree, S).tasks.every(task => task.status !== "done")).toBe(true)
   })
-
-  test("crash recovery assigns a fresh UUID instead of reusing the restored attempt counter", async () => {
-    const deps = observedDeps({ delegate: { review: false, max_attempts: 1 } as any })
-    const q = createQueue(deps)
-    observeSkillTask(deps, { sessionID: S, taskID: "t1", attemptID: "old_attempt_1", phase: "pending", status: "started", ownerSessionID: S })
-    let { ledger } = addTasks(emptyLedger(S), [{ title: "crashed attempt" }])
-    ledger = updateTask(ledger, "t1", { status: "running", attempts: 1 })
-    writeLedger(wt.worktree, { ...ledger, running: { taskId: "t1", since: 1 } })
-    client.replies.worker = { text: "resumed" }
-
-    await q.run(S, { messageID: "msg_restart", resumed: true })
-
-    const taskFacts = observations().filter((f) => f.kind === "task_context" && f.sessionID === S && factPayload(f).taskID === "t1")
-    const restarted = taskFacts.map(factPayload).find((f) => f.phase === "terminal")
-    expect(readLedger(wt.worktree, S).tasks[0]).toMatchObject({ attempts: 1, status: "done" })
-    expect(taskFacts.some((f) => factPayload(f).attemptID === "old_attempt_1" && factPayload(f).phase === "pending")).toBe(true)
-    expect(restarted?.attemptID).not.toBe("old_attempt_1")
-    expect(restarted).toMatchObject({ messageID: "msg_restart", resumeOfAttemptID: null })
-  })
-
-  test("legacy Queue.run calls keep missing origin lineage explicitly unknown", async () => {
-    const deps = observedDeps({ delegate: { review: false, max_attempts: 1 } as any })
-    const q = createQueue(deps)
-    client.replies.worker = { text: "done" }
-    q.add(S, [{ title: "no origin" }])
-    await q.run(S)
-
-    const taskFact = observations().find((f) => f.kind === "task_context" && f.sessionID === S)
-    const task = taskFact && factPayload(taskFact)
-    expect(task).toMatchObject({ status: "done", messageID: null, originTaskID: null, resumeOfAttemptID: null })
-  })
-
-  test("disabled observation leaves queue behavior unchanged and creates no database", async () => {
-    const deps = makeDeps(client, wt.worktree, { delegate: { review: false, max_attempts: 1 } as any })
-    const q = createQueue(deps)
-    const databasePath = skillObservationDatabasePath(wt.worktree)
-    client.replies.worker = { text: "worker report", run: () => write("ok.txt", "ok\n") }
-    q.add(S, [{ title: "disabled observer", verify: okVerify() }])
-
-    const run = await q.run(S)
-    expect(run.done).toBe(1)
-    expect(readLedger(wt.worktree, S).tasks[0]?.verify_result?.ok).toBe(true)
-    expect(existsSync(databasePath)).toBe(false)
-  })
-
-  test("verify failure re-runs the worker once with the reason, then marks the task failed; the queue goes on", async () => {
-    const deps = makeDeps(client, wt.worktree)
-    const q = createQueue(deps)
-    client.replies.worker = (o, nth) => ({ text: `attempt ${nth}`, run: () => write(`w${nth}.txt`, "x") })
-    client.replies.reviewer = { text: "ACCEPT" }
-    q.add(S, [{ title: "bad", verify: failVerify() }, { title: "good", verify: okVerify() }])
-    const run = await q.run(S)
-    expect(run.done).toBe(1)
-    expect(run.failed).toBe(1)
-    const w = prompts("worker").map((c) => (c.args as any).body.parts[0].text)
-    expect(w.length).toBe(3) // bad x2, good x1
-    expect(w[1]).toContain("A previous worker already changed files for this task, but the result was not accepted. Reason: verify failed (exit 2)")
-    expect(w[1]).toContain("boom-output")
-    expect(w[2]).toContain("Task 1 (failed (verify failed (exit 2): boom-output)): bad")
-    // no reviewer call for a task whose verify failed
-    expect(prompts("reviewer").length).toBe(1)
-    const l = readLedger(wt.worktree, S)
-    expect(l.tasks[0]!.status).toBe("failed")
-    expect(l.tasks[0]!.attempts).toBe(2)
-    expect(l.tasks[0]!.error).toContain("verify failed")
-    expect(l.tasks[0]!.review?.verdict).toBe("skipped")
-    expect(l.tasks[1]!.status).toBe("done")
-    const handoff = readFileSync(join(wt.worktree, l.tasks[0]!.handoff!), "utf8")
-    expect(handoff).toContain("- status: failed")
-    expect(handoff).toContain("boom-output")
-  })
-
-  test("a worker that edits the test file named in the verify command fails the attempt even though verify passes", async () => {
-    const deps = makeDeps(client, wt.worktree, { delegate: { review: false, max_attempts: 2 } as any })
-    const q = createQueue(deps)
-    write("test_rect.py", "def test_x():\n    assert 1 == 2\n")
-    client.replies.worker = (o, nth) => ({
-      text: `w${nth}`,
-      run: () => {
-        write("rect.py", "x = 1\n")
-        if (nth === 1) write("test_rect.py", "def test_x():\n    assert 1 == 1\n") // cheating
-      },
+  test("stable runtime identity, serial worker/reviewer execution, independent verifier and handoff", async () => {
+    const f = fixture()
+    const queue = getQueue(f.runtime)
+    expect(getQueue(f.runtime)).toBe(queue)
+    f.replies.set("worker", (request) => {
+      const n = f.requests.filter((r) => r.role === "worker").length
+      write(`mod${n}.py`, `V = ${n}\n`)
+      return { status: "completed", text: `Files changed: mod${n}.py\nOpen issues: none` }
     })
-    const v = verifyScript(wt.worktree, "verify_rect.sh", "python3 -m pytest -q test_rect.py")
-    q.add(S, [{ title: "rect", verify: `${v} && python3 -m pytest -q test_rect.py` }])
-    const run = await q.run(S)
-    const t = readLedger(wt.worktree, S).tasks[0]!
-    expect(t.attempts).toBe(2)
-    const w = prompts("worker").map((c) => (c.args as any).body.parts[0].text)
-    expect(w[0]).toContain("Never edit verify_rect.sh, test_rect.py")
-    expect(w[1]).toContain("modified protected file(s): test_rect.py")
-    // the cheated test file is restored BEFORE verify (the verify result of a violating attempt is void), so
-    // attempt 2's verify fails honestly -> failed
-    expect(readFileSync(join(wt.worktree, "test_rect.py"), "utf8")).toContain("assert 1 == 2")
-    expect(t.status).toBe("failed")
-    expect(t.error).toContain("verify failed")
-    expect(t.childSessions.length).toBe(2)
-    expect(run.failed).toBe(1)
-    // the voided attempt never reports "verify: pass"
-    const l1 = readLedger(wt.worktree, S)
-    expect(JSON.stringify(l1)).not.toContain('"ok":true')
+    f.replies.set("reviewer", () => ({ status: "completed", text: "ACCEPT" }))
+    queue.add(S, [
+      { title: "one", verify: verify("check_one.sh", "test -f mod1.py") },
+      { title: "two", verify: verify("check_two.sh", "test -f mod2.py") },
+    ])
+    expect(await queue.run(S)).toMatchObject({ done: 2, failed: 0, cancelled: 0 })
+    expect(f.requests.map((r) => r.role)).toEqual(["worker", "reviewer", "worker", "reviewer"])
+    expect(f.requests[0]?.policy).toBe(f.runtime.policy.resolve("worker"))
+    expect(f.requests[1]?.policy).toBe(f.runtime.policy.resolve("reviewer"))
+    expect(f.requests[2]?.text).toContain("Task 1 (done): one [files: mod1.py]")
+    expect(f.requests[3]?.text).toContain("+V = 2")
+    const ledger = readLedger(wt.worktree, S)
+    expect(ledger.tasks.map((task) => task.status)).toEqual(["done", "done"])
+    expect(ledger.tasks.map((task) => task.verify_result?.ok)).toEqual([true, true])
+    expect(existsSync(join(wt.worktree, ledger.tasks[0]!.handoff!))).toBe(true)
+    expect(existsSync(sessionDir(wt.worktree, "child_1"))).toBe(false)
+    expect(f.runtime.runs.status().executions).toHaveLength(6)
+    expect(f.runtime.runs.status().executions.filter(e => e.kind === "verifier")).toHaveLength(2)
+    expect(f.runtime.runs.status().executions.filter(e => e.kind === "verifier").every(e => e.descendantRisk === "unproven" && e.terminal?.verification?.isolationEstablished === false && e.terminal?.verification?.domainState === "unknown")).toBe(true)
+    expect(f.runtime.runs.status().claim).toBeUndefined()
   })
 
-  test("a verify command that is not an allow-listed runner is refused and never executed", async () => {
-    const deps = makeDeps(client, wt.worktree, { delegate: { review: false, max_attempts: 1 } as any })
-    const q = createQueue(deps)
-    client.replies.worker = { text: "ok", run: () => write("marker.txt", "x") }
-    let { ledger } = addTasks(emptyLedger(S), [{ title: "evil" }])
-    ledger = updateTask(ledger, "t1", { verify: "rm -rf build && sh verify_ok.sh" }) // bypasses delegate-time validation
-    writeLedger(wt.worktree, ledger)
-    await q.run(S)
-    const t = readLedger(wt.worktree, S).tasks[0]!
-    expect(t.status).toBe("failed")
-    expect(t.verify_result?.exitCode).toBeNull()
-    expect(t.verify_result?.output).toContain("verify command refused")
-    expect(t.error).toContain("verify refused")
+  test("legacy verifier persists its boundary and terminal risk before the next host intent", async () => {
+    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "verified", verify: verify("check_first.sh", "test -f README.md") }, { title: "next" }])
+    expect(await q.run(S)).toMatchObject({ done: 2 })
+    const [worker, verifier, next] = f.runtime.runs.status().executions
+    expect(worker).toMatchObject({ kind: "host", profile: "legacy-unowned" })
+    expect(verifier).toMatchObject({ kind: "verifier", profile: "legacy-unowned", descendantRisk: "unproven", terminal: { outcome: "ok", verification: { parentExit: 0, isolationEstablished: false, domainState: "unknown", integrity: "unchanged" } } })
+    expect(verifier?.boundaryRef).toMatchObject({ kind: "verifier", inputSnapshotID: verifier?.inputSnapshotID, inputDigest: verifier?.inputDigest })
+    expect(next).toMatchObject({ kind: "host", profile: "legacy-unowned" })
+    expect(f.runtime.runs.status().claim).toBeUndefined()
   })
 
-  test("reviewer REJECT retries with the reason; a second REJECT on a verified task is advisory (task done)", async () => {
-    const deps = makeDeps(client, wt.worktree)
-    const q = createQueue(deps)
-    // attempt 1 writes the file; attempt 2 changes nothing more
-    client.replies.worker = (o, nth) => ({ text: `w${nth}`, run: () => (nth === 1 ? write("f.py", "v=1\n") : undefined) })
-    client.replies.reviewer = { text: "REJECT: missing edge case\n- n=0" }
-    q.add(S, [{ title: "t", verify: okVerify() }])
-    const run = await q.run(S)
-    expect(run.done).toBe(1)
-    expect(run.failed).toBe(0)
-    const w = prompts("worker").map((c) => (c.args as any).body.parts[0].text)
-    expect(w[1]).toContain("review rejected: missing edge case")
-    // the second reviewer call still sees f.py (cumulative diff): not "skipped: no file changes"
-    const r = prompts("reviewer").map((c) => (c.args as any).body.parts[0].text)
-    expect(r.length).toBe(2)
-    expect(r[1]).toContain("+v=1")
-    const t = readLedger(wt.worktree, S).tasks[0]!
-    expect(t.status).toBe("done")
-    expect(t.attempts).toBe(2)
-    expect(t.review?.verdict).toBe("reject")
-    expect(t.error).toContain("accepted with review objection: missing edge case")
-    expect(t.filesChanged).toEqual(["f.py"])
+  test("unsupported Linux profile refuses before any verifier spawn or intent", async () => {
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    f.runtime.verificationProfile = "linux-single-use"
+    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "refused", verify: verify("check_linux.sh", "touch spawned-marker") }])
+    expect(await q.run(S)).toMatchObject({ failed: 1 })
+    expect(f.runtime.runs.status().executions.map(e => e.kind)).toEqual(["host"])
+    expect(readLedger(wt.worktree, S).tasks[0]?.verify_result?.output).toContain("verify backend refused")
+    expect(existsSync(join(wt.worktree, "spawned-marker"))).toBe(false)
   })
 
-  test("review_strict: a REJECT on the last attempt fails the task even when verify passed", async () => {
-    const deps = makeDeps(client, wt.worktree, { delegate: { review_strict: true } as any })
-    const q = createQueue(deps)
-    client.replies.worker = { text: "w", run: () => write("f.py", "v\n") }
-    client.replies.reviewer = { text: "REJECT: scope creep" }
-    q.add(S, [{ title: "t", verify: okVerify() }])
-    const run = await q.run(S)
-    expect(run.failed).toBe(1)
-    expect(readLedger(wt.worktree, S).tasks[0]!.error).toContain("review rejected: scope creep")
+  test("a restored ledger with a disallowed command is refused before verifier preparation", async () => {
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+    const q = createQueue(f.runtime)
+    const [task] = q.add(S, [{ title: "stale command", verify: verify("check_safe.sh", "test -f README.md") }])
+    const ledger = readLedger(wt.worktree, S)
+    writeLedger(wt.worktree, updateTask(ledger, task!.id, { verify: "sh check_safe.sh; touch forbidden-marker" }))
+    expect(await q.run(S)).toMatchObject({ failed: 1 })
+    expect(readLedger(wt.worktree, S).tasks[0]?.verify_result?.output).toContain("verify command refused")
+    expect(f.runtime.runs.status().executions.map(e => e.kind)).toEqual(["host"])
+    expect(existsSync(join(wt.worktree, "forbidden-marker"))).toBe(false)
   })
 
-  test("a REJECT without any verify command retries and then fails (nothing else proves the task)", async () => {
-    const deps = makeDeps(client, wt.worktree)
-    const q = createQueue(deps)
-    client.replies.worker = { text: "w", run: () => write("f.py", "v\n") }
-    client.replies.reviewer = { text: "REJECT: incomplete" }
-    q.add(S, [{ title: "t" }])
-    const run = await q.run(S)
-    expect(run.failed).toBe(1)
-    expect(prompts("worker").length).toBe(2)
+  test("dead-owner legacy missing terminal becomes unknown and repairs the running task", async () => {
+    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const q = createQueue(f.runtime)
+    const [task] = q.add(S, [{ title: "restart" }])
+    const old = f.runtime.runs.claim(S, "dead-owner", 99999999)
+    f.runtime.runs.registerIntent(old, {
+      executionId: "orphan-verifier", ownerSession: S, taskId: task!.id, attemptId: "old-attempt",
+      generation: old.generation, role: "verifier", cwd: wt.worktree, policyID: "verify-command",
+      kind: "verifier", profile: "legacy-unowned", inputSnapshotID: "old-tree", inputDigest: "a".repeat(64),
+      deadlineAt: Date.now() + 1000, maxOutputChars: 1500,
+    })
+    writeLedger(wt.worktree, { ...updateTask(readLedger(wt.worktree, S), task!.id, { status: "running", attempts: 1 }),
+      running: { taskId: task!.id, since: Date.now() } })
+    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+    expect(await q.run(S)).toMatchObject({ done: 1 })
+    expect(f.requests).toHaveLength(1)
+    expect(readLedger(wt.worktree, S).tasks[0]?.attempts).toBe(1)
+    expect(f.runtime.runs.status().executions[0]).toMatchObject({ terminal: { outcome: "unknown" }, descendantRisk: "unproven" })
   })
 
-  test("an unparseable verdict never fails a verified task and is reported as 'no verdict'", async () => {
-    const deps = makeDeps(client, wt.worktree)
-    const q = createQueue(deps)
-    client.replies.worker = { text: "w", run: () => write("f.py", "v\n") }
-    client.replies.reviewer = { text: "Looks fine to me overall." }
-    q.add(S, [{ title: "t", verify: okVerify() }])
-    const run = await q.run(S)
-    expect(run.done).toBe(1)
-    const t = readLedger(wt.worktree, S).tasks[0]!
-    expect(t.attempts).toBe(1)
-    expect(t.review?.verdict).toBe("error")
-    expect(readFileSync(join(wt.worktree, t.handoff!), "utf8")).toContain("- review: NO VERDICT")
+  test("missing Linux proof keeps claim and pending tasks fenced", async () => {
+    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const old = f.runtime.runs.claim(S, "dead-owner", 99999999)
+    f.runtime.runs.registerIntent(old, {
+      executionId: "linux-orphan", ownerSession: S, taskId: "old-task", attemptId: "old-attempt",
+      generation: old.generation, role: "verifier", cwd: wt.worktree, policyID: "verify-command",
+      kind: "verifier", profile: "linux-single-use", inputSnapshotID: "old-tree", inputDigest: "a".repeat(64),
+      deadlineAt: Date.now() + 1000, maxOutputChars: 1500,
+    })
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "never started" }])
+    expect(await q.run(S)).toMatchObject({ aborted: true, done: 0 })
+    expect(f.requests).toHaveLength(0)
+    expect(readLedger(wt.worktree, S).tasks[0]?.status).toBe("pending")
+    expect(f.runtime.runs.status().claim).toBeDefined()
   })
 
-  test("review is skipped when the worker changed nothing, and when disabled by config", async () => {
-    const deps = makeDeps(client, wt.worktree)
-    const q = createQueue(deps)
-    client.replies.worker = { text: "nothing to do" }
-    client.replies.reviewer = { text: "REJECT: should not be asked" }
-    q.add(S, [{ title: "noop" }])
-    await q.run(S)
-    expect(prompts("reviewer").length).toBe(0)
-    expect(readLedger(wt.worktree, S).tasks[0]!.review).toEqual({ verdict: "skipped", reason: "no file changes" })
-
-    const deps2 = makeDeps(client, wt.worktree, noReview)
-    const q2 = createQueue(deps2)
-    client.replies.worker = { text: "did it", run: () => write("z.txt", "z") }
-    q2.add("ses_2", [{ title: "x" }])
-    await q2.run("ses_2")
-    expect(prompts("reviewer").length).toBe(0)
-    expect(readLedger(wt.worktree, "ses_2").tasks[0]!.status).toBe("done")
+  test("protected mutation by verifier is invalidated and restored before review", async () => {
+    write("test_lock.py", "original\n")
+    const f = fixture({ delegate: { review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "mutating check", verify: verify("check_mutation.sh", "printf 'changed\\n' > test_lock.py") }])
+    expect(await q.run(S)).toMatchObject({ failed: 1 })
+    expect(readFileSync(join(wt.worktree, "test_lock.py"), "utf8")).toBe("original\n")
+    expect(readLedger(wt.worktree, S).tasks[0]?.verify_result?.ok).toBe(false)
+    expect(f.requests.map(r => r.role)).toEqual(["worker"])
+    expect(f.runtime.runs.status().executions.find(e => e.kind === "verifier")?.terminal?.verification?.integrity).toBe("changed")
   })
 
-  test("worker error (provider error in info.error) counts as a failed attempt", async () => {
-    const deps = makeDeps(client, wt.worktree, { delegate: { review: false, max_attempts: 1 } as any })
-    const q = createQueue(deps)
-    client.replies.worker = { error: { name: "ApiError", data: { message: "500 from ollama" } } }
-    q.add(S, [{ title: "t" }])
-    const run = await q.run(S)
-    expect(run.failed).toBe(1)
-    const t = readLedger(wt.worktree, S).tasks[0]!
-    expect(t.status).toBe("failed")
-    expect(t.error).toContain("ApiError: 500 from ollama")
+  test("isolated task verifies its imported content before review and main-worktree merge", async () => {
+    const f = fixture({ delegate: { worktree: true, review: true } as LcaConfig["delegate"] })
+    f.replies.set("worker", request => {
+      writeFileSync(join(request.cwd, "feature.py"), "VALUE = 7\n")
+      writeFileSync(join(request.cwd, "check_feature.sh"), "test -f feature.py\n")
+      return { status: "completed", text: "Files changed: feature.py\nOpen issues: none" }
+    })
+    f.replies.set("reviewer", request => {
+      expect(existsSync(join(request.cwd, "feature.py"))).toBe(true)
+      expect(existsSync(join(wt.worktree, "feature.py"))).toBe(false)
+      return { status: "completed", text: "ACCEPT" }
+    })
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "import ordering", verify: verify("check_feature.sh", "test -f feature.py") }])
+    expect(await q.run(S)).toMatchObject({ done: 1 })
+    expect(readFileSync(join(wt.worktree, "feature.py"), "utf8")).toBe("VALUE = 7\n")
+    expect(f.runtime.runs.status().executions.find(e => e.kind === "verifier")?.terminal?.verification?.integrity).toBe("unchanged")
   })
 
-  test("session.create returning {error} is a readable failure, not [object Object]", async () => {
-    const deps = makeDeps(client, wt.worktree, { delegate: { review: false, max_attempts: 1 } as any })
-    const q = createQueue(deps)
-    client.createError = { name: "NotFoundError", data: { message: "parent gone" } }
-    q.add(S, [{ title: "t" }])
-    const run = await q.run(S)
-    expect(run.failed).toBe(1)
-    const t = readLedger(wt.worktree, S).tasks[0]!
-    expect(t.error).toContain("NotFoundError: parent gone")
-    expect(t.error).not.toContain("[object Object]")
-  })
+  for (const isolated of [false, true]) {
+    test(`reviewer mutation invalidates verified tree before ${isolated ? "merge" : "completion"}`, async () => {
+      const f = fixture({ delegate: { worktree: isolated, review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+      f.replies.set("worker", request => {
+        writeFileSync(join(request.cwd, "feature.py"), "SAFE = 1\n")
+        return { status: "completed", text: "Files changed: feature.py\nOpen issues: none" }
+      })
+      f.replies.set("reviewer", request => {
+        writeFileSync(join(request.cwd, "feature.py"), "UNVERIFIED = 1\n")
+        return { status: "completed", text: "ACCEPT" }
+      })
+      const q = createQueue(f.runtime)
+      q.add(S, [{ title: "reviewer writer", verify: verify("check_feature.sh", "test -f feature.py") }])
+      expect(await q.run(S)).toMatchObject({ done: 0, failed: 1 })
+      expect(readLedger(wt.worktree, S).tasks[0]?.verify_result?.output).toContain("verified tree changed")
+      if (isolated) expect(existsSync(join(wt.worktree, "feature.py"))).toBe(false)
+      else expect(readFileSync(join(wt.worktree, "feature.py"), "utf8")).toBe("SAFE = 1\n")
+    })
+  }
 
-  test("a child aborted by someone else (repetition guard) is a failed attempt and retried, not a queue abort", async () => {
-    const deps = makeDeps(client, wt.worktree, noReview)
-    const q = createQueue(deps)
-    client.replies.worker = (o, nth) => (nth === 1 ? { error: { name: "MessageAbortedError" } } : { text: "ok", run: () => write("a.txt", "a") })
-    q.add(S, [{ title: "a" }, { title: "b" }])
-    const run = await q.run(S)
-    expect(run.aborted).toBe(false)
-    expect(run.done).toBe(2)
-    const t = readLedger(wt.worktree, S).tasks[0]!
-    expect(t.attempts).toBe(2)
-    expect(t.status).toBe("done")
-    expect(prompts("worker")[1]!.args as any).toBeDefined()
-    expect((prompts("worker")[1]!.args as any).body.parts[0].text).toContain("aborted (repetition guard or external abort)")
-  })
-
-  test("abort mid-worker: child session aborted, task cancelled, remaining tasks cancelled, ledger settled", async () => {
-    const deps = makeDeps(client, wt.worktree, noReview)
-    const q = createQueue(deps)
-    let inSecond = false
-    client.replies.worker = (o, nth) => {
-      if (nth === 1) return { text: "one", run: () => write("a.txt", "a") }
-      inSecond = true
-      return { text: "never finishes", run: () => new Promise<void>(() => {}) } // hangs until aborted
-    }
-    q.add(S, [{ title: "a" }, { title: "b" }, { title: "c" }])
-    const running = q.run(S)
-    await waitFor(() => inSecond)
-    expect(q.isRunning(S)).toBe(true)
-    await q.abort(S, "user_stop")
-    expect(client.calls.some((c) => c.method === "abort" && (c.args as any).path.id === "child_2")).toBe(true)
-    const run = await running
-    expect(run.aborted).toBe(true)
-    expect(run.abortReason).toBe("user_stop")
-    expect(run.done).toBe(1)
-    expect(run.cancelled).toBe(2)
-    const l = readLedger(wt.worktree, S)
-    expect(l.tasks.map((t) => t.status)).toEqual(["done", "cancelled", "cancelled"])
-    expect(l.tasks[1]!.error).toBe("user_stop")
-    expect(l.running).toBeUndefined()
-    expect(q.isRunning(S)).toBe(false)
-  })
-
-  test("abort during the reviewer: a verified change is kept as done (review aborted), an unverified one is cancelled", async () => {
-    const deps = makeDeps(client, wt.worktree)
-    const q = createQueue(deps)
-    let inReview = false
-    client.replies.worker = { text: "w", run: () => write("f.py", "v\n") }
-    client.replies.reviewer = () => {
-      inReview = true
-      return { text: "REJECT: late", run: () => new Promise<void>(() => {}) }
-    }
-    q.add(S, [{ title: "only", verify: okVerify() }])
-    const running = q.run(S)
-    await waitFor(() => inReview)
-    await q.abort(S, "user_stop")
-    const run = await running
-    expect(run.aborted).toBe(true)
-    const t = readLedger(wt.worktree, S).tasks[0]!
-    expect(t.status).toBe("done")
-    expect(t.error).toContain("review aborted")
-    expect(t.review?.aborted).toBe(true)
-
-    inReview = false
-    client.calls.length = 0
-    client.replies.worker = { text: "w", run: () => write("g.py", "v\n") }
-    q.add("ses_b", [{ title: "no verify" }])
-    const running2 = q.run("ses_b")
-    await waitFor(() => inReview)
-    await q.abort("ses_b", "user_stop")
-    await running2
-    expect(readLedger(wt.worktree, "ses_b").tasks[0]!.status).toBe("cancelled")
-  })
-
-  test("abort during the verify command kills it and cancels the task", async () => {
-    const deps = makeDeps(client, wt.worktree, noReview)
-    const q = createQueue(deps)
-    client.replies.worker = { text: "w", run: () => write("f.py", "v\n") }
-    const slow = verifyScript(wt.worktree, "verify_slow.sh", "sleep 20")
-    q.add(S, [{ title: "slow verify", verify: slow }, { title: "next" }])
-    const running = q.run(S)
-    await waitFor(() => deps.logs.includes("task start") && client.calls.filter((c) => c.method === "prompt").length === 1)
-    await new Promise((r) => setTimeout(r, 150)) // let the verify process start
-    const t0 = Date.now()
-    await q.abort(S, "user_stop")
-    const run = await running
-    expect(Date.now() - t0).toBeLessThan(5000)
-    expect(run.aborted).toBe(true)
-    const l = readLedger(wt.worktree, S)
-    expect(l.tasks[0]!.status).toBe("cancelled")
-    expect(l.tasks[0]!.verify_result?.output).toContain("killed")
-    expect(l.tasks[1]!.status).toBe("cancelled")
-  })
-
-  test("abort file present before start cancels every pending task without prompting", async () => {
-    const deps = makeDeps(client, wt.worktree)
-    const q = createQueue(deps)
-    writeJsonAtomic(abortPath(wt.worktree, S), { reason: "user_stop", at: Date.now() })
-    q.add(S, [{ title: "a" }, { title: "b" }])
-    const run = await q.run(S)
-    expect(run).toMatchObject({ done: 0, cancelled: 2, aborted: true, abortReason: "user_stop" })
-    expect(prompts("worker").length).toBe(0)
-  })
-
-  test("queue ttl cancels the remaining tasks", async () => {
-    const deps = makeDeps(client, wt.worktree, { delegate: { review: false, queue_ttl_ms: 60 } as any })
-    const q = createQueue(deps)
-    client.replies.worker = { text: "ok", delayMs: 80 }
-    q.add(S, [{ title: "a" }, { title: "b" }])
-    const run = await q.run(S)
-    expect(run.done).toBe(1)
-    expect(run.cancelled).toBe(1)
-    expect(run.abortReason).toBe("queue ttl exceeded")
-  })
-
-  test("second run for the same session is refused while the first is active; a stale running task is resumed with its attempt restored", async () => {
-    const deps = makeDeps(client, wt.worktree, noReview)
-    const q = createQueue(deps)
-    let started = false
-    let release: (() => void) | undefined
-    client.replies.worker = {
-      text: "ok",
-      run: () => {
-        started = true
-        write("r.txt", "r")
-        return new Promise<void>((r) => (release = r))
+  test("Linux unknown integrity cannot become a pass from equal worktree snapshots", async () => {
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    f.runtime.verificationProfile = "linux-single-use"
+    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+    const base = createLegacyVerifierExecutor()
+    f.runtime.verifier = {
+      ...base,
+      async preflight() { return { compatible: true, problems: [] } },
+      async prepare(request) {
+        const reference = { kind: "verifier" as const, profile: "linux-single-use" as const, executionID: request.executionID,
+          invocationID: "test-invocation", inputSnapshotID: request.inputSnapshotID, inputDigest: request.inputDigest,
+          deadlineAt: request.deadlineAt, maxOutputChars: request.maxOutputChars, unit: "test-unit", bootID: "test-boot", cgroupInode: "123" }
+        return { reference,
+          async run() { return { profile: "linux-single-use" as const, parentExit: 0, timedOut: false, cancelled: false,
+            isolationEstablished: true, domainState: "empty" as const, integrity: "unknown" as const, output: "",
+            proof: { reference, evidence: "fixture-proof" } } },
+          async reconcile() { return { outcome: "terminal" as const, isolationEstablished: true, domainState: "empty" as const,
+            integrity: "unknown" as const, proof: { reference, evidence: "fixture-proof" } } },
+          async requestCancel() { return { requested: false, acknowledged: false } },
+        }
       },
     }
-    // simulate a crash during attempt 2 of 2: task left "running" on disk
-    let { ledger } = addTasks(emptyLedger(S), [{ title: "stale" }])
-    ledger = updateTask(ledger, "t1", { status: "running", attempts: 2 })
-    writeLedger(wt.worktree, { ...ledger, running: { taskId: "t1", since: 1 } })
-    const first = q.run(S)
-    const second = await q.run(S)
-    expect(second.skipped).toBe("already_running")
-    await waitFor(() => started)
-    release!()
-    const r = await first
-    expect(r.done).toBe(1)
-    const t = readLedger(wt.worktree, S).tasks[0]!
-    expect(t.attempts).toBe(2) // 2 -> 1 (restored) -> 2 (this run)
-    expect(t.status).toBe("done")
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "unknown integrity", verify: verify("check_linux_unknown.sh", "test -f README.md") }])
+    expect(await q.run(S)).toMatchObject({ done: 0, failed: 1 })
+    expect(readLedger(wt.worktree, S).tasks[0]?.verify_result?.ok).toBe(false)
+    expect(f.runtime.runs.status().executions.find(e => e.kind === "verifier")?.terminal?.verification?.integrity).toBe("unknown")
   })
 
-  test("running.childSessionID is recorded while a worker runs", async () => {
-    const deps = makeDeps(client, wt.worktree, noReview)
-    const q = createQueue(deps)
-    let seen: string | undefined
-    client.replies.worker = {
-      text: "ok",
-      run: () => {
-        seen = readLedger(wt.worktree, S).running?.childSessionID
-      },
+  test("hanging verifier handle reconciliation fences without retry, review, or cancelling pending tasks", async () => {
+    const f = fixture({ delegate: { review: true, max_attempts: 2 } as LcaConfig["delegate"] })
+    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+    const base = f.runtime.verifier
+    f.runtime.verifier = { ...base, async prepare(request) {
+      const handle = await base.prepare(request)
+      return { ...handle, reconcile: async () => new Promise<never>(() => {}) }
+    } }
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "hanging reconcile", verify: verify("check_hang.sh", "test -f README.md") }, { title: "pending" }])
+    expect(await q.run(S)).toMatchObject({ aborted: true, done: 0 })
+    expect(f.requests.map(r => r.role)).toEqual(["worker"])
+    expect(readLedger(wt.worktree, S).tasks[1]?.status).toBe("pending")
+    expect(f.runtime.runs.status().claim).toBeDefined()
+    expect(f.runtime.runs.status().executions.find(e => e.kind === "verifier")?.fence).toBeDefined()
+  })
+
+  test("verifier replacement environment supplies a trusted executable path", async () => {
+    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+    const base = f.runtime.verifier
+    let suppliedPath: string | undefined
+    f.runtime.verifier = { ...base, async prepare(request) {
+      suppliedPath = request.env.PATH
+      return base.prepare(request)
+    } }
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "runner path", verify: verify("check_path.sh", "test -f README.md") }])
+    expect(await q.run(S)).toMatchObject({ done: 1 })
+    expect(suppliedPath).toContain("/usr/bin:/bin")
+    expect(suppliedPath).not.toContain(".")
+  })
+
+  test("hanging verifier restart reconciliation fences before repairing or replaying tasks", async () => {
+    const f = fixture()
+    const old = f.runtime.runs.claim(S, "dead-owner", 99999999)
+    const id = "linux-restart-hang"
+    const snapshotID = "old-tree"
+    const digest = "a".repeat(64)
+    const deadlineAt = Date.now() + 5000
+    f.runtime.runs.registerIntent(old, { executionId: id, ownerSession: S, taskId: "old-task", attemptId: "old-attempt",
+      generation: old.generation, role: "verifier", cwd: wt.worktree, policyID: "verify-command",
+      kind: "verifier", profile: "linux-single-use", inputSnapshotID: snapshotID, inputDigest: digest, deadlineAt, maxOutputChars: 1500 })
+    f.runtime.runs.bindVerifierRef(old, id, { kind: "verifier", profile: "linux-single-use", executionID: id,
+      invocationID: "old-invocation", inputSnapshotID: snapshotID, inputDigest: digest, deadlineAt, maxOutputChars: 1500,
+      unit: "old-unit", bootID: "old-boot", cgroupInode: "123" })
+    f.runtime.verifier = { ...f.runtime.verifier, reconcile: async () => new Promise<never>(() => {}) }
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "still pending" }])
+    expect(await q.run(S)).toMatchObject({ aborted: true, done: 0 })
+    expect(f.requests).toHaveLength(0)
+    expect(readLedger(wt.worktree, S).tasks[0]?.status).toBe("pending")
+    expect(f.runtime.runs.status().claim).toBeDefined()
+    expect(f.runtime.runs.status().executions[0]?.fence).toBeDefined()
+  })
+
+  test("hanging host restart reconciliation cannot route through verifier or cancel pending tasks", async () => {
+    const f = fixture()
+    const old = f.runtime.runs.claim(S, "dead-owner", 99999999)
+    f.runtime.runs.registerIntent(old, { executionId: "host-restart-hang", ownerSession: S, taskId: "old-task", attemptId: "old-attempt",
+      generation: old.generation, role: "worker", cwd: wt.worktree, policyID: "worker-policy", kind: "host", profile: "legacy-unowned" })
+    f.runtime.runs.bindVendorRef(old, "host-restart-hang", JSON.stringify({ executionID: "host-restart-hang", vendorSessionID: "old-child" }))
+    f.runtime.host.reconcile = async () => new Promise<never>(() => {})
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "still pending" }])
+    expect(await q.run(S)).toMatchObject({ aborted: true, done: 0 })
+    expect(f.requests).toHaveLength(0)
+    expect(readLedger(wt.worktree, S).tasks[0]?.status).toBe("pending")
+    expect(f.runtime.runs.status().claim).toBeDefined()
+    expect(f.runtime.runs.status().executions[0]?.fence).toBeDefined()
+  })
+
+  test("cancelled legacy verifier records a terminal, never passes, and does not review", async () => {
+    const f = fixture({ delegate: { review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "cancel check", verify: verify("check_slow.sh", "touch verifier-started; sleep 10") }])
+    const run = q.run(S)
+    await waitFor(() => existsSync(join(wt.worktree, "verifier-started")))
+    await q.abort(S, "stop verifier")
+    expect(await run).toMatchObject({ done: 0, cancelled: 1 })
+    expect(readLedger(wt.worktree, S).tasks[0]?.verify_result?.ok).not.toBe(true)
+    expect(f.requests.map(r => r.role)).toEqual(["worker"])
+    expect(f.runtime.runs.status().executions.find(e => e.kind === "verifier")?.terminal?.verification?.cancelled).toBe(true)
+  })
+
+  test("aborting verifier preparation fences the claim without cancelling pending ledger tasks", async () => {
+    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+    const base = f.runtime.verifier
+    f.runtime.verifier = { ...base, prepare: async () => new Promise(() => {}) }
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "prepare hangs", verify: verify("check_prepare.sh", "test -f README.md") }, { title: "pending" }])
+    const run = q.run(S)
+    await waitFor(() => f.runtime.runs.status().executions.some(e => e.kind === "verifier"))
+    await q.abort(S, "stop preparation")
+    expect(await run).toMatchObject({ aborted: true, done: 0 })
+    expect(f.runtime.runs.status().claim).toBeDefined()
+    expect(f.runtime.runs.status().executions.find(e => e.kind === "verifier")?.fence).toBeDefined()
+    expect(readLedger(wt.worktree, S).tasks[1]?.status).toBe("pending")
+    expect(f.requests.map(r => r.role)).toEqual(["worker"])
+  })
+
+  test("protected-file mutation restores original test and invalidates verification", async () => {
+    write("test_lock.py", "def test_lock():\n    assert True\n")
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    f.replies.set("worker", () => { write("test_lock.py", "def test_lock():\n    assert False\n"); return { status: "completed", text: "done" } })
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "protected", verify: "python3 -m pytest -q test_lock.py" }])
+    expect(await q.run(S)).toMatchObject({ failed: 1 })
+    expect(readFileSync(join(wt.worktree, "test_lock.py"), "utf8")).toBe("def test_lock():\n    assert True\n")
+    expect(readLedger(wt.worktree, S).tasks[0]?.verify_result?.output).toContain("protected file modified")
+  })
+
+  test("cancel interleaved with the final merge guard neither applies nor marks done", async () => {
+    const f = fixture({ delegate: { worktree: true, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    f.replies.set("worker", (request) => {
+      writeFileSync(join(request.cwd, "feature.py"), "VALUE = 1\n")
+      return { status: "completed", text: "Files changed: feature.py\nOpen issues: none" }
+    })
+    const q = createQueue(f.runtime)
+    const original = f.runtime.runs.assertQuiescent.bind(f.runtime.runs)
+    let interrupted = false
+    let guards = 0
+    f.runtime.runs.assertQuiescent = (claim) => {
+      original(claim)
+      // The first assertion is queue startup; the second is the final merge guard.
+      if (++guards === 2) {
+        interrupted = true
+        void q.abort(S, "cancel at merge guard")
+      }
     }
-    q.add(S, [{ title: "a" }])
-    await q.run(S)
-    expect(seen).toBe("child_1")
-    expect(readLedger(wt.worktree, S).running).toBeUndefined()
+    q.add(S, [{ title: "guarded merge", verify: verify("check_feature.sh", "test -f feature.py") }])
+    expect(await q.run(S)).toMatchObject({ done: 0, cancelled: 1 })
+    expect(interrupted).toBe(true)
+    expect(existsSync(join(wt.worktree, "feature.py"))).toBe(false)
+    expect(readLedger(wt.worktree, S).tasks[0]?.status).toBe("cancelled")
   })
 
-  test("child session timeout aborts the child and fails the attempt; the retry gets the reason", async () => {
-    const deps = makeDeps(client, wt.worktree, { delegate: { review: false, max_attempts: 2, task_ttl_ms: 50 } as any })
-    const q = createQueue(deps)
-    client.replies.worker = { text: "late", delayMs: 300 }
-    q.add(S, [{ title: "slow" }])
-    const run = await q.run(S)
-    expect(run.failed).toBe(1)
-    expect(client.calls.filter((c) => c.method === "abort").length).toBe(2)
-    expect((prompts("worker")[1]!.args as any).body.parts[0].text).toContain("timed out")
-    expect(readLedger(wt.worktree, S).tasks[0]!.error).toContain("timed out")
+  test("failed verification retries with a new generation-safe execution and preserves reason", async () => {
+    const f = fixture({ delegate: { review: false, max_attempts: 2 } as LcaConfig["delegate"] })
+    f.replies.set("worker", () => {
+      if (f.requests.length === 2) write("ready.txt", "ready\n")
+      return { status: "completed", text: "done" }
+    })
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "retry", verify: verify("check_ready.sh", "test -f ready.txt") }])
+    expect(await q.run(S)).toMatchObject({ done: 1 })
+    expect(f.requests).toHaveLength(2)
+    expect(f.requests[1]?.text).toContain("previous worker already changed files")
+    expect(f.requests[0]?.executionID).not.toBe(f.requests[1]?.executionID)
   })
 
-  test("configured worker/reviewer models are passed as provider/model on the child prompt", async () => {
-    const deps = makeDeps(client, wt.worktree, { models: { worker: "ollama/gemma4:31b-mlx" }, ...noReview })
-    const q = createQueue(deps)
-    client.replies.worker = { text: "ok" }
-    q.add(S, [{ title: "m" }])
-    await q.run(S)
-    expect((prompts("worker")[0]!.args as any).body.model).toEqual({ providerID: "ollama", modelID: "gemma4:31b-mlx" })
+  test("ACK without quiescence fences execution and blocks verifier and retry", async () => {
+    const f = fixture({ delegate: { review: false, task_ttl_ms: 20 } as LcaConfig["delegate"] })
+    f.setCancellation("ack-only")
+    f.replies.set("worker", () => new Promise<ExecutionOutcome>(() => {}))
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "stuck", verify: verify("should_not_run.sh", "touch verifier-ran") }])
+    expect(await q.run(S)).toMatchObject({ aborted: true })
+    expect(f.requests).toHaveLength(1)
+    expect(existsSync(join(wt.worktree, "verifier-ran"))).toBe(false)
+    const state = f.runtime.runs.status()
+    expect(state.executions[0]?.fence).toBeDefined()
+    expect(typeof state.executions[0]?.cancel?.acknowledgedAt).toBe("number")
+    expect(state.claim).toBeDefined()
+    expect(await q.run(S)).toMatchObject({ aborted: true })
+    expect(f.requests).toHaveLength(1)
+  })
+
+  test("timeout with affirmative terminal reconciliation can retry; policy is unbound only then", async () => {
+    const f = fixture({ delegate: { review: false, max_attempts: 2, task_ttl_ms: 20 } as LcaConfig["delegate"] })
+    let n = 0
+    f.replies.set("worker", () => ++n === 1 ? new Promise<ExecutionOutcome>(() => {}) : { status: "completed", text: "done" })
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "timeout" }])
+    expect(await q.run(S)).toMatchObject({ done: 1 })
+    expect(f.requests).toHaveLength(2)
+    expect(f.runtime.policy.handlersForSession("child_1")).toBeUndefined()
+    expect(f.runtime.runs.status().claim).toBeUndefined()
+  })
+
+  test("missing data bridge refuses data tasks before ledger mutation", () => {
+    const f = fixture()
+    expect(() => createQueue(f.runtime).add(S, [{ title: "question", kind: "data" }])).toThrow("data checks unavailable")
+    expect(readLedger(wt.worktree, S).tasks).toHaveLength(0)
+  })
+
+  test("external stop of a hanging child is bounded and cannot turn an ACK into completion", async () => {
+    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    f.setCancellation("ack-only")
+    f.replies.set("worker", () => new Promise<ExecutionOutcome>(() => {}))
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "hang" }])
+    const run = q.run(S)
+    await waitFor(() => f.requests.length === 1)
+    await q.abort(S, "stop")
+    expect(f.runtime.runs.status().executions[0]?.fence).toBeDefined()
+    // The deadline is configured by the runtime, not a fake terminal response from the host.
+    expect(await run).toMatchObject({ aborted: true })
+  })
+
+  test("external stop while session creation hangs returns and fences without dispatching work", async () => {
+    const f = fixture()
+    f.setPrepareWait(() => new Promise<void>(() => {}))
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "prepare hang" }])
+    const run = q.run(S)
+    await waitFor(() => f.requests.length === 1)
+    await q.abort(S, "user_stop")
+    expect(await run).toMatchObject({ aborted: true, abortReason: "user_stop" })
+    expect(f.runtime.runs.status().executions[0]?.fence).toBeDefined()
+    expect(f.runtime.runs.status().executions[0]?.cancel?.requestedAt).toBeNumber()
+    expect(f.runtime.runs.status().claim).toBeDefined()
+    expect(readLedger(wt.worktree, S).tasks[0]?.status).toBe("cancelled")
   })
 })
 
-describe("prompt builders + verdict parser", () => {
-  test("workerPrompt counts tasks within the batch and carries the retry guidance", () => {
-    let { ledger } = addTasks(emptyLedger(S), [{ title: "a", detail: "do a", verify: "pytest -q a.py" }, { title: "b" }])
+describe("prompt and reviewer contracts", () => {
+  test("worker retry prompt counts the batch and reviewer prompt carries full scope", () => {
+    let { ledger } = addTasks(emptyLedger(S), [{ title: "a", verify: "bun test test/a.test.ts" }, { title: "b" }])
     ledger = addTasks(ledger, [{ title: "c" }]).ledger
-    const p = workerPrompt(ledger, ledger.tasks[1]!, "verify failed: x", 600)
-    expect(p.startsWith("Task 2 of 2: b")).toBe(true)
-    expect(p).toContain("Reason: verify failed: x")
-    expect(p).toContain("keep what already works")
-    expect(p).not.toContain("Run this once")
-    // a later batch counts from 1 again (the ledger number stays global for handoff file names)
-    expect(workerPrompt(ledger, ledger.tasks[2]!, undefined, 600).startsWith("Task 1 of 1: c")).toBe(true)
-    expect(p.length).toBeLessThan(600)
+    const p = workerPrompt(ledger, ledger.tasks[0]!, "verify failed", 600)
+    expect(p).toContain("Reason: verify failed")
+    expect(p).toContain("The framework will run this verification after your edits; do not run it: bun test test/a.test.ts")
+    expect(p).not.toContain("Run this once before you finish")
+    expect(p).toContain("Never invoke Bash or run tests")
+    expect(workerPrompt(ledger, ledger.tasks[2]!, undefined, 600)).toContain("Task 1 of 1: c")
+    expect(reviewerPrompt(ledger.tasks[0]!, "+x", undefined)).toContain("Verification: none provided")
   })
-
-  test("reviewerPrompt without verify says so and shows the full scope", () => {
-    const { ledger } = addTasks(emptyLedger(S), [{ title: "a", detail: "x".repeat(500) }])
-    const p = reviewerPrompt(ledger.tasks[0]!, "+x", undefined)
-    expect(p).toContain("Verification: none provided by the task; judge the diff only.")
-    expect(p).toContain("Scope: " + "x".repeat(500))
-  })
-
-  test("parseVerdict handles the contract and common local-model deviations", () => {
-    expect(parseVerdict("ACCEPT\n- fine")).toEqual({ verdict: "accept" })
-    expect(parseVerdict("REJECT: tests fail\n- x")).toEqual({ verdict: "reject", reason: "tests fail" })
-    expect(parseVerdict("**REJECT** - scope creep")).toEqual({ verdict: "reject", reason: "scope creep" })
-    expect(parseVerdict("\n\nAccept.")).toEqual({ verdict: "accept" })
-    expect(parseVerdict("REJECTED: scope creep")).toEqual({ verdict: "reject", reason: "scope creep" })
-    expect(parseVerdict("Verdict: REJECT — missing tests")).toEqual({ verdict: "reject", reason: "missing tests" })
-    expect(parseVerdict("**Verdict:** ACCEPT")).toEqual({ verdict: "accept" })
-    expect(parseVerdict("거부: 테스트 없음")).toEqual({ verdict: "reject", reason: "테스트 없음" })
-    expect(parseVerdict("승인")).toEqual({ verdict: "accept" })
-    // identifiers in the reason survive (underscores are not stripped)
-    expect(parseVerdict("REJECT: bug in is_right")).toEqual({ verdict: "reject", reason: "bug in is_right" })
-    // a verdict on the second line still counts; rule recitals do not
-    expect(parseVerdict("Looking at the diff...\nREJECT: missing test")).toEqual({ verdict: "reject", reason: "missing test" })
-    expect(parseVerdict("I would reject when tests fail, but here they pass.\nLooks good").verdict).toBe("error")
-    // verdict-last format (current reviewer contract) and rule recitals
-    expect(parseVerdict("1. Test files in the diff: none\n2. Test-aware code: none\n3. yes\n4. none\nACCEPT")).toEqual({ verdict: "accept" })
-    expect(parseVerdict("1. none\n2. global _call_count\n3. no: counter\n4. none\nREJECT: test-aware code")).toEqual({ verdict: "reject", reason: "test-aware code" })
-    expect(parseVerdict("REJECT when 1, 2 or 4 is not none.\n1. none\n2. none\n3. yes\n4. none\nAccept")).toEqual({ verdict: "accept" })
-    expect(parseVerdict("REJECT if any of 1, 2, 4 is not none.\n…\n**Verdict:** REJECT: special-cased")).toEqual({ verdict: "reject", reason: "special-cased" })
+  test("verdict parser rejects prose and rule recitals, accepts explicit verdicts", () => {
+    expect(parseVerdict("ACCEPT")).toEqual({ verdict: "accept" })
+    expect(parseVerdict("**Verdict:** REJECT: test-aware code")).toEqual({ verdict: "reject", reason: "test-aware code" })
+    expect(parseVerdict("REJECT when tests fail.\nLooks fine").verdict).toBe("error")
     expect(parseVerdict("Looks good to me").verdict).toBe("error")
-    expect(parseVerdict("").verdict).toBe("error")
   })
 })

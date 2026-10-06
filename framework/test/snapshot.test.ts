@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { diffSnapshots, snapshotTree } from "../src/orchestration/snapshot.ts"
+import { createSnapshotStore, diffSnapshots, snapshotTree } from "../src/orchestration/snapshot.ts"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { runShell, startShell } from "../src/orchestration/shell.ts"
 import { tempGitWorktree, tempWorktree } from "./guards-helpers.ts"
@@ -29,6 +29,113 @@ describe("snapshot / diff", () => {
     expect(status).toContain("?? new.py")
     expect(status).toContain(" M keep.py")
     expect(execFileSync("git", ["log", "--oneline"], { cwd: wt.worktree }).toString().trim().split("\n").length).toBe(1)
+  })
+
+  test("diff paths preserve exact leading and trailing whitespace", async () => {
+    const before = await snapshotTree(wt.worktree)
+    const name = " leading and trailing "
+    writeFileSync(join(wt.worktree, name), "space-safe\n")
+    const after = await snapshotTree(wt.worktree)
+    expect((await diffSnapshots(wt.worktree, before, after, 10_000))?.files).toEqual([name])
+  })
+
+  test("restore recreates original symlink entries", async () => {
+    writeFileSync(join(wt.worktree, "target.py"), "target\n")
+    symlinkSync("target.py", join(wt.worktree, "source.py"))
+    const store = await createSnapshotStore(wt.worktree)
+    expect(store).not.toBeNull()
+    try {
+      const before = await store!.snapshot()
+      unlinkSync(join(wt.worktree, "source.py"))
+      writeFileSync(join(wt.worktree, "source.py"), "replacement\n")
+      expect(await store!.restore(before, ["source.py"])).toEqual(["source.py"])
+      expect(lstatSync(join(wt.worktree, "source.py")).isSymbolicLink()).toBe(true)
+      expect(readlinkSync(join(wt.worktree, "source.py"))).toBe("target.py")
+    } finally {
+      store!.dispose()
+    }
+  })
+
+  test("restore preserves binary bytes and executable Git mode", async () => {
+    const path = join(wt.worktree, "tool.bin")
+    const original = Buffer.from([0, 0xff, 0x41, 0x0a])
+    writeFileSync(path, original)
+    chmodSync(path, 0o755)
+    const store = await createSnapshotStore(wt.worktree)
+    expect(store).not.toBeNull()
+    try {
+      const before = await store!.snapshot()
+      chmodSync(path, 0o644)
+      writeFileSync(path, Buffer.from([0x42, 0, 0x43]))
+      expect(await store!.restore(before, ["tool.bin"])).toEqual(["tool.bin"])
+      expect(readFileSync(path)).toEqual(original)
+      expect(lstatSync(path).mode & 0o777).toBe(0o755)
+    } finally {
+      store!.dispose()
+    }
+  })
+
+  test("restore invalidates matching Python bytecode cache entries", async () => {
+    const path = join(wt.worktree, "cached.py")
+    writeFileSync(path, "value = 1\n")
+    const store = await createSnapshotStore(wt.worktree)
+    expect(store).not.toBeNull()
+    try {
+      const before = await store!.snapshot()
+      mkdirSync(join(wt.worktree, "__pycache__"))
+      writeFileSync(join(wt.worktree, "__pycache__", "cached.cpython-313.pyc"), "stale")
+      writeFileSync(path, "value = 2\n")
+      expect(await store!.restore(before, ["cached.py"])).toEqual(["cached.py"])
+      expect(readFileSync(path, "utf8")).toBe("value = 1\n")
+      expect(existsSync(join(wt.worktree, "__pycache__", "cached.cpython-313.pyc"))).toBe(false)
+    } finally {
+      store!.dispose()
+    }
+  })
+
+  test("restore rejects noncanonical names without deleting the normalized target", async () => {
+    const store = await createSnapshotStore(wt.worktree)
+    expect(store).not.toBeNull()
+    try {
+      const before = await store!.snapshot()
+      writeFileSync(join(wt.worktree, "keep.py"), "changed\n")
+      for (const path of ["./keep.py", "folder/../keep.py", join(wt.worktree, "keep.py")]) {
+        await expect(store!.restore(before, [path])).rejects.toThrow("noncanonical")
+        expect(readFileSync(join(wt.worktree, "keep.py"), "utf8")).toBe("changed\n")
+      }
+    } finally { store!.dispose() }
+  })
+
+  test("restore replaces a planted hardlink without writing its outside inode", async () => {
+    const store = await createSnapshotStore(wt.worktree)
+    expect(store).not.toBeNull()
+    const outside = join(wt.stateHome, "outside.py")
+    writeFileSync(outside, "outside\n")
+    try {
+      const before = await store!.snapshot()
+      unlinkSync(join(wt.worktree, "keep.py"))
+      linkSync(outside, join(wt.worktree, "keep.py"))
+      expect(await store!.restore(before, ["keep.py"])).toEqual(["keep.py"])
+      expect(readFileSync(join(wt.worktree, "keep.py"), "utf8")).toBe("x = 1\n")
+      expect(readFileSync(outside, "utf8")).toBe("outside\n")
+      expect(lstatSync(join(wt.worktree, "keep.py")).nlink).toBe(1)
+    } finally { store!.dispose() }
+  })
+
+  test("restore refuses an absent-before path through an external parent symlink", async () => {
+    const store = await createSnapshotStore(wt.worktree)
+    expect(store).not.toBeNull()
+    const outside = join(wt.stateHome, "outside")
+    mkdirSync(outside)
+    writeFileSync(join(outside, "victim.txt"), "untouched\n")
+    try {
+      const before = await store!.snapshot()
+      symlinkSync(outside, join(wt.worktree, "escape"))
+      await expect(store!.restore(before, ["escape/victim.txt"])).rejects.toThrow(/outside worktree/)
+      expect(readFileSync(join(outside, "victim.txt"), "utf8")).toBe("untouched\n")
+    } finally {
+      store!.dispose()
+    }
   })
 
   test("the plugin's own .lca/ runtime files are never part of a task diff", async () => {

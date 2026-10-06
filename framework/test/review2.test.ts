@@ -7,12 +7,13 @@ import { join } from "node:path"
 import { DEFAULT_CONFIG, verifyCommandProblem } from "../src/config.ts"
 import { scanDiff, taskTextProblem } from "../src/orchestration/gaming.ts"
 import { createQueue, getQueue } from "../src/orchestration/queue.ts"
-import { createSnapshotStore, filterOverrides } from "../src/orchestration/snapshot.ts"
+import { createSnapshotStore } from "../src/orchestration/snapshot.ts"
 import { startShell } from "../src/orchestration/shell.ts"
 import { createDelegateTool } from "../src/tools/delegate.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { createCommandHook, STOP_COMMAND } from "../src/hooks/command.ts"
 import { createEventHook } from "../src/hooks/event.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { addTasks, emptyLedger, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
 import { abortPath, sessionDir, stateBase, stateRoot, writeJsonAtomic } from "../src/state/store.ts"
 import { fakeClient, GIT_TEST_ENV, makeDeps, tempGitWorktree, tempWorktree, verifyScript, waitFor, type FakeClient } from "./guards-helpers.ts"
@@ -80,7 +81,7 @@ describe("verify allowlist (second pass)", () => {
 describe("protected files (second pass)", () => {
   test("conftest.py skipping every test is restored before verify and fails the attempt; the verify result is void", async () => {
     const deps = makeDeps(client, wt.worktree, { delegate: { review: false, max_attempts: 1 } as any })
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     write("test_rect.py", "def test_x():\n    assert 1 == 2\n")
     client.replies.worker = {
       text: "Files changed: rect.py, conftest.py\nOpen issues: none",
@@ -102,7 +103,7 @@ describe("protected files (second pass)", () => {
 
   test("a task that names package.json may edit it; test-looking files are protected when verify names none", async () => {
     const deps = makeDeps(client, wt.worktree, { delegate: { review: false, max_attempts: 1 } as any })
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     const ok = verifyScript(wt.worktree, "check_pkg.sh", "test -f package.json")
     client.replies.worker = (o, nth) => ({
       text: "ok",
@@ -123,7 +124,7 @@ describe("protected files (second pass)", () => {
 
   test("strong gaming pattern in the code fails the attempt even though verify passes and no test file was touched", async () => {
     const deps = makeDeps(client, wt.worktree, { delegate: { review: false, max_attempts: 1 } as any })
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     client.replies.worker = { text: "ok", run: () => write("rect.py", "_call_count = 0\ndef rect_area(w, h):\n    global _call_count\n    _call_count += 1\n    return w * h + (1 if _call_count == 2 else 0)\n") }
     q.add(S, [{ title: "rect", verify: verifyScript(wt.worktree, "verify_ok.sh", "exit 0") }])
     const run = await q.run(S)
@@ -133,7 +134,7 @@ describe("protected files (second pass)", () => {
 
   test("a worker that reports the task as impossible (Open issues) is not retried after a failed verify", async () => {
     const deps = makeDeps(client, wt.worktree, { delegate: { review: false, max_attempts: 2 } as any })
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     client.replies.worker = { text: "Files changed: rect.py\nVerification: 1 failed\nOpen issues: test_rect.py asserts 1 == 2, cannot pass honestly", run: () => write("rect.py", "x=1\n") }
     q.add(S, [{ title: "rect", verify: verifyScript(wt.worktree, "verify_fail.sh", "exit 1") }])
     const run = await q.run(S)
@@ -144,19 +145,21 @@ describe("protected files (second pass)", () => {
     expect(readFileSync(join(wt.worktree, t.handoff!), "utf8")).toContain("- worker reports: test_rect.py asserts")
   })
 
-  test("outside git the review/guard gap is reported honestly instead of 'no file changes'", async () => {
+  test("outside git a coding task fails before any worker or unguarded review", async () => {
     const plain = tempWorktree()
     try {
       const deps = makeDeps(client, plain.worktree)
-      const q = createQueue(deps)
+      const q = createQueue(getOpenCodeRuntime(deps))
       client.replies.worker = { text: "ok", run: () => writeFileSync(join(plain.worktree, "a.py"), "x") }
       client.replies.reviewer = { text: "REJECT: never asked" }
       q.add(S, [{ title: "a" }])
       const run = await q.run(S)
       expect(run.noSnapshot).toBe(true)
+      expect(run).toMatchObject({ done: 0, failed: 1 })
+      expect(prompts("worker")).toHaveLength(0)
       expect(prompts("reviewer").length).toBe(0)
       const t = readLedger(plain.worktree, S).tasks[0]!
-      expect(t.review?.reason).toContain("not a git repository")
+      expect(t).toMatchObject({ status: "failed", error: "could not snapshot the task baseline" })
     } finally {
       plain.cleanup()
     }
@@ -164,14 +167,11 @@ describe("protected files (second pass)", () => {
 })
 
 describe("snapshot hardening", () => {
-  test("a worker-planted clean filter is neutralised: git add never runs it", async () => {
+  test("a worker-planted clean filter is refused before git add runs it", async () => {
     write(".gitattributes", "* filter=evil\n")
     execFileSync("git", ["config", "filter.evil.clean", `sh -c 'touch ${join(wt.worktree, "PWNED")}; cat'`], { cwd: wt.worktree, env: GIT_TEST_ENV })
-    expect((await filterOverrides(wt.worktree)).join(" ")).toContain("filter.evil.clean=cat")
-    const store = (await createSnapshotStore(wt.worktree))!
     write("x.py", "x\n")
-    await store.snapshot()
-    store.dispose()
+    await expect(createSnapshotStore(wt.worktree)).rejects.toThrow(/git-config: forbidden filter\.evil\.clean/)
     expect(existsSync(join(wt.worktree, "PWNED"))).toBe(false)
   })
 
@@ -198,19 +198,19 @@ describe("snapshot hardening", () => {
     }
   })
 
-  test("handoff writing refuses a symlinked .lca/handoffs and the task outcome is unaffected", async () => {
+  test("handoff writing refuses a symlinked .lca/handoffs and the unsafe snapshot fails closed", async () => {
     const outside = tempWorktree()
     try {
       mkdirSync(join(wt.worktree, ".lca"))
       symlinkSync(outside.worktree, join(wt.worktree, ".lca/handoffs"))
       const deps = makeDeps(client, wt.worktree, noReview)
-      const q = createQueue(deps)
+      const q = createQueue(getOpenCodeRuntime(deps))
       client.replies.worker = { text: "ok", run: () => write("a.py", "x") }
       q.add(S, [{ title: "a" }])
       const run = await q.run(S)
-      expect(run.done).toBe(1)
+      expect(run).toMatchObject({ done: 0, failed: 1 })
       const t = readLedger(wt.worktree, S).tasks[0]!
-      expect(t.status).toBe("done")
+      expect(t).toMatchObject({ status: "failed", error: "could not snapshot the task baseline" })
       expect(t.handoff).toBeUndefined()
       expect(deps.logs).toContain("handoff write failed")
       expect(readlinkSync(join(wt.worktree, ".lca/handoffs"))).toBe(outside.worktree)
@@ -239,7 +239,7 @@ describe("state root containment", () => {
 describe("abort timing / resilience", () => {
   test("/stop arriving between the worker's end and the verify spawn kills the verify at once", async () => {
     const deps = makeDeps(client, wt.worktree, noReview)
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     let workerDone = false
     client.replies.worker = { text: "ok", run: () => write("a.py", "x") }
     const slow = verifyScript(wt.worktree, "verify_slow.sh", "sleep 5")
@@ -267,7 +267,7 @@ describe("abort timing / resilience", () => {
       if (msg === "task verify") throw new Error("boom inside the queue")
       realLog(msg, extra)
     }
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     client.replies.worker = { text: "ok", run: () => write("a.py", "x") }
     q.add(S, [{ title: "a", verify: verifyScript(wt.worktree, "verify_ok.sh", "exit 0") }, { title: "b" }])
     q.add("unused", [])
@@ -356,7 +356,7 @@ describe("resume offer on the next user message; /stop settles; session.deleted 
 
   test("session.deleted while the queue runs: abort + the state dir is not resurrected", async () => {
     const deps = makeDeps(client, wt.worktree, noReview)
-    const q = getQueue(deps)
+    const q = getQueue(getOpenCodeRuntime(deps))
     let started = false
     client.replies.worker = { text: "x", run: () => ((started = true), new Promise<void>(() => {})) }
     q.add(S, [{ title: "a" }, { title: "b" }])

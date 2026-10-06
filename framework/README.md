@@ -1,9 +1,40 @@
 # lca — local coding agent (OpenCode plugin)
 
-Local-first agent framework for OpenCode with Ollama/Gemma as the only backend. It is the
+Local-first agent framework for OpenCode, defaulting to Ollama/Gemma while retaining OpenCode's
+native Anthropic/OpenAI provider integrations when explicitly selected. It is the
 "opposite premise" of OMC/OMO/OMX (see `docs/agent-framework-review-2026-09-22.md`): the static
 prefix (system prompt + tool list + thinking toggle) is fixed at session start and small; repeat
 blocking, output trimming and orchestration are done in code, not by the model.
+
+## Core and qualification boundaries
+
+| Layer | Files | Scope |
+| --- | --- | --- |
+| OpenCode runtime | `src/hosts/{opencode,opencode-runtime,types,runtime,tool-policy,run-state}.ts` | Host execution, fixed role policy, execution ownership and durable recovery state. |
+| Workflow entry points | `src/hosts/{cli,controller}.ts`, `src/flow/`, `src/hooks/`, `src/tools/` | Import, approval, delegation, review, cancellation and status. |
+| Task execution | `src/orchestration/{queue,snapshot,worktree,git-boundary,shell,verifier,legacy-verifier}.ts` | Serial tasks, snapshots, verification and accepted changes. The current verifier remains `legacy-unowned`. |
+
+Review the runtime, queue, workflow callers and their tests as one integration change:
+committing the queue without its new host contracts leaves unresolved imports. Native-host
+and Seatbelt qualification results are a separate review scope, not proof that the core
+is safe for untrusted workloads. Native Claude/Codex adapters, their SDK dependencies,
+Linux domain provisioning and macOS Seatbelt experiments are not included in this core.
+Core changes still require regression tests and type checking. Native containment claims
+additionally require the corresponding platform qualification, not just passing unit tests.
+
+The plugin and foreground CLI assemble execution through `getOpenCodeRuntime`; they do not
+maintain separate policy or verifier factories. Disabling `config.agents` or `chat.params`
+therefore refuses execution admission in either entry point, before a plan-review child is
+created. Configured data checks and task observation also follow the shared runtime.
+Read-only CLI `status` bypasses runtime construction.
+
+The shared process-risk fence also applies to plugin `delegate`, not only the foreground
+CLI: a managed worker that invokes `bash` cannot prove descendant termination from a
+returned prompt alone, so the execution remains fenced instead of being accepted.
+Worker prompts therefore reserve test execution for the framework's verifier and report
+verification as pending rather than instructing the worker to run Bash itself.
+Use trusted file-tool-only fixtures for core acceptance; this integration does not
+establish general shell-workload containment.
 
 ## Default coding conventions
 
@@ -22,6 +53,58 @@ No external plugin or dependency is installed. The guidance is part of the stati
 prefix: restart OpenCode and start a new session to load it, rather than changing an
 active session's prefix.
 
+## Model selection and output limits
+
+Set role models in `.lca/lca.jsonc` with `models: { "worker": "provider/model-id" }`.
+The provider is the first path segment; the remaining model ID may itself contain slashes.
+An unset role inherits OpenCode's configured default, which may be a cloud provider; lca does
+not silently switch providers. Worker/reviewer temperature is set to `0.2` only when the
+effective model is explicitly known to use a local provider. Cloud temperature and reasoning
+options are not assumed to be supported.
+
+The framework's per-role output ceiling is further limited by a lower OpenCode request limit or
+the selected model's declared positive finite output limit. Invalid explicit limits are rejected.
+This is a request bound, not evidence that a remote provider enforces it or stops billing.
+
+## Foreground imported-plan runner (OpenCode)
+
+The standalone runner uses the real, already-running local OpenCode service with this project's
+LCA plugin; it never starts a daemon or falls back to another engine or model. The plan must be
+canonical JSON inside the worktree (3–10 steps). For example:
+
+```sh
+bun src/hosts/cli.ts run --plan plan.json --worktree /path/to/repo --server http://127.0.0.1:4096
+bun src/hosts/cli.ts status --worktree /path/to/repo --json
+bun src/hosts/cli.ts resume --session SESSION_ID --worktree /path/to/repo --server http://127.0.0.1:4096
+```
+
+`run --plan` validates and advisory-reviews the saved plan, shows its canonical file/hash, and
+requires an interactive local terminal to type `APPROVE <workflow-id> <plan-sha>` or
+`REJECT <workflow-id> <plan-sha> <reason>` before any task runs. No auto-yes or noninteractive
+approval exists. The explicit loopback `--server` must be trusted by its operator; its API
+inventory can reject conflicting plugin or reviewer configuration, but cannot authenticate a
+malicious local service that lies about its own hooks. It creates one native parent session,
+runs tasks serially with code-owned checks
+and independent read-only reviewers, and preserves durable claim/fence state across processes.
+`status` reads only local state, without an SDK client, credentials, or model request. `cancel`
+and `resume` require the exact owner session ID. Cancellation preserves the owner and stays
+pending while execution retirement is unproven; acknowledgement is not quiescence.
+SIGINT/SIGTERM during a run requests cancellation. A detached
+process from a worker shell command cannot currently be proven stopped by a prompt response:
+such an execution remains fenced rather than verifying, merging, or releasing its claim.
+Trusted scripted fixtures can use read/write/edit tools and the code-owned verifier.
+The current Darwin/shared-server verifier is `legacy-unowned`: its durable record states
+`isolationEstablished=false`, `domainState=unknown`, `descendantRisk=unproven`, and status
+renders `verification: passed (legacy-unowned, descendants unproven)` after a successful task.
+**Do not run untrusted work through this foreground runner yet.** The preserved
+`worktree.test.ts` adversary demonstrates that a detached verifier child can still change a
+protected test after the parent exits and the legacy task is accepted. The separate
+`linux-single-use` strict control is blocked/not-run without an operator-provisioned local
+systemd lab and fixed units; legacy success earns no F2/F3 safety credit. No Linux owned-host
+profile or cloud provider egress is enabled by this Darwin work.
+Native Claude and Codex coding profiles are not admitted. Choosing those engines refuses
+before connecting to the server; use OpenCode's provider integrations instead.
+
 ## Plan workflow (harness M1) — `/plan` → `/approve` → workers
 
 ```text
@@ -38,7 +121,7 @@ active session's prefix.
 /status            code-rendered state, any phase            /stop     unchanged (stops the queue)
 ```
 
-Approval only ever comes from your typed `/approve` command (never from model text). Workflow state lives outside
+In the OpenCode chat workflow, approval comes from your typed `/approve` command (never from model text). Workflow state lives outside
 the repo in `<stateRoot>/workflow/` (`workflow.json`, `archive/`, `events.jsonl`, `plans/<id>.json`); a new
 `opencode` process continues the same session (owning-session takeover). `flow.enabled: false` in `.lca/lca.jsonc`
 restores the legacy suffix-only plan mode. Results and numbers: `docs/lca-harness-m1-2026-10-01.md`.
@@ -613,7 +696,8 @@ verified production application remain unmet. See the
 | `verify_timeout_ms` | `120000` | cap for the task's `verify` command (own process group, SIGTERM then SIGKILL) |
 | `verify_allow` | test/check runners (see `config.ts`) | regexes a verify command must match; everything else is refused before it can run |
 | `handoff_context_chars` | `600` | earlier-task summary prepended to the next worker prompt |
-| `report_max_chars` / `diff_max_chars` / `verify_output_chars` | `1200` / `6000` / `1500` | trimming of the worker report, the diff shown to the reviewer, the verify output tail |
+| `report_max_chars` / `verify_output_chars` | `1200` / `1500` | trimming of the worker report and the verify output tail |
+| `diff_max_chars` | `6000` | maximum complete task diff accepted for scanning and review; a truncated diff fails the attempt before verification or review, even when review is disabled. Narrow the task or explicitly increase this bound. |
 | `diff_exclude` | `__pycache__`, `.pytest_cache`, `node_modules`, `.venv`, `*.pyc`, `.env`, `*.pem`, … | globs never counted as task changes (any depth); `.lca/state` and `.lca/handoffs` are always excluded (`.lca/lca.jsonc` edits do show up). Without this the reviewer rejects "files outside the task" for test-run artifacts (seen in the first e2e) |
 
 Hook ids for `disabled_hooks`: `tool.delegate` (drops the tool; main's prompt and the `ulw` suffix then fall back to the
@@ -624,7 +708,8 @@ Full list in `src/hooks/types.ts` (`HOOK_IDS`).
 
 Known limits (from the reviews, not addressed): a plugin tool's `ctx.metadata()` is a no-op on OpenCode 1.18.32, so
 the TUI shows only the tool name while the queue runs (the child sessions' titles `lca task N: …` are the progress
-signal); two OpenCode instances on the same repository each run their own queue (no cross-process lock); test gaming
+signal); execution claims now serialize the shared queue and review across processes, but an unresolved execution
+retains its fence; test gaming
 that no pattern catches (a clever worker) is only stopped by the reviewer, which on a 26B with thinking off is weak —
 verify commands and protected files are the real gate, so write task-local tests.
 

@@ -36,12 +36,14 @@ export type FakeClient = {
     promptAsync?: (o: any) => Promise<{ data: unknown }>
     abort: (o: any) => Promise<{ data: boolean }>
     create: (o: any) => Promise<{ data: unknown }>
+    status: (o?: any) => Promise<{ data: Record<string, { type: "busy" | "idle" }> }>
   }
 }
 
 export function fakeClient(opts: { todoEndpoint?: boolean; promptAsync?: boolean } = {}): FakeClient {
   let seq = 0
   const nth: Record<string, number> = {}
+  const pendingMessageIDs = new Map<string, string>()
   const c: FakeClient = {
     calls: [],
     todos: [],
@@ -70,7 +72,7 @@ export function fakeClient(opts: { todoEndpoint?: boolean; promptAsync?: boolean
         const reply = typeof entry === "function" ? entry(o, nth[agent!]!) : entry
         const sid = o.path.id as string
         const build = (aborted: boolean) => {
-          const info: any = { id: `msg_${seq}_${nth[agent!]}`, role: "assistant", sessionID: sid }
+          const info: any = { id: `msg_${seq}_${nth[agent!]}`, role: "assistant", sessionID: sid, parentID: o.body.messageID }
           if (aborted) info.error = { name: "MessageAbortedError", data: {} }
           else if (reply.error) info.error = reply.error
           const texts = reply.texts ?? (reply.text !== undefined ? [reply.text] : [])
@@ -80,6 +82,7 @@ export function fakeClient(opts: { todoEndpoint?: boolean; promptAsync?: boolean
         // in flight until delay/run finish; session.abort resolves it early with MessageAbortedError (real behaviour)
         return await new Promise<{ data: unknown }>(async (resolve) => {
           let settled = false
+          pendingMessageIDs.set(sid, o.body.messageID)
           c.inflight.set(sid, (r) => {
             if (settled) return
             settled = true
@@ -89,6 +92,7 @@ export function fakeClient(opts: { todoEndpoint?: boolean; promptAsync?: boolean
             if (reply.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs))
             if (reply.run) await reply.run()
           } finally {
+            pendingMessageIDs.delete(sid)
             if (!settled) {
               settled = true
               c.inflight.delete(sid)
@@ -102,10 +106,11 @@ export function fakeClient(opts: { todoEndpoint?: boolean; promptAsync?: boolean
         const pending = c.inflight.get(o.path.id)
         if (pending) {
           c.inflight.delete(o.path.id)
-          pending({ data: { info: { id: "aborted", role: "assistant", sessionID: o.path.id, error: { name: "MessageAbortedError", data: {} } }, parts: [] } })
+          pending({ data: { info: { id: "aborted", role: "assistant", sessionID: o.path.id, parentID: pendingMessageIDs.get(o.path.id), error: { name: "MessageAbortedError", data: {} } }, parts: [] } })
         }
         return { data: true }
       },
+      status: async () => ({ data: Object.fromEntries(c.created.map(({ id }) => [id, { type: c.inflight.has(id) ? "busy" as const : "idle" as const }])) }),
     },
   }
   if (opts.todoEndpoint !== false) {

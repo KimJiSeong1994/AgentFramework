@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { createCommandHook, STOP_COMMAND, STOP_DESCRIPTION, STOP_TEMPLATE } from "../src/hooks/command.ts"
 import { createConfigHook } from "../src/hooks/config.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { getQueue } from "../src/orchestration/queue.ts"
 import { createDelegateTool } from "../src/tools/delegate.ts"
 import { readLedger } from "../src/state/ledger.ts"
@@ -41,7 +42,7 @@ describe("/stop", () => {
   test("writes the abort marker, deactivates the mode, aborts the running child and cancels the rest", async () => {
     const deps = makeDeps(client, wt.worktree, { delegate: { review: false } as any })
     const hook = createCommandHook(deps)
-    const q = getQueue(deps)
+    const q = getQueue(getOpenCodeRuntime(deps))
     writeModeState(wt.worktree, S, { ...EMPTY_MODE, mode: "ulw", active: true, startedAt: Date.now(), updatedAt: Date.now() })
     let release: (() => void) | undefined
     client.replies.worker = (o, nth) =>

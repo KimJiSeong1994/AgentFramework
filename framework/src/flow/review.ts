@@ -2,11 +2,13 @@
 // pending_approval. Runs INSIDE the lca_flow tool call (main is blocked, so it never races a running queue).
 // The only model text read is the verdict line (parsePlanVerdict, reuses the parseVerdict normalisation ideas);
 // findings are advisory only — approval is the user's decision (/approve), never this reviewer's.
-import type { HookDeps } from "../hooks/types.ts"
+import { randomUUID } from "node:crypto"
+import type { ExecutionHandle, ExecutionOutcome, ExecutionRuntime } from "../hosts/types.ts"
+import { beginExecutionActivity } from "../hosts/runtime.ts"
 import { estimateTokens } from "../tokens.ts"
-import { CHILD_TOOL_DENY, getQueue } from "../orchestration/queue.ts"
+import { getQueue } from "../orchestration/queue.ts"
 import { renderPlanMd, type Plan } from "./plan.ts"
-import type { Workflow } from "./state.ts"
+import { readWorkflow, type Workflow } from "./state.ts"
 
 /** <= 350 est. tokens (asserted in test and by doctor D12c); the rendered plan is appended after this and capped separately. */
 export const PLAN_REVIEW_TEMPLATE = `Review this plan before it goes to the user for approval. You are read-only: never edit, write or run commands.
@@ -82,108 +84,176 @@ export function reviewToolCapProblem(sessionID: string, max: number): string | n
 
 // ---------------------------------------------------------------- child session
 
-function extractText(parts: unknown): string {
-  if (!Array.isArray(parts)) return ""
-  return parts
-    .filter((p: any) => p && p.type === "text" && typeof p.text === "string" && !p.ignored)
-    .map((p: any) => p.text as string)
-    .join("\n")
-}
-
-function describeError(e: unknown): string {
-  if (!e) return "no id"
-  if (typeof e === "string") return e
-  const o = e as any
-  const name = o.name ?? o.error?.name
-  const msg = o.data?.message ?? o.message ?? o.error?.message
-  if (name || msg) return [name, msg].filter(Boolean).join(": ")
-  try {
-    return JSON.stringify(e).slice(0, 200)
-  } catch {
-    return String(e)
-  }
-}
-
-async function abortSession(deps: HookDeps, sessionID: string): Promise<void> {
-  try {
-    await (deps.client as any).session.abort({ path: { id: sessionID } })
-  } catch (e) {
-    deps.log("plan review: child abort failed", { sessionID, error: (e as Error).message })
-  }
-}
-
 /**
- * Run the advisory plan review. Never throws: a session-create/prompt failure, an aborted child or a wall-clock
- * timeout all resolve to `{ verdict: "none", findings: [], note: "aborted" }` (T8 — the plan already passed the
- * code gates, so the user decides). Refuses (returns `none`, no child created) while the owning session's queue is
- * running, so a review never races a running queue.
+ * Run an advisory review under the same durable claim and fence as worker executions.
+ * No vendor response, including an abort acknowledgement, proves quiescence by itself.
  */
-export async function runPlanReview(deps: HookDeps, wf: Workflow, plan: Plan, signal?: AbortSignal): Promise<PlanReviewResult> {
-  if (getQueue(deps).isRunning(wf.sessionID)) return { verdict: "none", findings: [] }
+export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, plan: Plan, signal?: AbortSignal): Promise<PlanReviewResult> {
+  if (getQueue(runtime).isRunning(wf.sessionID)) return { verdict: "none", findings: [] }
   if (signal?.aborted) return { verdict: "none", findings: [], note: "aborted" }
-
-  const rendered = capPlanText(renderPlanMd(wf.id, plan))
-  const text = `${PLAN_REVIEW_TEMPLATE}\n${rendered}`
-  const session = (deps.client as any).session
-  const ttlMs = deps.config.delegate.review_ttl_ms
-
-  let sessionID: string | undefined
-  try {
-    const created = await session.create({ body: { parentID: wf.sessionID, title: `lca plan review: ${wf.id}` } })
-    sessionID = created?.data?.id
-    if (!sessionID) {
-      deps.log("plan review: session.create failed", { error: describeError(created?.error) })
-      return { verdict: "none", findings: [], note: "aborted" }
-    }
-  } catch (e) {
-    deps.log("plan review: session.create threw", { error: (e as Error).message })
-    return { verdict: "none", findings: [], note: "aborted" }
+  const releaseActivity = beginExecutionActivity(runtime, wf.sessionID, "review")
+  if (!releaseActivity) return { verdict: "none", findings: [] }
+  const abortController = new AbortController()
+  const reviewSignal = abortController.signal
+  const forwardAbort = () => abortController.abort()
+  if (signal) {
+    if (signal.aborted) abortController.abort()
+    else signal.addEventListener("abort", forwardAbort, { once: true })
   }
-
-  markReviewSession(sessionID)
+  let workflowCancelTimer: ReturnType<typeof setInterval> | undefined
+  const runs = runtime.runs
+  const aborted: PlanReviewResult = { verdict: "none", findings: [], note: "aborted" }
+  let claim: ReturnType<typeof runs.claim> | undefined
+  let executionID: string | undefined
+  let handle: ExecutionHandle | undefined
+  let vendorSessionID: string | undefined
+  let quiescent = false
+  let registered = false
   try {
-    const body: Record<string, unknown> = { agent: "reviewer", tools: CHILD_TOOL_DENY, parts: [{ type: "text", text }] }
-    const model = deps.config.models.reviewer
-    if (model) {
-      const [providerID, ...rest] = model.split("/")
-      if (providerID && rest.length) body.model = { providerID, modelID: rest.join("/") }
+    const observeWorkflowCancellation = () => {
+      if (reviewSignal.aborted) return
+      let current: ReturnType<typeof readWorkflow>
+      try { current = readWorkflow(runtime.worktree) }
+      catch { return }
+      if (current?.id !== wf.id || current.sessionID !== wf.sessionID || !(current.pendingCancel || current.phase === "cancelled")) return
+      abortController.abort()
+      if (workflowCancelTimer) clearInterval(workflowCancelTimer)
+    }
+    let currentWorkflow: ReturnType<typeof readWorkflow>
+    try { currentWorkflow = readWorkflow(runtime.worktree) }
+    catch { currentWorkflow = null }
+    if (currentWorkflow?.id === wf.id && currentWorkflow.sessionID === wf.sessionID) {
+      observeWorkflowCancellation()
+      if (!reviewSignal.aborted) workflowCancelTimer = setInterval(observeWorkflowCancellation, 50)
+    }
+    if (reviewSignal.aborted) return aborted
+    claim = runs.claim(wf.sessionID, runtime.instance, process.pid)
+    runs.assertQuiescent(claim)
+    const policy = runtime.policy.resolve("reviewer")
+    executionID = randomUUID()
+    const deadlineAt = Date.now() + runtime.config.delegate.review_ttl_ms
+    const base = {
+      executionID, supervisorSessionID: wf.sessionID, taskID: wf.id, attemptID: randomUUID(),
+      generation: claim.generation, role: "reviewer" as const, title: `lca plan review: ${wf.id}`,
+      cwd: runtime.directory, text: `${PLAN_REVIEW_TEMPLATE}\n${capPlanText(renderPlanMd(wf.id, plan))}`,
+      deadlineAt, policy,
+    }
+    runs.registerIntent(claim, { executionId: executionID, ownerSession: wf.sessionID, taskId: wf.id,
+      attemptId: base.attemptID, generation: claim.generation, role: "reviewer", cwd: runtime.directory, policyID: policy.id,
+      kind: "host", profile: runtime.verificationProfile })
+    registered = true
+    let prepareTimer: ReturnType<typeof setTimeout> | undefined
+    let onPrepareAbort: (() => void) | undefined
+    let prepared: ExecutionHandle | null
+    try {
+      prepared = await Promise.race([
+        runtime.host.prepare({ ...base, handlers: runtime.policy.handlers(base),
+          onReference: (reference) => runs.bindVendorRef(claim!, executionID!, JSON.stringify(reference)) }),
+        new Promise<null>((resolve) => { prepareTimer = setTimeout(() => resolve(null), Math.max(0, deadlineAt - Date.now())) }),
+        new Promise<null>((resolve) => {
+          onPrepareAbort = () => resolve(null)
+          reviewSignal.addEventListener("abort", onPrepareAbort, { once: true })
+          if (reviewSignal.aborted) resolve(null)
+        }),
+      ])
+    } finally {
+      if (prepareTimer) clearTimeout(prepareTimer)
+      if (onPrepareAbort) reviewSignal.removeEventListener("abort", onPrepareAbort)
+    }
+    if (!prepared) {
+      runs.fence(claim, executionID, "review preparation timed out without a known vendor reference")
+      return aborted
+    }
+    handle = prepared
+    vendorSessionID = handle.reference.vendorSessionID
+    if (handle.reference.executionID !== executionID || !vendorSessionID) {
+      runs.fence(claim, executionID, "review host returned an incomplete reference")
+      return aborted
+    }
+    runs.bindVendorRef(claim, executionID, JSON.stringify(handle.reference))
+    markReviewSession(vendorSessionID)
+    if (reviewSignal.aborted) {
+      runs.recordTerminal(claim, executionID, { outcome: "cancelled", terminalAt: Date.now(), quiescentAt: Date.now() })
+      quiescent = true
+      return aborted
     }
     let timer: ReturnType<typeof setTimeout> | undefined
     let onAbort: (() => void) | undefined
-    // TTL and the tool call's abort (Esc) both end the review as T8 ("aborted"); the child session is aborted too.
-    const timeout = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), ttlMs)
-      if (signal) {
-        onAbort = () => resolve("timeout")
-        signal.addEventListener("abort", onAbort, { once: true })
-      }
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), Math.max(0, deadlineAt - Date.now()))
+      onAbort = () => resolve(null)
+      reviewSignal.addEventListener("abort", onAbort, { once: true })
+      if (reviewSignal.aborted) resolve(null)
     })
     try {
-      const raced = await Promise.race([session.prompt({ path: { id: sessionID }, body }), timeout])
-      if (raced === "timeout") {
-        await abortSession(deps, sessionID)
-        return { verdict: "none", findings: [], note: "aborted" }
+      let outcome = await Promise.race<ExecutionOutcome | null>([handle.run(), timeout])
+      if (outcome !== null) {
+        observeWorkflowCancellation()
+        if (reviewSignal.aborted) outcome = null
       }
-      const res: any = raced
-      if (res?.error) {
-        deps.log("plan review: prompt error", { error: describeError(res.error) })
-        return { verdict: "none", findings: [], note: "aborted" }
+      if (outcome === null) {
+        runs.fence(claim, executionID, "review cancelled before quiescence")
+        const requestedAt = Date.now()
+        const cancelDeadline = requestedAt + 1000
+        const cancel = await Promise.race([
+          handle.requestCancel("review timeout or abort", cancelDeadline).catch(() => null),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
+        ])
+        runs.recordCancel(claim, executionID, { requestedAt, ...(cancel?.acknowledged ? { acknowledgedAt: Date.now() } : {}) })
+        if (cancel?.terminal) runs.recordTerminal(claim, executionID, { outcome: "cancelled", terminalAt: Date.now(), ...(cancel.quiescent ? { quiescentAt: Date.now() } : {}) })
+        if (cancel?.terminal && cancel.quiescent) quiescent = true
+        else {
+          const reconciled = await Promise.race([
+            handle.reconcile().catch(() => null),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
+          ])
+          if (reconciled) {
+            runs.reconcile(claim, executionID, reconciled)
+            quiescent = reconciled.quiescent
+          }
+        }
+        return aborted
       }
-      const data = res?.data ?? res
-      const info = data?.info
-      if (info?.error) {
-        deps.log("plan review: child errored", { error: describeError(info.error) })
-        return { verdict: "none", findings: [], note: "aborted" }
+      runs.recordTerminal(claim, executionID, { outcome: outcome.status, terminalAt: Date.now() })
+      const reconciled = await Promise.race([
+        handle.reconcile().catch(() => null),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
+      ])
+      if (reconciled) {
+        runs.reconcile(claim, executionID, reconciled)
+        quiescent = reconciled.quiescent
       }
-      return parsePlanVerdict(extractText(data?.parts))
+      if (!quiescent) {
+        runs.fence(claim, executionID, "review terminal response lacks quiescence proof")
+        return aborted
+      }
+      observeWorkflowCancellation()
+      if (reviewSignal.aborted) return aborted
+      return outcome.status === "completed" && outcome.text ? parsePlanVerdict(outcome.text) : aborted
     } finally {
       if (timer) clearTimeout(timer)
-      if (signal && onAbort) signal.removeEventListener("abort", onAbort)
+      if (onAbort) reviewSignal.removeEventListener("abort", onAbort)
     }
   } catch (e) {
-    deps.log("plan review: child prompt threw", { error: (e as Error).message })
-    return { verdict: "none", findings: [], note: "aborted" }
+    runtime.log("plan review: execution failed", { error: e instanceof Error ? e.message : String(e) })
+    if (claim && executionID && registered) {
+      if (!quiescent) runs.fence(claim, executionID, "review preparation or execution failed without quiescence proof")
+    }
+    return aborted
   } finally {
-    clearReviewSession(sessionID)
+    try {
+      if (claim && quiescent) {
+        if (vendorSessionID) {
+          clearReviewSession(vendorSessionID)
+          runtime.policy.unbindSession(vendorSessionID)
+        }
+        runs.assertQuiescent(claim)
+        runs.release(claim)
+      }
+    } finally {
+      if (workflowCancelTimer) clearInterval(workflowCancelTimer)
+      if (signal) signal.removeEventListener("abort", forwardAbort)
+      releaseActivity()
+    }
   }
 }

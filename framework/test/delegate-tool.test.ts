@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { z } from "zod"
 import { createDelegateTool, DELEGATE_DESCRIPTION, delegateArgs } from "../src/tools/delegate.ts"
 import { getQueue } from "../src/orchestration/queue.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { addTasks, emptyLedger, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
 import { abortPath, writeJsonAtomic } from "../src/state/store.ts"
 import { estimateToolSchemaTokens } from "../src/tokens.ts"
@@ -134,7 +135,7 @@ describe("delegate tool", () => {
     release!()
     const out = (await first) as { output: string }
     expect(out.output).toContain("1 done")
-    expect(getQueue(deps).isRunning(S)).toBe(false)
+    expect(getQueue(getOpenCodeRuntime(deps)).isRunning(S)).toBe(false)
   })
 
   test("a user_stop marker is NOT cleared by delegate: the call is refused", async () => {

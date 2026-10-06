@@ -75,6 +75,23 @@ describe("chat.params hook", () => {
     expect(higher.maxOutputTokens).toBe(4096)
   })
 
+  test("applies trusted model output limit and reports configured identity conflicts", async () => {
+    const hook = createChatParamsHook(deps({ models: { worker: "ollama/gemma4:26b" } }))
+    const capped = output()
+    await hook(input("worker", model({ limit: { context: 65536, output: 1024 } })), capped)
+    expect(capped.maxOutputTokens).toBe(1024)
+
+    await expect(hook(input("worker", model({ id: "other" })), output())).rejects.toThrow(/conflicts with resolved model/)
+    await expect(hook(input("worker", model({ providerID: "google" })), output())).rejects.toThrow(/Conflicting provider IDs/)
+  })
+
+  test("does not add reasoning options when model capability does not support reasoning", async () => {
+    const hook = createChatParamsHook(deps())
+    const o = output()
+    await hook(input("worker", model({ capabilities: { ...model().capabilities, reasoning: false } })), o)
+    expect(o.options.reasoningEffort).toBeUndefined()
+  })
+
   test("leaves non-lca agents untouched", async () => {
     const hook = createChatParamsHook(deps())
     const o = output(123_456)

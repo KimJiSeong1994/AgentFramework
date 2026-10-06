@@ -10,6 +10,7 @@ import { detectMode, stripModeKeywords } from "../modes/detect.ts"
 import { openTasks, readLedger } from "../state/ledger.ts"
 import { markResumeOffered, resumeMessage } from "../loop/idle.ts"
 import { getQueue } from "../orchestration/queue.ts"
+import { getOpenCodeRuntime } from "../hosts/opencode-runtime.ts"
 import { enabled } from "./types.ts"
 import { flowSuffix, modeSuffix, type FlowPhase } from "../modes/instructions.ts"
 import { hasLcaMarker, stripForgedMarkers } from "../modes/markers.ts"
@@ -64,6 +65,8 @@ function suffixPhase(wf: Workflow): FlowPhase {
 
 export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.message"]> {
   const { worktree, config, log } = deps
+  const runtime = getOpenCodeRuntime(deps)
+  const queue = getQueue(runtime)
   const router = createSkillRouter(deps)
   return async (input, output) => {
     const textPart = lastUserText(output.parts)
@@ -122,8 +125,8 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     if (commandTurn?.name === STATUS_COMMAND) {
       const part = lastUserText(output.parts)
       if (part) {
-        resolveAuthority(deps, "status", sessionID)
-        part.text = renderStatus(deps, sessionID, getQueue(deps).isRunning(sessionID)) + "\n\nReply only: ok"
+        resolveAuthority(runtime, "status", sessionID)
+        part.text = renderStatus(runtime, sessionID, queue.isRunning(sessionID)) + "\n\nReply only: ok"
         log("chat.message: /status rendered", { sessionID })
       } else {
         log("chat.message: /status had no user text part", { sessionID })
@@ -215,14 +218,14 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     // An active workflow in a DIFFERENT session is not "no workflow" for T1/T20 purposes; resolveAuthority handles
     // that (owning-session takeover / foreign dead-owner T20 then T1, or a same-session-live refusal).
     if (detection && detection.mode === "plan" && flowOn(config)) {
-      const a = resolveAuthority(deps, "plan", sessionID, now)
+      const a = resolveAuthority(runtime, "plan", sessionID, now)
       if (a.refuse) {
         part.text = a.refuse
         log("chat.message: plan keyword refused", { sessionID, refuse: a.refuse })
         return
       }
       const request = stripModeKeywords(part.text).trim() || "(no request text given)"
-      const r = startWorkflow(deps, sessionID, "keyword", request, "user_keyword", now)
+      const r = startWorkflow(runtime, sessionID, "keyword", request, "user_keyword", now)
       if (r.ok) {
         part.text += flowSuffix(suffixPhase(r.wf))
         log("chat.message: plan keyword started a workflow", { sessionID, wfId: r.wf.id })
@@ -292,7 +295,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
 
   function resumeSuffix(sessionID: string): string {
     try {
-      if (!enabled(config, "tool.delegate") || getQueue(deps).isRunning(sessionID)) return ""
+      if (!enabled(config, "tool.delegate") || queue.isRunning(sessionID)) return ""
       const ledger = readLedger(worktree, sessionID)
       const open = openTasks(ledger)
       if (open.length === 0) return ""
@@ -351,7 +354,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     // T13: a real user message (not a command turn, not synthetic -- already guaranteed by lastUserText) resets the
     // nudge counter from planning, or exits stuck(no_submission) back to planning.
     if (!isCommandTurn && (wf.phase === "planning" || (wf.phase === "stuck" && wf.stuckCause === "no_submission"))) {
-      const r = applyEvent(deps, wf, "user_message", "user_message")
+      const r = applyEvent(runtime, wf, "user_message", "user_message")
       if (r.ok) {
         part.text += flowSuffix(suffixPhase(r.wf))
         return
@@ -369,7 +372,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
   function handleFlowCommand(sessionID: string, command: string, args: string, part: TextPart): void {
     const now = Date.now()
     if (command === PLAN_COMMAND) {
-      const a = resolveAuthority(deps, "plan", sessionID, now)
+      const a = resolveAuthority(runtime, "plan", sessionID, now)
       if (a.refuse) {
         part.text = a.refuse
         return
@@ -377,13 +380,13 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       // authorize() itself allows every command for the owning session regardless of phase; startWorkflow is the
       // one that refuses a second /plan while non-terminal and applies T18+T1 when the existing workflow is stuck.
       const request = args.trim() || "(no request text given)"
-      const r = startWorkflow(deps, sessionID, "command", request, "user_command", now)
+      const r = startWorkflow(runtime, sessionID, "command", request, "user_command", now)
       part.text = r.ok ? `Request: ${request}\n\n${PLAN_TEMPLATE}` : r.text
       log("chat.message: /plan", { sessionID, ok: r.ok })
       return
     }
     if (command === APPROVE_COMMAND) {
-      const a = resolveAuthority(deps, "approve", sessionID, now)
+      const a = resolveAuthority(runtime, "approve", sessionID, now)
       if (a.refuse) {
         part.text = a.refuse
         return
@@ -393,7 +396,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
         part.text = "no plan awaiting approval"
         return
       }
-      const queueRunning = getQueue(deps).isRunning(wf.sessionID)
+      const queueRunning = queue.isRunning(wf.sessionID)
       let planShaOk = false
       let inputs: TaskInput[] = []
       if (wf.planRef) {
@@ -409,13 +412,13 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
         }
       }
       const mdShaOk = !!wf.planRef && fileSha(worktree, planMdPath(wf.id)) === wf.planRef.mdSha
-      const r = approveWorkflow(deps, wf, inputs, { queueRunning, planShaOk, mdShaOk }, now)
+      const r = approveWorkflow(runtime, wf, inputs, { queueRunning, planShaOk, mdShaOk }, now)
       part.text = r.ok ? APPROVE_TEMPLATE : r.text
       log("chat.message: /approve", { sessionID, ok: r.ok, queueRunning, planShaOk, mdShaOk })
       return
     }
     if (command === REJECT_COMMAND) {
-      const a = resolveAuthority(deps, "reject", sessionID, now)
+      const a = resolveAuthority(runtime, "reject", sessionID, now)
       if (a.refuse) {
         part.text = a.refuse
         return
@@ -426,13 +429,13 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
         return
       }
       const reason = args.trim() || "(no reason given)"
-      const r = applyEvent(deps, wf, "reject", "user_command", {}, (w) => w, { reason })
+      const r = applyEvent(runtime, wf, "reject", "user_command", {}, (w) => w, { reason })
       part.text = r.ok ? `${REJECT_TEMPLATE_PREFIX}${reason}${REJECT_TEMPLATE_SUFFIX}` : r.text
       log("chat.message: /reject", { sessionID, ok: r.ok })
       return
     }
     if (command === CANCEL_COMMAND) {
-      const a = resolveAuthority(deps, "cancel", sessionID, now)
+      const a = resolveAuthority(runtime, "cancel", sessionID, now)
       if (a.refuse) {
         part.text = a.refuse
         return
@@ -442,9 +445,9 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
         part.text = "no active workflow"
         return
       }
-      const queueRunning = getQueue(deps).isRunning(wf.sessionID)
-      const r = cancelWorkflow(deps, wf, queueRunning, () => {
-        void getQueue(deps).abort(wf.sessionID, "workflow_cancel").catch((e: unknown) => log("/cancel: queue abort failed", { sessionID, error: String(e) }))
+      const queueRunning = queue.isRunning(wf.sessionID)
+      const r = cancelWorkflow(runtime, wf, queueRunning, () => {
+        void queue.abort(wf.sessionID, "workflow_cancel").catch((e: unknown) => log("/cancel: queue abort failed", { sessionID, error: String(e) }))
       })
       part.text = r.ok ? CANCEL_TEMPLATE : r.text
       log("chat.message: /cancel", { sessionID, ok: r.ok, queueRunning })

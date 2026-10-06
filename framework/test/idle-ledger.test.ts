@@ -3,6 +3,7 @@ import { createEventHook } from "../src/hooks/event.ts"
 import { createIdleLoop, resumeMessage } from "../src/loop/idle.ts"
 import { createCompactingHook, buildCheckpoint } from "../src/hooks/compacting.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { getQueue } from "../src/orchestration/queue.ts"
 import { addTasks, emptyLedger, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
 import { abortPath, EMPTY_MODE, readModeState, sessionInfoPath, writeJsonAtomic, writeModeState, type ModeState } from "../src/state/store.ts"
@@ -79,7 +80,7 @@ describe("idle loop with a ledger", () => {
 
   test("idle while the queue is running is ignored (no double run, no resume offer)", async () => {
     const deps = makeDeps(client, wt.worktree, { delegate: { review: false } as any })
-    const q = getQueue(deps)
+    const q = getQueue(getOpenCodeRuntime(deps))
     let started = false
     let release: (() => void) | undefined
     client.replies.worker = { text: "x", run: () => ((started = true), new Promise<void>((r) => (release = r))) }

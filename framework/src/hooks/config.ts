@@ -15,6 +15,7 @@ import {
   recordInjectedCommands,
 } from "./command.ts"
 import { flowOn } from "../flow/status.ts"
+import { parseModelSelection, supportsLocalTemperature } from "../config.ts"
 
 /**
  * The plugin package types the hook input with the v1 SDK Config, which lacks keys the running
@@ -68,8 +69,10 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
       const injected: AgentConfig = { ...def }
       if (name === "main") injected.prompt = mainPrompt(enabled(deps.config, "tool.delegate"), dataOn, flowOn(deps.config))
       const model = deps.config.models[name]
-      if (model) injected.model = model
-      if (name !== "main") injected.temperature = 0.2
+      if (model) {
+        const selected = parseModelSelection(model)
+        injected.model = `${selected.providerID}/${selected.modelID}`
+      }
       // Skill visibility: OpenCode lists only skills whose permission is not "deny" for the agent
       // (Skill service `available` filters by permission.evaluate("skill", name)). Deny everything but the allowlist
       // for main; worker/reviewer have the skill tool off entirely.
@@ -83,7 +86,15 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
       injected.permission = { ...injected.permission, "evo-semantic_*": "deny", ...denies, skill: skillPerm } as AgentConfig["permission"]
       const user = config.agent[name]
       if (user) merged.push(name)
-      config.agent[name] = user ? mergeAgent(injected, user) : injected
+      const effective = user ? mergeAgent(injected, user) : injected
+      if (name !== "main" && effective.temperature === undefined) {
+        const effectiveModel = user?.model ?? model ?? config.model
+        if (effectiveModel) {
+          const selection = parseModelSelection(effectiveModel)
+          if (supportsLocalTemperature(selection.providerID)) effective.temperature = 0.2
+        }
+      }
+      config.agent[name] = effective
     }
 
     // (b) built-in task tool off for every agent: orchestration is done by code, and its schema alone costs ~2.5K

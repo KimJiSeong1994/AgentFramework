@@ -1,13 +1,12 @@
-// Serial worker queue (stage 2). One task at a time, each in a fresh child session of the main session:
-//   snapshot -> worker prompt (blocking session.prompt) -> snapshot/diff -> protected-file + gaming checks
+// Serial worker queue. One task at a time, each in a fresh host execution:
+//   snapshot -> host worker run -> snapshot/diff -> protected-file + gaming checks
 //   -> verify command -> reviewer gate -> ledger + handoff.
 // Entry points: the `delegate` tool (blocks inside main's tool call; `resume: true` re-runs open tasks left by an
 // interrupted run) — the idle loop / chat.message only tell main about open tasks, they never run the queue
 // (second review F4: a queue running while main is idle races with user input). One runner per (plugin instance,
 // main session). All decisions read the ledger file and process results; the only model text parsed is the
 // reviewer's verdict line (that agent's output contract) and the worker's "Open issues:" line (report contract).
-import type { HookDeps } from "../hooks/types.ts"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { verifyCommandProblem } from "../config.ts"
 import { readAbort, removeSessionDir } from "../state/store.ts"
 import {
@@ -32,14 +31,16 @@ import {
   type VerifyResult,
 } from "../state/ledger.ts"
 import { scanDiff } from "./gaming.ts"
-import { getBackend } from "../data/backend.ts"
-import { DEFAULT_SUITE, extractAnswer, formatCheckRun, loadSuite, runChecks, sampleRows, type CheckRun } from "../data/check.ts"
+import { DEFAULT_SUITE, extractAnswer, formatCheckRun, sampleRows, type CheckRun } from "../data/check.ts"
 import type { LcaAgentName } from "../agents/prompts.ts"
-import { observeSkillTask, observeSkillVerification } from "../telemetry/skill-observer.ts"
 import type { SkillTaskFactInput, SkillVerificationFactInput } from "../telemetry/skills.ts"
-import { startShell, type RunHandle } from "./shell.ts"
+import { settled, strictQuiescent, type ExecutionClaim } from "../hosts/run-state.ts"
+import { beginExecutionActivity } from "../hosts/runtime.ts"
+import type { ExecutionHandle, ExecutionReconciliation, ExecutionReference, ExecutionRole, ExecutionRuntime } from "../hosts/types.ts"
+import type { VerificationHandle, VerificationResult } from "./verifier.ts"
 import { createSnapshotStore, type Snapshot } from "./snapshot.ts"
 import { createTaskWorktree, type TaskWorktree } from "./worktree.ts"
+import { readWorkflow } from "../flow/state.ts"
 import { copyFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { handoffDir } from "../state/ledger.ts"
@@ -54,8 +55,8 @@ export type QueueRun = {
   aborted: boolean
   /** why it was aborted, when it was */
   abortReason?: string
-  /** "already_running" when another run owned the session */
-  skipped?: "already_running"
+  /** Another queue/review already owns this worktree's in-process execution slot. */
+  skipped?: "already_running" | "execution_busy"
   /** review + protected-file guard were unavailable (not a git repository) */
   noSnapshot?: boolean
 }
@@ -80,11 +81,29 @@ type Active = {
   aborted: boolean
   reason?: string
   discard?: boolean
-  child?: string
-  verify?: RunHandle
+  workflowID?: string
+  workflowCancellationObserved?: boolean
+  child?: { id: string; handle: ExecutionHandle; claim: ExecutionClaim }
+  preparingExecutionID?: string
+  cancelWaiter?: () => void
+  claim?: ExecutionClaim
+  unresolved?: boolean
+  verify?: { id: string; handle: VerificationHandle; claim: ExecutionClaim; run?: Promise<VerificationResult>; cancelled?: VerificationResult }
   attempt?: AttemptObservation
   startedAt: number
   promise: Promise<QueueRun>
+}
+
+async function beforeDeadline<T>(work: Promise<T>, deadlineAt: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out`)), Math.max(0, deadlineAt - Date.now()))
+      }),
+    ])
+  } finally { if (timer) clearTimeout(timer) }
 }
 
 type AttemptLineage = {
@@ -110,12 +129,12 @@ type AttemptObservation = AttemptLineage & {
   completed: boolean
 }
 
-function bestEffortTaskObservation(deps: HookDeps, fact: SkillTaskFactInput): void {
-  try { observeSkillTask(deps, fact) } catch { /* Observation never changes queue behavior. */ }
+function bestEffortTaskObservation(deps: ExecutionRuntime, fact: SkillTaskFactInput): void {
+  try { deps.observe?.task?.(fact) } catch { /* Observation never changes queue behavior. */ }
 }
 
-function bestEffortVerificationObservation(deps: HookDeps, fact: SkillVerificationFactInput): void {
-  try { observeSkillVerification(deps, fact) } catch { /* Observation never changes queue behavior. */ }
+function bestEffortVerificationObservation(deps: ExecutionRuntime, fact: SkillVerificationFactInput): void {
+  try { deps.observe?.verification?.(fact) } catch { /* Observation never changes queue behavior. */ }
 }
 
 function attemptContext(attempt: AttemptObservation) {
@@ -128,7 +147,7 @@ function attemptContext(attempt: AttemptObservation) {
   }
 }
 
-function observeChild(deps: HookDeps, attempt: AttemptObservation, childSessionID: string, agent: LcaAgentName, status: "started" | "done" | "failed" | "cancelled", childMessageID?: string): void {
+function observeChild(deps: ExecutionRuntime, attempt: AttemptObservation, childSessionID: string, agent: LcaAgentName, status: "started" | "done" | "failed" | "cancelled", childMessageID?: string): void {
   const role = actorRole(agent)
   bestEffortTaskObservation(deps, {
     ...attemptContext(attempt), sessionID: childSessionID,
@@ -152,9 +171,9 @@ function reviewVerdict(review: ReviewResult | undefined): NonNullable<SkillVerif
   return review?.verdict ?? "unknown"
 }
 
-const registry = new WeakMap<HookDeps, Queue>()
+const registry = new WeakMap<ExecutionRuntime, Queue>()
 
-export function getQueue(deps: HookDeps): Queue {
+export function getQueue(deps: ExecutionRuntime): Queue {
   let q = registry.get(deps)
   if (!q) {
     q = createQueue(deps)
@@ -163,7 +182,7 @@ export function getQueue(deps: HookDeps): Queue {
   return q
 }
 
-export function createQueue(deps: HookDeps): Queue {
+export function createQueue(deps: ExecutionRuntime): Queue {
   const active = new Map<string, Active>()
   const cfg = () => deps.config.delegate
 
@@ -248,6 +267,7 @@ export function createQueue(deps: HookDeps): Queue {
   }
 
   const add: Queue["add"] = (sessionID, tasks) => {
+    if (!deps.dataChecks && tasks.some((task) => task.kind === "data")) throw new Error("data checks unavailable for this execution runtime")
     const { ledger, added } = addTasks(readLedger(deps.worktree, sessionID), tasks)
     writeLedger(deps.worktree, ledger)
     deps.log("ledger: tasks added", { sessionID, ids: added.map((t) => t.id) })
@@ -255,6 +275,7 @@ export function createQueue(deps: HookDeps): Queue {
   }
 
   const cancelOpenTasks: Queue["cancelOpen"] = (sessionID, reason) => {
+    if (deps.runs.status().executions.some(execution => !settled(execution))) return []
     const { ledger, ids } = cancelOpen(readLedger(deps.worktree, sessionID), reason)
     if (ids.length) {
       writeLedger(deps.worktree, ledger)
@@ -266,12 +287,31 @@ export function createQueue(deps: HookDeps): Queue {
   const run: Queue["run"] = (sessionID, origin) => {
     const existing = active.get(sessionID)
     if (existing) return Promise.resolve({ taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: false, skipped: "already_running" })
+    const releaseActivity = beginExecutionActivity(deps, sessionID, "queue")
+    if (!releaseActivity) return Promise.resolve({ taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: false, skipped: "execution_busy" })
+    let workflowID: string | undefined
+    try {
+      const workflow = readWorkflow(deps.worktree)
+      if (workflow?.sessionID === sessionID) workflowID = workflow.id
+    } catch (error) {
+      deps.log("workflow cancellation watch unavailable", { sessionID, error: String(error) })
+    }
     const entry: Active = { aborted: false, startedAt: Date.now(), promise: Promise.resolve() as unknown as Promise<QueueRun> }
+    entry.workflowID = workflowID
     active.set(sessionID, entry)
+    let workflowCancelTimer: ReturnType<typeof setInterval> | undefined
+    const observe = () => {
+      observeWorkflowCancellation(sessionID, entry)
+      if (entry.aborted && workflowCancelTimer) clearInterval(workflowCancelTimer)
+    }
+    if (workflowID) {
+      observe()
+      if (!entry.workflowCancellationObserved) workflowCancelTimer = setInterval(observe, 50)
+    }
     entry.promise = runLoop(sessionID, entry, origin)
       .catch((e: unknown) => {
-        // never leave the ledger with a running marker after an internal failure: the task that was running is
-        // `failed (queue error)`, the rest is cancelled
+        // Never leave a running marker. A user stop with unresolved child execution
+        // remains cancelled but fenced; an unrelated internal failure is failed.
         const msg = (e as Error)?.message ?? String(e)
         if (entry.attempt) {
           finishAttemptObservation(entry.attempt, "failed", "failed", entry.attempt.review)
@@ -281,12 +321,25 @@ export function createQueue(deps: HookDeps): Queue {
         if (!entry.discard) {
           let ledger = readLedger(deps.worktree, sessionID)
           const running = ledger.tasks.find((t) => t.status === "running")
-          if (running) ledger = updateTask(ledger, running.id, { status: "failed", error: `queue error: ${head(msg, 200)}`, finishedAt: Date.now() })
-          writeLedger(deps.worktree, cancelOpen(ledger, `queue error: ${head(msg, 200)}`).ledger)
+          if (running) ledger = updateTask(ledger, running.id, {
+            status: entry.aborted && entry.unresolved ? "cancelled" : "failed",
+            error: entry.aborted && entry.unresolved ? `cancelled; execution fenced: ${head(msg, 200)}` : `queue error: ${head(msg, 200)}`,
+            finishedAt: Date.now(),
+          })
+          if (!entry.unresolved) ledger = cancelOpen(ledger, `queue error: ${head(msg, 200)}`).ledger
+          writeLedger(deps.worktree, ledger)
         }
-        return { taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: true, abortReason: `queue error: ${msg}` } as QueueRun
+        return { taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: true, abortReason: entry.reason ?? `queue error: ${msg}` } as QueueRun
       })
-      .finally(() => active.delete(sessionID))
+      .finally(() => {
+        if (workflowCancelTimer) clearInterval(workflowCancelTimer)
+        active.delete(sessionID)
+        if (entry.claim && !entry.unresolved) {
+          try { deps.runs.release(entry.claim) }
+          catch (error) { deps.log("queue claim release failed", { sessionID, error: String(error) }) }
+        }
+        releaseActivity()
+      })
     return entry.promise
   }
 
@@ -296,11 +349,59 @@ export function createQueue(deps: HookDeps): Queue {
     entry.aborted = true
     entry.reason = reason
     if (opts.discard) entry.discard = true
-    entry.verify?.kill(reason)
-    if (entry.child) await abortSession(deps, entry.child)
+    if (entry.verify) {
+      const current = entry.verify
+      const deadlineAt = Date.now() + 2000
+      deps.runs.recordCancel(current.claim, current.id, { requestedAt: Date.now() })
+      try {
+        const cancellation = await Promise.race([
+          current.handle.requestCancel(reason, deadlineAt),
+          new Promise<null>(resolve => setTimeout(() => resolve(null), 2000)),
+        ])
+        if (cancellation?.acknowledged) deps.runs.recordCancel(current.claim, current.id, { requestedAt: Date.now(), acknowledgedAt: Date.now() })
+        const outcome = cancellation?.outcome ?? await Promise.race([
+          current.run ?? Promise.resolve(null),
+          new Promise<null>(resolve => setTimeout(() => resolve(null), Math.max(0, deadlineAt - Date.now()))),
+        ])
+        if (outcome) current.cancelled = outcome
+        if (!outcome) {
+          deps.runs.fence(current.claim, current.id, "verifier cancellation has no terminal result")
+          entry.unresolved = true
+        }
+      } catch (error) {
+        deps.runs.fence(current.claim, current.id, "verifier cancellation failed")
+        entry.unresolved = true
+        deps.log("verifier abort failed", { executionID: current.id, error: String(error) })
+      } finally { entry.cancelWaiter?.() }
+    }
+    if (entry.child) {
+      try { await cancelChild(deps, entry.child, reason) }
+      finally { entry.cancelWaiter?.() }
+    } else {
+      if (entry.claim && entry.preparingExecutionID) deps.runs.recordCancel(entry.claim, entry.preparingExecutionID, { requestedAt: Date.now() })
+      entry.cancelWaiter?.()
+    }
+  }
+
+  function observeWorkflowCancellation(sessionID: string, entry: Active): void {
+    if (!entry.workflowID || entry.workflowCancellationObserved || entry.aborted) return
+    let current: ReturnType<typeof readWorkflow>
+    try { current = readWorkflow(deps.worktree) }
+    catch (error) {
+      deps.log("workflow cancellation poll failed", { sessionID, workflowID: entry.workflowID, error: String(error) })
+      return
+    }
+    if (current?.id !== entry.workflowID || current.sessionID !== sessionID || !(current.pendingCancel || current.phase === "cancelled")) return
+    entry.workflowCancellationObserved = true
+    entry.aborted = true
+    entry.reason = `plan workflow ${entry.workflowID} cancelled`
+    void abort(sessionID, entry.reason).catch(error => {
+      deps.log("workflow cancellation observation failed", { sessionID, workflowID: entry.workflowID, error: String(error) })
+    })
   }
 
   function abortRequested(sessionID: string, entry: Active): string | undefined {
+    observeWorkflowCancellation(sessionID, entry)
     if (entry.aborted) return entry.reason ?? "aborted"
     const marker = readAbort(deps.worktree, sessionID)
     if (marker) return marker.reason ?? "aborted"
@@ -309,8 +410,53 @@ export function createQueue(deps: HookDeps): Queue {
     return undefined
   }
 
+  function mayComplete(sessionID: string, entry: Active): boolean {
+    if (abortRequested(sessionID, entry) || !entry.claim) return false
+    try { deps.runs.assertQuiescent(entry.claim); return !abortRequested(sessionID, entry) }
+    catch { return false }
+  }
+
   async function runLoop(sessionID: string, entry: Active, origin?: QueueOrigin): Promise<QueueRun> {
     const result: QueueRun = { taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: false }
+    entry.claim = deps.runs.claim(sessionID, deps.instance, process.pid)
+    // A previous process may have stopped after dispatch. Never replay its ledger task until
+    // every persisted execution has affirmative terminal/quiescence evidence.
+    for (const execution of deps.runs.status().executions) {
+      if (settled(execution)) continue
+      if (execution.kind === "verifier") {
+        if (execution.profile === "legacy-unowned" && execution.generation !== entry.claim.generation && !execution.terminal) {
+          deps.runs.recordTerminal(entry.claim, execution.executionId, { outcome: "unknown", terminalAt: Date.now() })
+          continue
+        }
+        if (execution.boundaryRef && "kind" in execution.boundaryRef && execution.boundaryRef.kind === "verifier") {
+          try {
+            const state = await beforeDeadline(deps.verifier.reconcile(execution.boundaryRef), Date.now() + 2000, "verifier restart reconciliation")
+            deps.runs.reconcile(entry.claim, execution.executionId, {
+              outcome: state.outcome, quiescent: false,
+              evidence: "verifier restart cannot prove qualified retirement",
+            })
+          } catch (error) {
+            deps.runs.fence(entry.claim, execution.executionId, `verifier recovery failed: ${String(error).slice(0, 200)}`)
+            entry.unresolved = true
+            throw error
+          }
+        }
+        continue
+      }
+      if (strictQuiescent(execution)) continue
+      let reconciliation: ExecutionReconciliation = { outcome: "unknown", quiescent: false, evidence: "no persisted vendor reference" }
+      if (execution.vendorRef) {
+        try { reconciliation = await beforeDeadline(deps.host.reconcile(JSON.parse(execution.vendorRef) as ExecutionReference), Date.now() + 2000, "host restart reconciliation") }
+        catch (error) {
+          deps.runs.fence(entry.claim, execution.executionId, `host recovery failed: ${String(error).slice(0, 200)}`)
+          entry.unresolved = true
+          throw error
+        }
+      }
+      deps.runs.reconcile(entry.claim, execution.executionId, reconciliation)
+    }
+    try { deps.runs.assertQuiescent(entry.claim) }
+    catch (error) { entry.unresolved = true; throw error }
     let ledger = readLedger(deps.worktree, sessionID)
     // A crashed run may have left a task `running`; give it its attempt back and run it again. The ledger counter is
     // not a stable identity, so the restarted attempt gets a new UUID and no guessed resumeOfAttemptID.
@@ -357,6 +503,7 @@ export function createQueue(deps: HookDeps): Queue {
     let rejectReason: string | undefined
     let attempt: AttemptObservation | undefined
     let previousAttemptID: string | undefined
+    let verifiedTree: string | undefined
     // Optional isolation: the task runs in its own linked git worktree (worker session + verify bound to it) and its
     // diff is applied to the main worktree only when accepted. Falls back to in-place when there is no commit yet.
     let wt: TaskWorktree | null = null
@@ -382,7 +529,12 @@ export function createQueue(deps: HookDeps): Queue {
     const cancelled = (): LedgerTask => finishObserved(
       { ...task, status: "cancelled", error: entry.reason ?? "aborted", finishedAt: Date.now() }, "cancelled")
     try {
+      if (!store || !before) return finishObserved(
+        { ...task, status: "failed", error: "could not snapshot the task baseline", finishedAt: Date.now() }, "failed")
       while (task.attempts < c.max_attempts) {
+        observeWorkflowCancellation(sessionID, entry)
+        if (entry.aborted) return cancelled()
+        verifiedTree = undefined
         task = { ...task, status: "running", attempts: task.attempts + 1, startedAt: task.startedAt ?? Date.now() }
         ledger = writeLedger(deps.worktree, { ...updateTask(ledger, task.id, task), running: { taskId: task.id, since: Date.now() } })
         deps.log("task start", { sessionID, task: task.id, attempt: task.attempts })
@@ -400,18 +552,35 @@ export function createQueue(deps: HookDeps): Queue {
         if (worker.status === "error") task.error = worker.error
 
         // ---- what changed (cumulative for the task)
-        const after: Snapshot = store ? await store.snapshot(c.diff_exclude) : null
-        const diff = store ? await store.diff(before, after, c.diff_max_chars) : null
+        const after: Snapshot = await store.snapshot(c.diff_exclude)
+        const diff = await store.diff(before, after, c.diff_max_chars)
+        if (!after || !diff) {
+          if (!wt) entry.unresolved = true
+          try { await store.restore(before, protectedFiles(task)) }
+          catch { entry.unresolved = true }
+          if (entry.unresolved) throw new Error("could not restore or snapshot the task; queue fenced")
+          return finishObserved({ ...task, status: "failed", error: "could not snapshot or diff the task", finishedAt: Date.now() }, "failed")
+        }
         task.filesChanged = diff?.files ?? task.filesChanged
 
         // ---- protected files: restore BEFORE verify so the check runs on honest files; gaming shapes in the code
         const report = protectedViolations(task.filesChanged, prot, task)
-        if (report.violations.length && store) {
-          const restored = await store.restore(before, report.violations)
+        if (report.violations.length) {
+          let restored: string[]
+          try { restored = await store.restore(before, report.violations) }
+          catch {
+            entry.unresolved = true
+            throw new Error("protected file restoration failed; queue fenced")
+          }
           deps.log("task restored protected files", { sessionID, task: task.id, restored })
+          if (!report.violations.every(path => restored.includes(path))) {
+            entry.unresolved = true
+            throw new Error("protected file restoration incomplete; queue fenced")
+          }
           task.filesChanged = task.filesChanged?.filter((f) => !report.violations.includes(f))
         }
-        const scan = diff ? scanDiff(diff.diff, [...prot, ...report.violations]) : { strong: [], weak: [] }
+        const scan = diff && !diff.truncated ? scanDiff(diff.diff, [...prot, ...report.violations]) : { strong: [], weak: [] }
+        observeWorkflowCancellation(sessionID, entry)
         if (entry.aborted) return cancelled()
 
         // ---- verify (code-side, never trusted from the worker's report); the command was validated at delegate
@@ -425,21 +594,144 @@ export function createQueue(deps: HookDeps): Queue {
           } else if (report.violations.length) {
             setCodeVerificationResult(attempt!, "invalidated", null)
             verify = { command: task.verify, ok: false, exitCode: null, timedOut: false, output: `(void: protected file modified: ${report.violations.join(", ")})` }
+          } else if (diff.truncated) {
+            setCodeVerificationResult(attempt!, "refused", null)
+            verify = { command: task.verify, ok: false, exitCode: null, timedOut: false, output: "verification refused because the task diff was truncated" }
           } else {
             startCodeVerification(attempt!)
-            const handle = startShell(task.verify, {
-              cwd: wt ? wt.path : deps.directory,
-              timeoutMs: c.verify_timeout_ms,
-              maxOutputChars: c.verify_output_chars,
-              env: { PYTHONNOUSERSITE: "1", PYTHONSAFEPATH: "1", PYTHONDONTWRITEBYTECODE: "1" },
-            })
-            entry.verify = handle
-            if (entry.aborted) handle.kill(entry.reason) // /stop arrived between the check above and the spawn
-            const r = await handle.result
-            entry.verify = undefined
-            setCodeVerificationResult(attempt!, r.timedOut ? "timed_out" : r.killed ? "aborted" : r.ok ? "pass" : "fail", r.exitCode)
-            verify = { command: task.verify, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut, output: r.killed ? `(killed: ${entry.reason ?? "aborted"})\n${r.output}` : r.output }
-            deps.log("task verify", { sessionID, task: task.id, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut, killed: r.killed, ms: r.ms })
+            const input = await store.snapshot(c.diff_exclude)
+            if (!input) { entry.unresolved = true; throw new Error("verifier input snapshot unavailable; queue fenced") }
+            const profile = deps.verificationProfile
+            const preflight = await deps.verifier.preflight(profile)
+            if (!preflight.compatible) {
+              setCodeVerificationResult(attempt!, "refused", null)
+              verify = { command: task.verify, ok: false, exitCode: null, timedOut: false, output: `verify backend refused: ${preflight.problems.join("; ")}` }
+            } else {
+              const claim = entry.claim!
+              const id = randomUUID()
+              const deadlineAt = Date.now() + c.verify_timeout_ms
+              const inputDigest = createHash("sha256").update(input.tree).digest("hex")
+              const request = {
+                executionID: id, supervisorSessionID: sessionID, taskID: task.id, attemptID: attempt!.attemptID,
+                generation: claim.generation, command: task.verify, cwd: root, inputSnapshotID: input.tree,
+                inputDigest, deadlineAt, maxOutputChars: c.verify_output_chars,
+                env: { PATH: "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin", PYTHONNOUSERSITE: "1", PYTHONSAFEPATH: "1", PYTHONDONTWRITEBYTECODE: "1" }, profile,
+                onReference: (reference: VerificationHandle["reference"]) => deps.runs.bindVerifierRef(claim, id, reference),
+              }
+              deps.runs.registerIntent(claim, {
+                executionId: id, ownerSession: sessionID, taskId: task.id, attemptId: attempt!.attemptID,
+                generation: claim.generation, role: "verifier", cwd: root, policyID: "verify-command",
+                kind: "verifier", profile, inputSnapshotID: input.tree, inputDigest, deadlineAt, maxOutputChars: c.verify_output_chars,
+              })
+              entry.preparingExecutionID = id
+              let handle: VerificationHandle
+              let prepareTimer: ReturnType<typeof setTimeout> | undefined
+              const prepareAbort = new Promise<"aborted">(resolve => { entry.cancelWaiter = () => resolve("aborted") })
+              try {
+                const prepared = await Promise.race([
+                  deps.verifier.prepare(request), prepareAbort,
+                  new Promise<"timeout">(resolve => { prepareTimer = setTimeout(() => resolve("timeout"), Math.max(0, deadlineAt - Date.now())) }),
+                ])
+                if (prepared === "aborted" || prepared === "timeout") throw new Error(`verifier preparation ${prepared} without terminal evidence`)
+                handle = prepared
+                request.onReference(handle.reference)
+              } catch (error) {
+                deps.runs.fence(claim, id, "verifier preparation failed without terminal evidence")
+                entry.unresolved = true
+                throw error
+              } finally {
+                if (prepareTimer) clearTimeout(prepareTimer)
+                entry.preparingExecutionID = undefined
+                entry.cancelWaiter = undefined
+              }
+              if (entry.aborted) {
+                if (profile !== "legacy-unowned") {
+                  deps.runs.fence(claim, id, "verifier pre-dispatch cancellation has no Linux domain proof")
+                  entry.unresolved = true
+                  throw new Error("verifier cancellation unresolved; queue fenced")
+                }
+                deps.runs.recordTerminal(claim, id, { outcome: "killed", terminalAt: Date.now(), verification: {
+                  profile, parentExit: null, timedOut: false, cancelled: true, isolationEstablished: false,
+                  domainState: "unknown", integrity: "unknown", output: "cancelled before verifier dispatch",
+                } })
+                return cancelled()
+              }
+              const current: NonNullable<Active["verify"]> = { id, handle, claim }
+              entry.verify = current
+              let r: VerificationResult
+              try {
+                const interrupted = new Promise<"interrupted">(resolve => { entry.cancelWaiter = () => resolve("interrupted") })
+                current.run = handle.run()
+                const result = await Promise.race([current.run, interrupted])
+                if (result === "interrupted") {
+                  if (!current.cancelled) {
+                    deps.runs.fence(claim, id, "verifier cancellation outcome unproven")
+                    entry.unresolved = true
+                    throw new Error("verifier cancellation unresolved; queue fenced")
+                  }
+                  r = current.cancelled
+                } else r = result
+              } catch (error) {
+                if (!entry.unresolved) {
+                  deps.runs.fence(claim, id, "verifier run failed without terminal evidence")
+                  entry.unresolved = true
+                }
+                throw error
+              } finally { entry.verify = undefined; entry.cancelWaiter = undefined }
+              if (r.profile !== profile) {
+                deps.runs.fence(claim, id, "verifier result profile mismatch")
+                entry.unresolved = true
+                throw new Error("verifier result profile mismatch; queue fenced")
+              }
+              const checked = await store.snapshot(c.diff_exclude)
+              const changes = await store.diff(input, checked, c.diff_max_chars)
+              if (!checked || !changes) {
+                entry.unresolved = true
+                deps.runs.fence(claim, id, "post-verifier snapshot unavailable")
+                throw new Error("post-verifier snapshot unavailable; queue fenced")
+              }
+              const invalidated = changes.files.length > 0 || r.integrity === "changed"
+              const integrity = invalidated ? "changed" : profile === "legacy-unowned" || r.integrity === "unchanged" ? "unchanged" : "unknown"
+              r = { ...r, integrity }
+              const outcome = r.cancelled ? "killed" : r.timedOut ? "timeout" : r.parentExit === 0 ? "ok" : "fail"
+              try {
+                deps.runs.recordTerminal(claim, id, { outcome, terminalAt: Date.now(), verification: r,
+                  ...(profile === "linux-single-use" && r.isolationEstablished && r.domainState === "empty" && r.proof ? { quiescentAt: Date.now() } : {}),
+                })
+                const reconciled = await beforeDeadline(handle.reconcile(), Date.now() + 2000, "verifier reconciliation")
+                deps.runs.reconcile(claim, id, { outcome: reconciled.outcome,
+                  quiescent: profile === "linux-single-use" && reconciled.outcome === "terminal" && reconciled.isolationEstablished && reconciled.domainState === "empty" && !!reconciled.proof,
+                  evidence: "verifier backend reconciliation",
+                  ...(profile === "linux-single-use" && reconciled.proof ? { verification: { ...r, proof: reconciled.proof } } : {}),
+                })
+              } catch (error) {
+                deps.runs.fence(claim, id, "verifier terminal reconciliation failed")
+                entry.unresolved = true
+                throw error
+              }
+              if (!settled(deps.runs.status().executions.find(execution => execution.executionId === id)!)) {
+                deps.runs.fence(claim, id, "verifier terminal/domain settlement unproven")
+                entry.unresolved = true
+                throw new Error("verifier unsettled; queue fenced")
+              }
+              if (changes.files.length) {
+                let restored: string[]
+                try { restored = await store.restore(input, changes.files) }
+                catch { entry.unresolved = true; throw new Error("post-verifier restoration failed; queue fenced") }
+                if (!changes.files.every(path => restored.includes(path))) {
+                  entry.unresolved = true
+                  throw new Error("post-verifier restoration incomplete; queue fenced")
+                }
+              }
+              const ok = r.parentExit === 0 && !r.timedOut && !r.cancelled && integrity === "unchanged" &&
+                (profile === "legacy-unowned" || strictQuiescent(deps.runs.status().executions.find(execution => execution.executionId === id)!))
+              if (ok) verifiedTree = input.tree
+              setCodeVerificationResult(attempt!, invalidated ? "invalidated" : r.timedOut ? "timed_out" : r.cancelled ? "aborted" : ok ? "pass" : "fail", r.parentExit)
+              verify = { command: task.verify, ok, exitCode: r.parentExit, timedOut: r.timedOut,
+                output: invalidated ? "(void: verifier changed files or its post-check snapshot failed)" :
+                  r.cancelled ? `(killed: ${entry.reason ?? "aborted"})\n${r.output}` : r.output }
+              deps.log("task verify", { sessionID, task: task.id, profile, ok, exitCode: r.parentExit, timedOut: r.timedOut, cancelled: r.cancelled })
+            }
           }
           task.verify_result = verify
         } else setCodeVerificationResult(attempt!, "not_run", null)
@@ -448,40 +740,72 @@ export function createQueue(deps: HookDeps): Queue {
 
         // ---- reviewer gate (only when there is something to judge and nothing above already failed)
         let review: ReviewResult = { verdict: "skipped" }
-        if (!store) review = { verdict: "skipped", reason: "no snapshot (not a git repository): review and protected-file guard unavailable" }
-        else if (c.review && worker.status === "ok" && !report.violations.length && !scan.strong.length && (!verify || verify.ok)) {
+        if (c.review && !diff.truncated && worker.status === "ok" && !report.violations.length && !scan.strong.length && (!verify || verify.ok)) {
           if (!diff || diff.files.length === 0) review = { verdict: "skipped", reason: "no file changes" }
           else review = await runReview(sessionID, entry, task, diff.diff, verify, prot, report.suspicious, scan.weak, c.review_ttl_ms, wt?.path, attempt)
         }
         task.review = review
         attempt!.review = review
+        // A reviewer or late writer must not change the content seen by the verifier.
+        // Restore the verified tree before retry; merge also rechecks this exact tree.
+        if (verifiedTree) {
+          const final = await store.snapshot(c.diff_exclude)
+          if (!final) { entry.unresolved = true; throw new Error("final verified snapshot unavailable; queue fenced") }
+          if (final.tree !== verifiedTree) {
+            const trusted = { tree: verifiedTree, store }
+            const changed = await store.diff(trusted, final, c.diff_max_chars)
+            if (!changed) { entry.unresolved = true; throw new Error("final verified diff unavailable; queue fenced") }
+            try {
+              const restored = await store.restore(trusted, changed.files)
+              if (!changed.files.every(path => restored.includes(path))) throw new Error("incomplete restoration")
+            } catch {
+              entry.unresolved = true
+              throw new Error("final verified tree restoration failed; queue fenced")
+            }
+            verifiedTree = undefined
+            verify = { ...verify!, ok: false, output: "(void: verified tree changed after verification)" }
+            task.verify_result = verify
+            setCodeVerificationResult(attempt!, "invalidated", verify.exitCode)
+          }
+        }
+        observeWorkflowCancellation(sessionID, entry)
         if (review.aborted || entry.aborted) {
           // a /stop during the review of an already verified change: keep the work, note the missing verdict
-          if (verified && !report.violations.length && !scan.strong.length) return finishObserved(
+          if (!wt && verified && verifiedTree && !report.violations.length && !scan.strong.length && mayComplete(sessionID, entry)) return finishObserved(
             { ...task, status: "done", error: `review aborted (${entry.reason ?? "aborted"})`, finishedAt: Date.now() }, "done")
           return cancelled()
         }
 
         const lastAttempt = task.attempts >= c.max_attempts
         let failure: string | undefined
-        if (worker.status === "error") failure = `worker error: ${worker.error}`
+        if (diff.truncated) failure = `task diff was truncated at ${c.diff_max_chars} characters; increase delegate.diff_max_chars or split the change into smaller tasks`
+        else if (worker.status === "error") failure = `worker error: ${worker.error}`
         else if (report.violations.length) failure = `modified protected file(s): ${report.violations.join(", ")} — they were restored and the verify result does not count; make the code under test pass instead`
         else if (scan.strong.length) failure = `test-gaming pattern in the code: ${scan.strong.join("; ")} — write code that is correct for any input`
         else if (verify && !verify.ok) failure = `verify ${verify.timedOut ? "timed out" : verify.exitCode === null ? "refused" : `failed (exit ${verify.exitCode})`}: ${tail(verify.output, 300)}`
         else if (review.verdict === "reject") {
           // A REJECT on a task whose verify command passed is retried once, then advisory (review_strict: still fails).
           if (!verified || c.review_strict || !lastAttempt) failure = `review rejected: ${review.reason ?? ""}`
-        } else if (review.verdict === "error" && c.review_strict && !verified) failure = "review gave no verdict"
+        } else if (review.verdict === "error" && c.review_strict) failure = "review gave no verdict"
 
         if (!failure) {
           const advisory = review.verdict === "reject" ? `accepted with review objection: ${review.reason ?? ""}` : undefined
           if (wt) {
             // accepted: bring the task's changes into the main worktree (in code; a patch that no longer applies is a
             // blocked task, the patch stays with the handoffs for a human)
-            const m = await wt.merge(c.diff_exclude)
+            let completed: LedgerTask | undefined
+            const m = await wt.merge(c.diff_exclude, {
+              guard: () => mayComplete(sessionID, entry),
+              applied: (files) => {
+                task.filesChanged = files
+                completed = finishObserved({ ...task, status: "done", error: advisory, finishedAt: Date.now() }, "done")
+              },
+            }, verifiedTree)
             if (!m.ok) {
+              if (m.reason === "task cancelled before merge") return cancelled()
               let kept = m.patch
               try {
+                if (!m.patch) throw new Error("no patch was produced")
                 const dir = handoffDir(deps.worktree, sessionID)
                 mkdirSync(dir, { recursive: true })
                 kept = join(dir, `task-${task.n}.patch`)
@@ -491,9 +815,10 @@ export function createQueue(deps: HookDeps): Queue {
               return finishObserved(
                 { ...task, status: "failed", blocked: m.reason, error: `not merged: ${m.reason} (patch: ${kept})`, finishedAt: Date.now() }, "failed")
             }
-            task.filesChanged = m.files
             deps.log("task worktree merged", { sessionID, task: task.id, files: m.files.length })
+            return completed!
           }
+          if (!mayComplete(sessionID, entry)) return cancelled()
           return finishObserved({ ...task, status: "done", error: advisory, finishedAt: Date.now() }, "done")
         }
         rejectReason = failure
@@ -518,9 +843,9 @@ export function createQueue(deps: HookDeps): Queue {
       entry.attempt = undefined
       throw error
     } finally {
-      store?.dispose()
+      if (!entry.unresolved) store?.dispose()
       // a failed or cancelled task's worktree changes are discarded with it (the main worktree never saw them)
-      if (wt) await wt.remove()
+      if (wt && !entry.unresolved) await wt.remove()
     }
   }
 
@@ -532,7 +857,6 @@ export function createQueue(deps: HookDeps): Queue {
    */
   async function runDataTask(sessionID: string, entry: Active, task0: LedgerTask, origin?: QueueOrigin): Promise<LedgerTask> {
     const c = cfg()
-    const d = deps.config.data
     let task = task0
     let ledger = readLedger(deps.worktree, sessionID)
     let rejectReason: string | undefined
@@ -549,6 +873,8 @@ export function createQueue(deps: HookDeps): Queue {
       { ...task, status: "cancelled", error: entry.reason ?? "aborted", finishedAt: Date.now() }, "cancelled")
     const suiteName = task.verify?.trim() || DEFAULT_SUITE.name
     while (task.attempts < c.max_attempts) {
+      observeWorkflowCancellation(sessionID, entry)
+      if (entry.aborted) return cancelled()
       task = { ...task, status: "running", attempts: task.attempts + 1, startedAt: task.startedAt ?? Date.now() }
       ledger = writeLedger(deps.worktree, { ...updateTask(ledger, task.id, task), running: { taskId: task.id, since: Date.now() } })
       deps.log("data task start", { sessionID, task: task.id, attempt: task.attempts })
@@ -574,8 +900,8 @@ export function createQueue(deps: HookDeps): Queue {
       let check: CheckRun | undefined
       if (parsed.sql) {
         try {
-          const suites = suiteName === DEFAULT_SUITE.name ? [DEFAULT_SUITE] : [DEFAULT_SUITE, loadSuite(deps.worktree, d.checks_dir, suiteName)]
-          check = await runChecks(getBackend(deps), parsed.sql, suites, { timeoutMs: d.statement_timeout_ms, maxRows: d.max_rows })
+          if (!deps.dataChecks) throw new Error("data checks unavailable for this execution runtime")
+          check = await deps.dataChecks(parsed.sql, suiteName)
         } catch (e) {
           check = { suite: suiteName, ok: false, results: [], error: `checks could not run: ${(e as Error).message.slice(0, 200)}` }
         }
@@ -585,6 +911,7 @@ export function createQueue(deps: HookDeps): Queue {
       } else {
         task.verify_result = { command: `data_check ${suiteName}`, ok: false, exitCode: null, timedOut: false, output: task.blocked ? `(not run: analyst reports the data cannot answer: ${task.blocked})` : "(not run: no SQL: block in the analyst's answer)" }
       }
+      observeWorkflowCancellation(sessionID, entry)
       if (entry.aborted) return cancelled()
       const verified = !!check?.ok
 
@@ -595,8 +922,9 @@ export function createQueue(deps: HookDeps): Queue {
       }
       task.review = review
       attempt!.review = review
+      observeWorkflowCancellation(sessionID, entry)
       if (review.aborted || entry.aborted) {
-        if (verified) return finishObservedData(
+        if (verified && mayComplete(sessionID, entry)) return finishObservedData(
           { ...task, status: "done", error: `verification aborted (${entry.reason ?? "aborted"})`, finishedAt: Date.now() }, "done")
         return cancelled()
       }
@@ -609,10 +937,11 @@ export function createQueue(deps: HookDeps): Queue {
       else if (check && !check.ok) failure = `checks failed: ${check.error ?? check.results.filter((r) => !r.ok).map((r) => `${r.name} (${r.detail})`).join("; ")}`
       else if (review.verdict === "reject") {
         if (c.review_strict || !lastAttempt) failure = `verifier rejected: ${review.reason ?? ""}`
-      }
+      } else if (review.verdict === "error" && c.review_strict) failure = `verifier gave no verdict: ${review.reason ?? ""}`
 
       if (!failure) {
         const advisory = review.verdict === "reject" ? `accepted with verifier objection: ${review.reason ?? ""}` : undefined
+        if (!mayComplete(sessionID, entry)) return cancelled()
         return finishObservedData({ ...task, status: "done", error: advisory, finishedAt: Date.now() }, "done")
       }
       rejectReason = failure
@@ -650,8 +979,10 @@ export function createQueue(deps: HookDeps): Queue {
     const done = { ...task, handoff }
     if (!entry.discard) writeLedger(deps.worktree, { ...updateTask(ledger, task.id, done), running: undefined })
     // child sessions' plugin state dirs (session.json etc.) are never needed again
-    for (const child of done.childSessions) removeSessionDir(deps.worktree, child)
-    if (done.review?.sessionID) removeSessionDir(deps.worktree, done.review.sessionID)
+    if (!entry.unresolved) {
+      for (const child of done.childSessions) removeSessionDir(deps.worktree, child)
+      if (done.review?.sessionID) removeSessionDir(deps.worktree, done.review.sessionID)
+    }
     deps.log("task finished", { sessionID, task: task.id, status: done.status, files: done.filesChanged?.length ?? 0 })
     return done
   }
@@ -685,7 +1016,7 @@ export function workerPrompt(ledger: Ledger, task: LedgerTask, previousFailure: 
   const index = Math.max(1, batch.findIndex((t) => t.id === task.id) + 1)
   const lines = [`Task ${index} of ${batch.length}: ${task.title}`]
   if (task.detail) lines.push(task.detail)
-  if (task.verify) lines.push(`Run this once before you finish: ${task.verify}`)
+  if (task.verify) lines.push(`The framework will run this verification after your edits; do not run it: ${task.verify}`)
   const prot = protectedFiles(task)
   if (prot.length) lines.push(`Never edit ${prot.join(", ")}. If the check cannot pass with honest code, report that under Open issues.`)
   const ctx = handoffContext(ledger, task.id, contextChars)
@@ -694,7 +1025,7 @@ export function workerPrompt(ledger: Ledger, task: LedgerTask, previousFailure: 
     lines.push(
       "",
       `A previous worker already changed files for this task, but the result was not accepted. Reason: ${oneLine(previousFailure, 300)}`,
-      "Read the files first and keep what already works. Make the verify command pass by changing only the code this task owns; never edit test files. If it cannot pass that way, do not force it: explain under Open issues and stop.",
+      "Read the files first and keep what already works. Change only the code this task owns to satisfy the declared verification; the framework runs it after your edits. Never invoke Bash or run tests, and never edit test files. If it cannot pass honestly, explain under Open issues and stop.",
     )
   }
   return lines.join("\n")
@@ -766,11 +1097,8 @@ export function parseVerdict(text: string): ReviewResult {
 
 export type ChildRun = { status: "ok" | "error" | "aborted"; sessionID?: string; text?: string; error?: string }
 
-/** Tools a child session must never see even if an agent config drifts (defense in depth: session-level deny). */
-export const CHILD_TOOL_DENY = { task: false, delegate: false, todowrite: false, todoread: false, webfetch: false }
-
 async function runChild(
-  deps: HookDeps,
+  deps: ExecutionRuntime,
   entry: Active,
   parentID: string,
   agent: LcaAgentName,
@@ -782,101 +1110,130 @@ async function runChild(
   attempt?: AttemptObservation,
 ): Promise<ChildRun> {
   if (entry.aborted) return { status: "aborted" }
-  const session = (deps.client as any).session
-  let sessionID: string | undefined
-  let childMessageID: string | undefined
-  // `directory` binds the child session (and every tool it runs) to another directory: the SDK's per-request
-  // `?directory=` (worktree isolation)
-  const query = directory ? { directory } : undefined
-  try {
-    const created = await session.create({ body: { parentID, title }, ...(query ? { query } : {}) })
-    sessionID = created?.data?.id
-    if (!sessionID) return { status: "error", error: `session.create failed: ${describeError(created?.error)}` }
-  } catch (e) {
-    return { status: "error", error: `session.create threw: ${(e as Error).message}` }
+  const claim = entry.claim!
+  const executionID = randomUUID()
+  const attemptID = attempt?.attemptID ?? randomUUID()
+  const policy = deps.policy.resolve(agent as ExecutionRole)
+  const request = {
+    executionID, supervisorSessionID: parentID, taskID: attempt?.taskID ?? executionID,
+    attemptID, generation: claim.generation, role: agent as ExecutionRole,
+    title, cwd: directory ?? deps.directory, text, deadlineAt: Date.now() + ttlMs, policy,
   }
-  entry.child = sessionID
-  if (attempt) observeChild(deps, attempt, sessionID, agent, "started")
+  const fullRequest = {
+    ...request, handlers: deps.policy.handlers(request),
+    onReference: (reference: ExecutionReference) => deps.runs.bindVendorRef(claim, executionID, JSON.stringify(reference)),
+  }
+  deps.runs.registerIntent(claim, {
+    executionId: executionID, ownerSession: parentID, taskId: request.taskID,
+    attemptId: attemptID, generation: claim.generation, role: agent, cwd: request.cwd, policyID: policy.id,
+    kind: "host", profile: "legacy-unowned",
+  })
+  entry.preparingExecutionID = executionID
+  let handle: ExecutionHandle
+  let prepareTimer: ReturnType<typeof setTimeout> | undefined
+  const prepareAbort = new Promise<"aborted">((resolve) => { entry.cancelWaiter = () => resolve("aborted") })
+  try {
+    const prepared = await Promise.race([
+      deps.host.prepare(fullRequest), prepareAbort,
+      new Promise<"timeout">((resolve) => { prepareTimer = setTimeout(() => resolve("timeout"), Math.max(0, request.deadlineAt - Date.now())) }),
+    ])
+    if (prepared === "aborted" || prepared === "timeout") throw new Error(`child preparation ${prepared} without terminal quiescence`)
+    handle = prepared
+    deps.runs.bindVendorRef(claim, executionID, JSON.stringify(handle.reference))
+  } catch (error) {
+    deps.runs.fence(claim, executionID, "prepare failed without proof of quiescence")
+    entry.unresolved = true
+    throw error
+  } finally {
+    if (prepareTimer) clearTimeout(prepareTimer)
+    entry.preparingExecutionID = undefined
+    entry.cancelWaiter = undefined
+  }
+  const sessionID = handle.reference.vendorSessionID
+  entry.child = { id: executionID, handle, claim }
+  if (attempt && sessionID) observeChild(deps, attempt, sessionID, agent, "started")
   const complete = (run: ChildRun): ChildRun => {
-    if (attempt) observeChild(deps, attempt, sessionID!, agent,
-      run.status === "ok" ? "done" : run.status === "error" ? "failed" : "cancelled", childMessageID)
+    if (attempt && sessionID) observeChild(deps, attempt, sessionID, agent,
+      run.status === "ok" ? "done" : run.status === "error" ? "failed" : "cancelled")
     return run
   }
   try {
-    onCreated?.(sessionID)
+    if (sessionID) onCreated?.(sessionID)
   } catch (error) {
-    complete({ status: "error", sessionID })
+    deps.runs.fence(claim, executionID, "child registration failed")
+    entry.unresolved = true
     throw error
   }
+  // The prepared handle is inert. Cancellation before dispatch is recorded as quiescent.
   if (entry.aborted) {
+    deps.runs.recordTerminal(claim, executionID, { outcome: "cancelled", terminalAt: Date.now(), quiescentAt: Date.now() })
     entry.child = undefined
+    if (sessionID) deps.policy.unbindSession(sessionID)
     return complete({ status: "aborted", sessionID })
   }
-
-  const body: Record<string, unknown> = { agent, tools: CHILD_TOOL_DENY, parts: [{ type: "text", text }] }
-  const model = deps.config.models[agent]
-  if (model) {
-    const [providerID, ...rest] = model.split("/")
-    if (providerID && rest.length) body.model = { providerID, modelID: rest.join("/") }
-  }
-
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<"timeout">((resolve) => {
-    timer = setTimeout(() => resolve("timeout"), ttlMs)
+    timer = setTimeout(() => resolve("timeout"), Math.max(0, request.deadlineAt - Date.now()))
+  })
+  const cancelled = new Promise<"cancelled">((resolve) => {
+    entry.cancelWaiter = () => resolve("cancelled")
   })
   try {
-    const raced = await Promise.race([session.prompt({ path: { id: sessionID }, body, ...(query ? { query } : {}) }), timeout])
+    const raced = await Promise.race([handle.run(), timeout, cancelled])
+    if (raced === "cancelled") {
+      try { deps.runs.assertQuiescent(claim) }
+      catch { entry.unresolved = true; throw new Error("child cancellation ended without terminal quiescence; queue fenced") }
+      return complete({ status: "aborted", sessionID })
+    }
     if (raced === "timeout") {
-      await abortSession(deps, sessionID)
+      await cancelChild(deps, { id: executionID, handle, claim }, "child timeout")
+      try { deps.runs.assertQuiescent(claim) }
+      catch { entry.unresolved = true; throw new Error(`child execution timed out without quiescence after ${Math.round(ttlMs / 1000)}s`) }
       return complete({ status: "error", sessionID, error: `child session timed out after ${Math.round(ttlMs / 1000)}s` })
     }
-    const res: any = raced
-    if (entry.aborted) return complete({ status: "aborted", sessionID })
-    if (res?.error) return complete({ status: "error", sessionID, error: `prompt error: ${describeError(res.error)}` })
-    const data = res?.data ?? res
-    const info = data?.info
-    if (info?.role === "assistant" && info.sessionID === sessionID && typeof info.parentID === "string") childMessageID = info.parentID
-    if (info?.error) {
-      const name = info.error?.name ?? "error"
-      // Aborted by someone else (repetition guard, user closing the child): a failed attempt, not a queue abort.
-      if (name === "MessageAbortedError") return complete({ status: "error", sessionID, error: "child session aborted (repetition guard or external abort)", text: extractText(data?.parts) })
-      return complete({ status: "error", sessionID, error: `${name}: ${info.error?.data?.message ?? ""}`.trim(), text: extractText(data?.parts) })
+    const res = raced
+    const terminal = res.status === "completed" || res.status === "failed" || res.status === "cancelled"
+    if (terminal) deps.runs.recordTerminal(claim, executionID, { outcome: res.status, terminalAt: Date.now() })
+    const reconciled = await handle.reconcile()
+    deps.runs.reconcile(claim, executionID, reconciled)
+    if (!terminal || !reconciled.quiescent || reconciled.outcome !== "terminal") {
+      deps.runs.fence(claim, executionID, "execution terminal/quiescence unproven")
+      entry.unresolved = true
+      throw new Error("child execution unresolved; queue fenced")
     }
-    return complete({ status: "ok", sessionID, text: extractText(data?.parts) })
-  } catch (e) {
-    return complete({ status: entry.aborted ? "aborted" : "error", sessionID, error: (e as Error).message })
+    if (entry.aborted) return complete({ status: "aborted", sessionID })
+    if (res.status !== "completed") return complete({ status: "error", sessionID, error: res.error ?? res.status, text: res.text })
+    return complete({ status: "ok", sessionID, text: res.text })
+  } catch (error) {
+    if (entry.unresolved) throw error
+    deps.runs.fence(claim, executionID, "execution threw without terminal/quiescence proof")
+    entry.unresolved = true
+    throw error
   } finally {
     if (timer) clearTimeout(timer)
-    if (entry.child === sessionID) entry.child = undefined
+    entry.cancelWaiter = undefined
+    if (entry.child?.id === executionID) entry.child = undefined
+    if (!entry.unresolved && sessionID) deps.policy.unbindSession(sessionID)
   }
 }
 
-function describeError(e: unknown): string {
-  if (!e) return "no id"
-  if (typeof e === "string") return e
-  const o = e as any
-  const name = o.name ?? o.error?.name
-  const msg = o.data?.message ?? o.message ?? o.error?.message
-  if (name || msg) return [name, msg].filter(Boolean).join(": ")
+async function cancelChild(deps: ExecutionRuntime, child: { id: string; handle: ExecutionHandle; claim: ExecutionClaim }, reason: string): Promise<void> {
+  const deadlineAt = Date.now() + 2000
+  deps.runs.recordCancel(child.claim, child.id, { requestedAt: Date.now() })
   try {
-    return JSON.stringify(e).slice(0, 200)
-  } catch {
-    return String(e)
-  }
-}
-
-function extractText(parts: unknown): string {
-  if (!Array.isArray(parts)) return ""
-  return parts
-    .filter((p: any) => p && p.type === "text" && typeof p.text === "string" && !p.ignored)
-    .map((p: any) => p.text as string)
-    .join("\n")
-}
-
-async function abortSession(deps: HookDeps, sessionID: string): Promise<void> {
-  try {
-    await (deps.client as any).session.abort({ path: { id: sessionID } })
-  } catch (e) {
-    deps.log("child abort failed", { sessionID, error: (e as Error).message })
+    const cancellation = await Promise.race([
+      child.handle.requestCancel(reason, deadlineAt),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), Math.max(0, deadlineAt - Date.now()))),
+    ])
+    if (cancellation?.acknowledged) deps.runs.recordCancel(child.claim, child.id, { requestedAt: Date.now(), acknowledgedAt: Date.now() })
+    const reconciliation = await Promise.race([
+      child.handle.reconcile(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), Math.max(0, deadlineAt - Date.now()))),
+    ])
+    if (reconciliation) deps.runs.reconcile(child.claim, child.id, reconciliation)
+    if (!reconciliation?.quiescent || reconciliation.outcome !== "terminal") deps.runs.fence(child.claim, child.id, "cancellation acknowledged without terminal quiescence")
+  } catch (error) {
+    deps.runs.fence(child.claim, child.id, "cancellation failed without terminal quiescence")
+    deps.log("child abort failed", { executionID: child.id, error: String(error) })
   }
 }

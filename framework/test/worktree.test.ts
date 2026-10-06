@@ -3,12 +3,14 @@
 // failed/cancelled tasks discarded, patch kept when the merge no longer applies).
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createQueue } from "../src/orchestration/queue.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { createTaskWorktree, worktreeRoot } from "../src/orchestration/worktree.ts"
+import { createSnapshotStore } from "../src/orchestration/snapshot.ts"
 import { readLedger } from "../src/state/ledger.ts"
-import { fakeClient, GIT_TEST_ENV, makeDeps, tempGitWorktree, verifyScript, type FakeClient } from "./guards-helpers.ts"
+import { fakeClient, GIT_TEST_ENV, makeDeps, tempGitWorktree, verifyScript, waitFor, type FakeClient } from "./guards-helpers.ts"
 
 const S = "ses_wt"
 let wt: ReturnType<typeof tempGitWorktree>
@@ -24,6 +26,64 @@ const read = (dir: string, f: string) => readFileSync(join(dir, f), "utf8")
 const prompts = (agent: string) => client.calls.filter((c) => c.method === "prompt" && (c.args as any).body.agent === agent).map((c) => c.args as any)
 
 describe("task worktree", () => {
+  test.each([
+    ["filter.evil.clean", "sh -c 'touch sentinel'"],
+    ["diff.evil.textconv", "sh -c 'touch sentinel'"],
+    ["merge.evil.driver", "sh -c 'touch sentinel'"],
+    ["include.path", "sentinel"],
+    ["includeIf.onbranch:main.path", "sentinel"],
+    ["core.fsmonitor", "sh -c 'touch sentinel'"],
+    ["core.hooksPath", "sentinel"],
+    ["alias.evil", "!touch sentinel"],
+    ["credential.helper", "!touch sentinel"],
+    ["url.file:///tmp/.insteadOf", "https://invalid.example/"],
+  ])("refuses executable Git config %s before creating a worktree or snapshot", async (key, value) => {
+    g(wt.worktree, "config", "--local", key, value)
+    expect(createSnapshotStore(wt.worktree)).rejects.toThrow(/git-config:/)
+    expect(createTaskWorktree(wt.worktree, S, "config-refusal", [])).rejects.toThrow(/git-config:/)
+    expect(existsSync(join(wt.worktree, "sentinel"))).toBe(false)
+    expect(existsSync(join(worktreeRoot(wt.worktree), S, "config-refusal"))).toBe(false)
+  })
+
+  test("refuses tracked driver attributes before running Git filters", async () => {
+    writeFileSync(join(wt.worktree, ".gitattributes"), "*.py filter=evil\n")
+    g(wt.worktree, "add", ".gitattributes")
+    g(wt.worktree, "config", "--local", "filter.evil.clean", "touch sentinel")
+    expect(createSnapshotStore(wt.worktree)).rejects.toThrow(/git-config:/)
+    g(wt.worktree, "config", "--local", "--unset", "filter.evil.clean")
+    expect(createTaskWorktree(wt.worktree, S, "attr-refusal", [])).rejects.toThrow(/driver attribute/)
+    expect(existsSync(join(wt.worktree, "sentinel"))).toBe(false)
+  })
+
+  test("refuses symlink import instead of following or copying it", async () => {
+    symlinkSync("lib.py", join(wt.worktree, "untracked-link.py"))
+    expect(createTaskWorktree(wt.worktree, S, "link-refusal", [])).rejects.toThrow(/nonregular import/)
+  })
+
+  test.each(["core.worktree", "core.bare"])("refuses %s without modifying an external victim", async (key) => {
+    const victim = join(wt.stateHome, "external-victim")
+    mkdirSync(victim)
+    writeFileSync(join(victim, "lib.py"), "DO NOT MODIFY\n")
+    g(wt.worktree, "config", "--local", key, key === "core.bare" ? "true" : victim)
+    expect(createSnapshotStore(wt.worktree)).rejects.toThrow(/git-config: forbidden core\./)
+    expect(createTaskWorktree(wt.worktree, S, "redirection", [])).rejects.toThrow(/git-config: forbidden core\./)
+    expect(read(victim, "lib.py")).toBe("DO NOT MODIFY\n")
+    expect(existsSync(join(worktreeRoot(wt.worktree), S, "redirection"))).toBe(false)
+  })
+
+  test("operational Git failure does not fall back to an in-place worker", async () => {
+    // A real repository whose worktree metadata is unusable must not be treated as an absent repository.
+    writeFileSync(join(wt.worktree, ".git", "worktrees"), "cannot create linked worktree metadata")
+    expect(createTaskWorktree(wt.worktree, S, "broken", [])).rejects.toThrow(/git-config: could not/)
+    const deps = makeDeps(client, wt.worktree, { delegate: { review: false, worktree: true } as any })
+    const queue = createQueue(getOpenCodeRuntime(deps))
+    queue.add(S, [{ title: "must remain isolated", verify: verifyScript(wt.worktree, "check.sh", "exit 0") }])
+    expect(await queue.run(S)).toMatchObject({ aborted: true, done: 0, abortReason: expect.stringMatching(/git-config: could not/) })
+    expect(prompts("worker")).toHaveLength(0)
+    expect(client.created).toHaveLength(0)
+    expect(existsSync(join(worktreeRoot(wt.worktree), S, "broken"))).toBe(false)
+  })
+
   test("starts from HEAD plus the main worktree's uncommitted and untracked state; merge applies the task's diff to main", async () => {
     writeFileSync(join(wt.worktree, "lib.py"), "X = 2\n") // uncommitted tracked change
     writeFileSync(join(wt.worktree, "new_from_earlier_task.py"), "Y = 1\n") // untracked
@@ -52,6 +112,18 @@ describe("task worktree", () => {
     expect(g(wt.worktree, "worktree", "list")).not.toContain("/t1")
   })
 
+  test("worktree merge preserves exact leading and trailing whitespace in filenames", async () => {
+    const inheritedName = " main whitespace "
+    writeFileSync(join(wt.worktree, inheritedName), "inherited\n")
+    const t = (await createTaskWorktree(wt.worktree, S, "whitespace-path", []))!
+    expect(read(t.path, inheritedName)).toBe("inherited\n")
+    const name = " task whitespace "
+    writeFileSync(join(t.path, name), "merged\n")
+    expect(await t.merge([])).toEqual({ ok: true, files: [name] })
+    expect(read(wt.worktree, name)).toBe("merged\n")
+    await t.remove()
+  })
+
   test("a patch that no longer applies (main changed underneath) is reported, main is left alone, the patch is kept", async () => {
     const t = (await createTaskWorktree(wt.worktree, S, "t2", []))!
     writeFileSync(join(t.path, "lib.py"), "X = 10\n")
@@ -67,6 +139,85 @@ describe("task worktree", () => {
     await t.remove()
   })
 
+  test("failed worktree snapshot and cancellation at the final guard never apply a patch", async () => {
+    const t = (await createTaskWorktree(wt.worktree, S, "snapshot-fault", []))!
+    writeFileSync(join(t.path, "lib.py"), "X = 10\n")
+    writeFileSync(join(t.path, ".git-lca-index.lock"), "locked")
+    const failed = await t.merge([])
+    expect(failed).toMatchObject({ ok: false, reason: "could not snapshot the worktree" })
+    expect(read(wt.worktree, "lib.py")).toBe("X = 1\n")
+    const { rmSync } = await import("node:fs")
+    rmSync(join(t.path, ".git-lca-index.lock"))
+    let applied = false
+    const cancelled = await t.merge([], { guard: () => false, applied: () => { applied = true } })
+    expect(cancelled).toMatchObject({ ok: false, reason: "task cancelled before merge" })
+    expect(applied).toBe(false)
+    expect(read(wt.worktree, "lib.py")).toBe("X = 1\n")
+    await t.remove()
+  })
+
+  test("rejects a worktree tree different from the verified tree before diff or merge", async () => {
+    const t = (await createTaskWorktree(wt.worktree, S, "verified-mismatch", []))!
+    writeFileSync(join(t.path, "lib.py"), "X = 2\n")
+    const store = (await createSnapshotStore(t.path))!
+    const verified = (await store.snapshot())!
+    writeFileSync(join(t.path, "lib.py"), "X = 3\n")
+    const result = await t.merge([], undefined, verified.tree)
+    expect(result).toMatchObject({ ok: false, reason: "worktree changed since verification", patch: "" })
+    expect(read(wt.worktree, "lib.py")).toBe("X = 1\n")
+    store.dispose()
+    await t.remove()
+  })
+
+  test("SnapshotStore's verified tree matches the worktree merge tree for an ordinary change", async () => {
+    const t = (await createTaskWorktree(wt.worktree, S, "verified-match", []))!
+    writeFileSync(join(t.path, "lib.py"), "X = 2\n")
+    const store = (await createSnapshotStore(t.path))!
+    const verified = (await store.snapshot())!
+    expect(verified.tree).toMatch(/^[0-9a-f]{40,64}$/)
+    expect(await t.merge([], { guard: () => true, applied: () => {} }, verified.tree)).toMatchObject({ ok: true, files: ["lib.py"] })
+    expect(read(wt.worktree, "lib.py")).toBe("X = 2\n")
+    store.dispose()
+    await t.remove()
+  })
+
+  test("tracked legacy handoff paths share the verifier and merge exclusion set", async () => {
+    mkdirSync(join(wt.worktree, ".lca", "handoffs"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".lca", "handoffs", "legacy.txt"), "previous\n")
+    g(wt.worktree, "add", "-f", ".lca/handoffs/legacy.txt")
+    g(wt.worktree, "commit", "-m", "tracked historical handoff")
+    const t = (await createTaskWorktree(wt.worktree, S, "excluded-match", []))!
+    writeFileSync(join(t.path, "lib.py"), "X = 2\n")
+    writeFileSync(join(t.path, ".lca", "handoffs", "legacy.txt"), "unverified handoff\n")
+    const store = (await createSnapshotStore(t.path))!
+    const verified = (await store.snapshot())!
+    expect(await t.merge([], { guard: () => true, applied: () => {} }, verified.tree)).toMatchObject({ ok: true, files: ["lib.py"] })
+    expect(read(wt.worktree, "lib.py")).toBe("X = 2\n")
+    expect(read(wt.worktree, ".lca/handoffs/legacy.txt")).toBe("previous\n")
+    store.dispose()
+    await t.remove()
+  })
+
+  test("rechecks verified tree synchronously after the final guard mutates the worktree", async () => {
+    const t = (await createTaskWorktree(wt.worktree, S, "late-writer", []))!
+    writeFileSync(join(t.path, "lib.py"), "X = 2\n")
+    const store = (await createSnapshotStore(t.path))!
+    const verified = (await store.snapshot())!
+    let applied = false
+    const result = await t.merge([], {
+      guard: () => {
+        writeFileSync(join(t.path, "lib.py"), "X = 3\n")
+        return true
+      },
+      applied: () => { applied = true },
+    }, verified.tree)
+    expect(result).toMatchObject({ ok: false, reason: "worktree changed since verification" })
+    expect(applied).toBe(false)
+    expect(read(wt.worktree, "lib.py")).toBe("X = 1\n")
+    store.dispose()
+    await t.remove()
+  })
+
   test("returns null without a commit (unborn repository) and for a non-git directory", async () => {
     const bare = tempGitWorktree()
     g(bare.worktree, "update-ref", "-d", "HEAD")
@@ -79,9 +230,170 @@ describe("task worktree", () => {
 })
 
 describe("queue with delegate.worktree", () => {
+
+  test("without a Git baseline no worker, verifier, or review is launched", async () => {
+    rmSync(join(wt.worktree, ".git"), { recursive: true, force: true })
+    const deps = makeDeps(client, wt.worktree, { delegate: { worktree: false, review: true } as any })
+    const queue = createQueue(getOpenCodeRuntime(deps))
+    queue.add(S, [{ title: "unverifiable change", verify: verifyScript(wt.worktree, "check_untracked.sh", "touch verified-marker") }])
+    expect(await queue.run(S)).toMatchObject({ done: 0, failed: 1 })
+    expect(readLedger(wt.worktree, S).tasks[0]).toMatchObject({ status: "failed", error: "could not snapshot the task baseline" })
+    expect(prompts("worker")).toHaveLength(0)
+    expect(prompts("reviewer")).toHaveLength(0)
+    expect(existsSync(join(wt.worktree, "verified-marker"))).toBe(false)
+  })
+
+  test("a verifier that synchronously rewrites a protected test invalidates its own result", async () => {
+    writeFileSync(join(wt.worktree, "test_guard.py"), "def test_guard():\n    assert True\n")
+    g(wt.worktree, "add", "test_guard.py")
+    g(wt.worktree, "commit", "-m", "tracked guard")
+    const verify = verifyScript(wt.worktree, "check_guard.sh", "printf 'def test_guard():\\n    assert False\\n' > \"$1\"\nexit 0") + " test_guard.py"
+    const deps = makeDeps(client, wt.worktree, { delegate: { review: false, worktree: false, max_attempts: 1 } as any })
+    const queue = createQueue(getOpenCodeRuntime(deps))
+    client.replies.worker = { text: "Files changed: lib.py\nVerification: ok\nOpen issues: none",
+      run: () => writeFileSync(join(wt.worktree, "lib.py"), "X = 2\n") }
+    queue.add(S, [{ title: "update lib", verify }])
+    expect(await queue.run(S)).toMatchObject({ done: 0, failed: 1 })
+    expect(read(wt.worktree, "test_guard.py")).toBe("def test_guard():\n    assert True\n")
+    const task = readLedger(wt.worktree, S).tasks[0]!
+    expect(task.verify_result).toMatchObject({ ok: false, exitCode: 0 })
+    expect(task.verify_result?.output).toContain("verifier changed files")
+  })
+
+  test("refuses an unallowlisted verifier before it or its descendant launches or merges work", async () => {
+    const verifierLaunched = join(wt.stateHome, "refused-verifier-launched")
+    const descendantLaunched = join(wt.stateHome, "refused-descendant-launched")
+    const verify = verifyScript(wt.worktree, "check_refused.sh", [
+      `touch "${verifierLaunched}"`,
+      `(touch "${descendantLaunched}") &`,
+      "wait",
+    ].join("\n")) + " && python3 -c 'print(1)'" // not an allowed test runner; neither command may start
+    const deps = makeDeps(client, wt.worktree, { delegate: { review: false, worktree: true, max_attempts: 1 } as any })
+    const queue = createQueue(getOpenCodeRuntime(deps))
+    client.replies.worker = (o) => ({
+      text: "Files changed: lib.py\nVerification: not run\nOpen issues: none",
+      run: () => writeFileSync(join(o.query?.directory as string, "lib.py"), "X = 2\n"),
+    })
+    queue.add(S, [{ title: "update lib", verify }])
+    const run = await queue.run(S)
+    const task = readLedger(wt.worktree, S).tasks[0]!
+    expect(prompts("worker")).toHaveLength(1)
+    expect(task.verify_result).toMatchObject({ ok: false, exitCode: null, timedOut: false })
+    expect(task.verify_result?.output).toContain("verify command refused")
+    expect(run).toMatchObject({ done: 0, failed: 1 })
+    expect(task.status).toBe("failed")
+    expect(read(wt.worktree, "lib.py")).toBe("X = 1\n")
+    expect(existsSync(verifierLaunched)).toBe(false)
+    expect(existsSync(descendantLaunched)).toBe(false)
+  })
+
+  test("records the escaped detached verifier as unproven on legacy; Linux requires retained ownership", async () => {
+    writeFileSync(join(wt.worktree, "test_guard.py"), "def test_guard():\n    assert True\n")
+    g(wt.worktree, "add", "test_guard.py")
+    g(wt.worktree, "commit", "-m", "tracked guard")
+    const ready = join(wt.stateHome, "writer-ready")
+    const release = join(wt.stateHome, "writer-release")
+    const finished = join(wt.stateHome, "writer-finished")
+    const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+    const child = [
+      "import os, pathlib, sys, time",
+      "os.setsid()", // escape the verifier shell's process group before the shell exits
+      "ready, release, target, finished = map(pathlib.Path, sys.argv[1:])",
+      "ready.touch()",
+      "while not release.exists(): time.sleep(0.01)",
+      "outcome = 'write-error'",
+      "try:",
+      "  target.write_text('def test_guard():\\n    assert False\\n')",
+      "  outcome = 'written'",
+      "except PermissionError:",
+      "  outcome = 'write-denied'",
+      "finally:",
+      "  finished.write_text(outcome + '\\n')",
+    ].join("\n")
+    const verify = verifyScript(wt.worktree, "check_delayed.sh", [
+      `python3 -c ${quote(child)} ${quote(ready)} ${quote(release)} "$1" ${quote(finished)} </dev/null >/dev/null 2>&1 &`,
+      `while [ ! -f ${quote(ready)} ]; do sleep 0.01; done`,
+      "exit 0",
+    ].join("\n")) + " test_guard.py"
+    const deps = makeDeps(client, wt.worktree, { delegate: { review: false, worktree: false, max_attempts: 1 } as any })
+    const runtime = getOpenCodeRuntime(deps)
+    const q = createQueue(runtime)
+    client.replies.worker = { text: "Files changed: lib.py\nVerification: ok\nOpen issues: none", run: () => writeFileSync(join(wt.worktree, "lib.py"), "X = 2\n") }
+    q.add(S, [{ title: "update lib", verify }])
+    let resolvedRun: Awaited<ReturnType<typeof q.run>> | undefined
+    const runPromise = q.run(S).then((run) => { resolvedRun = run; return run })
+    let beforeRelease: {
+      childReady: boolean
+      queueResolved: boolean
+      resolvedDone: number | null
+      taskStatus: string | undefined
+      claimRetained: boolean
+      unresolvedExecutions: number
+      fencedExecutions: number
+      safeBeforeRelease: boolean
+    } | undefined
+    try {
+      await waitFor(() => existsSync(ready))
+      // The legacy oracle must release the escaped child *after* acceptance,
+      // not race a slower snapshot/merge and accidentally test a pre-merge write.
+      if (runtime.verificationProfile === "legacy-unowned") await waitFor(() => !!resolvedRun, 10_000)
+      else await new Promise((resolve) => setTimeout(resolve, 100))
+      const task = readLedger(wt.worktree, S).tasks[0]!
+      const state = runtime.runs.status()
+      const claimRetained = state.claim?.ownerSession === S
+      const unresolved = state.executions.filter((execution) => execution.ownerSession === S && execution.taskId === task.id
+        && (execution.processRisk || (!execution.terminal?.quiescentAt
+          && !(execution.reconciliation?.outcome === "terminal" && execution.reconciliation.quiescent))))
+      const activeWithClaim = !resolvedRun && task.status !== "done" && claimRetained
+      const settledWithFence = !!resolvedRun && resolvedRun.done === 0 && task.status !== "done"
+        && claimRetained && unresolved.some((execution) => !!execution.fence)
+      beforeRelease = {
+        childReady: existsSync(ready), queueResolved: !!resolvedRun, resolvedDone: resolvedRun?.done ?? null,
+        taskStatus: task.status, claimRetained, unresolvedExecutions: unresolved.length,
+        fencedExecutions: unresolved.filter((execution) => !!execution.fence).length,
+        safeBeforeRelease: activeWithClaim || settledWithFence,
+      }
+    } finally {
+      writeFileSync(release, "go\n")
+    }
+    const run = await runPromise
+    await waitFor(() => existsSync(finished))
+    const childWriteOutcome = readFileSync(finished, "utf8").trim()
+    const afterRelease = {
+      childFinished: existsSync(finished), childWriteOutcome,
+      childWriteObserved: childWriteOutcome === "written" || childWriteOutcome === "write-denied", queueDone: run.done,
+      ledgerDone: readLedger(wt.worktree, S).tasks[0]?.status === "done",
+      protectedContent: read(wt.worktree, "test_guard.py"),
+    }
+    const verifier = runtime.runs.status().executions.find(e => e.kind === "verifier")
+    if (runtime.verificationProfile === "linux-single-use") {
+      expect({ beforeRelease, afterRelease }).toMatchObject({
+        beforeRelease: { childReady: true, safeBeforeRelease: true },
+        afterRelease: { childFinished: true, childWriteObserved: true, queueDone: 0, ledgerDone: false,
+          protectedContent: "def test_guard():\n    assert True\n" },
+      }) // Linux never accepts a detached writer before complete-family retirement.
+    } else {
+      expect(runtime.verificationProfile).toBe("legacy-unowned")
+      expect(verifier).toMatchObject({ kind: "verifier", profile: "legacy-unowned", descendantRisk: "unproven",
+        terminal: { outcome: "ok", verification: { isolationEstablished: false, domainState: "unknown" } } })
+      expect({ beforeRelease, afterRelease }).toMatchObject({
+        beforeRelease: { childReady: true, queueResolved: true, resolvedDone: 1, claimRetained: false },
+        afterRelease: { childFinished: true, childWriteOutcome: "written", queueDone: 1, ledgerDone: true,
+          protectedContent: "def test_guard():\n    assert False\n" },
+      }) // Historical unsafe behavior is retained only with an explicit unproven label; no F2/F3 credit.
+    }
+  })
+
+  test("Linux-only detached verifier control reports blocked/not-run without a qualified systemd lab", async () => {
+    if (process.platform === "linux") throw new Error("Linux systemd lab must run the strict detached-verifier branch with a qualified linux-single-use runtime")
+    const runtime = getOpenCodeRuntime(makeDeps(client, wt.worktree))
+    expect((await runtime.verifier.preflight("linux-single-use")).compatible).toBe(false)
+    console.info("blocked/not-run: requires linux-systemd255 lab (1 Linux detached-verifier control)")
+  })
+
   test("worker and verify run in the worktree; main gets the files only after the task is accepted", async () => {
     const deps = makeDeps(client, wt.worktree, { delegate: { review: false, worktree: true } as any })
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     const verify = verifyScript(wt.worktree, "check_feature.sh", "test -f feature.py && grep -q 'return 3' feature.py")
     let seenMainDuringTask: boolean | undefined
     client.replies.worker = (o) => ({
@@ -111,7 +423,7 @@ describe("queue with delegate.worktree", () => {
 
   test("a failed task's worktree changes never reach main; a merge conflict marks the task failed with the patch kept", async () => {
     const deps = makeDeps(client, wt.worktree, { delegate: { review: false, worktree: true, max_attempts: 1 } as any })
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     const failing = verifyScript(wt.worktree, "check_fail.sh", "exit 1")
     const passing = verifyScript(wt.worktree, "check_ok.sh", "exit 0")
     client.replies.worker = (o) => {
@@ -149,11 +461,11 @@ describe("queue with delegate.worktree", () => {
     const bare = tempGitWorktree()
     g(bare.worktree, "update-ref", "-d", "HEAD")
     const deps = makeDeps(client, bare.worktree, { delegate: { review: false, worktree: true } as any })
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     client.replies.worker = (o) => ({ text: "Files changed: a.py\nVerification: ok\nOpen issues: none", run: () => writeFileSync(join(bare.worktree, "a.py"), "A = 1\n") })
     q.add(S, [{ title: "in place", verify: verifyScript(bare.worktree, "check_a.sh", "test -f a.py") }])
     expect(await q.run(S)).toMatchObject({ done: 1 })
-    expect(client.created[0]!.directory).toBeUndefined()
+    expect(client.created[0]!.directory).toBe(bare.worktree)
     expect(deps.logs.some((l) => l.startsWith("task worktree unavailable"))).toBe(true)
     bare.cleanup()
   })

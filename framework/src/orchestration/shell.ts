@@ -2,8 +2,9 @@
 // node:child_process is used (not Bun.spawn) so the same code runs in bun test and inside OpenCode.
 //
 // The command runs `detached` in its own process group and the timeout / abort kills the GROUP (SIGTERM, then
-// SIGKILL): killing only `sh` leaves e.g. `pytest` children alive holding the stdout pipe, and `close` would never
-// fire (review, security M1). Resolution happens on `exit`, not `close`, for the same reason.
+// KILL): killing only `sh` leaves e.g. `pytest` children alive holding the stdout pipe, and `close` would never
+// fire (review, security M1). Resolution happens on `exit`, not `close`, for the same reason. This observes only
+// the immediate child: a detached descendant can escape the process group. Use only for legacy-unowned verification.
 import { spawn } from "node:child_process"
 import { StringDecoder } from "node:string_decoder"
 
@@ -17,7 +18,7 @@ export type RunHandle = {
 
 export function startShell(
   command: string,
-  opts: { cwd: string; timeoutMs: number; maxOutputChars?: number; env?: Record<string, string> },
+  opts: { cwd: string; timeoutMs: number; maxOutputChars?: number; env?: Record<string, string>; replaceEnv?: boolean },
 ): RunHandle {
   const max = opts.maxOutputChars ?? 4000
   const t0 = Date.now()
@@ -28,7 +29,7 @@ export function startShell(
   const decoder = new StringDecoder("utf8")
   const child = spawn("/bin/sh", ["-c", command], {
     cwd: opts.cwd,
-    env: { ...process.env, ...(opts.env ?? {}), LCA_VERIFY: "1" },
+    env: { ...(opts.replaceEnv ? {} : process.env), ...(opts.env ?? {}), LCA_VERIFY: "1" },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   })

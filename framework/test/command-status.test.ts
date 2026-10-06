@@ -11,6 +11,8 @@ import { eventsPath, newWorkflow, workflowPath, writeWorkflow } from "../src/flo
 import { currentOwner } from "../src/flow/owner.ts"
 import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
 import { fakeDeps } from "./helpers.ts"
+import { createExecutionRunStore } from "../src/hosts/run-state.ts"
+import { addTasks, emptyLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
 
 const S = "ses_main"
 const OTHER = "ses_other"
@@ -45,6 +47,39 @@ describe("/status", () => {
     expect(text).toContain("mode: none")
     expect(text).toContain("ledger: 0 done, 0 open, 0 failed, 0 cancelled; queue idle")
     expect(text.endsWith("Reply only: ok")).toBe(true)
+  })
+
+  test("read-only status renders unresolved execution and never clears cancellation ACK", async () => {
+    const runs = createExecutionRunStore(wt.worktree)
+    const claim = runs.claim(S, "fixture", process.pid)
+    runs.registerIntent(claim, { executionId: "exec", ownerSession: S, taskId: "task", attemptId: "attempt", generation: claim.generation, role: "worker", cwd: wt.worktree, policyID: "fixture-fixed-policy", kind: "host", profile: "legacy-unowned" })
+    runs.recordCancel(claim, "exec", { requestedAt: 1, acknowledgedAt: 2 })
+    const before = runs.status()
+    const text = await runStatus()
+    expect(text).toContain("execution: 1 unresolved, 1 cancel ACK")
+    expect(text).toContain("usage unknown")
+    expect(runs.status()).toEqual(before)
+  })
+
+  test("passed legacy verification visibly retains unproven descendant risk without mutating state", async () => {
+    const runs = createExecutionRunStore(wt.worktree)
+    const created = addTasks(emptyLedger(S), [{ title: "legacy verifier", verify: "true" }])
+    const task = created.added[0]!
+    writeLedger(wt.worktree, updateTask(created.ledger, task.id, { status: "done" }))
+    const claim = runs.claim(S, "fixture", process.pid)
+    const ref = { kind: "verifier" as const, executionID: "verify-1", profile: "legacy-unowned" as const,
+      invocationID: "legacy-1", inputSnapshotID: "tree-1", inputDigest: "a".repeat(64), deadlineAt: Date.now() + 1000, maxOutputChars: 4096 }
+    runs.registerIntent(claim, { executionId: "verify-1", ownerSession: S, taskId: task.id, attemptId: "attempt-1", generation: claim.generation,
+      role: "verifier", cwd: wt.worktree, policyID: "verify-legacy", kind: "verifier", profile: "legacy-unowned",
+      inputSnapshotID: ref.inputSnapshotID, inputDigest: ref.inputDigest, deadlineAt: ref.deadlineAt, maxOutputChars: ref.maxOutputChars })
+    runs.bindVerifierRef(claim, "verify-1", ref)
+    runs.recordTerminal(claim, "verify-1", { outcome: "ok", terminalAt: Date.now(), verification: {
+      profile: "legacy-unowned", parentExit: 0, timedOut: false, cancelled: false, isolationEstablished: false,
+      domainState: "unknown", integrity: "unchanged", output: "",
+    } })
+    const before = runs.status()
+    expect(await runStatus()).toContain("verification: passed (legacy-unowned, descendants unproven)")
+    expect(runs.status()).toEqual(before)
   })
 
   test("owning session, owner live: renders workflow phase, this session", async () => {

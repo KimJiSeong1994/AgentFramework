@@ -10,6 +10,7 @@ import type { Hooks } from "@opencode-ai/plugin"
 import type { HookDeps } from "./types.ts"
 import { EMPTY_MODE, abortPath, readModeState, writeJsonAtomic, writeModeState } from "../state/store.ts"
 import { getQueue } from "../orchestration/queue.ts"
+import { getOpenCodeRuntime } from "../hosts/opencode-runtime.ts"
 import { markCommandTurn } from "./command-turns.ts"
 
 export const STOP_COMMAND = "stop"
@@ -60,7 +61,7 @@ export function createCommandHook(
   deps: HookDeps,
   opts: { stop?: boolean; status?: boolean; flow?: boolean; injected?: Set<string> } = {},
 ): NonNullable<Hooks["command.execute.before"]> {
-  const queue = getQueue(deps)
+  const queue = getQueue(getOpenCodeRuntime(deps))
   const stopOn = opts.stop ?? true
   const statusOn = opts.status ?? false
   const flowCmdsOn = opts.flow ?? false
