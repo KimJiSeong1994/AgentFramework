@@ -39,6 +39,62 @@ describe("snapshot / diff", () => {
     expect((await diffSnapshots(wt.worktree, before, after, 10_000))?.files).toEqual([name])
   })
 
+  test("snapshots ignored artifacts and exact binary paths without touching the real index or objects", async () => {
+    const store = await createSnapshotStore(wt.worktree)
+    expect(store).not.toBeNull()
+    const excludes = DEFAULT_CONFIG.delegate.diff_exclude
+    const exactName = " leading\nand trailing "
+    const binaryName = ":(exclude) binary.bin"
+    const binary = Buffer.from([0x00, 0xff, 0x41, 0x0a])
+    try {
+      writeFileSync(join(wt.worktree, ".gitignore"), "__pycache__/\n*.pyc\n.lca/plans/\n")
+      const indexPath = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-path", "index"], { cwd: wt.worktree }).toString().trim()
+      const index = readFileSync(indexPath)
+      const objects = execFileSync("git", ["count-objects", "-v"], { cwd: wt.worktree }).toString()
+      const before = await store!.snapshot(excludes)
+      expect(before).not.toBeNull()
+
+      mkdirSync(join(wt.worktree, "pkg/__pycache__"), { recursive: true })
+      mkdirSync(join(wt.worktree, ".lca/plans"), { recursive: true })
+      writeFileSync(join(wt.worktree, "pkg/__pycache__/cache.cpython-313.pyc"), "ignored cache")
+      writeFileSync(join(wt.worktree, ".lca/plans/approval.md"), "ignored plan")
+      writeFileSync(join(wt.worktree, exactName), "exact path\n")
+      writeFileSync(join(wt.worktree, binaryName), binary)
+
+      const after = await store!.snapshot(excludes)
+      expect(after).not.toBeNull()
+      const diff = await store!.diff(before, after, 10_000)
+      expect(diff?.files.sort()).toEqual([binaryName, exactName].sort())
+      expect(readFileSync(indexPath)).toEqual(index)
+      expect(execFileSync("git", ["count-objects", "-v"], { cwd: wt.worktree }).toString()).toBe(objects)
+
+      writeFileSync(join(wt.worktree, binaryName), Buffer.from([0x42]))
+      expect(await store!.restore(after, [binaryName])).toEqual([binaryName])
+      expect(readFileSync(join(wt.worktree, binaryName))).toEqual(binary)
+
+      const empty = await store!.snapshot(["*"])
+      expect(empty).not.toBeNull()
+      expect((await store!.diff(after, empty, 10_000))?.files.sort()).toEqual([
+        ".gitignore", "README.md", "keep.py", binaryName, exactName,
+      ].sort())
+    } finally {
+      store!.dispose()
+    }
+  })
+
+  test("snapshots tracked file deletions from the worktree", async () => {
+    const store = await createSnapshotStore(wt.worktree)
+    expect(store).not.toBeNull()
+    try {
+      const before = await store!.snapshot()
+      unlinkSync(join(wt.worktree, "keep.py"))
+      const after = await store!.snapshot()
+      expect((await store!.diff(before, after, 10_000))?.files).toEqual(["keep.py"])
+    } finally {
+      store!.dispose()
+    }
+  })
+
   test("restore recreates original symlink entries", async () => {
     writeFileSync(join(wt.worktree, "target.py"), "target\n")
     symlinkSync("target.py", join(wt.worktree, "source.py"))

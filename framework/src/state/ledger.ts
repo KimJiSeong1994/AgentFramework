@@ -273,7 +273,7 @@ export function openIssues(report: string | undefined): string | undefined {
   const m = /^[ \t]*Open issues:[ \t]*(\S.*)$/im.exec(report) ?? /^[ \t]*Open issues:[ \t]*\n[ \t]*[-*][ \t]*(.+)$/im.exec(report)
   if (!m) return undefined
   const v = m[1]!.trim().replace(/^[-*][ \t]*/, "")
-  if (/^(none|n\/a|no|-|nothing)\.?$/i.test(v)) return undefined
+  if (!v || /^(none|n\/a|no|-|nothing)\.?$/i.test(v) || /^<\s*(?:none|n\/a|no|-|nothing)\.?\s*>$/i.test(v)) return undefined
   return oneLine(v, 200)
 }
 

@@ -83,6 +83,7 @@ type Active = {
   discard?: boolean
   workflowID?: string
   workflowCancellationObserved?: boolean
+  abortWork?: Promise<void>
   child?: { id: string; handle: ExecutionHandle; claim: ExecutionClaim }
   preparingExecutionID?: string
   cancelWaiter?: () => void
@@ -331,14 +332,18 @@ export function createQueue(deps: ExecutionRuntime): Queue {
         }
         return { taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: true, abortReason: entry.reason ?? `queue error: ${msg}` } as QueueRun
       })
-      .finally(() => {
-        if (workflowCancelTimer) clearInterval(workflowCancelTimer)
-        active.delete(sessionID)
-        if (entry.claim && !entry.unresolved) {
-          try { deps.runs.release(entry.claim) }
-          catch (error) { deps.log("queue claim release failed", { sessionID, error: String(error) }) }
+      .finally(async () => {
+        try {
+          if (entry.abortWork) await entry.abortWork
+        } finally {
+          if (workflowCancelTimer) clearInterval(workflowCancelTimer)
+          active.delete(sessionID)
+          if (entry.claim && !entry.unresolved) {
+            try { deps.runs.release(entry.claim) }
+            catch (error) { deps.log("queue claim release failed", { sessionID, error: String(error) }) }
+          }
+          releaseActivity()
         }
-        releaseActivity()
       })
     return entry.promise
   }
@@ -349,38 +354,43 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     entry.aborted = true
     entry.reason = reason
     if (opts.discard) entry.discard = true
-    if (entry.verify) {
-      const current = entry.verify
-      const deadlineAt = Date.now() + 2000
-      deps.runs.recordCancel(current.claim, current.id, { requestedAt: Date.now() })
-      try {
-        const cancellation = await Promise.race([
-          current.handle.requestCancel(reason, deadlineAt),
-          new Promise<null>(resolve => setTimeout(() => resolve(null), 2000)),
-        ])
-        if (cancellation?.acknowledged) deps.runs.recordCancel(current.claim, current.id, { requestedAt: Date.now(), acknowledgedAt: Date.now() })
-        const outcome = cancellation?.outcome ?? await Promise.race([
-          current.run ?? Promise.resolve(null),
-          new Promise<null>(resolve => setTimeout(() => resolve(null), Math.max(0, deadlineAt - Date.now()))),
-        ])
-        if (outcome) current.cancelled = outcome
-        if (!outcome) {
-          deps.runs.fence(current.claim, current.id, "verifier cancellation has no terminal result")
+    if (entry.abortWork) return entry.abortWork
+    const work = (async () => {
+      if (entry.verify) {
+        const current = entry.verify
+        const deadlineAt = Date.now() + 2000
+        deps.runs.recordCancel(current.claim, current.id, { requestedAt: Date.now() })
+        try {
+          const cancellation = await Promise.race([
+            current.handle.requestCancel(reason, deadlineAt),
+            new Promise<null>(resolve => setTimeout(() => resolve(null), 2000)),
+          ])
+          if (cancellation?.acknowledged) deps.runs.recordCancel(current.claim, current.id, { requestedAt: Date.now(), acknowledgedAt: Date.now() })
+          const outcome = cancellation?.outcome ?? await Promise.race([
+            current.run ?? Promise.resolve(null),
+            new Promise<null>(resolve => setTimeout(() => resolve(null), Math.max(0, deadlineAt - Date.now()))),
+          ])
+          if (outcome) current.cancelled = outcome
+          if (!outcome) {
+            deps.runs.fence(current.claim, current.id, "verifier cancellation has no terminal result")
+            entry.unresolved = true
+          }
+        } catch (error) {
+          deps.runs.fence(current.claim, current.id, "verifier cancellation failed")
           entry.unresolved = true
-        }
-      } catch (error) {
-        deps.runs.fence(current.claim, current.id, "verifier cancellation failed")
-        entry.unresolved = true
-        deps.log("verifier abort failed", { executionID: current.id, error: String(error) })
-      } finally { entry.cancelWaiter?.() }
-    }
-    if (entry.child) {
-      try { await cancelChild(deps, entry.child, reason) }
-      finally { entry.cancelWaiter?.() }
-    } else {
-      if (entry.claim && entry.preparingExecutionID) deps.runs.recordCancel(entry.claim, entry.preparingExecutionID, { requestedAt: Date.now() })
-      entry.cancelWaiter?.()
-    }
+          deps.log("verifier abort failed", { executionID: current.id, error: String(error) })
+        } finally { entry.cancelWaiter?.() }
+      }
+      if (entry.child) {
+        try { await cancelChild(deps, entry.child, reason) }
+        finally { entry.cancelWaiter?.() }
+      } else {
+        if (entry.claim && entry.preparingExecutionID) deps.runs.recordCancel(entry.claim, entry.preparingExecutionID, { requestedAt: Date.now() })
+        entry.cancelWaiter?.()
+      }
+    })()
+    entry.abortWork = work
+    return work
   }
 
   function observeWorkflowCancellation(sessionID: string, entry: Active): void {

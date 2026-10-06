@@ -33,6 +33,8 @@ function fixture(patch: Partial<LcaConfig> = {}) {
   const events: string[] = []
   const replies = new Map<string, Reply>()
   let prepareWait: (() => Promise<void>) | undefined
+  let requestCancelWait: (() => Promise<void>) | undefined
+  let reconciliation: "settled" | "unknown" = "settled"
   let cancellation: "terminal" | "ack-only" = "terminal"
   let seq = 0
   const runtime: ExecutionRuntime = {
@@ -61,11 +63,13 @@ function fixture(patch: Partial<LcaConfig> = {}) {
             return outcome
           },
           async requestCancel() {
+            if (requestCancelWait) await requestCancelWait()
             stopped = true
             if (cancellation === "terminal") settled = true
             return { requested: true, acknowledged: true, terminal: false, quiescent: false }
           },
           async reconcile(): Promise<ExecutionReconciliation> {
+            if (reconciliation === "unknown") return { outcome: "unknown", quiescent: false, evidence: "fixture cannot prove execution quiescence" }
             return settled ? { outcome: "terminal", quiescent: true, evidence: "fixture execution settled" }
               : { outcome: "unknown", quiescent: false, evidence: "fixture execution still pending" }
           },
@@ -74,7 +78,9 @@ function fixture(patch: Partial<LcaConfig> = {}) {
     },
   }
   return { runtime, requests, events, replies, setCancellation: (value: "terminal" | "ack-only") => { cancellation = value },
-    setPrepareWait: (wait: () => Promise<void>) => { prepareWait = wait } }
+    setPrepareWait: (wait: () => Promise<void>) => { prepareWait = wait },
+    setRequestCancelWait: (wait: () => Promise<void>) => { requestCancelWait = wait },
+    setReconciliation: (value: "settled" | "unknown") => { reconciliation = value } }
 }
 
 describe("neutral execution queue", () => {
@@ -610,6 +616,57 @@ describe("neutral execution queue", () => {
     // The deadline is configured by the runtime, not a fake terminal response from the host.
     expect(await run).toMatchObject({ aborted: true })
   })
+
+  for (const reconciliation of ["settled", "unknown"] as const) {
+    test(`run retains its claim until delayed cancellation bookkeeping finishes (${reconciliation})`, async () => {
+      const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+      if (reconciliation === "unknown") f.setReconciliation("unknown")
+      let workerStarted = false
+      let releaseWorker!: (outcome: ExecutionOutcome) => void
+      f.replies.set("worker", () => {
+        workerStarted = true
+        return new Promise<ExecutionOutcome>(resolve => { releaseWorker = resolve })
+      })
+      let cancellationStarted!: () => void
+      const cancellationRequestStarted = new Promise<void>(resolve => { cancellationStarted = resolve })
+      let releaseCancellation!: () => void
+      const cancellationAck = new Promise<void>(resolve => { releaseCancellation = resolve })
+      f.setRequestCancelWait(async () => {
+        cancellationStarted()
+        await cancellationAck
+      })
+      const q = createQueue(f.runtime)
+      q.add(S, [{ title: "delayed cancellation" }])
+      let runSettled = false
+      const run = q.run(S).then(result => { runSettled = true; return result }, error => {
+        runSettled = true
+        throw error
+      })
+      await waitFor(() => workerStarted)
+      const abort = q.abort(S, "delayed stop")
+      await cancellationRequestStarted
+      releaseWorker({ status: "cancelled", text: "cancelled" })
+      await waitFor(() => readLedger(wt.worktree, S).tasks[0]?.status === "cancelled")
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
+      expect(runSettled).toBe(false)
+      expect(q.isRunning(S)).toBe(true)
+      expect(f.runtime.runs.status().claim).toBeDefined()
+
+      releaseCancellation()
+      await expect(abort).resolves.toBeUndefined()
+      expect(await run).toMatchObject({ aborted: true, cancelled: reconciliation === "settled" ? 1 : 0 })
+      const state = f.runtime.runs.status()
+      expect(f.events).not.toContain("child abort failed")
+      expect(f.events).not.toContain("queue claim release failed")
+      if (reconciliation === "settled") {
+        expect(state.claim).toBeUndefined()
+        expect(state.executions[0]?.fence).toBeUndefined()
+      } else {
+        expect(state.claim).toBeDefined()
+        expect(state.executions[0]?.fence).toBeDefined()
+      }
+    })
+  }
 
   test("external stop while session creation hangs returns and fences without dispatching work", async () => {
     const f = fixture()
