@@ -4,7 +4,8 @@
 // turn, then chat.message does the §5.2/§5.3/§5.5 state work and rewrites the command's own text in place, the
 // lca_flow tool runs the review inline, and tool.execute.after settles on delegate return.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync } from "node:fs"
+import { mkdirSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import {
   APPROVE_COMMAND, APPROVE_TEMPLATE, CANCEL_COMMAND, CANCEL_TEMPLATE, PLAN_COMMAND, PLAN_TEMPLATE,
   REJECT_COMMAND, REJECT_TEMPLATE_PREFIX, REJECT_TEMPLATE_SUFFIX, createCommandHook,
@@ -14,13 +15,14 @@ import { createToolAfterHook } from "../src/hooks/tool-after.ts"
 import { createLcaFlowTool } from "../src/tools/lca-flow.ts"
 import { createIdleLoop } from "../src/loop/idle.ts"
 import { repairOnLoad } from "../src/flow/runtime.ts"
+import { createDelegateTool } from "../src/tools/delegate.ts"
 import { readEvents, readWorkflow, writeWorkflow, newWorkflow, planJsonPath, renderArtifact, type Workflow } from "../src/flow/state.ts"
 import { currentOwner, INSTANCE_ID } from "../src/flow/owner.ts"
 import { canonicalPlanSha, planMdPath, renderPlanMd, type Plan } from "../src/flow/plan.ts"
 import { readLedger, tasksForWorkflow, writeLedger, addTasks } from "../src/state/ledger.ts"
 import { sessionDir, writeJsonAtomic } from "../src/state/store.ts"
 import { getQueue } from "../src/orchestration/queue.ts"
-import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
+import { fakeClient, makeDeps, tempGitWorktree, tempWorktree, type FakeClient } from "./guards-helpers.ts"
 
 const S = "ses_main"
 const OTHER = "ses_other"
@@ -38,9 +40,9 @@ function validPlanArgs() {
   return {
     goal: "fix the bug",
     steps: [
-      { title: "one", files: ["src/a.ts"], detail: "d", verify: "bun test test/a.test.ts" },
-      { title: "two", files: ["src/b.ts"], detail: "d", verify: "bun test test/b.test.ts" },
-      { title: "three", files: ["src/c.ts"], detail: "d", verify: "bun test test/c.test.ts" },
+      { title: "one", files: ["src/a.ts"], detail: "d", verify: "sh verify-a.test.sh" },
+      { title: "two", files: ["src/b.ts"], detail: "d", verify: "sh verify-b.test.sh" },
+      { title: "three", files: ["src/c.ts"], detail: "d", verify: "sh verify-c.test.sh" },
     ],
     risks: ["might miss an edge case"],
   }
@@ -66,6 +68,13 @@ function eventTypes(worktree: string, wfId: string): string[] {
 
 describe("1) /plan -> review (ITERATE then OKAY) -> /approve -> tasks done -> delegate return settles -> done", () => {
   test("full happy path", async () => {
+    wt.cleanup()
+    wt = tempGitWorktree({
+      "verify-a.test.sh": "test -s src/a.ts",
+      "verify-b.test.sh": "test -s src/b.ts",
+      "verify-c.test.sh": "test -s src/c.ts",
+    })
+    mkdirSync(sessionDir(wt.worktree, S), { recursive: true })
     const deps = makeDeps(client, wt.worktree)
 
     const planText = await runCommand(deps, PLAN_COMMAND, "add a widget", PLAN_TEMPLATE)
@@ -100,10 +109,19 @@ describe("1) /plan -> review (ITERATE then OKAY) -> /approve -> tasks done -> de
     expect(tagged.length).toBe(3)
     expect(tagged.map((t) => t.title)).toEqual(validPlanArgs().steps.map((s) => s.title))
 
-    // mark the tagged tasks done directly in the ledger (stand-in for a completed delegate run), then let the
-    // delegate return path (tool.execute.after) settle the workflow
-    const ledger = readLedger(wt.worktree, S)
-    writeLedger(wt.worktree, { ...ledger, tasks: ledger.tasks.map((t) => (t.wf?.id === wf.id ? { ...t, status: "done" as const } : t)) })
+    client.replies.worker = (_request, nth) => ({
+      text: "Implemented the requested change.",
+      run: async () => {
+        const file = ["src/a.ts", "src/b.ts", "src/c.ts"][nth - 1]!
+        mkdirSync(join(wt.worktree, file.slice(0, file.lastIndexOf("/"))), { recursive: true })
+        writeFileSync(join(wt.worktree, file), `export const ${String.fromCharCode(96 + nth)} = ${nth};\n`)
+      },
+    })
+    client.replies.reviewer = { text: "The diff and verification are acceptable.\nACCEPT" }
+    const delegated = await createDelegateTool(deps).execute({ resume: true }, toolCtx() as any) as { title: string }
+    expect(delegated.title).toBe("delegate: 3/3 done")
+
+    // Settle through the real delegate return hook, not a synthetic ledger mutation.
     const afterHook = createToolAfterHook(deps)
     await afterHook({ tool: "delegate", sessionID: S, callID: "c1", args: {} } as any, { title: "delegate", output: "ok", metadata: {} } as any)
 
