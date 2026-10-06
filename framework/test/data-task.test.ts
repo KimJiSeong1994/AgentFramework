@@ -14,6 +14,7 @@ import { readLedger, summarizeLedger } from "../src/state/ledger.ts"
 import { ANSWER_JUDGE_PROMPT, DATA_VERIFIER_PROMPT, MAIN_RULE_DATA, ONTOLOGY_EVOLVER_PROMPT, mainPrompt } from "../src/agents/prompts.ts"
 import { MODE_INSTRUCTIONS, MODE_INSTRUCTIONS_NO_DELEGATE } from "../src/modes/instructions.ts"
 import { createConfigHook } from "../src/hooks/config.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { estimateTokens, estimateToolSchemaTokens } from "../src/tokens.ts"
 import { fakeClient, makeDeps, tempGitWorktree, type FakeClient } from "./guards-helpers.ts"
 import { fakeDeps } from "./helpers.ts"
@@ -106,7 +107,7 @@ describe("check suites on the sqlite fixture", () => {
 describe("queue: data tasks", () => {
   test("analyst child -> SQL re-executed + default checks -> verifier ACCEPT -> done with answer; no snapshot, no files", async () => {
     const deps = makeDeps(client, wt.worktree, dataCfg())
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     client.replies["data-analyst"] = { texts: ["calling tools…", answer(GOOD_SQL)] }
     client.replies["data-verifier"] = { text: "1. yes\n2. yes\n3. yes\nACCEPT" }
     q.add(S, [{ title: "경기 농장 수 알려줘", kind: "data" }])
@@ -134,7 +135,7 @@ describe("queue: data tasks", () => {
 
   test("broken SQL fails the checks, the analyst is re-run once with the reason, the fixed answer passes", async () => {
     const deps = makeDeps(client, wt.worktree, dataCfg())
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     client.replies["data-analyst"] = (_o, nth) => (nth === 1 ? { text: answer("SELECT count(*) FROM tb_place WHERE sido = '경기'") } : { text: answer(GOOD_SQL) })
     client.replies["data-verifier"] = { text: "ACCEPT" }
     q.add(S, [{ title: "경기 농장 수", kind: "data" }])
@@ -151,7 +152,7 @@ describe("queue: data tasks", () => {
 
   test("no SQL block: retried, then failed; ANSWER without SQL = blocked (no retry); a named suite failure is reported", async () => {
     const deps = makeDeps(client, wt.worktree, dataCfg())
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     writeSuite("strict", [{ name: "exactly 1", expect: { value: 1 } }])
     let calls = 0
     client.replies["data-analyst"] = (o) => {
@@ -184,7 +185,7 @@ describe("queue: data tasks", () => {
 
   test("verifier REJECT retries once; a second REJECT on a checked answer is advisory; review_strict fails it", async () => {
     const deps = makeDeps(client, wt.worktree, dataCfg())
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     client.replies["data-analyst"] = { text: answer(GOOD_SQL) }
     client.replies["data-verifier"] = { text: "1. no: 경기 vs 경기도\n2. yes\n3. yes\nREJECT: sido filter" }
     q.add(S, [{ title: "q", kind: "data" }])
@@ -196,14 +197,34 @@ describe("queue: data tasks", () => {
 
     const strict = makeDeps(fakeClient({ promptAsync: true }), wt.worktree, { ...dataCfg(), delegate: { review_strict: true } as any })
     ;(strict.client as any).session = client.session
-    const q2 = createQueue(strict)
+    const q2 = createQueue(getOpenCodeRuntime(strict))
     q2.add("ses_strict", [{ title: "q2", kind: "data" }])
     expect(await q2.run("ses_strict")).toMatchObject({ done: 0, failed: 1 })
   })
 
+  for (const reviewStrict of [false, true]) {
+    test(`malformed data-verifier verdict with passing checks (review_strict=${reviewStrict})`, async () => {
+      client = fakeClient({ promptAsync: true })
+      const deps = makeDeps(client, wt.worktree, { ...dataCfg(), delegate: { review_strict: reviewStrict, max_attempts: 2 } as any })
+      const q = createQueue(getOpenCodeRuntime(deps))
+      client.replies["data-analyst"] = { text: answer(GOOD_SQL) }
+      client.replies["data-verifier"] = { text: "The answer looks good to me." }
+      q.add(S, [{ title: "q", kind: "data" }])
+      const run = await q.run(S)
+      expect(run).toMatchObject(reviewStrict ? { done: 0, failed: 1 } : { done: 1, failed: 0 })
+      const task = readLedger(wt.worktree, S).tasks[0]!
+      expect(task.verify_result?.ok).toBe(true)
+      expect(task.review?.verdict).toBe("error")
+      expect(task.attempts).toBe(reviewStrict ? 2 : 1)
+      if (reviewStrict) expect(task.error).toContain("verifier gave no verdict")
+      expect(prompts("data-analyst")).toHaveLength(reviewStrict ? 2 : 1)
+      expect(prompts("data-verifier")).toHaveLength(reviewStrict ? 2 : 1)
+    })
+  }
+
   test("data and code tasks mix in one run; the code task keeps its snapshot/review path", async () => {
     const deps = makeDeps(client, wt.worktree, { ...dataCfg(), delegate: { review: false } as any })
-    const q = createQueue(deps)
+    const q = createQueue(getOpenCodeRuntime(deps))
     client.replies["data-analyst"] = { text: answer(GOOD_SQL) }
     client.replies.worker = { text: "Files changed: a.py\nVerification: ok\nOpen issues: none", run: () => writeFileSync(join(wt.worktree, "a.py"), "X = 1\n") }
     q.add(S, [

@@ -62,14 +62,17 @@ describe("prompt content", () => {
     expect(MAIN_PROMPT).not.toMatch(/\btask tool\b|\bsubagent\b/i)
   })
 
-  test("worker: one task, no scope creep, run tests, <=10 line report, no subagents", () => {
+  test("worker: one task, no scope creep, framework-owned verification, <=10 line report, no subagents", () => {
     expect(WORKER_PROMPT).toMatch(/exactly one task/i)
     expect(WORKER_PROMPT).toMatch(/No extra refactors/i)
-    expect(WORKER_PROMPT).toMatch(/Run the verify command given in the task once/i)
-    expect(WORKER_PROMPT).toMatch(/Do not run other test suites/i)
+    expect(WORKER_PROMPT).toMatch(/Do not invoke Bash or run tests or verification commands/i)
+    expect(WORKER_PROMPT).toMatch(/framework runs the task's declared verify after your edits/i)
+    expect(WORKER_PROMPT).toMatch(/report Verification: pending and never claim it passed/i)
+    expect(WORKER_PROMPT).not.toMatch(/Run the verify command given in the task/i)
     expect(WORKER_PROMPT).toMatch(/at most 10 lines/i)
     expect(WORKER_PROMPT).toMatch(/Files changed:/)
     expect(WORKER_PROMPT).toMatch(/Verification:/)
+    expect(WORKER_PROMPT).toMatch(/Verification: pending \(the framework runs the declared verify\)/)
     expect(WORKER_PROMPT).toMatch(/Open issues:/)
     expect(WORKER_PROMPT).toMatch(/Never spawn subagents/i)
     expect(WORKER_PROMPT).toMatch(/Never repeat the same call/i)

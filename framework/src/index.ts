@@ -19,6 +19,7 @@ import { createLcaFlowTool } from "./tools/lca-flow.ts"
 import { flowOn } from "./flow/status.ts"
 import { repairOnLoad } from "./flow/runtime.ts"
 import { getQueue } from "./orchestration/queue.ts"
+import { getOpenCodeRuntime } from "./hosts/opencode-runtime.ts"
 import { initializeSkillObservation } from "./telemetry/skill-observer.ts"
 
 export const LcaPlugin: Plugin = async (input) => {
@@ -31,7 +32,8 @@ export const LcaPlugin: Plugin = async (input) => {
 
   // repairOnLoad is authority-free (ARCH-14) and must never break plugin startup.
   try {
-    repairOnLoad(deps, (sessionID) => getQueue(deps).isRunning(sessionID))
+    const runtime = getOpenCodeRuntime(deps)
+    repairOnLoad(runtime, (sessionID) => getQueue(runtime).isRunning(sessionID))
   } catch (e) {
     log("repairOnLoad failed", { error: (e as Error).message })
   }

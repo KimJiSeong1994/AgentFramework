@@ -4,7 +4,7 @@
 import { EMPTY_MODE, readModeState, sessionDir, writeModeState } from "../state/store.ts"
 import { approvePlanTasks, cancelOpen, readLedger, tasksForWorkflow, type LedgerTask, type TaskInput, type Ledger, writeLedger, OPEN_STATUSES } from "../state/ledger.ts"
 import { existsSync } from "node:fs"
-import type { HookDeps } from "../hooks/types.ts"
+import type { FlowRuntime } from "../hosts/types.ts"
 import { transition, type FlowEvent, type TransitionCtx, type Limits, DEFAULT_LIMITS, TERMINAL } from "./machine.ts"
 import {
   activeWorkflow, appendEvents, coreOf, newWorkflow, readWorkflow, rotate, withCore, writeWorkflow,
@@ -14,16 +14,16 @@ import { authorize, currentOwner, defaultLiveness, ownerLive, startHeartbeat, ta
 
 export type FlowResult = { ok: true; wf: Workflow; toast?: string; note?: string } | { ok: false; text: string; wf?: Workflow | null }
 
-export function flowLimits(deps: HookDeps): Limits {
+export function flowLimits(deps: FlowRuntime): Limits {
   const f = deps.config.flow
   return { max_code_invalid: f.max_code_invalid, max_review_iterations: f.max_review_iterations, nudge_max: f.nudge_max }
 }
 
-export function sessionExists(deps: HookDeps): (id: string) => boolean {
+export function sessionExists(deps: FlowRuntime): (id: string) => boolean {
   return (id: string) => existsSync(sessionDir(deps.worktree, id))
 }
 
-export function liveness(deps: HookDeps, now = Date.now()): LivenessCtx {
+export function liveness(deps: FlowRuntime, now = Date.now()): LivenessCtx {
   return defaultLiveness(sessionExists(deps), now)
 }
 
@@ -42,7 +42,7 @@ let beat: Heartbeat | null = null
 let beatWorktree: string | null = null
 
 /** Keep the owner heartbeat of this instance's workflow fresh; stops by itself when the workflow ends or moves. */
-export function ensureHeartbeat(deps: HookDeps): void {
+export function ensureHeartbeat(deps: FlowRuntime): void {
   if (beat && beatWorktree === deps.worktree) return
   beat?.stop()
   beatWorktree = deps.worktree
@@ -68,7 +68,7 @@ export function stopHeartbeat(): void {
 // ---------------------------------------------------------------- transitions
 /** Apply one machine event to `wf` and persist it (workflow first, then events). */
 export function applyEvent(
-  deps: HookDeps,
+  deps: FlowRuntime,
   wf: Workflow,
   event: FlowEvent,
   actor: EventActor,
@@ -124,13 +124,13 @@ function phaseLabel(wf: Workflow): string {
   return wf.stuckCause ? `${wf.phase}(${wf.stuckCause})` : wf.phase
 }
 
-function event(deps: HookDeps, wf: Workflow, type: string, actor: EventActor, data?: Record<string, unknown>): Workflow {
+function event(deps: FlowRuntime, wf: Workflow, type: string, actor: EventActor, data?: Record<string, unknown>): Workflow {
   const seq = appendEvents(deps.worktree, [{ wf: wf.id, type, actor, data }])
   return writeWorkflow(deps.worktree, { ...wf, lastSeq: seq })
 }
 
 /** §5.3 owning-session takeover: owner rewritten, heartbeat started, owner_takeover emitted; phase unchanged. */
-export function applyTakeover(deps: HookDeps, wf: Workflow, now = Date.now()): Workflow {
+export function applyTakeover(deps: FlowRuntime, wf: Workflow, now = Date.now()): Workflow {
   const prev = wf.owner
   const next = event(deps, writeWorkflow(deps.worktree, takeOver(wf, now), now), "owner_takeover", "code", {
     fromInstance: prev.instance, fromPid: prev.pid,
@@ -144,7 +144,7 @@ export function applyTakeover(deps: HookDeps, wf: Workflow, now = Date.now()): W
  * `{ wf: null }` when there is no active workflow. T20 (foreign session, dead owner) is applied here for /plan.
  */
 export function resolveAuthority(
-  deps: HookDeps,
+  deps: FlowRuntime,
   cmd: Command,
   sessionID: string,
   now = Date.now(),
@@ -165,12 +165,12 @@ export function resolveAuthority(
   }
 }
 
-function liveOwner(deps: HookDeps, wf: Workflow, now: number): boolean {
+function liveOwner(deps: FlowRuntime, wf: Workflow, now: number): boolean {
   return authorize("status", wf.sessionID, wf, liveness(deps, now)).kind === "allow"
 }
 
 /** Cancel open tasks tagged with this workflow when no queue runs (T18/T19/T20 side effect). */
-export function cancelTaggedIdle(deps: HookDeps, wf: Workflow, reason = `plan workflow ${wf.id} cancelled`): string[] {
+export function cancelTaggedIdle(deps: FlowRuntime, wf: Workflow, reason = `plan workflow ${wf.id} cancelled`): string[] {
   const ledger = readLedger(deps.worktree, wf.sessionID)
   const ids = new Set(tasksForWorkflow(ledger, wf.id).filter((t) => OPEN_STATUSES.has(t.status)).map((t) => t.id))
   if (ids.size === 0) return []
@@ -184,7 +184,7 @@ export function cancelTaggedIdle(deps: HookDeps, wf: Workflow, reason = `plan wo
  * T1: start a plan workflow for `sessionID`. The caller has resolved authority first (no active workflow, or T20
  * applied). A stuck workflow of the same session is cancelled first (T18 then T1). Rotation archives a terminal one.
  */
-export function startWorkflow(deps: HookDeps, sessionID: string, entry: Workflow["entry"], request: string, actor: EventActor, now = Date.now()): FlowResult {
+export function startWorkflow(deps: FlowRuntime, sessionID: string, entry: Workflow["entry"], request: string, actor: EventActor, now = Date.now()): FlowResult {
   const cur = activeWorkflow(deps.worktree)
   if (cur) {
     if (cur.sessionID === sessionID && cur.phase === "stuck") {
@@ -215,7 +215,7 @@ export function startWorkflow(deps: HookDeps, sessionID: string, entry: Workflow
  * marked offered) — skipped when tasks for this planSha already exist; (2) workflow -> executing; (3) events.
  */
 export function approveWorkflow(
-  deps: HookDeps,
+  deps: FlowRuntime,
   wf: Workflow,
   inputs: TaskInput[],
   opts: { queueRunning: boolean; planShaOk: boolean; mdShaOk: boolean },
@@ -245,7 +245,7 @@ export function approveWorkflow(
  * Settle (T15/T16 and the T18 pendingCancel completion) from the ledger tags. Runs at delegate return, session.idle
  * and plugin load. `queueRunning` keeps a pending cancel open while the queue still winds down.
  */
-export function settle(deps: HookDeps, wf: Workflow, queueRunning: boolean, now = Date.now()): FlowResult | null {
+export function settle(deps: FlowRuntime, wf: Workflow, queueRunning: boolean, now = Date.now()): FlowResult | null {
   if (wf.phase !== "executing" && !(wf.pendingCancel && !TERMINAL.has(wf.phase))) return null
   const ledger = readLedger(deps.worktree, wf.sessionID)
   const tasks = tasksForWorkflow(ledger, wf.id)
@@ -264,7 +264,7 @@ export function settle(deps: HookDeps, wf: Workflow, queueRunning: boolean, now 
 }
 
 /** T18 cancel mirroring /stop. `abort` is called when the queue runs (the cancel completes at settle). */
-export function cancelWorkflow(deps: HookDeps, wf: Workflow, queueRunning: boolean, abort: () => void, actor: EventActor = "user_command"): FlowResult {
+export function cancelWorkflow(deps: FlowRuntime, wf: Workflow, queueRunning: boolean, abort: () => void, actor: EventActor = "user_command"): FlowResult {
   const r = applyEvent(deps, wf, "cancel", actor, { queueRunning })
   if (!r.ok) return r
   if (queueRunning) abort()
@@ -273,7 +273,7 @@ export function cancelWorkflow(deps: HookDeps, wf: Workflow, queueRunning: boole
 }
 
 /** T19: the owning session was deleted (runs before the session dir is removed). */
-export function onSessionDeleted(deps: HookDeps, sessionID: string, queueRunning: boolean, abort: () => void): FlowResult | null {
+export function onSessionDeleted(deps: FlowRuntime, sessionID: string, queueRunning: boolean, abort: () => void): FlowResult | null {
   const wf = activeWorkflow(deps.worktree)
   if (!wf || wf.sessionID !== sessionID) return null
   if (queueRunning) abort()
@@ -286,7 +286,7 @@ export function onSessionDeleted(deps: HookDeps, sessionID: string, queueRunning
  * Plugin-load repair, authority-free only (§5.2/§5.3, ARCH-14): T8 for an orphaned `reviewing`, finishing an
  * interrupted approve (tagged tasks exist but phase still pending_approval), settle. Never T20, never takeover.
  */
-export function repairOnLoad(deps: HookDeps, isQueueRunning: (sessionID: string) => boolean = () => false): FlowResult | null {
+export function repairOnLoad(deps: FlowRuntime, isQueueRunning: (sessionID: string) => boolean = () => false): FlowResult | null {
   const wf = activeWorkflow(deps.worktree)
   if (!wf) return null
   // Another live instance owns it (a second opencode process on the same repo): its review or queue may be in

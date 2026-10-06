@@ -14,6 +14,7 @@ import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { createToolAfterHook } from "../src/hooks/tool-after.ts"
 import { createLcaFlowTool } from "../src/tools/lca-flow.ts"
 import { createIdleLoop } from "../src/loop/idle.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { repairOnLoad } from "../src/flow/runtime.ts"
 import { createDelegateTool } from "../src/tools/delegate.ts"
 import { readEvents, readWorkflow, writeWorkflow, newWorkflow, planJsonPath, renderArtifact, type Workflow } from "../src/flow/state.ts"
@@ -172,13 +173,16 @@ describe("2) /reject from pending_approval -> planning, counters.user_rejections
 
 describe("3) /cancel in executing while the queue runs -> pendingCancel, settles to cancelled once the queue stops", () => {
   test("cancel then settle", async () => {
+    wt.cleanup()
+    wt = tempGitWorktree()
+    mkdirSync(sessionDir(wt.worktree, S), { recursive: true })
     const wf = { ...newWorkflow(S, currentOwner(), "command", "do the thing"), phase: "executing" as const, taskIds: ["t1"] }
     writeWorkflow(wt.worktree, wf)
     const { ledger } = addTasks(readLedger(wt.worktree, S), [{ title: "tagged task" }], Date.now(), { id: wf.id, planSha: "s" })
     writeLedger(wt.worktree, ledger)
 
     const deps = makeDeps(client, wt.worktree)
-    const q = getQueue(deps)
+    const q = getQueue(getOpenCodeRuntime(deps))
     // keep the queue "running" with an unrelated blocker task until abort() unblocks it
     client.replies.worker = { text: "never", run: () => new Promise<void>(() => {}) }
     q.add(S, [{ title: "blocker" }])
@@ -276,7 +280,7 @@ describe("6) interrupted approve (tagged tasks exist, phase still pending_approv
     writeLedger(wt.worktree, ledger)
 
     const deps = makeDeps(client, wt.worktree)
-    const r = repairOnLoad(deps)
+    const r = repairOnLoad(getOpenCodeRuntime(deps))
     expect(r?.ok).toBe(true)
     const after = readWorkflow(wt.worktree)!
     expect(after.phase).toBe("executing")

@@ -9,6 +9,7 @@ import { verifyCommandProblem } from "../config.ts"
 import { suiteProblem } from "../data/check.ts"
 import { taskTextProblem } from "../orchestration/gaming.ts"
 import { getQueue } from "../orchestration/queue.ts"
+import { getOpenCodeRuntime } from "../hosts/opencode-runtime.ts"
 import { openTasks, protectedFiles, readLedger, summarizeLedger } from "../state/ledger.ts"
 import { clearAbort, readAbort } from "../state/store.ts"
 import { MAIN_AGENT } from "../hooks/tool-before.ts"
@@ -40,7 +41,7 @@ export const delegateArgs = {
 }
 
 export function createDelegateTool(deps: HookDeps): ToolDefinition {
-  const queue = getQueue(deps)
+  const queue = getQueue(getOpenCodeRuntime(deps))
   return tool({
     description: DELEGATE_DESCRIPTION,
     args: delegateArgs,

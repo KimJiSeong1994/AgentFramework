@@ -15,6 +15,7 @@ import { getGuards } from "../guards/registry.ts"
 import { fetchTodos, incompleteTodos, todoFingerprint } from "../guards/todos.ts"
 import { openTasks, readLedger, writeLedger } from "../state/ledger.ts"
 import { getQueue } from "../orchestration/queue.ts"
+import { getOpenCodeRuntime } from "../hosts/opencode-runtime.ts"
 import { activeWorkflow, type Workflow } from "../flow/state.ts"
 import { flowOn } from "../flow/status.ts"
 import { applyEvent, settle } from "../flow/runtime.ts"
@@ -75,7 +76,8 @@ async function lastAssistantAsks(deps: HookDeps, sessionID: string): Promise<boo
 
 export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number) => Promise<IdleOutcome> {
   const guards = getGuards(deps)
-  const queue = getQueue(deps)
+  const runtime = getOpenCodeRuntime(deps)
+  const queue = getQueue(runtime)
   const loopOn = enabled(deps.config, "loop.idle")
   /** T11 (executing resume) nudge sent at most once per distinct task-id set. */
   const executingNotified = new Map<string, string>()
@@ -90,7 +92,7 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
 
   /** §5.6 workflow branch, run first while the session owns a non-terminal workflow. Never falls through. */
   const runWorkflow = async (sessionID: string, wf: Workflow): Promise<IdleOutcome> => {
-    const settled = settle(deps, wf, queue.isRunning(sessionID))
+    const settled = settle(runtime, wf, queue.isRunning(sessionID))
     const current = settled?.ok ? settled.wf : wf
     if (!loopOn) return { action: "workflow", wfId: current.id }
 
@@ -108,14 +110,14 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
       const asking = await lastAssistantAsks(deps, sessionID)
       if (asking) return { action: "workflow", wfId: current.id }
       if (current.counters.nudges < deps.config.flow.nudge_max) {
-        const r = applyEvent(deps, current, "nudge", "code")
+        const r = applyEvent(runtime, current, "nudge", "code")
         if (r.ok) {
           await sendMessage(deps, sessionID, NUDGE_PROMPT)
           deps.log("workflow: nudge sent", { sessionID, wfId: current.id })
           return { action: "workflow", wfId: current.id, event: "nudge" }
         }
       } else {
-        const r = applyEvent(deps, current, "nudge_exhausted", "code")
+        const r = applyEvent(runtime, current, "nudge_exhausted", "code")
         if (r.ok) {
           await showToast(deps, r.toast ?? "no plan submitted")
           deps.log("workflow: stuck(no_submission)", { sessionID, wfId: current.id })

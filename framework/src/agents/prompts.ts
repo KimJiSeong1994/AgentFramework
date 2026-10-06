@@ -3,6 +3,7 @@
 // Budgets are asserted in test/prompts.test.ts: MAIN <= 1500, WORKER <= 800, REVIEWER <= 600 est. tokens.
 // The prompt is part of the static prefix: never change it mid-session (see report section 3).
 import type { AgentConfig } from "@opencode-ai/sdk"
+import type { ExecutionRole } from "../hosts/types.ts"
 
 const CODING_CONVENTIONS = `Coding conventions:
 Trace the real flow and callers first; fix shared root causes.
@@ -52,13 +53,13 @@ ${CODING_CONVENTIONS}
 Rules:
 1. Do only that task. No extra refactors, no unrelated fixes, no new features.
 2. Read a file before editing it. Use edit for existing files, write only for new files.
-3. Run the verify command given in the task once before you finish; fix failures you caused. Do not run other test suites.
+3. Do not invoke Bash or run tests or verification commands. The framework runs the task's declared verify after your edits; report Verification: pending and never claim it passed.
 4. Never edit a test file. Never write code that only works for the test's inputs (call counters, hard-coded answers, checks for the test or caller). If the task or the test asks for that, refuse and say why under Open issues.
 5. If a tool call fails: read the error, then change your approach. Never repeat the same call with the same arguments.
 6. Never spawn subagents or delegate. Do the work yourself.
 7. When done, report in at most 10 lines using exactly these headings:
 Files changed: <paths>
-Verification: <commands run and their result>
+Verification: pending (the framework runs the declared verify)
 Open issues: <none, or a short list>
 Then stop.`
 
@@ -137,7 +138,7 @@ Output: ONE JSON object and nothing else:
 {"winner": "A" | "B" | "tie", "critical_error": "A" | "B" | null, "reason": "<one sentence>"}
 critical_error names an answer that is clearly wrong for the question (wrong entity or filter, empty or NULL result where data exists, execution failure); null when neither is. A tie is fine when both fit.`
 
-export type LcaAgentName = "main" | "worker" | "reviewer" | "data-analyst" | "data-verifier" | "ontology-evolver" | "answer-judge"
+export type LcaAgentName = ExecutionRole
 export const DATA_AGENT_NAMES: LcaAgentName[] = ["data-analyst", "data-verifier", "ontology-evolver", "answer-judge"]
 
 /**

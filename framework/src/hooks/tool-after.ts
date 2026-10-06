@@ -12,34 +12,26 @@ import { activeWorkflow } from "../flow/state.ts"
 import { flowOn } from "../flow/status.ts"
 import { settle } from "../flow/runtime.ts"
 import { getQueue } from "../orchestration/queue.ts"
-
-/** Tools whose output is mostly paths; the worktree prefix is pure prefill cost for the model. */
-export const PATH_TOOLS: ReadonlySet<string> = new Set(["glob", "grep", "list", "read", "bash"])
-
-/** Replace absolute worktree/directory prefixes with relative paths. Longest prefix first. */
-export function relativizePaths(text: string, roots: string[]): string {
-  let out = text
-  const uniq = Array.from(new Set(roots.filter(Boolean).map((r) => r.replace(/\/+$/, "")))).sort((a, b) => b.length - a.length)
-  for (const root of uniq) {
-    out = out.split(root + "/").join("")
-  }
-  return out
-}
-
-/** Tools that returned normally but whose text still reads as a failure (e.g. tools that report errors as output). */
-export const ERROR_OUTPUT = /^\s*(Error\b|error:|✗|Failed\b)/
-
-export function isErrorOutput(output: string): boolean {
-  return ERROR_OUTPUT.test(output ?? "")
-}
+import { isErrorOutput, PATH_TOOLS, relativizePaths } from "../hosts/tool-policy.ts"
+import { getOpenCodeRuntime, policyForOpenCodeSession } from "../hosts/opencode-runtime.ts"
 
 export function createToolAfterHook(deps: HookDeps): NonNullable<Hooks["tool.execute.after"]> {
   const guards = getGuards(deps)
+  const runtime = getOpenCodeRuntime(deps)
   const repeatOn = enabled(deps.config, "guard.repeat")
   const trimOn = enabled(deps.config, "guard.trim")
   const recoverOn = enabled(deps.config, "guard.recover")
 
   return async (input, output) => {
+    const bound = policyForOpenCodeSession(deps, input.sessionID)
+    if (bound) {
+      const shaped = bound.toolResult({ type: "tool-result", sessionID: input.sessionID, callID: input.callID, toolID: input.callID, name: input.tool, result: output.output })
+      if (typeof shaped.error === "string") output.output = shaped.error
+      else if (typeof shaped.result === "string") output.output = shaped.result
+      const meta = output.metadata && typeof output.metadata === "object" ? output.metadata : {}
+      output.metadata = { ...meta, lca: { trimmed: shaped.trimmed ?? false, hinted: shaped.hinted ?? false } }
+      return
+    }
     const original = typeof output.output === "string" ? output.output : String(output.output ?? "")
     const ok = !isErrorOutput(original)
 
@@ -77,7 +69,7 @@ export function createToolAfterHook(deps: HookDeps): NonNullable<Hooks["tool.exe
       const wf = activeWorkflow(deps.worktree)
       if (wf && wf.sessionID === input.sessionID) {
         try {
-          settle(deps, wf, getQueue(deps).isRunning(input.sessionID))
+          settle(runtime, wf, getQueue(runtime).isRunning(input.sessionID))
         } catch (e) {
           deps.log("tool.execute.after: settle failed", { sessionID: input.sessionID, error: (e as Error).message })
         }

@@ -12,6 +12,7 @@ import { recordToolOutcome } from "../telemetry/outcomes.ts"
 import { onSessionDeleted } from "../flow/runtime.ts"
 import { flowOn } from "../flow/status.ts"
 import { observeSkillMessage, observeSkillPart, observeRelatedToolPart, observeSkillBoundary } from "../telemetry/skill-observer.ts"
+import { getOpenCodeRuntime, policyForOpenCodeSession } from "../hosts/opencode-runtime.ts"
 
 const MAX_TRACKED_MESSAGES = 200
 const MAX_TRACKED_CALLS = 200
@@ -22,7 +23,7 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
   const repeatOn = enabled(deps.config, "guard.repeat")
   const toolHistoryOn = enabled(deps.config, "tool.history")
   const idle = createIdleLoop(deps)
-  const queue = getQueue(deps)
+  const queue = getQueue(getOpenCodeRuntime(deps))
 
   /** messageID -> role, from message.updated (TextPart carries no role). */
   const roles = new Map<string, "user" | "assistant">()
@@ -112,22 +113,26 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
   }
 
   async function onText(sessionID: string, messageID: string, partID: string, text: string, delta: string | undefined) {
-    if (!repetitionOn) return
+    const bound = policyForOpenCodeSession(deps, sessionID)
+    if (!repetitionOn && !bound) return
     const role = roles.get(messageID)
     // Unknown role + no streaming delta: most likely a user part; never abort on pasted user text.
     if (role === "user" || (role === undefined && delta === undefined)) return
     if (abortedParts.has(partID)) return
-    const res = guards.repetition.feed(sessionID, partID, text)
-    if (!res.repeating) return
-    deps.log("repetition detected", { sessionID, partID, sample: res.sample })
-    if (!deps.config.guards.abort_on_repetition) return
+    const res = bound ? null : guards.repetition.feed(sessionID, partID, text)
+    const cancel = bound
+      ? bound.assistantText({ type: "text", sessionID, partID, text, final: false }).cancel
+      : res!.repeating && deps.config.guards.abort_on_repetition
+    if (res?.repeating) deps.log("repetition detected", { sessionID, partID, sample: res.sample })
+    if (!cancel) return
+    if (bound) deps.log("repetition detected", { sessionID, partID })
     abortedParts.add(partID)
     writeJsonAtomic(abortPath(deps.worktree, sessionID), {
       reason: "repetition",
       at: Date.now(),
       messageID,
       partID,
-      sample: res.sample,
+      ...(res ? { sample: res.sample } : {}),
       chars: text.length,
     })
     try {
@@ -142,7 +147,9 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
     if (failedCalls.has(callID)) return
     failedCalls.add(callID)
     while (failedCalls.size > MAX_TRACKED_CALLS) failedCalls.delete(failedCalls.values().next().value as string)
-    if (repeatOn) guards.repeat.recordResult(sessionID, callID, false, error)
+    const bound = policyForOpenCodeSession(deps, sessionID)
+    if (bound) bound.toolResult({ type: "tool-result", sessionID, callID, toolID: callID, name: "unknown", error })
+    else if (repeatOn) guards.repeat.recordResult(sessionID, callID, false, error)
     const state = readModeState(deps.worktree, sessionID)
     if (state.active) writeModeState(deps.worktree, sessionID, { ...state, failures: state.failures + 1 })
   }

@@ -2,10 +2,13 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdirSync, symlinkSync } from "node:fs"
 import { join } from "node:path"
 import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
-import { createToolAfterHook, isErrorOutput } from "../src/hooks/tool-after.ts"
+import { createToolAfterHook } from "../src/hooks/tool-after.ts"
+import { isErrorOutput, relativizePaths } from "../src/hosts/tool-policy.ts"
 import { createEventHook } from "../src/hooks/event.ts"
 import { writeJsonAtomic, sessionInfoPath, writeModeState, readModeState, EMPTY_MODE } from "../src/state/store.ts"
 import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
+import type { ExecutionRequest } from "../src/hosts/types.ts"
 
 const S = "ses_t"
 let wt: ReturnType<typeof tempWorktree>
@@ -26,6 +29,35 @@ const toolErrorEvent = (callID: string, error: string) => ({
 })
 
 describe("tool.execute.before", () => {
+  test("plugin recovers a reviewer policy from the durable execution reference", async () => {
+    const owner = makeDeps(client, wt.worktree)
+    const runs = getOpenCodeRuntime(owner).runs
+    const claim = runs.claim(S, "external-controller", process.pid)
+    runs.registerIntent(claim, { executionId: "external-review", ownerSession: S, taskId: "plan", attemptId: "attempt", generation: claim.generation, role: "reviewer", cwd: wt.worktree, policyID: getOpenCodeRuntime(owner).policy.resolve("reviewer").id, kind: "host", profile: "legacy-unowned" })
+    runs.bindVendorRef(claim, "external-review", JSON.stringify({ executionID: "external-review", vendorSessionID: "review-native" }))
+    const server = makeDeps(fakeClient(), wt.worktree)
+    const hook = createToolBeforeHook(server)
+    await expect(hook({ tool: "write", sessionID: "review-native", callID: "write-1" }, { args: { filePath: "x" } }))
+      .rejects.toThrow(/reviewer tool write is not read-only/)
+    expect(getOpenCodeRuntime(server).policy.snapshotForSession("review-native")?.role).toBe("reviewer")
+    runs.recordTerminal(claim, "external-review", { outcome: "completed", terminalAt: Date.now(), quiescentAt: Date.now() })
+    runs.release(claim)
+  })
+
+  test("remote plugin refuses a child when its fixed guard configuration differs from the controller", async () => {
+    const owner = makeDeps(client, wt.worktree)
+    const ownerRuntime = getOpenCodeRuntime(owner)
+    const runs = ownerRuntime.runs
+    const claim = runs.claim(S, "external-controller", process.pid)
+    runs.registerIntent(claim, { executionId: "drift", ownerSession: S, taskId: "task", attemptId: "attempt",
+      generation: claim.generation, role: "worker", cwd: wt.worktree, policyID: ownerRuntime.policy.resolve("worker").id, kind: "host", profile: "legacy-unowned" })
+    runs.bindVendorRef(claim, "drift", JSON.stringify({ executionID: "drift", vendorSessionID: "drift-child" }))
+    const server = makeDeps(fakeClient(), wt.worktree, { guards: { ...owner.config.guards, repeat_limit: owner.config.guards.repeat_limit + 1 } })
+    await expect(createToolBeforeHook(server)({ tool: "read", sessionID: "drift-child", callID: "read-1" }, { args: { filePath: "x" } }))
+      .rejects.toThrow("remote execution policy differs")
+    expect(getOpenCodeRuntime(server).policy.snapshotForSession("drift-child")).toBeUndefined()
+  })
+
   test("blocks the (limit+1)th identical failing call with a model-facing message", async () => {
     const deps = makeDeps(client, wt.worktree)
     const hookBefore = createToolBeforeHook(deps)
@@ -141,6 +173,33 @@ describe("tool.execute.before", () => {
 })
 
 describe("tool.execute.after", () => {
+  test("bound reviewer policy denies writes before execution and shapes read results", async () => {
+    const deps = makeDeps(client, wt.worktree, { guards: { ...makeDeps(client, wt.worktree).config.guards, read_max_lines: 2 } })
+    const runtime = getOpenCodeRuntime(deps)
+    const snapshot = runtime.policy.resolve("reviewer")
+    const request: Omit<ExecutionRequest, "handlers"> = {
+      executionID: "review-1", supervisorSessionID: "main", taskID: "plan", attemptID: "attempt",
+      generation: 1, role: "reviewer", title: "review", cwd: wt.worktree, text: "review",
+      deadlineAt: Date.now() + 1000, policy: snapshot,
+    }
+    runtime.policy.bindSession(S, runtime.policy.handlers(request), snapshot)
+    const claim = runtime.runs.claim("main", "review-fixture", process.pid)
+    runtime.runs.registerIntent(claim, { executionId: request.executionID, ownerSession: "main", taskId: request.taskID, attemptId: request.attemptID, generation: claim.generation, role: request.role, cwd: request.cwd, policyID: snapshot.id, kind: "host", profile: "legacy-unowned" })
+    runtime.runs.bindVendorRef(claim, request.executionID, JSON.stringify({ executionID: request.executionID, vendorSessionID: S }))
+    const hookBefore = createToolBeforeHook(deps)
+    const hookAfter = createToolAfterHook(deps)
+    await expect(hookBefore(before("write", { filePath: "x" }, "blocked").input, { args: { filePath: "x" } }))
+      .rejects.toThrow(/reviewer tool write is not read-only/)
+    const read = before("read", { filePath: "x" }, "read-1")
+    await hookBefore(read.input, read.output)
+    const result = after("read", read.output.args, "read-1", "a\nb\nc\nd")
+    await hookAfter(result.input, result.output)
+    expect(result.output.output).toContain("[lca: trimmed")
+    expect(result.output.metadata.lca.trimmed).toBe(true)
+    runtime.runs.recordTerminal(claim, request.executionID, { outcome: "completed", terminalAt: Date.now(), quiescentAt: Date.now() })
+    await expect(hookBefore(before("read", {}, "late").input, { args: {} })).rejects.toThrow(/cancelled, fenced or terminal/)
+  })
+
   test("isErrorOutput markers", () => {
     expect(isErrorOutput("Error: nope")).toBe(true)
     expect(isErrorOutput("error: nope")).toBe(true)
@@ -211,7 +270,6 @@ describe("tool.execute.after", () => {
   })
 
   test("relativizePaths strips worktree and directory prefixes, longest first", async () => {
-    const { relativizePaths } = await import("../src/hooks/tool-after.ts")
     const out = relativizePaths("/w/sub/a.ts\n/w/b.ts\n/other/c.ts", ["/w", "/w/sub"])
     expect(out).toBe("a.ts\nb.ts\n/other/c.ts")
   })

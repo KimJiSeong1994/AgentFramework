@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { createCommandHook, APPROVE_COMMAND, APPROVE_TEMPLATE } from "../src/hooks/command.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
+import { getQueue } from "../src/orchestration/queue.ts"
 import { newWorkflow, planJsonPath, readWorkflow, writeWorkflow, type Workflow } from "../src/flow/state.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { canonicalPlanSha, planMdPath, renderPlanMd, type Plan } from "../src/flow/plan.ts"
@@ -94,7 +96,7 @@ describe("/approve — dispatch path", () => {
   test("queue running is refused", async () => {
     putApprovablePlan()
     const deps = makeDeps(client, wt.worktree)
-    const q = require("../src/orchestration/queue.ts").getQueue(deps)
+    const q = getQueue(getOpenCodeRuntime(deps))
     // simulate a running queue: run() marks `active` internally, but for the test we only need isRunning() true.
     // The queue module keys "active" by sessionID once run() starts; instead we add a pending task and start run()
     // without awaiting so isRunning() is true during the assertion window.

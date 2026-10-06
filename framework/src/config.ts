@@ -6,6 +6,48 @@ import { join } from "node:path"
 
 export type Mode = "none" | "ulw" | "plan" | "data"
 
+export type ModelSelection = { providerID: string; modelID: string }
+
+/** Parse OpenCode's provider/model selector without silently accepting an empty or ambiguous component. */
+export function parseModelSelection(value: string): ModelSelection {
+  if (typeof value !== "string" || value.trim() !== value || !value) {
+    throw new Error(`Invalid model selection ${JSON.stringify(value)}; expected provider/model`)
+  }
+  const slash = value.indexOf("/")
+  if (slash <= 0 || slash === value.length - 1) {
+    throw new Error(`Invalid model selection ${JSON.stringify(value)}; expected provider/model`)
+  }
+  const providerID = value.slice(0, slash)
+  const modelID = value.slice(slash + 1)
+  if (/[\\\s]/.test(providerID) || /[\\\s]/.test(modelID)) {
+    throw new Error(`Invalid model selection ${JSON.stringify(value)}; provider and model IDs cannot contain whitespace or backslashes`)
+  }
+  return { providerID, modelID }
+}
+
+/** Reject an explicit selection that disagrees with the host's resolved provider/model identity. */
+export function assertModelSelectionMatches(selection: ModelSelection, providerID: string, modelID: string): void {
+  if (selection.providerID !== providerID || selection.modelID !== modelID) {
+    throw new Error(`Configured model ${selection.providerID}/${selection.modelID} conflicts with resolved model ${providerID}/${modelID}`)
+  }
+}
+
+/** Output budget after applying the role ceiling, caller/host limit, and trusted finite model limit. */
+export function effectiveOutputLimit(roleLimit: number, hostLimit: number | undefined, modelLimit: number | undefined): number {
+  for (const [name, limit] of [["role", roleLimit], ["host", hostLimit], ["model", modelLimit]] as const) {
+    if (limit !== undefined && (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0)) {
+      throw new Error(`Invalid ${name} output limit: ${limit}`)
+    }
+  }
+  const limits = [roleLimit, hostLimit, modelLimit].filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0)
+  return Math.min(...limits)
+}
+
+/** Temperature is only forced for known local providers; cloud provider support is not assumed. */
+export function supportsLocalTemperature(providerID: string): boolean {
+  return /^(ollama|local)(?:[-_].*)?$/i.test(providerID)
+}
+
 /** Shell control characters a verify command may never contain (`&&` is allowed; a lone `&`, `|`, `;`, `$`, backtick, `<`, `>` are not). */
 export const VERIFY_DENY_RE = /[|;$`<>]|(?<!&)&(?!&)|[\r\n\t]/
 /** Runner options that load code/config from files the worker may have written (pytest -p/-c/-o/--rootdir, npm -C, ...). */
@@ -146,7 +188,7 @@ export type LcaConfig = {
     handoff_context_chars: number
     /** chars of the worker's final report kept in the ledger / handoff file / tool result */
     report_max_chars: number
-    /** chars of the per-task diff shown to the reviewer */
+    /** maximum complete task diff for scanning/review; truncation fails the attempt before verification */
     diff_max_chars: number
     /** chars of verify output kept (tail) */
     verify_output_chars: number

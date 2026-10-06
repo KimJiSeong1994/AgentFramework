@@ -14,6 +14,7 @@ import { activeWorkflow, appendEvents, type Workflow } from "../flow/state.ts"
 import { flowOn } from "../flow/status.ts"
 import { isReviewSession, reviewToolCapProblem } from "../flow/review.ts"
 import { observeSkillAttempt } from "../telemetry/skill-observer.ts"
+import { getOpenCodeRuntime, policyForOpenCodeSession } from "../hosts/opencode-runtime.ts"
 
 export const MAIN_AGENT = "main"
 
@@ -103,6 +104,14 @@ export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.ex
     if (wikiRawOn && wikiRawTarget(deps, input.tool, output.args)) {
       deps.log("blocked write to knowledge/raw", { sessionID: input.sessionID, tool: input.tool })
       throw new Error("lca: raw wiki sources are immutable; use `bun scripts/lca-wiki.ts register`.")
+    }
+
+    const bound = policyForOpenCodeSession(deps, input.sessionID)
+    if (bound) {
+      const decision = bound.beforeTool({ type: "tool-before", sessionID: input.sessionID, callID: input.callID, toolID: input.callID, name: input.tool, input: output.args })
+      if (!decision.allow) throw new Error(decision.reason)
+      if (input.tool === "bash") getOpenCodeRuntime(deps).runs.markProcessRiskBySession(input.sessionID)
+      return
     }
 
     if (boundaryOn && flowOn(deps.config)) {

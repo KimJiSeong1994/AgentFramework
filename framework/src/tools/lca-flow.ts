@@ -13,6 +13,7 @@ import { applyEvent, flowLimits } from "../flow/runtime.ts"
 import { canonicalPlanSha, coercePlan, planMdPath, renderPlanMd, validatePlan, type Plan, type ReviewView } from "../flow/plan.ts"
 import { runPlanReview } from "../flow/review.ts"
 import type { FlowEvent } from "../flow/machine.ts"
+import { getOpenCodeRuntime } from "../hosts/opencode-runtime.ts"
 
 export const LCA_FLOW_DESCRIPTION =
   'Plan workflow control. "status": show plan/mode/ledger/queue status. "plan": submit the plan (3-10 steps: ' +
@@ -43,6 +44,7 @@ function numbered(errors: string[]): string {
 }
 
 export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
+  const runtime = getOpenCodeRuntime(deps)
   return tool({
     description: LCA_FLOW_DESCRIPTION,
     args: lcaFlowArgs,
@@ -53,7 +55,7 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       if (!flowOn(deps.config)) throw new Error("lca: the plan workflow feature is disabled.")
 
       if (args.op === "status") {
-        const text = renderStatus(deps, ctx.sessionID, getQueue(deps).isRunning(ctx.sessionID))
+        const text = renderStatus(runtime, ctx.sessionID, getQueue(runtime).isRunning(ctx.sessionID))
         return { title: "lca_flow: status", output: text }
       }
 
@@ -101,7 +103,7 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       if (!submitted.ok) return { title: "lca_flow: refused", output: `lca: ${submitted.text}` }
 
       // review runs inside this tool call (main is blocked; no race with the queue). Esc (ctx.abort) aborts it (T8).
-      const result = await runPlanReview(deps, submitted.wf, plan, ctx.abort)
+      const result = await runPlanReview(runtime, submitted.wf, plan, ctx.abort)
 
       const limits = flowLimits(deps)
       let event: FlowEvent
