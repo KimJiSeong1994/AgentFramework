@@ -5,10 +5,11 @@ import { DEFAULT_SUITE, loadSuite, runChecks } from "../data/check.ts"
 import { observeSkillTask, observeSkillVerification } from "../telemetry/skill-observer.ts"
 import { createExecutionRunStore, type ExecutionRunStore } from "./run-state.ts"
 import { createExecutionPolicy } from "./tool-policy.ts"
-import { createOpenCodeHost } from "./opencode.ts"
+import { createOpenCodeHost, type OpenCodeRecoveryContext } from "./opencode.ts"
 import { createLegacyVerifierExecutor } from "../orchestration/legacy-verifier.ts"
 import { stateRoot } from "../state/store.ts"
-import { EXECUTION_ROLES, type ExecutionRuntime, type ExecutionRole } from "./types.ts"
+import { isAbsolute, resolve } from "node:path"
+import { EXECUTION_ROLES, type ExecutionReference, type ExecutionRuntime, type ExecutionRole } from "./types.ts"
 
 const runtimes = new WeakMap<HookDeps, ExecutionRuntime>()
 
@@ -30,6 +31,9 @@ export function getOpenCodeRuntime(deps: HookDeps): ExecutionRuntime {
     },
     processRisk(sessionID) {
       return processRiskForSession(runs, sessionID)
+    },
+    recoveryContext(reference) {
+      return recoveryContextForOpenCodeReference(runs, policy, reference)
     },
   } : undefined)
 
@@ -70,6 +74,74 @@ export function processRiskForSession(runs: ExecutionRunStore, sessionID: string
     catch { return false }
   })
   return execution?.processRisk !== undefined || !execution
+}
+
+function recoveryContextForOpenCodeReference(
+  runs: ExecutionRunStore,
+  policy: ReturnType<typeof createExecutionPolicy>,
+  reference: ExecutionReference,
+): OpenCodeRecoveryContext | undefined {
+  if (typeof reference.executionID !== "string" || !reference.executionID
+    || typeof reference.vendorSessionID !== "string" || !reference.vendorSessionID) return undefined
+
+  const state = runs.status()
+  const matches = state.executions.filter(record => record.executionId === reference.executionID)
+  if (matches.length !== 1) return undefined
+  const record = matches[0]!
+  if (record.kind !== "host" || record.profile !== "legacy-unowned" || !record.vendorRef
+    || !state.claim || state.claim.ownerSession !== record.ownerSession
+    || record.generation > state.generation || !isAbsolute(record.cwd) || resolve(record.cwd) !== record.cwd) return undefined
+
+  let persistedReference: unknown
+  try { persistedReference = JSON.parse(record.vendorRef) }
+  catch { return undefined }
+  if (!openCodeReference(persistedReference, record.executionId)
+    || persistedReference.vendorSessionID !== reference.vendorSessionID
+    || persistedReference.executionID !== reference.executionID) return undefined
+
+  if (record.boundaryRef !== undefined) {
+    if (!openCodeReference(record.boundaryRef, record.executionId)
+      || record.boundaryRef.vendorSessionID !== persistedReference.vendorSessionID
+      || record.boundaryRef.vendorThreadID !== persistedReference.vendorThreadID
+      || record.boundaryRef.vendorTurnID !== persistedReference.vendorTurnID) return undefined
+  }
+
+  for (const candidate of state.executions) {
+    if (!candidate.vendorRef) continue
+    let value: unknown
+    try { value = JSON.parse(candidate.vendorRef) }
+    catch { return undefined }
+    if (!openCodeReference(value, candidate.executionId)) return undefined
+    if (candidate.executionId !== record.executionId && value.vendorSessionID === reference.vendorSessionID) return undefined
+  }
+
+  if (!(EXECUTION_ROLES as readonly string[]).includes(record.role)) return undefined
+  const role = record.role as ExecutionRole
+  let fixedPolicy: ReturnType<typeof policy.resolve>
+  try { fixedPolicy = policy.resolve(role) }
+  catch { return undefined }
+  if (record.policyID !== fixedPolicy.id) return undefined
+
+  return {
+    executionID: record.executionId,
+    vendorSessionID: persistedReference.vendorSessionID,
+    ownerSession: record.ownerSession,
+    cwd: record.cwd,
+    role,
+    policyID: record.policyID,
+    profile: "legacy-unowned",
+    processRisk: record.processRisk !== undefined,
+  }
+}
+
+function openCodeReference(value: unknown, executionID: string): value is ExecutionReference & { vendorSessionID: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const reference = value as Record<string, unknown>
+  const known = new Set(["executionID", "vendorSessionID", "vendorThreadID", "vendorTurnID"])
+  if (Object.keys(reference).some(key => !known.has(key)) || reference.executionID !== executionID
+    || typeof reference.vendorSessionID !== "string" || !reference.vendorSessionID) return false
+  return ["vendorThreadID", "vendorTurnID"].every(key => !(key in reference)
+    || (typeof reference[key] === "string" && (reference[key] as string).length > 0))
 }
 
 /** Resolve a child prepared by a foreground controller in another process.

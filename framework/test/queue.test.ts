@@ -8,6 +8,7 @@ import type { ExecutionHandle, ExecutionOutcome, ExecutionReconciliation, Execut
 import { createQueue, getQueue, parseVerdict, reviewerPrompt, workerPrompt } from "../src/orchestration/queue.ts"
 import { createLegacyVerifierExecutor } from "../src/orchestration/legacy-verifier.ts"
 import { createSnapshotStore } from "../src/orchestration/snapshot.ts"
+import { createTaskWorktree } from "../src/orchestration/worktree.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { newWorkflow, writeWorkflow } from "../src/flow/state.ts"
 import { addTasks, emptyLedger, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
@@ -93,6 +94,92 @@ describe("neutral execution queue", () => {
     } finally {
       store.dispose()
     }
+  })
+
+  test("unknown restart recovery leaves ledger bytes untouched and later runs only unfinished tasks", async () => {
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "already done" }, { title: "interrupted" }, { title: "still pending" }])
+    let ledger = readLedger(wt.worktree, S)
+    const [done, interrupted, pending] = ledger.tasks
+    const snapshots = join(sessionDir(wt.worktree, S), "snapshots", interrupted!.id)
+    const baselineStore = (await createSnapshotStore(wt.worktree, snapshots))!
+    expect(await baselineStore.baseline(f.runtime.config.delegate.diff_exclude)).not.toBeNull()
+    const now = Date.now()
+    ledger = updateTask(ledger, done!.id, { status: "done", attempts: 1, startedAt: now - 3000, finishedAt: now - 2000 })
+    ledger = updateTask(ledger, interrupted!.id, { status: "running", attempts: 1, startedAt: now - 1000 })
+    writeLedger(wt.worktree, { ...ledger, running: { taskId: interrupted!.id, since: now - 1000 } })
+    const ledgerPath = join(sessionDir(wt.worktree, S), "ledger.json")
+    const originalBytes = readFileSync(ledgerPath)
+
+    const old = f.runtime.runs.claim(S, "dead-owner", 99999999)
+    f.runtime.runs.registerIntent(old, { executionId: "recovery-unknown", ownerSession: S, taskId: interrupted!.id,
+      attemptId: "old-attempt", generation: old.generation, role: "worker", cwd: wt.worktree,
+      policyID: "worker-policy", kind: "host", profile: "legacy-unowned" })
+    f.runtime.runs.bindVendorRef(old, "recovery-unknown", JSON.stringify({ executionID: "recovery-unknown", vendorSessionID: "old-child" }))
+    f.runtime.runs.fence(old, "recovery-unknown", "prior owner ended without proof")
+    let hostRecovery: ExecutionReconciliation = { outcome: "unknown", quiescent: false, evidence: "still busy" }
+    f.runtime.host.reconcile = async () => hostRecovery
+
+    expect(await q.run(S)).toMatchObject({ aborted: true, done: 0 })
+    expect(f.requests).toHaveLength(0)
+    expect(readFileSync(ledgerPath)).toEqual(originalBytes)
+    expect(f.runtime.runs.status().claim).toBeDefined()
+    expect(f.runtime.runs.status().executions[0]?.fence).toBeDefined()
+
+    hostRecovery = { outcome: "terminal", quiescent: true, evidence: "execution is terminal and quiescent" }
+    f.replies.set("worker", () => ({ status: "completed", text: "Files changed: none\nOpen issues: none" }))
+    expect(await q.run(S)).toMatchObject({ done: 2, failed: 0 })
+    expect(f.requests.map(request => request.taskID)).toEqual([interrupted!.id, pending!.id])
+    expect(readLedger(wt.worktree, S).tasks.map(task => task.status)).toEqual(["done", "done", "done"])
+  })
+
+  test("restarted in-place task reviews pre-restart edits even when its new worker is idle", async () => {
+    const f = fixture({ delegate: { review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+    const q = createQueue(f.runtime)
+    const [task] = q.add(S, [{ title: "recover orphan edits" }])
+    const snapshots = join(sessionDir(wt.worktree, S), "snapshots", task!.id)
+    const baselineStore = (await createSnapshotStore(wt.worktree, snapshots))!
+    expect(await baselineStore.baseline(f.runtime.config.delegate.diff_exclude)).not.toBeNull()
+    write("orphan.py", "ORPHAN_EDIT = True\n")
+    const now = Date.now()
+    const running = updateTask(readLedger(wt.worktree, S), task!.id, { status: "running", attempts: 1, startedAt: now - 1000 })
+    writeLedger(wt.worktree, { ...running, running: { taskId: task!.id, since: now - 1000 } })
+
+    let reviewPromptText = ""
+    f.replies.set("worker", () => ({ status: "completed", text: "Files changed: none\nOpen issues: none" }))
+    f.replies.set("reviewer", request => {
+      reviewPromptText = request.text
+      return { status: "completed", text: "ACCEPT" }
+    })
+    expect(await q.run(S)).toMatchObject({ done: 1, failed: 0 })
+    expect(reviewPromptText).toContain("orphan.py")
+    expect(reviewPromptText).toContain("+ORPHAN_EDIT = True")
+    expect(f.requests.map(request => request.role)).toEqual(["worker", "reviewer"])
+    expect(existsSync(snapshots)).toBe(false)
+  })
+
+  test("interrupted isolated task preserves its old worktree instead of rebuilding a stale baseline", async () => {
+    const f = fixture({ delegate: { worktree: true, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const q = createQueue(f.runtime)
+    const [task] = q.add(S, [{ title: "preserve isolated orphan" }])
+    const old = (await createTaskWorktree(wt.worktree, S, task!.id, f.runtime.config.delegate.diff_exclude))!
+    const snapshots = join(sessionDir(wt.worktree, S), "snapshots", task!.id)
+    const baselineStore = (await createSnapshotStore(old.path, snapshots))!
+    expect(await baselineStore.baseline(f.runtime.config.delegate.diff_exclude)).not.toBeNull()
+    writeFileSync(join(old.path, "orphan.py"), "ORPHAN_EDIT = True\n")
+    const now = Date.now()
+    const running = updateTask(readLedger(wt.worktree, S), task!.id, { status: "running", attempts: 1, startedAt: now - 1000 })
+    writeLedger(wt.worktree, { ...running, running: { taskId: task!.id, since: now - 1000 } })
+
+    try {
+      expect(await q.run(S)).toMatchObject({ failed: 1, done: 0 })
+      expect(f.requests).toHaveLength(0)
+      expect(readFileSync(join(old.path, "orphan.py"), "utf8")).toBe("ORPHAN_EDIT = True\n")
+      expect(readLedger(wt.worktree, S).tasks[0]?.error).toContain("no worker was dispatched")
+      expect(existsSync(snapshots)).toBe(true)
+      expect(await baselineStore.baseline(f.runtime.config.delegate.diff_exclude, true)).not.toBeNull()
+    } finally { baselineStore.dispose(); await old.remove() }
   })
 
   for (const review of [false, true]) {

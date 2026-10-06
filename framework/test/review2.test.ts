@@ -210,7 +210,8 @@ describe("snapshot hardening", () => {
       const run = await q.run(S)
       expect(run).toMatchObject({ done: 0, failed: 1 })
       const t = readLedger(wt.worktree, S).tasks[0]!
-      expect(t).toMatchObject({ status: "failed", error: "could not snapshot the task baseline" })
+      expect(t).toMatchObject({ status: "failed", error: "could not snapshot the task baseline: snapshot control directory is unsafe" })
+      expect(existsSync(join(wt.worktree, "a.py"))).toBe(false)
       expect(t.handoff).toBeUndefined()
       expect(deps.logs).toContain("handoff write failed")
       expect(readlinkSync(join(wt.worktree, ".lca/handoffs"))).toBe(outside.worktree)

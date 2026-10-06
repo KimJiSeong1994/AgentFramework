@@ -1,15 +1,17 @@
 // Per-task diffs without touching the user's index, HEAD or object store.
 //
-// A SnapshotStore owns a temporary directory holding a private GIT_INDEX_FILE and a private GIT_OBJECT_DIRECTORY;
+// A SnapshotStore owns a private directory holding a private GIT_INDEX_FILE and a private GIT_OBJECT_DIRECTORY;
 // the user's .git/objects is only READ through GIT_ALTERNATE_OBJECT_DIRECTORIES. `git add -A` + `write-tree` then
 // produce a tree of the working directory (tracked + untracked, .gitignore respected) whose new blobs land in the
-// temp object dir and vanish with dispose() — no secrets or large untracked files are ever copied into the user's
-// repository (review, security M4). Diffing two such trees gives exactly what one task changed, even when earlier
+// private object dir and vanish with dispose() — no secrets or large untracked files are ever copied into the user's
+// repository (review, security M4). A caller may provide an external durable directory for a task baseline. Diffing
+// two such trees gives exactly what one task changed, even when earlier
 // tasks left the worktree dirty. The plugin's own runtime dirs and configured artifact globs are excluded so the
 // reviewer never sees session files or __pycache__ as "changes outside the task". Degrades to null outside git.
-import { closeSync, constants, fchmodSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync, type Stats } from "node:fs"
+import { closeSync, constants, fchmodSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, rmdirSync, symlinkSync, utimesSync, writeFileSync, type Stats } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, relative, resolve, sep } from "node:path"
+import { stateBase, stateRoot } from "../state/store.ts"
 import { safeGit as git, safeGitBuffer as gitBuffer } from "./git-boundary.ts"
 
 /** Always excluded: the plugin's handoffs (control-plane state lives outside the worktree; ".lca/state" kept for old layouts). */
@@ -34,6 +36,8 @@ export type SnapshotStore = {
   worktree: string
   env: Record<string, string>
   snapshot(exclude?: string[]): Promise<Snapshot>
+  /** Capture a baseline once, or reopen and validate the persisted baseline when requireExisting is true. */
+  baseline(exclude?: string[], requireExisting?: boolean): Promise<Snapshot>
   diff(before: Snapshot, after: Snapshot, maxChars: number): Promise<TreeDiff | null>
   /** put `paths` back to their content in `tree` (deleted if absent there); returns the paths actually restored */
   restore(tree: Snapshot, paths: string[]): Promise<string[]>
@@ -41,28 +45,44 @@ export type SnapshotStore = {
 }
 
 /** Null when `worktree` is not inside a git work tree. Call dispose() when the task is finished. */
-export async function createSnapshotStore(worktree: string): Promise<SnapshotStore | null> {
+export async function createSnapshotStore(worktree: string, durableDirectory?: string): Promise<SnapshotStore | null> {
   if ((await git(worktree, ["rev-parse", "--is-inside-work-tree"])) !== "true") return null
   // objects live in the common dir (a linked `git worktree` has its own git-dir without objects/)
   const objects = await git(worktree, ["rev-parse", "--path-format=absolute", "--git-path", "objects"])
   if (!objects) return null
-  const dir = mkdtempSync(join(tmpdir(), "lca-snap-"))
-  mkdirSync(join(dir, "objects"), { recursive: true }) // git refuses to create GIT_OBJECT_DIRECTORY itself
+  const root = realpathSync.native(worktree)
+  const requestedDirectory = durableDirectory === undefined ? undefined : resolve(durableDirectory)
+  if (requestedDirectory && (isWithin(root, requestedDirectory) || isWithin(requestedDirectory, root))) {
+    throw new Error("snapshot store must be outside the worktree")
+  }
+  if (requestedDirectory) assertNoStateSymlinks(worktree, requestedDirectory)
+  const dir = requestedDirectory ? ensureDirectory(requestedDirectory, root) : realpathSync.native(mkdtempSync(join(tmpdir(), "lca-snap-")))
+  const durable = requestedDirectory !== undefined
+  if (durable && (isWithin(root, dir) || isWithin(dir, root))) throw new Error("snapshot store must be outside the worktree")
+  try {
+    if (durable) {
+      const allowed = new Set(["baseline.json", "index", "objects", "pathspecs"])
+      if (readdirSync(dir).some((name) => !allowed.has(name))) throw new Error("snapshot store directory contains unexpected entries")
+    }
+    ensureDirectory(join(dir, "objects")) // git refuses to create GIT_OBJECT_DIRECTORY itself
+  } catch (error) {
+    if (!durable) rmSync(dir, { recursive: true, force: true })
+    throw error
+  }
   const env: Record<string, string> = {
     GIT_INDEX_FILE: join(dir, "index"),
     GIT_OBJECT_DIRECTORY: join(dir, "objects"),
     GIT_ALTERNATE_OBJECT_DIRECTORIES: objects,
   }
-  const root = realpathSync.native(worktree)
   const store: SnapshotStore = {
     worktree,
     env,
     async snapshot(exclude = []) {
+      if (durable) assertNoStateSymlinks(worktree, dir)
+      assertPrivateDirectory(dir)
+      assertPrivateDirectory(env.GIT_OBJECT_DIRECTORY!)
       // Excluding runtime paths must not hide a planted control-directory symlink.
-      for (const path of [".lca", ...ALWAYS_EXCLUDED]) {
-        const entry = lstatOrNull(join(root, path))
-        if (entry && !entry.isDirectory()) return null
-      }
+      if (!safeControlDirectories(root)) return null
       // fresh index every time so removed files disappear from the tree
       rmSync(env.GIT_INDEX_FILE!, { force: true })
       const pathspecs = ["--", ".", ...excludePathspecs(exclude)]
@@ -84,14 +104,17 @@ export async function createSnapshotStore(worktree: string): Promise<SnapshotSto
       const pathspecFile = join(dir, "pathspecs")
       const addPaths = async (paths: Buffer[], force: boolean): Promise<boolean> => {
         if (!paths.length) return true
-        writeFileSync(pathspecFile, nulPathspecs(paths))
+        rmSync(pathspecFile, { force: true })
+        const fd = openSync(pathspecFile, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
         try {
+          writeFileSync(fd, nulPathspecs(paths))
           const add = await git(worktree, [
             "--literal-pathspecs", "add", "-A", ...(force ? ["-f"] : []),
             `--pathspec-from-file=${pathspecFile}`, "--pathspec-file-nul",
           ], env)
           return add !== null
         } finally {
+          closeSync(fd)
           rmSync(pathspecFile, { force: true })
         }
       }
@@ -101,6 +124,50 @@ export async function createSnapshotStore(worktree: string): Promise<SnapshotSto
       if (!(await addPaths(trackedPaths, true)) || !(await addPaths(untrackedPaths, false))) return null
       const tree = await git(worktree, ["write-tree"], env)
       return tree ? { tree, store } : null
+    },
+    async baseline(exclude = [], requireExisting = false) {
+      if (durable) assertNoStateSymlinks(worktree, dir)
+      assertPrivateDirectory(dir)
+      assertPrivateDirectory(env.GIT_OBJECT_DIRECTORY!)
+      if (!safeControlDirectories(root)) throw new Error("snapshot control directory is unsafe")
+      const metadataPath = join(dir, "baseline.json")
+      const exclusions = excludePathspecs(exclude)
+      const existing = lstatOrNull(metadataPath)
+      if (existing) {
+        if (!existing.isFile() || existing.isSymbolicLink()) throw new Error("persisted task baseline metadata is unsafe")
+        let value: unknown
+        try { value = JSON.parse(readFileSync(metadataPath, "utf8")) }
+        catch { throw new Error("persisted task baseline metadata is corrupt") }
+        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("persisted task baseline metadata is invalid")
+        const metadata = value as Record<string, unknown>
+        const tree = metadata.tree
+        const storedExclusions = metadata.exclusions
+        if (metadata.version !== 1 || metadata.worktree !== root || typeof tree !== "string" ||
+          !/^[0-9a-f]{40,64}$/.test(tree) || !Array.isArray(storedExclusions) ||
+          storedExclusions.length !== exclusions.length ||
+          !storedExclusions.every((path, index) => path === exclusions[index])) {
+          throw new Error("persisted task baseline does not match this worktree and exclusion set")
+        }
+        if (!(await validTreeObject(worktree, tree, env))) {
+          throw new Error("persisted task baseline tree is missing or corrupt")
+        }
+        return { tree, store }
+      }
+      if (requireExisting) throw new Error("persisted task baseline is missing")
+      const snap = await store.snapshot(exclude)
+      // write-tree has just constructed this tree. Full integrity validation is
+      // required when reopening persisted objects, not again on fresh capture.
+      if (!snap || !/^[0-9a-f]{40,64}$/.test(snap.tree)) return null
+      const metadata = JSON.stringify({ version: 1, worktree: root, exclusions, tree: snap.tree }) + "\n"
+      const fd = openSync(metadataPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+      try {
+        writeFileSync(fd, metadata)
+        fsyncSync(fd)
+      } finally { closeSync(fd) }
+      const directoryFD = openSync(dir, "r")
+      try { fsyncSync(directoryFD) }
+      finally { closeSync(directoryFD) }
+      return snap
     },
     async diff(before, after, maxChars) {
       if (!before || !after) return null
@@ -174,13 +241,29 @@ export async function createSnapshotStore(worktree: string): Promise<SnapshotSto
       return restored
     },
     dispose() {
-      rmSync(dir, { recursive: true, force: true })
+      if (!durable) {
+        rmSync(dir, { recursive: true, force: true })
+        return
+      }
+      try { assertNoStateSymlinks(worktree, dir) }
+      catch { return }
+      const info = lstatOrNull(dir)
+      if (!info || !info.isDirectory() || info.isSymbolicLink()) return
+      for (const name of ["baseline.json", "index", "pathspecs", "objects"]) {
+        rmSync(join(dir, name), { recursive: true, force: true })
+      }
+      try { rmdirSync(dir) } catch { /* Preserve unexpected contents rather than deleting user data. */ }
     },
   }
   return store
 }
 
 type TreeEntry = { mode: string; type: string; oid: string }
+
+async function validTreeObject(worktree: string, tree: string, env: Record<string, string>): Promise<boolean> {
+  if (!/^[0-9a-f]{40,64}$/.test(tree) || await git(worktree, ["cat-file", "-t", tree], env) !== "tree") return false
+  return await git(worktree, ["fsck", "--no-reflogs", tree], env) !== null
+}
 
 async function readTreeEntry(worktree: string, tree: string, path: string, env: Record<string, string>): Promise<TreeEntry | null> {
   const raw = await gitBuffer(worktree, ["--literal-pathspecs", "ls-tree", "-z", "--full-tree", tree, "--", path], env)
@@ -227,6 +310,81 @@ function nulPathspecs(paths: Buffer[]): Buffer {
 
 function isWithin(root: string, path: string): boolean {
   return path === root || (root === sep ? path.startsWith(sep) : path.startsWith(root + sep))
+}
+
+function ensureDirectory(path: string, forbiddenRoot?: string): string {
+  const target = resolve(path)
+  let existing = target
+  const missing: string[] = []
+  for (;;) {
+    const info = lstatOrNull(existing)
+    if (info) {
+      if (existing === target && info.isSymbolicLink()) throw new Error(`snapshot control directory is unsafe: ${target}`)
+      if (!info.isDirectory() && !info.isSymbolicLink()) throw new Error(`snapshot control directory is unsafe: ${existing}`)
+      break
+    }
+    const parent = dirname(existing)
+    if (parent === existing) throw new Error(`snapshot control directory has no existing parent: ${target}`)
+    missing.unshift(basename(existing))
+    existing = parent
+  }
+  const parentInfo = lstatSync(existing)
+  if (!parentInfo.isDirectory() && !parentInfo.isSymbolicLink()) throw new Error(`snapshot control directory is unsafe: ${existing}`)
+  let current = realpathSync.native(existing)
+  const canonicalTarget = join(current, ...missing)
+  if (forbiddenRoot && (isWithin(forbiddenRoot, canonicalTarget) || isWithin(canonicalTarget, forbiddenRoot))) {
+    throw new Error("snapshot store must be outside the worktree")
+  }
+  for (const part of missing) {
+    current = join(current, part)
+    let info = lstatOrNull(current)
+    if (!info) {
+      mkdirSync(current, { mode: 0o700 })
+      info = lstatSync(current)
+    }
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`snapshot control directory is unsafe: ${current}`)
+  }
+  const result = realpathSync.native(target)
+  if (forbiddenRoot && (isWithin(forbiddenRoot, result) || isWithin(result, forbiddenRoot))) {
+    throw new Error("snapshot store must be outside the worktree")
+  }
+  return result
+}
+
+function assertPrivateDirectory(path: string): void {
+  const info = lstatOrNull(path)
+  if (!info || !info.isDirectory() || info.isSymbolicLink() || realpathSync.native(path) !== resolve(path)) {
+    throw new Error(`snapshot control directory is unsafe: ${path}`)
+  }
+}
+
+function safeControlDirectories(root: string): boolean {
+  for (const path of [".lca", ...ALWAYS_EXCLUDED]) {
+    const entry = lstatOrNull(join(root, path))
+    if (entry && (!entry.isDirectory() || entry.isSymbolicLink())) return false
+  }
+  return true
+}
+
+function assertNoStateSymlinks(worktree: string, directory: string): void {
+  const basePath = resolve(stateBase(worktree))
+  const baseInfo = lstatOrNull(basePath)
+  if (baseInfo?.isSymbolicLink()) throw new Error(`snapshot control directory is unsafe: ${basePath}`)
+  const canonicalBase = baseInfo ? realpathSync.native(basePath) : basePath
+  const statePath = resolve(stateRoot(worktree))
+  const stateInfo = lstatOrNull(statePath)
+  if (stateInfo?.isSymbolicLink()) throw new Error(`snapshot control directory is unsafe: ${statePath}`)
+  const canonicalState = stateInfo ? realpathSync.native(statePath) : statePath
+  const target = resolve(directory)
+  const roots = [basePath, canonicalBase, statePath, canonicalState]
+  const state = roots.find(root => isWithin(root, target)) ?? null
+  if (!state) return
+  let current = state
+  for (const part of relative(state, target).split(sep).filter(Boolean)) {
+    current = join(current, part)
+    const child = lstatOrNull(current)
+    if (child?.isSymbolicLink()) throw new Error(`snapshot control directory is unsafe: ${current}`)
+  }
 }
 
 /** Resolve the nearest existing parent and refuse any symlink that escapes the worktree. */

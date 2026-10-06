@@ -270,9 +270,10 @@ function beginReceipt(args: Args): Receipt {
   let prior: Receipt
   try { prior = JSON.parse(readFileSync(args.receipt, "utf8")) as Receipt }
   catch { return fail("resume requires a readable receipt from the interrupted run") }
-  if (prior.schemaVersion !== 1 || !["interrupt", "checkpoint"].includes(prior.scenario) || prior.baseIdentity.worktree !== args.worktree
+  if (prior.schemaVersion !== 1 || !["interrupt", "checkpoint", "resume"].includes(prior.scenario) || prior.baseIdentity.worktree !== args.worktree
     || prior.baseIdentity.serverOrigin !== args.server || prior.nativeSessionIDs.parentSessionID !== args.session
-    || !Array.isArray(prior.runs) || !Array.isArray(prior.nativeSessionIDs.childSessionIDs)) {
+    || !Array.isArray(prior.runs) || !["interrupt", "checkpoint"].includes(String(prior.runs[0]?.scenario))
+    || !Array.isArray(prior.failures) || !Array.isArray(prior.nativeSessionIDs.childSessionIDs)) {
     fail("resume receipt does not identify the matching interrupted worktree, server, and parent session")
   }
   prior.scenario = "resume"
@@ -854,9 +855,12 @@ async function main(): Promise<void> {
     return
   }
 
+  const priorFailureCount = receipt.failures.length
+  const priorRunCount = receipt.runs.length
   await runDriver(args, receipt)
-  const latest = receipt.runs.at(-1)
+  const latest = receipt.runs.length > priorRunCount ? receipt.runs.at(-1) : undefined
   if (latest && typeof latest.finishedAt !== "string") latest.finishedAt = new Date().toISOString()
+  if (latest) latest.failureCount = receipt.failures.length - priorFailureCount
   try { persistReceipt(args.receipt, receipt) }
   catch (error) {
     recordFailure(receipt, "persist receipt", error)
@@ -864,7 +868,7 @@ async function main(): Promise<void> {
     process.exitCode = 1
   }
   process.stdout.write(`${JSON.stringify({ receipt: args.receipt })}\n`)
-  if (receipt.failures.length) process.exitCode = 1
+  if (receipt.failures.length > priorFailureCount) process.exitCode = 1
 }
 
 if (import.meta.main) void main()
