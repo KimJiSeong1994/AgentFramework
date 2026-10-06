@@ -128,8 +128,22 @@ describe("ledger", () => {
     expect(protectedViolations(["package.json"], [], { title: "add jest to package.json", detail: "" }).violations).toEqual([])
     // no file named in verify (pytest -q tests/, bun test): test-looking changes are violations
     expect(protectedViolations(["tests/test_a.py", "src/a.py", "x.test.ts", "b_test.go", "spec/c_spec.rb"], [], task).violations).toEqual(["tests/test_a.py", "x.test.ts", "b_test.go", "spec/c_spec.rb"])
+  })
+
+  test("openIssues recognizes plain and bracketed empty markers without hiding reasons", () => {
     expect(openIssues("Files changed: a\nVerification: ok\nOpen issues: none")).toBeUndefined()
+    expect(openIssues("Open issues: n/a")).toBeUndefined()
+    expect(openIssues("Open issues: no")).toBeUndefined()
+    expect(openIssues("Open issues: -")).toBeUndefined()
+    expect(openIssues("Open issues: nothing")).toBeUndefined()
+    expect(openIssues("Open issues: <none>")).toBeUndefined()
+    expect(openIssues("Open issues: <n/a>")).toBeUndefined()
+    expect(openIssues("Open issues: <no>")).toBeUndefined()
+    expect(openIssues("Open issues: <->")).toBeUndefined()
+    expect(openIssues("Open issues: <nothing>")).toBeUndefined()
     expect(openIssues("Open issues: test_rect.py asserts 1 == 2, cannot pass")).toBe("test_rect.py asserts 1 == 2, cannot pass")
+    expect(openIssues("Open issues: <network access is blocked>")).toBe("<network access is blocked>")
+    expect(openIssues("Open issues: <none; tests still fail>")).toBe("<none; tests still fail>")
     expect(openIssues("Open issues:\n- the test is impossible")).toBe("the test is impossible")
   })
 

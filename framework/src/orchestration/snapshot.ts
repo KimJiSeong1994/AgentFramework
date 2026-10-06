@@ -58,10 +58,47 @@ export async function createSnapshotStore(worktree: string): Promise<SnapshotSto
     worktree,
     env,
     async snapshot(exclude = []) {
+      // Excluding runtime paths must not hide a planted control-directory symlink.
+      for (const path of [".lca", ...ALWAYS_EXCLUDED]) {
+        const entry = lstatOrNull(join(root, path))
+        if (entry && !entry.isDirectory()) return null
+      }
       // fresh index every time so removed files disappear from the tree
       rmSync(env.GIT_INDEX_FILE!, { force: true })
-      const add = await git(worktree, ["add", "-A", "--", ".", ...excludePathspecs(exclude)], env)
-      if (add === null) return null
+      const pathspecs = ["--", ".", ...excludePathspecs(exclude)]
+      const [cached, untracked, deleted] = await Promise.all([
+        gitBuffer(worktree, ["ls-files", "--cached", "-z", ...pathspecs]),
+        gitBuffer(worktree, ["ls-files", "--others", "--exclude-standard", "-z", ...pathspecs]),
+        gitBuffer(worktree, ["ls-files", "--deleted", "-z", ...pathspecs]),
+      ])
+      if (cached === null || untracked === null || deleted === null) return null
+
+      // Don't pass absent tracked paths to `git add`: the private index is empty, so it cannot stage their deletion.
+      const missing = new Set(nulRecords(deleted).map((path) => path.toString("hex")))
+      const trackedPaths = nulRecords(cached).filter((path) => !missing.has(path.toString("hex")))
+      const untrackedPaths = nulRecords(untracked)
+
+      // Initialize the private index even when all paths are excluded; write-tree then yields the empty tree.
+      if (await git(worktree, ["read-tree", "--empty"], env) === null) return null
+
+      const pathspecFile = join(dir, "pathspecs")
+      const addPaths = async (paths: Buffer[], force: boolean): Promise<boolean> => {
+        if (!paths.length) return true
+        writeFileSync(pathspecFile, nulPathspecs(paths))
+        try {
+          const add = await git(worktree, [
+            "--literal-pathspecs", "add", "-A", ...(force ? ["-f"] : []),
+            `--pathspec-from-file=${pathspecFile}`, "--pathspec-file-nul",
+          ], env)
+          return add !== null
+        } finally {
+          rmSync(pathspecFile, { force: true })
+        }
+      }
+
+      // The real index identified tracked paths; force only those because the fresh index has no tracked entries.
+      // Untracked paths were enumerated with --exclude-standard and remain subject to ignore rules when added.
+      if (!(await addPaths(trackedPaths, true)) || !(await addPaths(untrackedPaths, false))) return null
       const tree = await git(worktree, ["write-tree"], env)
       return tree ? { tree, store } : null
     },
@@ -175,6 +212,17 @@ function nulRecords(bytes: Buffer): Buffer[] {
 
 function nulPaths(bytes: Buffer): string[] {
   return nulRecords(bytes).map((record) => record.toString("utf8"))
+}
+
+function nulPathspecs(paths: Buffer[]): Buffer {
+  const output = Buffer.allocUnsafe(paths.reduce((size, path) => size + path.length + 1, 0))
+  let offset = 0
+  for (const path of paths) {
+    path.copy(output, offset)
+    offset += path.length
+    output[offset++] = 0
+  }
+  return output
 }
 
 function isWithin(root: string, path: string): boolean {
