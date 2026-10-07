@@ -140,7 +140,7 @@ describe("1) /plan -> review (ITERATE then OKAY) -> /approve -> tasks done -> de
       "tasks_created",
       "transition", // settle_ok -> done
     ])
-  })
+  }, 10_000) // Includes real Git snapshots and three shell verifications; not a latency benchmark.
 })
 
 describe("2) /reject from pending_approval -> planning, counters.user_rejections", () => {

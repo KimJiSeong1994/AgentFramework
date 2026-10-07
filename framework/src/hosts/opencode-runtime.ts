@@ -3,11 +3,13 @@ import { enabled, type HookDeps } from "../hooks/types.ts"
 import { getBackend } from "../data/backend.ts"
 import { DEFAULT_SUITE, loadSuite, runChecks } from "../data/check.ts"
 import { observeSkillTask, observeSkillVerification } from "../telemetry/skill-observer.ts"
-import { createExecutionRunStore, type ExecutionRunStore } from "./run-state.ts"
+import { createExecutionRunStore, type ExecutionRecord, type ExecutionRunStore } from "./run-state.ts"
 import { createExecutionPolicy } from "./tool-policy.ts"
 import { createOpenCodeHost, type OpenCodeRecoveryContext } from "./opencode.ts"
 import { createLegacyVerifierExecutor } from "../orchestration/legacy-verifier.ts"
+import { taskWorktreeOwner } from "../orchestration/worktree.ts"
 import { stateRoot } from "../state/store.ts"
+import { realpathSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
 import { EXECUTION_ROLES, type ExecutionReference, type ExecutionRuntime, type ExecutionRole } from "./types.ts"
 
@@ -74,6 +76,127 @@ export function processRiskForSession(runs: ExecutionRunStore, sessionID: string
     catch { return false }
   })
   return execution?.processRisk !== undefined || !execution
+}
+
+type ExecutionStoreSource = {
+  owner?: NonNullable<ReturnType<typeof taskWorktreeOwner>>
+  runs: ExecutionRunStore
+}
+
+function executionStoreFor(deps: HookDeps, runtime: ExecutionRuntime): ExecutionStoreSource {
+  const owner = taskWorktreeOwner(deps.worktree)
+  return { owner, runs: owner ? createExecutionRunStore(owner.mainWorktree) : runtime.runs }
+}
+
+function linkedExecutionForSession(
+  state: ReturnType<ExecutionRunStore["status"]>,
+  owner: NonNullable<ReturnType<typeof taskWorktreeOwner>>,
+  childWorktree: string,
+  sessionID: string,
+): ExecutionRecord {
+  const matches: Array<{ record: ExecutionRecord; reference: unknown }> = []
+  for (const record of state.executions) {
+    if (!record.vendorRef) continue
+    let reference: unknown
+    try { reference = JSON.parse(record.vendorRef) }
+    catch { throw new Error("lca: linked task execution reference is corrupt") }
+    if (reference && typeof reference === "object" && !Array.isArray(reference)
+      && (reference as Record<string, unknown>).vendorSessionID === sessionID) {
+      matches.push({ record, reference })
+    }
+  }
+  if (matches.length !== 1) throw new Error("lca: linked task has no unique execution owner")
+
+  const { record, reference } = matches[0]!
+  if (!openCodeReference(reference, record.executionId)
+    || record.kind !== "host" || record.profile !== "legacy-unowned") {
+    throw new Error("lca: linked task execution reference or profile is invalid")
+  }
+  const boundary = record.boundaryRef
+  if (!openCodeReference(boundary, record.executionId) || !sameOpenCodeReference(reference, boundary)) {
+    throw new Error("lca: linked task vendor reference does not match its execution identity")
+  }
+  if (!state.claim || state.generation !== state.claim.generation
+    || record.generation !== state.claim.generation || record.ownerSession !== state.claim.ownerSession
+    || record.ownerSession !== owner.sessionID || state.claim.ownerSession !== owner.sessionID
+    || record.taskId !== owner.taskId) {
+    throw new Error("lca: linked task execution owner, task, or generation does not match")
+  }
+  if (!isAbsolute(record.cwd) || !sameCanonicalDirectory(record.cwd, childWorktree)) {
+    throw new Error("lca: linked task execution cwd does not match its child worktree")
+  }
+  if (record.cancel || record.terminal || record.fence || record.reconciliation?.outcome === "terminal") {
+    throw new Error("lca: linked task execution is cancelled, fenced, or terminal")
+  }
+  return record
+}
+
+function sameCanonicalDirectory(left: string, right: string): boolean {
+  try { return left === realpathSync.native(left) && left === realpathSync.native(right) }
+  catch { return false }
+}
+
+function sameOpenCodeReference(left: unknown, right: unknown): boolean {
+  if (!left || typeof left !== "object" || Array.isArray(left)
+    || !right || typeof right !== "object" || Array.isArray(right)) return false
+  const a = left as ExecutionReference
+  const b = right as ExecutionReference
+  return a.executionID === b.executionID && a.vendorSessionID === b.vendorSessionID
+    && a.vendorThreadID === b.vendorThreadID && a.vendorTurnID === b.vendorTurnID
+}
+
+function sameExecutionIdentity(left: ExecutionRecord, right: ExecutionRecord): boolean {
+  return left.executionId === right.executionId && left.ownerSession === right.ownerSession
+    && left.taskId === right.taskId && left.attemptId === right.attemptId
+    && left.generation === right.generation && left.role === right.role
+    && left.cwd === right.cwd && left.policyID === right.policyID
+    && left.vendorRef === right.vendorRef && sameOpenCodeReference(left.boundaryRef, right.boundaryRef)
+}
+
+function fixedPolicyForExecution(runtime: ExecutionRuntime, execution: ExecutionRecord) {
+  if (!(EXECUTION_ROLES as readonly string[]).includes(execution.role)) {
+    throw new Error("lca: unrecognized execution role")
+  }
+  const role = execution.role as ExecutionRole
+  const policy = runtime.policy.resolve(role)
+  if (execution.policyID !== policy.id) {
+    throw new Error("lca: remote execution policy differs from the fixed owner snapshot")
+  }
+  return { role, policy }
+}
+
+/** Mark Bash risk in the store that owns this execution; linked workers never write child-local run state. */
+export function markOpenCodeProcessRiskForSession(deps: HookDeps, sessionID: string): void {
+  const runtime = getOpenCodeRuntime(deps)
+  let source: ExecutionStoreSource
+  try { source = executionStoreFor(deps, runtime) }
+  catch (error) {
+    runtime.policy.unbindSession(sessionID)
+    throw error
+  }
+  if (!source.owner) {
+    runtime.runs.markProcessRiskBySession(sessionID)
+    return
+  }
+
+  let before: ExecutionRecord
+  try {
+    before = linkedExecutionForSession(source.runs.status(), source.owner, deps.worktree, sessionID)
+    const { role, policy } = fixedPolicyForExecution(runtime, before)
+    const snapshot = runtime.policy.snapshotForSession(sessionID)
+    if (!runtime.policy.handlersForSession(sessionID) || !snapshot || snapshot.role !== role || snapshot.id !== policy.id) {
+      throw new Error("lca: linked task policy is not bound to its OpenCode session")
+    }
+    source.runs.markProcessRiskBySession(sessionID)
+    const after = linkedExecutionForSession(source.runs.status(), source.owner, deps.worktree, sessionID)
+    fixedPolicyForExecution(runtime, after)
+    if (!sameExecutionIdentity(before, after) || !after.processRisk) {
+      throw new Error("lca: linked task execution changed before Bash risk was recorded")
+    }
+  } catch (error) {
+    runtime.policy.unbindSession(sessionID)
+    throw error
+  }
 }
 
 function recoveryContextForOpenCodeReference(
@@ -150,32 +273,50 @@ function openCodeReference(value: unknown, executionID: string): value is Execut
  */
 export function policyForOpenCodeSession(deps: HookDeps, sessionID: string) {
   const runtime = getOpenCodeRuntime(deps)
-  const state = runtime.runs.status()
-  const managed = state.executions.findLast((record) => {
-    if (!record.vendorRef) return false
-    try {
-      const reference = JSON.parse(record.vendorRef) as { executionID?: unknown; vendorSessionID?: unknown }
-      return reference.executionID === record.executionId && reference.vendorSessionID === sessionID
-    } catch { return false }
-  })
-  const execution = managed && state.claim?.generation === managed.generation
-    && state.claim.ownerSession === managed.ownerSession && !managed.terminal && !managed.cancel
-    && !managed.fence && !(managed.reconciliation?.outcome === "terminal" && managed.reconciliation.quiescent)
-    ? managed : undefined
+  let source: ExecutionStoreSource
+  let execution: ExecutionRecord | undefined
+  let managed: ExecutionRecord | undefined
+  try {
+    source = executionStoreFor(deps, runtime)
+    const state = source.runs.status()
+    if (source.owner) {
+      execution = linkedExecutionForSession(state, source.owner, deps.worktree, sessionID)
+    } else {
+      managed = state.executions.findLast((record) => {
+        if (!record.vendorRef) return false
+        try {
+          const reference = JSON.parse(record.vendorRef) as { executionID?: unknown; vendorSessionID?: unknown }
+          return reference.executionID === record.executionId && reference.vendorSessionID === sessionID
+        } catch { return false }
+      })
+      execution = managed && state.claim?.generation === managed.generation
+        && state.claim.ownerSession === managed.ownerSession && !managed.terminal && !managed.cancel
+        && !managed.fence && !(managed.reconciliation?.outcome === "terminal" && managed.reconciliation.quiescent)
+        ? managed : undefined
+    }
+  } catch (error) {
+    runtime.policy.unbindSession(sessionID)
+    throw error
+  }
   if (!execution) {
     runtime.policy.unbindSession(sessionID)
     if (managed) throw new Error("lca: execution session is cancelled, fenced or terminal")
     return undefined
   }
-  const existing = runtime.policy.handlersForSession(sessionID)
-  if (existing) return existing
+  let fixed: ReturnType<typeof fixedPolicyForExecution>
+  try {
+    fixed = fixedPolicyForExecution(runtime, execution)
+  } catch (error) {
+    runtime.policy.unbindSession(sessionID)
+    throw error
+  }
+  const { role, policy } = fixed
   if (!enabled(deps.config, "config.agents") || !enabled(deps.config, "chat.params")) {
+    runtime.policy.unbindSession(sessionID)
     throw new Error("lca: required execution policy hooks are disabled")
   }
-  if (!(EXECUTION_ROLES as readonly string[]).includes(execution.role)) throw new Error("lca: unrecognized execution role")
-  const role = execution.role as ExecutionRole
-  const policy = runtime.policy.resolve(role)
-  if (execution.policyID !== policy.id) throw new Error("lca: remote execution policy differs from the fixed owner snapshot")
+  const existing = runtime.policy.handlersForSession(sessionID)
+  if (existing) return existing
   const request = {
     executionID: execution.executionId, supervisorSessionID: execution.ownerSession,
     taskID: execution.taskId, attemptID: execution.attemptId, generation: execution.generation,

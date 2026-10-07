@@ -39,7 +39,7 @@ import { beginExecutionActivity } from "../hosts/runtime.ts"
 import type { ExecutionHandle, ExecutionReconciliation, ExecutionReference, ExecutionRole, ExecutionRuntime } from "../hosts/types.ts"
 import type { VerificationHandle, VerificationResult } from "./verifier.ts"
 import { createSnapshotStore, type Snapshot } from "./snapshot.ts"
-import { createTaskWorktree, type TaskWorktree, worktreeRoot } from "./worktree.ts"
+import { createTaskWorktree, hasTaskWorktreeState, reopenTaskWorktree, type TaskWorktree } from "./worktree.ts"
 import { readWorkflow } from "../flow/state.ts"
 import { copyFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
@@ -469,8 +469,27 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     }
     try { deps.runs.assertQuiescent(entry.claim) }
     catch (error) { entry.unresolved = true; throw error }
-    entry.recoveryBlocked = false
     let ledger = readLedger(deps.worktree, sessionID)
+    const c = cfg()
+    const reopenedWorktrees = new Map<string, TaskWorktree>()
+    // Ownership and the original durable baseline must be authenticated before repairing any running-task
+    // ledger state. In particular, do not let a missing or substituted worktree become a fresh baseline.
+    for (const task of ledger.tasks) {
+      if (task.kind === "data" || (task.status !== "running" && task.status !== "pending")) continue
+      const residue = hasTaskWorktreeState(deps.worktree, sessionID, task.id)
+      if (!c.worktree) {
+        if (residue) throw new Error(`task worktree recovery refused for ${task.id}: isolation is disabled; existing worktree was preserved`)
+        continue
+      }
+      const interrupted = task.status === "running" || task.startedAt !== undefined
+      const resumedPreDispatch = task.status === "pending" && origin?.resumed === true && residue
+      if (interrupted || resumedPreDispatch) {
+        reopenedWorktrees.set(task.id, await reopenTaskWorktree(deps.worktree, sessionID, task.id, c.diff_exclude))
+      } else if (residue) {
+        throw new Error(`task worktree recovery refused for ${task.id}: existing worktree requires an explicit resumed run`)
+      }
+    }
+    entry.recoveryBlocked = false
     // A crashed run may have left a task `running`; give it its attempt back and run it again. The ledger counter is
     // not a stable identity, so the restarted attempt gets a new UUID and no guessed resumeOfAttemptID.
     if (ledger.tasks.some((t) => t.status === "running")) {
@@ -495,7 +514,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
         result.cancelled += c.ids.length
         break
       }
-      const finished = await runTask(sessionID, entry, task, result, origin)
+      const finished = await runTask(sessionID, entry, task, result, origin, reopenedWorktrees.get(task.id))
       if (finished.status === "done") result.done++
       else if (finished.status === "failed") result.failed++
       else if (finished.status === "cancelled") result.cancelled++
@@ -508,7 +527,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     return result
   }
 
-  async function runTask(sessionID: string, entry: Active, task0: LedgerTask, result: QueueRun, origin?: QueueOrigin): Promise<LedgerTask> {
+  async function runTask(sessionID: string, entry: Active, task0: LedgerTask, result: QueueRun, origin?: QueueOrigin, reopenedWorktree?: TaskWorktree): Promise<LedgerTask> {
     if (task0.kind === "data") return runDataTask(sessionID, entry, task0, origin)
     const c = cfg()
     let task = task0
@@ -519,10 +538,12 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     let verifiedTree: string | undefined
     // Optional isolation: the task runs in its own linked git worktree (worker session + verify bound to it) and its
     // diff is applied to the main worktree only when accepted. Falls back to in-place when there is no commit yet.
-    let wt: TaskWorktree | null = null
-    const interruptedIsolatedTask = c.worktree && task.startedAt !== undefined
-    const interruptedWorktreePath = interruptedIsolatedTask ? join(worktreeRoot(deps.worktree), sessionID, task.id) : undefined
-    if (c.worktree && !interruptedIsolatedTask) {
+    let wt: TaskWorktree | null = reopenedWorktree ?? null
+    if (c.worktree && !wt) {
+      if (hasTaskWorktreeState(deps.worktree, sessionID, task.id)) {
+        entry.recoveryBlocked = true
+        throw new Error(`task worktree recovery refused for ${task.id}: existing worktree was not authenticated before dispatch`)
+      }
       wt = await createTaskWorktree(deps.worktree, sessionID, task.id, c.diff_exclude)
       if (wt) deps.log("task worktree", { sessionID, task: task.id, path: wt.path })
       else deps.log("task worktree unavailable (no git repository or no commit yet): running in place", { sessionID, task: task.id })
@@ -531,15 +552,16 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     const snapshotDirectory = join(sessionDir(deps.worktree, sessionID), "snapshots", task.id)
     // One snapshot store + one "before" tree per task: a retry is judged on the task's cumulative diff (attempt 1 may
     // already have done the work; the retry then changes little or nothing).
-    const store = interruptedIsolatedTask ? null : await createSnapshotStore(root, snapshotDirectory)
-    if (!store && !interruptedIsolatedTask) result.noSnapshot = true
-    let before: Snapshot = null
+    const store = wt ? wt.store : await createSnapshotStore(root, snapshotDirectory)
+    if (!store && !wt) result.noSnapshot = true
+    let before: Snapshot = wt ? wt.baseline : null
     let baselineError: string | undefined
-    if (store && !interruptedIsolatedTask) {
+    if (!wt && store) {
       try { before = await store.baseline(c.diff_exclude, task.startedAt !== undefined) }
       catch (error) { baselineError = (error as Error).message ?? String(error) }
     }
     const prot = protectedFiles(task)
+    let removeWorktree = false
     const finishObserved = (next: LedgerTask, status: "done" | "failed" | "cancelled"): LedgerTask => {
       const done = finish(sessionID, entry, ledger, next)
       finishAttemptObservation(attempt, status, status, done.review)
@@ -550,8 +572,6 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     const cancelled = (): LedgerTask => finishObserved(
       { ...task, status: "cancelled", error: entry.reason ?? "aborted", finishedAt: Date.now() }, "cancelled")
     try {
-      if (interruptedIsolatedTask) return finishObserved(
-        { ...task, status: "failed", error: `cannot safely resume an interrupted isolated task: deterministic worktree path is ${interruptedWorktreePath}; recreating it may discard unreviewed edits or mismatch its original baseline, so no worker was dispatched`, finishedAt: Date.now() }, "failed")
       if (!store || !before) return finishObserved(
         { ...task, status: "failed", error: baselineError ? `could not ${task.startedAt === undefined ? "snapshot" : "reuse"} the task baseline: ${head(baselineError, 200)}` : "could not snapshot the task baseline", finishedAt: Date.now() }, "failed")
       while (task.attempts < c.max_attempts) {
@@ -838,6 +858,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
               return finishObserved(
                 { ...task, status: "failed", blocked: m.reason, error: `not merged: ${m.reason} (patch: ${kept})`, finishedAt: Date.now() }, "failed")
             }
+            removeWorktree = true
             deps.log("task worktree merged", { sessionID, task: task.id, files: m.files.length })
             return completed!
           }
@@ -866,9 +887,11 @@ export function createQueue(deps: ExecutionRuntime): Queue {
       entry.attempt = undefined
       throw error
     } finally {
-      if (!entry.unresolved && !baselineError) store?.dispose()
-      // a failed or cancelled task's worktree changes are discarded with it (the main worktree never saw them)
-      if (wt && !entry.unresolved) await wt.remove()
+      if (!wt && !entry.unresolved && !baselineError) store?.dispose()
+      if (wt && removeWorktree && !entry.unresolved) {
+        try { await wt.remove() }
+        catch (error) { deps.log("task worktree cleanup failed", { sessionID, task: task.id, error: String(error) }) }
+      }
     }
   }
 

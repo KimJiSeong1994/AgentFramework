@@ -3,14 +3,19 @@ import { mkdirSync, symlinkSync } from "node:fs"
 import { join } from "node:path"
 import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
 import { createToolAfterHook } from "../src/hooks/tool-after.ts"
+import { createChatParamsHook } from "../src/hooks/chat-params.ts"
 import { isErrorOutput, relativizePaths } from "../src/hosts/tool-policy.ts"
 import { createEventHook } from "../src/hooks/event.ts"
 import { writeJsonAtomic, sessionInfoPath, writeModeState, readModeState, EMPTY_MODE } from "../src/state/store.ts"
-import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
+import { createTaskWorktree } from "../src/orchestration/worktree.ts"
+import { fakeClient, makeDeps, tempGitWorktree, tempWorktree, type FakeClient } from "./guards-helpers.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
-import type { ExecutionRequest } from "../src/hosts/types.ts"
+import type { ExecutionRequest, ExecutionRole } from "../src/hosts/types.ts"
 
 const S = "ses_t"
+const LINKED_OWNER = "linked-owner"
+const LINKED_TASK = "linked-task"
+const LINKED_SESSION = "linked-child"
 let wt: ReturnType<typeof tempWorktree>
 let client: FakeClient
 beforeEach(() => {
@@ -27,6 +32,87 @@ const after = (tool: string, args: any, callID: string, output: string, metadata
 const toolErrorEvent = (callID: string, error: string) => ({
   event: { type: "message.part.updated", properties: { part: { id: "p", sessionID: S, messageID: "m", type: "tool", callID, tool: "write", state: { status: "error", error, input: {}, time: { start: 0, end: 1 } } } } } as any,
 })
+
+type LinkedFixtureOptions = {
+  role?: ExecutionRole
+  claimOwnerSession?: string
+  taskId?: string
+  cwd?: string
+  policyID?: string
+  profile?: "legacy-unowned" | "linux-single-use"
+  bind?: boolean
+  cancelled?: boolean
+  fenced?: boolean
+  terminal?: boolean
+  staleGeneration?: boolean
+  extraVendorReferenceField?: boolean
+  duplicateVendorReference?: boolean
+}
+
+async function createLinkedFixture(options: LinkedFixtureOptions = {}) {
+  const main = tempGitWorktree()
+  const linked = await createTaskWorktree(main.worktree, LINKED_OWNER, LINKED_TASK, [])
+  if (!linked) throw new Error("test fixture did not create a linked Git worktree")
+  const ownerDeps = makeDeps(fakeClient(), main.worktree)
+  const ownerRuntime = getOpenCodeRuntime(ownerDeps)
+  const runs = ownerRuntime.runs
+  let claim: ReturnType<typeof runs.claim> | undefined
+  const role = options.role ?? "worker"
+  if (options.bind !== false) {
+    const ownerSession = options.claimOwnerSession ?? LINKED_OWNER
+    claim = runs.claim(ownerSession, "linked-hook-fixture", process.pid)
+    const executionID = "linked-execution"
+    runs.registerIntent(claim, {
+      executionId: executionID, ownerSession, taskId: options.taskId ?? LINKED_TASK,
+      attemptId: "linked-attempt", generation: claim.generation, role,
+      cwd: options.cwd ?? linked.path,
+      policyID: options.policyID ?? ownerRuntime.policy.resolve(role).id,
+      kind: "host", profile: options.profile ?? "legacy-unowned",
+    })
+    runs.bindVendorRef(claim, executionID, JSON.stringify({
+      executionID, vendorSessionID: LINKED_SESSION,
+      ...(options.extraVendorReferenceField ? { unexpected: true } : {}),
+    }))
+    if (options.cancelled) runs.recordCancel(claim, executionID, { requestedAt: Date.now() })
+    if (options.fenced) runs.fence(claim, executionID, "fixture fence")
+    if (options.terminal || options.staleGeneration) {
+      runs.recordTerminal(claim, executionID, { outcome: "completed", terminalAt: Date.now(), quiescentAt: Date.now() })
+    }
+    if (options.staleGeneration) {
+      runs.release(claim)
+      claim = runs.claim(ownerSession, "linked-hook-fixture", process.pid)
+    }
+    if (options.duplicateVendorReference) {
+      runs.recordTerminal(claim, executionID, { outcome: "completed", terminalAt: Date.now(), quiescentAt: Date.now() })
+      runs.release(claim)
+      claim = runs.claim(ownerSession, "linked-hook-fixture", process.pid)
+      const duplicateID = "linked-execution-duplicate"
+      runs.registerIntent(claim, {
+        executionId: duplicateID, ownerSession, taskId: options.taskId ?? LINKED_TASK,
+        attemptId: "linked-attempt-duplicate", generation: claim.generation, role,
+        cwd: options.cwd ?? linked.path,
+        policyID: options.policyID ?? ownerRuntime.policy.resolve(role).id,
+        kind: "host", profile: options.profile ?? "legacy-unowned",
+      })
+      runs.bindVendorRef(claim, duplicateID, JSON.stringify({ executionID: duplicateID, vendorSessionID: LINKED_SESSION }))
+    }
+  }
+  const serverDeps = makeDeps(fakeClient(), linked.path)
+  return {
+    main, linked, ownerRuntime, runs, claim, serverDeps,
+    async cleanup() {
+      await linked.remove()
+      main.cleanup()
+      process.env.LCA_STATE_HOME = wt.stateHome
+    },
+  }
+}
+
+async function withLinkedFixture<T>(options: LinkedFixtureOptions, run: (fixture: Awaited<ReturnType<typeof createLinkedFixture>>) => Promise<T>): Promise<T> {
+  const fixture = await createLinkedFixture(options)
+  try { return await run(fixture) }
+  finally { await fixture.cleanup() }
+}
 
 describe("tool.execute.before", () => {
   test("plugin recovers a reviewer policy from the durable execution reference", async () => {
@@ -56,6 +142,72 @@ describe("tool.execute.before", () => {
     await expect(createToolBeforeHook(server)({ tool: "read", sessionID: "drift-child", callID: "read-1" }, { args: { filePath: "x" } }))
       .rejects.toThrow("remote execution policy differs")
     expect(getOpenCodeRuntime(server).policy.snapshotForSession("drift-child")).toBeUndefined()
+  })
+
+  test("linked reviewer keeps the fixed owner snapshot in chat.params and refuses writes", async () => {
+    await withLinkedFixture({ role: "reviewer" }, async ({ serverDeps, ownerRuntime }) => {
+      const localRuntime = getOpenCodeRuntime(serverDeps)
+      const chatParams = createChatParamsHook(serverDeps)
+      const output: any = { maxOutputTokens: 16_384, options: {} }
+      await chatParams({
+        sessionID: LINKED_SESSION,
+        agent: "reviewer",
+        model: { id: "fixture", providerID: "fixture", capabilities: { reasoning: false } },
+        provider: { info: { id: "fixture" } },
+      } as any, output)
+      expect(localRuntime.policy.snapshotForSession(LINKED_SESSION)?.id)
+        .toBe(ownerRuntime.policy.resolve("reviewer").id)
+
+      const hook = createToolBeforeHook(serverDeps)
+      await expect(hook({ tool: "write", sessionID: LINKED_SESSION, callID: "linked-write" }, { args: { filePath: "x" } }))
+        .rejects.toThrow(/reviewer tool write is not read-only/)
+    })
+  })
+
+  test("linked worker Bash risk is persisted to owner state before admission", async () => {
+    await withLinkedFixture({}, async ({ serverDeps, runs }) => {
+      const hook = createToolBeforeHook(serverDeps)
+      await hook({ tool: "bash", sessionID: LINKED_SESSION, callID: "linked-bash" }, { args: { command: "true" } })
+
+      expect(runs.status().executions[0]?.processRisk).toMatchObject({ tool: "bash" })
+      expect(getOpenCodeRuntime(serverDeps).runs.status().executions).toEqual([])
+    })
+  })
+
+  test.each([
+    ["cancelled execution", { cancelled: true }],
+    ["terminal execution", { terminal: true }],
+    ["stale generation", { staleGeneration: true }],
+    ["missing owner binding", { bind: false }],
+    ["wrong cwd", { cwd: "/" }],
+    ["wrong task", { taskId: "another-task" }],
+    ["wrong owner", { claimOwnerSession: "another-owner" }],
+    ["wrong fixed policy", { policyID: "lca:worker:wrong" }],
+    ["wrong execution profile", { profile: "linux-single-use" }],
+    ["fenced execution", { fenced: true }],
+    ["non-exact vendor reference", { extraVendorReferenceField: true }],
+    ["ambiguous vendor references", { duplicateVendorReference: true }],
+  ] as const)("linked session rejects %s", async (_name, options) => {
+    await withLinkedFixture(options, async ({ serverDeps }) => {
+      const hook = createToolBeforeHook(serverDeps)
+      await expect(hook({ tool: "read", sessionID: LINKED_SESSION, callID: "linked-read" }, { args: { filePath: "x" } }))
+        .rejects.toThrow()
+      expect(getOpenCodeRuntime(serverDeps).policy.snapshotForSession(LINKED_SESSION)).toBeUndefined()
+    })
+  })
+
+  test.each(["cancelled", "fenced"] as const)("cached linked policy is revalidated after %s", async (change) => {
+    await withLinkedFixture({}, async ({ serverDeps, runs, claim }) => {
+      const hook = createToolBeforeHook(serverDeps)
+      await hook({ tool: "read", sessionID: LINKED_SESSION, callID: "linked-read-1" }, { args: { filePath: "x" } })
+      expect(getOpenCodeRuntime(serverDeps).policy.snapshotForSession(LINKED_SESSION)?.role).toBe("worker")
+
+      if (change === "cancelled") runs.recordCancel(claim!, "linked-execution", { requestedAt: Date.now() })
+      else runs.fence(claim!, "linked-execution", "fixture fence")
+      await expect(hook({ tool: "read", sessionID: LINKED_SESSION, callID: "linked-read-2" }, { args: { filePath: "x" } }))
+        .rejects.toThrow(/cancelled, fenced, or terminal/)
+      expect(getOpenCodeRuntime(serverDeps).policy.snapshotForSession(LINKED_SESSION)).toBeUndefined()
+    })
   })
 
   test("blocks the (limit+1)th identical failing call with a model-facing message", async () => {

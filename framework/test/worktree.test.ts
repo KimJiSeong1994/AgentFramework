@@ -1,13 +1,13 @@
 // Stage 4: per-task git worktree isolation (delegate.worktree). The worktree module alone (creation state, merge,
 // conflicts) and the queue path (worker + verify bound to the worktree, main worktree untouched until accepted,
-// failed/cancelled tasks discarded, patch kept when the merge no longer applies).
+// failed/cancelled tasks preserved, patch kept when the merge no longer applies).
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { createQueue } from "../src/orchestration/queue.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
-import { createTaskWorktree, worktreeRoot } from "../src/orchestration/worktree.ts"
+import { createTaskWorktree, hasTaskWorktreeState, reopenTaskWorktree, taskWorktreeOwner, worktreeRoot } from "../src/orchestration/worktree.ts"
 import { createSnapshotStore } from "../src/orchestration/snapshot.ts"
 import { readLedger } from "../src/state/ledger.ts"
 import { fakeClient, GIT_TEST_ENV, makeDeps, tempGitWorktree, verifyScript, waitFor, type FakeClient } from "./guards-helpers.ts"
@@ -24,6 +24,7 @@ afterEach(() => wt.cleanup())
 const g = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd, stdio: "pipe", env: GIT_TEST_ENV }).toString().trim()
 const read = (dir: string, f: string) => readFileSync(join(dir, f), "utf8")
 const prompts = (agent: string) => client.calls.filter((c) => c.method === "prompt" && (c.args as any).body.agent === agent).map((c) => c.args as any)
+const recoveryDir = (taskId: string) => join(worktreeRoot(wt.worktree), ".recovery", S, taskId)
 
 describe("task worktree", () => {
   test.each([
@@ -112,6 +113,166 @@ describe("task worktree", () => {
     expect(g(wt.worktree, "worktree", "list")).not.toContain("/t1")
   })
 
+  test("reopens the owned worktree with its original edits and durable baseline without replaying main WIP", async () => {
+    writeFileSync(join(wt.worktree, "lib.py"), "X = 2\n")
+    writeFileSync(join(wt.worktree, "earlier.py"), "EARLIER = True\n")
+    const original = (await createTaskWorktree(wt.worktree, S, "reopen", []))!
+    expect(original.store).toBeDefined()
+    expect(original.baseline.tree).toMatch(/^[0-9a-f]{40,64}$/)
+    expect(original.baseline.store).toBe(original.store)
+    expect(taskWorktreeOwner(original.path)).toEqual({ mainWorktree: realpathSync(wt.worktree), sessionID: S, taskId: "reopen" })
+    expect(taskWorktreeOwner(wt.worktree)).toBeUndefined()
+    expect(hasTaskWorktreeState(wt.worktree, S, "reopen")).toBe(true)
+    writeFileSync(join(original.path, "recovered.py"), "RECOVERED = True\n")
+    const control = recoveryDir("reopen")
+    const ownership = readFileSync(join(control, "ownership.json"))
+    const baseline = readFileSync(join(control, "baseline", "baseline.json"))
+    expect(existsSync(join(control, "baseline", "objects"))).toBe(true)
+
+    const reopened = await reopenTaskWorktree(wt.worktree, S, "reopen", [])
+    expect(reopened.path).toBe(original.path)
+    expect(reopened.base).toBe(original.base)
+    expect(read(reopened.path, "recovered.py")).toBe("RECOVERED = True\n")
+    expect(read(wt.worktree, "lib.py")).toBe("X = 2\n")
+    expect(existsSync(join(wt.worktree, "recovered.py"))).toBe(false)
+    expect(readFileSync(join(control, "ownership.json"))).toEqual(ownership)
+    expect(readFileSync(join(control, "baseline", "baseline.json"))).toEqual(baseline)
+
+    expect(await reopened.merge([])).toEqual({ ok: true, files: ["recovered.py"] })
+    expect(read(wt.worktree, "lib.py")).toBe("X = 2\n")
+    expect(read(wt.worktree, "earlier.py")).toBe("EARLIER = True\n")
+    expect(read(wt.worktree, "recovered.py")).toBe("RECOVERED = True\n")
+    await expect(reopenTaskWorktree(wt.worktree, S, "reopen", [])).rejects.toThrow(/ambiguous/)
+    await reopened.remove()
+    expect(existsSync(original.path)).toBe(false)
+    expect(existsSync(control)).toBe(false)
+    expect(hasTaskWorktreeState(wt.worktree, S, "reopen")).toBe(false)
+  })
+
+  test("reopen refuses wrong session, task, and exclusion configuration without changing the worktree", async () => {
+    const task = (await createTaskWorktree(wt.worktree, S, "identity-check", []))!
+    await expect(reopenTaskWorktree(wt.worktree, "other-session", "identity-check", [])).rejects.toThrow()
+    await expect(reopenTaskWorktree(wt.worktree, S, "other-task", [])).rejects.toThrow()
+    await expect(reopenTaskWorktree(wt.worktree, S, "identity-check", ["ignored.txt"])).rejects.toThrow(/metadata/)
+    expect(existsSync(task.path)).toBe(true)
+    expect(g(wt.worktree, "worktree", "list")).toContain(task.path)
+    await task.remove()
+  })
+
+  test("parent HEAD drift refuses recovery and native ownership without discarding edits", async () => {
+    const task = (await createTaskWorktree(wt.worktree, S, "parent-head", []))!
+    writeFileSync(join(task.path, "lib.py"), "X = 19\n")
+    g(wt.worktree, "commit", "--allow-empty", "-m", "new parent checkout state")
+    await expect(reopenTaskWorktree(wt.worktree, S, "parent-head", [])).rejects.toThrow(/HEAD|identity/)
+    expect(() => taskWorktreeOwner(task.path)).toThrow(/HEAD|identity/)
+    expect((await task.merge([])).ok).toBe(false)
+    expect(read(task.path, "lib.py")).toBe("X = 19\n")
+    expect(read(wt.worktree, "lib.py")).toBe("X = 1\n")
+    expect(existsSync(join(recoveryDir("parent-head"), "baseline", "baseline.json"))).toBe(true)
+  })
+
+  test("reopen refuses mismatched Git identity and changed original HEAD", async () => {
+    const task = (await createTaskWorktree(wt.worktree, S, "git-identity", []))!
+    const metadataPath = join(recoveryDir("git-identity"), "ownership.json")
+    const originalMetadata = readFileSync(metadataPath)
+    const value = JSON.parse(originalMetadata.toString("utf8")) as { commonGitDir: string }
+    value.commonGitDir = join(wt.stateHome, "other-git")
+    writeFileSync(metadataPath, JSON.stringify(value) + "\n")
+    await expect(reopenTaskWorktree(wt.worktree, S, "git-identity", [])).rejects.toThrow(/identity|ownership/)
+    writeFileSync(metadataPath, originalMetadata)
+
+    g(task.path, "commit", "--allow-empty", "-m", "unexpected child HEAD")
+    await expect(reopenTaskWorktree(wt.worktree, S, "git-identity", [])).rejects.toThrow(/HEAD|identity/)
+    expect(read(wt.worktree, "lib.py")).toBe("X = 1\n")
+  })
+
+  test("reopen revalidates Git configuration before inspecting the child", async () => {
+    const task = (await createTaskWorktree(wt.worktree, S, "config-changed", []))!
+    g(wt.worktree, "config", "--local", "core.fsmonitor", "touch sentinel")
+    await expect(reopenTaskWorktree(wt.worktree, S, "config-changed", [])).rejects.toThrow(/git-config: forbidden/)
+    expect(existsSync(join(wt.worktree, "sentinel"))).toBe(false)
+    expect(existsSync(task.path)).toBe(true)
+    expect(existsSync(join(recoveryDir("config-changed"), "baseline", "baseline.json"))).toBe(true)
+  })
+
+  test("missing or corrupt ownership and missing baseline refuse recovery without recreation", async () => {
+    const missing = (await createTaskWorktree(wt.worktree, S, "missing-owner", []))!
+    const missingControl = recoveryDir("missing-owner")
+    rmSync(join(missingControl, "ownership.json"))
+    await expect(reopenTaskWorktree(wt.worktree, S, "missing-owner", [])).rejects.toThrow(/metadata is missing/)
+    expect(() => taskWorktreeOwner(missing.path)).toThrow(/metadata is missing/)
+    expect(hasTaskWorktreeState(wt.worktree, S, "missing-owner")).toBe(true)
+    expect(existsSync(missing.path)).toBe(true)
+    expect(existsSync(join(missingControl, "baseline", "baseline.json"))).toBe(true)
+
+    const corrupt = (await createTaskWorktree(wt.worktree, S, "corrupt-owner", []))!
+    const corruptMetadata = join(recoveryDir("corrupt-owner"), "ownership.json")
+    const saved = readFileSync(corruptMetadata)
+    writeFileSync(corruptMetadata, "{")
+    await expect(reopenTaskWorktree(wt.worktree, S, "corrupt-owner", [])).rejects.toThrow(/corrupt/)
+    writeFileSync(corruptMetadata, saved)
+
+    const noBaseline = (await createTaskWorktree(wt.worktree, S, "missing-baseline", []))!
+    const objects = join(recoveryDir("missing-baseline"), "baseline", "objects")
+    rmSync(objects, { recursive: true })
+    await expect(reopenTaskWorktree(wt.worktree, S, "missing-baseline", [])).rejects.toThrow(/baseline/)
+    expect(existsSync(objects)).toBe(false)
+    expect(existsSync(noBaseline.path)).toBe(true)
+    expect(existsSync(corrupt.path)).toBe(true)
+  })
+
+  test("reopen refuses a symlink replacement and preserves the outside target", async () => {
+    const task = (await createTaskWorktree(wt.worktree, S, "symlink-replacement", []))!
+    const outside = join(wt.stateHome, "outside")
+    mkdirSync(outside)
+    writeFileSync(join(outside, "keep.txt"), "untouched\n")
+    const moved = `${task.path}.saved`
+    renameSync(task.path, moved)
+    symlinkSync(outside, task.path)
+    await expect(reopenTaskWorktree(wt.worktree, S, "symlink-replacement", [])).rejects.toThrow(/replaced|symlink|unsafe/)
+    expect(() => taskWorktreeOwner(task.path)).toThrow(/replaced|symlink|unsafe/)
+    expect(read(outside, "keep.txt")).toBe("untouched\n")
+    unlinkSync(task.path)
+    renameSync(moved, task.path)
+    await task.remove()
+  })
+
+  test("fresh creation refuses an occupied deterministic path without deleting it", async () => {
+    const path = join(worktreeRoot(wt.worktree), S, "occupied")
+    mkdirSync(dirname(path), { recursive: true })
+    mkdirSync(path)
+    writeFileSync(join(path, "sentinel"), "preserve\n")
+    await expect(createTaskWorktree(wt.worktree, S, "occupied", [])).rejects.toThrow(/occupied/)
+    expect(read(path, "sentinel")).toBe("preserve\n")
+  })
+
+  test("recovery state is rejected before creation when the configured state base is inside the repository", async () => {
+    const oldLca = process.env.LCA_STATE_HOME
+    const oldXdg = process.env.XDG_STATE_HOME
+    delete process.env.LCA_STATE_HOME
+    process.env.XDG_STATE_HOME = join(wt.worktree, ".inside-state")
+    try {
+      await expect(createTaskWorktree(wt.worktree, S, "inside-state", [])).rejects.toThrow(/outside the main worktree/)
+      expect(existsSync(join(wt.worktree, ".inside-state"))).toBe(false)
+    } finally {
+      if (oldLca === undefined) delete process.env.LCA_STATE_HOME
+      else process.env.LCA_STATE_HOME = oldLca
+      if (oldXdg === undefined) delete process.env.XDG_STATE_HOME
+      else process.env.XDG_STATE_HOME = oldXdg
+    }
+  })
+
+  test("task-state lookup detects a child-only path and recovery-only residue", async () => {
+    const childOnly = (await createTaskWorktree(wt.worktree, S, "child-only", []))!
+    rmSync(recoveryDir("child-only"), { recursive: true })
+    expect(hasTaskWorktreeState(wt.worktree, S, "child-only")).toBe(true)
+
+    const recoveryOnly = (await createTaskWorktree(wt.worktree, S, "recovery-only", []))!
+    g(wt.worktree, "worktree", "remove", "--force", recoveryOnly.path)
+    expect(hasTaskWorktreeState(wt.worktree, S, "recovery-only")).toBe(true)
+    expect(existsSync(childOnly.path)).toBe(true)
+  })
+
   test("worktree merge preserves exact leading and trailing whitespace in filenames", async () => {
     const inheritedName = " main whitespace "
     writeFileSync(join(wt.worktree, inheritedName), "inherited\n")
@@ -136,18 +297,20 @@ describe("task worktree", () => {
       expect(readFileSync(m.patch, "utf8")).toContain("+X = 10")
     }
     expect(read(wt.worktree, "lib.py")).toBe("X = 99\n")
+    expect(existsSync(join(recoveryDir("t2"), "ownership.json"))).toBe(true)
+    expect(existsSync(join(recoveryDir("t2"), "baseline", "baseline.json"))).toBe(true)
     await t.remove()
+    expect(existsSync(recoveryDir("t2"))).toBe(false)
   })
 
   test("failed worktree snapshot and cancellation at the final guard never apply a patch", async () => {
     const t = (await createTaskWorktree(wt.worktree, S, "snapshot-fault", []))!
     writeFileSync(join(t.path, "lib.py"), "X = 10\n")
-    writeFileSync(join(t.path, ".git-lca-index.lock"), "locked")
+    symlinkSync(wt.stateHome, join(t.path, ".lca"))
     const failed = await t.merge([])
     expect(failed).toMatchObject({ ok: false, reason: "could not snapshot the worktree" })
     expect(read(wt.worktree, "lib.py")).toBe("X = 1\n")
-    const { rmSync } = await import("node:fs")
-    rmSync(join(t.path, ".git-lca-index.lock"))
+    unlinkSync(join(t.path, ".lca"))
     let applied = false
     const cancelled = await t.merge([], { guard: () => false, applied: () => { applied = true } })
     expect(cancelled).toMatchObject({ ok: false, reason: "task cancelled before merge" })
@@ -218,13 +381,34 @@ describe("task worktree", () => {
     await t.remove()
   })
 
-  test("returns null without a commit (unborn repository) and for a non-git directory", async () => {
+  test("final guard recheck detects a new file and tracked deletion before applying", async () => {
+    const t = (await createTaskWorktree(wt.worktree, S, "late-add-delete", []))!
+    writeFileSync(join(t.path, "lib.py"), "X = 2\n")
+    const store = (await createSnapshotStore(t.path))!
+    const verified = (await store.snapshot())!
+    const result = await t.merge([], {
+      guard: () => {
+        unlinkSync(join(t.path, "lib.py"))
+        writeFileSync(join(t.path, "late-added.py"), "LATE = True\n")
+        return true
+      },
+      applied: () => { throw new Error("must not apply") },
+    }, verified.tree)
+    expect(result).toMatchObject({ ok: false, reason: "worktree changed since verification" })
+    expect(read(wt.worktree, "lib.py")).toBe("X = 1\n")
+    expect(existsSync(join(wt.worktree, "late-added.py"))).toBe(false)
+    store.dispose()
+    await t.remove()
+  })
+
+  test("returns null without Git history and refuses a non-root Git directory before creation", async () => {
     const bare = tempGitWorktree()
     g(bare.worktree, "update-ref", "-d", "HEAD")
     expect(await createTaskWorktree(bare.worktree, S, "t1", [])).toBeNull()
     bare.cleanup()
     mkdirSync(join(wt.worktree, "plain"))
-    expect(await createTaskWorktree(join(wt.worktree, "plain"), S, "t1", [])).not.toBeNull() // inside the repo: fine
+    await expect(createTaskWorktree(join(wt.worktree, "plain"), S, "t1", [])).rejects.toThrow(/unchanged Git root/)
+    expect(g(wt.worktree, "worktree", "list").split("\n")).toHaveLength(1)
     expect(await createTaskWorktree("/", S, "t1", [])).toBeNull()
   })
 })
@@ -454,7 +638,10 @@ describe("queue with delegate.worktree", () => {
     const patch = join(wt.worktree, ".lca", "handoffs", S, "task-2.patch")
     expect(existsSync(patch)).toBe(true)
     expect(readFileSync(patch, "utf8")).toContain("+X = 2")
-    expect(g(wt.worktree, "worktree", "list").split("\n").length).toBe(1) // both worktrees removed
+    expect(read(join(worktreeRoot(wt.worktree), S, "t1"), "junk.py")).toBe("BAD = 1\n")
+    expect(read(join(worktreeRoot(wt.worktree), S, "t2"), "lib.py")).toBe("X = 2\n")
+    expect(existsSync(join(recoveryDir("t1"), "baseline", "baseline.json"))).toBe(true)
+    expect(existsSync(join(recoveryDir("t2"), "baseline", "baseline.json"))).toBe(true)
   })
 
   test("falls back to in-place execution when the repository has no commit", async () => {

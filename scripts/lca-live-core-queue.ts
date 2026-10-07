@@ -43,6 +43,7 @@ type AnyRecord = Record<string, unknown>
 
 type ChildRecord = {
   role: ExecutionRole
+  cwd: string
   taskID: string
   attemptID: string
   executionID: string
@@ -393,7 +394,6 @@ function childSessionIDsFromState(state: AnyRecord): string[] {
 function installTrackedHost(
   runtime: ExecutionRuntime,
   scenario: Scenario,
-  worktree: string,
   receipt: Receipt,
   children: ChildRecord[],
   injection: AnyRecord,
@@ -407,6 +407,7 @@ function installTrackedHost(
       const handle = await actual.prepare(request)
       const child: ChildRecord = {
         role: request.role,
+        cwd: request.cwd,
         taskID: request.taskID,
         attemptID: request.attemptID,
         executionID: request.executionID,
@@ -428,7 +429,7 @@ function installTrackedHost(
               ...(outcome.childMessageID ? { childMessageID: outcome.childMessageID } : {}),
             }
             if (scenario === "reject" && request.role === "worker" && outcome.status === "completed" && !injection.appliedAt) {
-              applyRejectInjection(worktree, child, injection)
+              applyRejectInjection(child, injection)
             }
             return outcome
           } catch (error) {
@@ -465,8 +466,8 @@ function errorRecord(error: unknown): { name: string; message: string } {
   }
 }
 
-function applyRejectInjection(worktree: string, child: ChildRecord, injection: AnyRecord): void {
-  const path = resolve(worktree, "text_ops.py")
+function applyRejectInjection(child: ChildRecord, injection: AnyRecord): void {
+  const path = resolve(child.cwd, "text_ops.py")
   const info = lstatSync(path)
   if (!info.isFile() || info.isSymbolicLink() || realpathSync(path) !== path) fail("reject injection target must be the regular root-level text_ops.py file")
   const before = readFileSync(path, "utf8")
@@ -483,7 +484,7 @@ function applyRejectInjection(worktree: string, child: ChildRecord, injection: A
   injection.appliedAt = new Date().toISOString()
 }
 
-async function waitForBusy(client: any, worktree: string, child: ChildRecord): Promise<BusyObservation> {
+async function waitForBusy(client: any, child: ChildRecord): Promise<BusyObservation> {
   const startedAt = Date.now()
   const observation: BusyObservation = {
     vendorSessionID: child.vendorSessionID ?? "",
@@ -502,7 +503,7 @@ async function waitForBusy(client: any, worktree: string, child: ChildRecord): P
     try {
       const timeout = Symbol("status-timeout")
       const result = await Promise.race([
-        client.session.status({ query: { directory: worktree } }),
+        client.session.status({ query: { directory: child.cwd } }),
         new Promise<typeof timeout>((resolve) => {
           timer = setTimeout(() => resolve(timeout), Math.max(0, deadline - Date.now()))
         }),
@@ -568,9 +569,9 @@ function validateRetryObservation(receipt: Receipt, run: AnyRecord, runtime: Exe
 function createRuntime(worktree: string, client: any, scenario: Scenario): { runtime: ExecutionRuntime; queue: Queue } {
   const config = loadConfig(worktree)
   const attempts = scenario === "retry" ? 2 : 1
-  if (!config.delegate.review || !config.delegate.review_strict || config.delegate.worktree ||
+  if (!config.delegate.review || !config.delegate.review_strict ||
     config.delegate.max_attempts !== attempts) {
-    fail(`fixture .lca/lca.jsonc must set review=true, review_strict=true, worktree=false, max_attempts=${attempts}; local overrides would conflict with the server's fixed policy`)
+    fail(`fixture .lca/lca.jsonc must set review=true, review_strict=true, max_attempts=${attempts}; local overrides would conflict with the server's fixed policy`)
   }
   const deps: HookDeps = {
     client,
@@ -617,9 +618,10 @@ async function runDriver(args: Args, receipt: Receipt): Promise<void> {
     }
     receipt.runs.push(run)
     let { runtime, queue } = createRuntime(args.worktree, client, args.scenario)
+    run.isolatedWorktrees = runtime.config.delegate.worktree
     const children: ChildRecord[] = []
     const injection: AnyRecord = {}
-    installTrackedHost(runtime, args.scenario, args.worktree, receipt, children, injection)
+    installTrackedHost(runtime, args.scenario, receipt, children, injection)
     run.children = children
 
     if (args.scenario === "resume") {
@@ -675,7 +677,8 @@ async function runDriver(args: Args, receipt: Receipt): Promise<void> {
     }
 
     phase = "run real queue workers"
-    const queuePromise = queue.run(parentID)
+    let queueFinished = false
+    const queuePromise = queue.run(parentID).finally(() => { queueFinished = true })
 
     if (args.scenario === "cancel") {
       const targetTaskID = added[0]!.id
@@ -690,7 +693,7 @@ async function runDriver(args: Args, receipt: Receipt): Promise<void> {
       }
       const targetChild = await deadlineChild()
       const busy: BusyObservation = targetChild
-        ? await waitForBusy(client, args.worktree, targetChild)
+        ? await waitForBusy(client, targetChild)
         : {
           vendorSessionID: "",
           taskID: targetTaskID,
@@ -772,12 +775,12 @@ async function runDriver(args: Args, receipt: Receipt): Promise<void> {
       const deadline = Date.now() + runtime.config.delegate.task_ttl_ms +
         runtime.config.delegate.review_ttl_ms + runtime.config.delegate.verify_timeout_ms + BUSY_POLL_MS
       let targetChild: ChildRecord | undefined
-      while (Date.now() < deadline && !targetChild) {
+      while (Date.now() < deadline && !targetChild && !queueFinished) {
         targetChild = workerForTask(children, targetTaskID)
         if (!targetChild) await new Promise((resolve) => setTimeout(resolve, BUSY_POLL_INTERVAL_MS))
       }
       const busy: BusyObservation = targetChild
-        ? await waitForBusy(client, args.worktree, targetChild)
+        ? await waitForBusy(client, targetChild)
         : {
           vendorSessionID: "",
           taskID: targetTaskID,

@@ -102,8 +102,14 @@ edits made before the crash remain part of verification and independent review, 
 replacement worker changes nothing. Missing or invalid recovery baselines are refused rather
 than replaced with a snapshot of already-modified files; this also applies to older interrupted
 runs without retained baselines. Completed tasks are not dispatched again.
-Interrupted `delegate.worktree: true` tasks are not automatically resumed: their existing
-linked worktree and private baseline are preserved for inspection instead of being recreated.
+Interrupted `delegate.worktree: true` tasks reopen only their original owned linked worktree:
+durable session/task identity, Git registration, original HEAD, exclusions and baseline must
+still match. Recovery never deletes and recreates that worktree or imports a new baseline.
+Verification, independent review and merge share the original private snapshot. Native hooks
+in the linked directory resolve the authoritative owner execution record, including cancellation
+and durable shell-risk checks. Conflicting destination edits, invalid ownership and ambiguous
+interrupted applies refuse automatic completion and preserve work for inspection. Older isolated
+tasks without ownership metadata cannot be silently adopted.
 Trusted scripted fixtures can use read/write/edit tools and the code-owned verifier.
 The current Darwin/shared-server verifier is `legacy-unowned`: its durable record states
 `isolationEstablished=false`, `domainState=unknown`, `descendantRisk=unproven`, and status
