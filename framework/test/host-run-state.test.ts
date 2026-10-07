@@ -212,6 +212,7 @@ test("legacy verifier terminal settles with an explicit unproven descendant labe
     f.store.registerIntent(c, verifierIntent(c, "verify"))
     const ref = verifierRef("verify", "legacy-unowned")
     f.store.bindVerifierRef(c, "verify", ref)
+    f.store.markVerifierDispatched(c, "verify")
     expect(() => f.store.registerIntent(c, intent(c, "next"))).toThrow(ExecutionRunUnresolvedError)
     expect(() => f.store.recordTerminal(c, "verify", { outcome: "ok", terminalAt: 10, quiescentAt: 11 })).toThrow(TypeError)
     f.store.recordTerminal(c, "verify", { outcome: "ok", terminalAt: 10, verification: verification(ref) })
@@ -227,21 +228,214 @@ test("legacy verifier terminal settles with an explicit unproven descendant labe
   } finally { f.cleanup() }
 })
 
-test("unknown recovered legacy terminal settles but linux verifier needs matching strict boundary proof", () => {
+test("verifier dispatch marker is store-owned, reference-bound, and monotonic", () => {
+  const f = fixture()
+  try {
+    const c = f.store.claim("session", "instance", process.pid)
+    f.store.registerIntent(c, { ...verifierIntent(c, "verify"), verifierDispatch: "started" } as any)
+    expect(f.store.status().executions[0]?.verifierDispatch).toBe("prepared")
+    expect(() => f.store.markVerifierDispatched(c, "verify")).toThrow(ExecutionRunUnresolvedError)
+    const ref = verifierRef("verify", "legacy-unowned")
+    f.store.bindVerifierRef(c, "verify", ref)
+    f.store.markVerifierDispatched(c, "verify")
+    expect(f.store.status().executions[0]?.verifierDispatch).toBe("started")
+    expect(() => f.store.markVerifierDispatched(c, "verify")).toThrow(ExecutionRunUnresolvedError)
+    expect(() => f.store.retireUndispatchedVerifier(c, "verify")).toThrow(ExecutionRunUnresolvedError)
+  } finally { f.cleanup() }
+})
+
+test("verifier dispatch rejects cancellation, fences, and stale generations", () => {
+  for (const blockedBy of ["cancel", "fence"] as const) {
+    const f = fixture()
+    try {
+      const c = f.store.claim("session", "instance", process.pid)
+      f.store.registerIntent(c, verifierIntent(c, "verify"))
+      f.store.bindVerifierRef(c, "verify", verifierRef("verify", "legacy-unowned"))
+      if (blockedBy === "cancel") f.store.recordCancel(c, "verify", { requestedAt: 1 })
+      else {
+        f.store.fence(c, "verify", "test fence")
+        expect(() => f.store.retireUndispatchedVerifier(c, "verify")).toThrow(ExecutionRunUnresolvedError)
+      }
+      expect(() => f.store.markVerifierDispatched(c, "verify")).toThrow(ExecutionRunUnresolvedError)
+    } finally { f.cleanup() }
+  }
+
+  const f = fixture()
+  try {
+    const old = f.store.claim("session", "instance", process.pid)
+    f.store.registerIntent(old, verifierIntent(old, "verify"))
+    f.store.bindVerifierRef(old, "verify", verifierRef("verify", "legacy-unowned"))
+    const path = join(stateRoot(join(f.home, "worktree")), "execution-runs", "state.json")
+    const state = JSON.parse(readFileSync(path, "utf8"))
+    state.claim.pid = 2147483647
+    writeFileSync(path, JSON.stringify(state))
+    const takeover = f.store.claim("session", "instance-2", process.pid)
+    expect(() => f.store.markVerifierDispatched(takeover, "verify")).toThrow(ExecutionRunUnresolvedError)
+  } finally { f.cleanup() }
+})
+
+test("prepared verifier can be durably retired without claiming it ran", () => {
+  const f = fixture()
+  try {
+    const c = f.store.claim("session", "instance", process.pid)
+    f.store.registerIntent(c, verifierIntent(c, "verify"))
+    f.store.recordCancel(c, "verify", { requestedAt: 1 })
+    f.store.retireUndispatchedVerifier(c, "verify")
+    const record = f.store.status().executions[0]!
+    expect(record).toMatchObject({ verifierDispatch: "retired", terminal: { outcome: "not-dispatched" } })
+    expect(strictQuiescent(record)).toBe(false)
+    expect(settled(record)).toBe(true)
+    f.store.registerIntent(c, verifierIntent(c, "next"))
+  } finally { f.cleanup() }
+})
+
+test("running reconciliation contradicts verifier retirement and unknown cannot erase the fence", () => {
+  for (const dispatched of [false, true]) {
+    const f = fixture()
+    try {
+      const c = f.store.claim("session", "instance", process.pid)
+      f.store.registerIntent(c, verifierIntent(c, "verify"))
+      if (dispatched) {
+        const ref = verifierRef("verify", "legacy-unowned")
+        f.store.bindVerifierRef(c, "verify", ref)
+        f.store.markVerifierDispatched(c, "verify")
+        f.store.recordTerminal(c, "verify", { outcome: "ok", terminalAt: 1, verification: verification(ref) })
+      } else f.store.retireUndispatchedVerifier(c, "verify")
+      expect(settled(f.store.status().executions[0]!)).toBe(true)
+      f.store.reconcile(c, "verify", { outcome: "running", quiescent: false, evidence: "still active" })
+      expect(settled(f.store.status().executions[0]!)).toBe(false)
+      f.store.reconcile(c, "verify", { outcome: "unknown", quiescent: false, evidence: "no fresh observation" })
+      expect(settled(f.store.status().executions[0]!)).toBe(false)
+      expect(() => f.store.release(c)).toThrow(ExecutionRunUnresolvedError)
+      expect(() => f.store.registerIntent(c, verifierIntent(c, "next"))).toThrow(ExecutionRunUnresolvedError)
+    } finally { f.cleanup() }
+  }
+})
+
+test("fenced, cancelled, and timed-out legacy verifier terminals remain unresolved", () => {
+  const scenarios = [
+    { name: "fenced", outcome: "ok", flag: "fence" as const, result: (ref: VerificationReference) => verification(ref) },
+    { name: "cancel requested before normal exit", outcome: "ok", flag: "cancel" as const, result: (ref: VerificationReference) => verification(ref) },
+    { name: "cancelled", outcome: "killed", flag: "cancel" as const, result: (ref: VerificationReference) => ({ ...verification(ref), cancelled: true }) },
+    { name: "timed out", outcome: "timeout", flag: "none" as const, result: (ref: VerificationReference) => ({ ...verification(ref), timedOut: true }) },
+    { name: "negative exit", outcome: "fail", flag: "none" as const, result: (ref: VerificationReference) => ({ ...verification(ref), parentExit: -9 }) },
+  ]
+  for (const scenario of scenarios) {
+    const f = fixture()
+    try {
+      const c = f.store.claim("session", "instance", process.pid)
+      f.store.registerIntent(c, verifierIntent(c, scenario.name))
+      const ref = verifierRef(scenario.name, "legacy-unowned")
+      f.store.bindVerifierRef(c, scenario.name, ref)
+      f.store.markVerifierDispatched(c, scenario.name)
+      if (scenario.flag === "fence") f.store.fence(c, scenario.name, "ambiguous verifier")
+      if (scenario.flag === "cancel") f.store.recordCancel(c, scenario.name, { requestedAt: 1 })
+      f.store.recordTerminal(c, scenario.name, { outcome: scenario.outcome, terminalAt: 2, verification: scenario.result(ref) })
+      expect(settled(f.store.status().executions[0]!)).toBe(false)
+      expect(() => f.store.release(c)).toThrow(ExecutionRunUnresolvedError)
+    } finally { f.cleanup() }
+  }
+})
+
+test("legacy verifier terminal must match exit classification and cannot be overwritten", () => {
+  const f = fixture()
+  try {
+    const c = f.store.claim("session", "instance", process.pid)
+    f.store.registerIntent(c, verifierIntent(c, "verify"))
+    const ref = verifierRef("verify", "legacy-unowned")
+    f.store.bindVerifierRef(c, "verify", ref)
+    f.store.markVerifierDispatched(c, "verify")
+    expect(() => f.store.recordTerminal(c, "verify", {
+      outcome: "fail", terminalAt: 1, verification: { ...verification(ref), parentExit: null },
+    })).toThrow(TypeError)
+    expect(() => f.store.recordTerminal(c, "verify", {
+      outcome: "fail", terminalAt: 1, verification: verification(ref),
+    })).toThrow(TypeError)
+    for (const flags of [{ timedOut: true }, { cancelled: true }]) {
+      expect(() => f.store.recordTerminal(c, "verify", {
+        outcome: "ok", terminalAt: 1, verification: { ...verification(ref), ...flags },
+      })).toThrow(TypeError)
+    }
+    const success = { outcome: "ok", terminalAt: 2, verification: verification(ref) }
+    f.store.recordTerminal(c, "verify", success)
+    f.store.recordTerminal(c, "verify", success)
+    expect(() => f.store.recordTerminal(c, "verify", {
+      outcome: "fail", terminalAt: 3, verification: { ...verification(ref), parentExit: 1 },
+    })).toThrow(ExecutionRunUnresolvedError)
+    expect(settled(f.store.status().executions[0]!)).toBe(true)
+  } finally { f.cleanup() }
+})
+
+test("normal nonzero legacy parent exit is settled as a retryable failure", () => {
+  const f = fixture()
+  try {
+    const c = f.store.claim("session", "instance", process.pid)
+    f.store.registerIntent(c, verifierIntent(c, "verify"))
+    const ref = verifierRef("verify", "legacy-unowned")
+    f.store.bindVerifierRef(c, "verify", ref)
+    f.store.markVerifierDispatched(c, "verify")
+    f.store.recordTerminal(c, "verify", { outcome: "fail", terminalAt: 10, verification: { ...verification(ref), parentExit: 7 } })
+    expect(settled(f.store.status().executions[0]!)).toBe(true)
+    f.store.registerIntent(c, verifierIntent(c, "retry"))
+  } finally { f.cleanup() }
+})
+
+test("unknown legacy verifier terminal remains unresolved", () => {
   const f = fixture()
   try {
     const c = f.store.claim("session", "instance", process.pid)
     f.store.registerIntent(c, verifierIntent(c, "legacy"))
+    const legacyRef = verifierRef("legacy", "legacy-unowned")
+    f.store.bindVerifierRef(c, "legacy", legacyRef)
+    f.store.markVerifierDispatched(c, "legacy")
     expect(() => f.store.release(c)).toThrow(ExecutionRunUnresolvedError)
-    f.store.recordTerminal(c, "legacy", { outcome: "unknown", terminalAt: 10 })
+    f.store.recordTerminal(c, "legacy", {
+      outcome: "unknown", terminalAt: 10, verification: { ...verification(legacyRef), parentExit: null },
+    })
+    expect(settled(f.store.status().executions[0]!)).toBe(false)
+    expect(() => f.store.registerIntent(c, verifierIntent(c, "next"))).toThrow(ExecutionRunUnresolvedError)
+    expect(() => f.store.release(c)).toThrow(ExecutionRunUnresolvedError)
+  } finally { f.cleanup() }
+})
+
+test("an old normal legacy terminal without lifecycle metadata is not auto-adopted", () => {
+  const f = fixture()
+  try {
+    const c = f.store.claim("session", "instance", process.pid)
+    f.store.registerIntent(c, verifierIntent(c, "legacy"))
+    const ref = verifierRef("legacy", "legacy-unowned")
+    f.store.bindVerifierRef(c, "legacy", ref)
+    f.store.markVerifierDispatched(c, "legacy")
+    f.store.recordTerminal(c, "legacy", { outcome: "ok", terminalAt: 10, verification: verification(ref) })
+    const path = join(stateRoot(join(f.home, "worktree")), "execution-runs", "state.json")
+    const state = JSON.parse(readFileSync(path, "utf8"))
+    delete state.executions[0].verifierDispatch
+    writeFileSync(path, JSON.stringify(state))
+    expect(settled(f.store.status().executions[0]!)).toBe(false)
+    expect(() => f.store.release(c)).toThrow(ExecutionRunUnresolvedError)
+  } finally { f.cleanup() }
+})
+
+test("linux verifier requires a matching strict boundary proof", () => {
+  const f = fixture()
+  try {
+    const c = f.store.claim("session", "instance", process.pid)
     f.store.registerIntent(c, verifierIntent(c, "linux", "linux-single-use"))
     const ref = verifierRef("linux", "linux-single-use")
     f.store.bindVerifierRef(c, "linux", ref)
-    f.store.recordTerminal(c, "linux", { outcome: "ok", terminalAt: 11, verification: verification(ref) })
-    expect(() => f.store.release(c)).toThrow(ExecutionRunUnresolvedError)
+    f.store.markVerifierDispatched(c, "linux")
     expect(() => f.store.recordTerminal(c, "linux", { outcome: "ok", terminalAt: 11, quiescentAt: 12, verification: verification(verifierRef("other", "linux-single-use")) })).toThrow(TypeError)
-    f.store.recordTerminal(c, "linux", { outcome: "ok", terminalAt: 11, quiescentAt: 12, verification: verification(ref) })
-    expect(strictQuiescent(f.store.status().executions[1]!)).toBe(true)
+    f.store.recordTerminal(c, "linux", { outcome: "ok", terminalAt: 11, verification: verification(ref) })
+    expect(strictQuiescent(f.store.status().executions[0]!)).toBe(false)
+    expect(() => f.store.release(c)).toThrow(ExecutionRunUnresolvedError)
+    expect(() => f.store.reconcile(c, "linux", {
+      outcome: "terminal", quiescent: true, evidence: "test boundary",
+      verification: verification(verifierRef("other", "linux-single-use")),
+    })).toThrow(TypeError)
+    f.store.reconcile(c, "linux", {
+      outcome: "terminal", quiescent: true, evidence: "test boundary", verification: verification(ref),
+    })
+    expect(strictQuiescent(f.store.status().executions[0]!)).toBe(true)
     f.store.release(c)
   } finally { f.cleanup() }
 })

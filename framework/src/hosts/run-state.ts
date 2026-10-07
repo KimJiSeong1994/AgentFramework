@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { isDeepStrictEqual } from "node:util"
 import { stateRoot } from "../state/store.ts"
 import type { VerificationProfile, VerificationReference, VerificationResult } from "../orchestration/verifier.ts"
 import type { ExecutionReference } from "./types.ts"
@@ -19,6 +20,7 @@ export type ExecutionRecord = ExecutionIntent & {
   vendorRef?: string
   boundaryRef?: ExecutionReference | VerificationReference
   descendantRisk?: "unproven"
+  verifierDispatch?: "prepared" | "started" | "retired"
   cancel?: { requestedAt: number; acknowledgedAt?: number }
   terminal?: { outcome: string; terminalAt?: number; quiescentAt?: number; verification?: VerificationResult }
   fence?: { reason: string; at: number }
@@ -36,6 +38,8 @@ export interface ExecutionRunStore {
   registerIntent(claim: ExecutionClaim, execution: ExecutionIntent): void
   bindVendorRef(claim: ExecutionClaim, executionId: string, vendorRef: string): void
   bindVerifierRef(claim: ExecutionClaim, executionId: string, reference: VerificationReference): void
+  markVerifierDispatched(claim: ExecutionClaim, executionId: string): void
+  retireUndispatchedVerifier(claim: ExecutionClaim, executionId: string): void
   markProcessRiskBySession(sessionID: string): void
   recordCancel(claim: ExecutionClaim, executionId: string, value: { requestedAt: number; acknowledgedAt?: number }): void
   recordTerminal(claim: ExecutionClaim, executionId: string, value: { outcome: string; terminalAt?: number; quiescentAt?: number; verification?: VerificationResult }): void
@@ -65,7 +69,7 @@ const verifiedBoundary = (e: ExecutionRecord, result?: VerificationResult): bool
   result.profile === e.profile && result.isolationEstablished && result.domainState === "empty" &&
   !!result.proof && sameBoundary(e, result.proof.reference)
 export const strictQuiescent = (e: ExecutionRecord): boolean => {
-  if (!e.kind || !e.profile || e.processRisk) return false
+  if (!e.kind || !e.profile || e.processRisk || (e.kind === "verifier" && e.fence)) return false
   if (e.kind === "verifier" && e.profile === "legacy-unowned") return false
   // A host ACK/terminal timestamp is not an owned-domain retirement proof.
   // Linux host executions remain fenced until a host boundary authenticates retirement.
@@ -75,8 +79,30 @@ export const strictQuiescent = (e: ExecutionRecord): boolean => {
     (e.kind === "host" || verifiedBoundary(e, e.reconciliation.verification))
   return !!(terminal || reconciled)
 }
-export const settled = (e: ExecutionRecord): boolean => strictQuiescent(e) ||
-  (e.kind === "verifier" && e.profile === "legacy-unowned" && !!e.terminal?.outcome && e.descendantRisk === "unproven" && !e.processRisk)
+// The caller persists `started` before run(), so an explicit prepared->retired transition proves no launch.
+const retiredBeforeDispatch = (e: ExecutionRecord): boolean => e.kind === "verifier" &&
+  e.verifierDispatch === "retired" && e.terminal?.outcome === "not-dispatched" &&
+  typeof e.terminal.terminalAt === "number" && Number.isFinite(e.terminal.terminalAt) && e.terminal.terminalAt >= 0 &&
+  !e.terminal.verification && e.terminal.quiescentAt === undefined && !e.fence && !e.processRisk &&
+  e.reconciliation?.outcome !== "running"
+// This preserves the documented parent-exit workflow only; it is not descendant-retirement proof.
+const ordinaryLegacyTerminal = (e: ExecutionRecord): boolean => {
+  if (e.kind !== "verifier" || e.profile !== "legacy-unowned" || e.verifierDispatch !== "started" ||
+    e.descendantRisk !== "unproven" || e.cancel || e.fence || e.processRisk || e.reconciliation?.outcome === "running" ||
+    !e.terminal || (e.terminal.outcome !== "ok" && e.terminal.outcome !== "fail") ||
+    typeof e.terminal.terminalAt !== "number" || !Number.isFinite(e.terminal.terminalAt) || e.terminal.terminalAt < 0) return false
+  const result = e.terminal.verification
+  const reference = e.boundaryRef
+  return !!result && verificationShape(result) && result.profile === "legacy-unowned" && result.parentExit !== null &&
+    !result.timedOut && !result.cancelled && !!reference && "kind" in reference &&
+    verifierRefShape(reference) && reference.kind === "verifier" && reference.executionID === e.executionId &&
+    reference.profile === e.profile && reference.inputSnapshotID === e.inputSnapshotID &&
+    reference.inputDigest === e.inputDigest && reference.deadlineAt === e.deadlineAt &&
+    reference.maxOutputChars === e.maxOutputChars &&
+    ((e.terminal.outcome === "ok" && result.parentExit === 0) ||
+      (e.terminal.outcome === "fail" && result.parentExit > 0))
+}
+export const settled = (e: ExecutionRecord): boolean => strictQuiescent(e) || retiredBeforeDispatch(e) || ordinaryLegacyTerminal(e)
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value)
 const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 512
 const integer = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) > 0
@@ -101,6 +127,22 @@ const verificationShape = (value: unknown): value is VerificationResult => objec
   (value.profile !== "legacy-unowned" || (!value.isolationEstablished && value.domainState === "unknown"))
 const validProof = (record: ExecutionRecord, result: VerificationResult): boolean => result.profile === record.profile &&
   (!result.proof || sameBoundary(record, result.proof.reference))
+const verifierTerminalShape = (record: ExecutionRecord, terminal: Record<string, unknown>): boolean => {
+  if (terminal.outcome === "not-dispatched") {
+    return record.kind === "verifier" && record.verifierDispatch === "retired" &&
+      timestamp(terminal.terminalAt) && terminal.verification === undefined && terminal.quiescentAt === undefined
+  }
+  if (record.kind !== "verifier") return true
+  if (!["ok", "fail", "timeout", "killed", "unknown"].includes(terminal.outcome as string)) return false
+  if (terminal.outcome === "unknown") return true
+  if (!verificationShape(terminal.verification) || !verifierRefShape(record.boundaryRef) ||
+    terminal.verification.output.length > (record.maxOutputChars as number)) return false
+  const result = terminal.verification
+  if (terminal.outcome === "ok") return result.parentExit === 0 && !result.timedOut && !result.cancelled
+  if (terminal.outcome === "fail") return result.parentExit !== null && result.parentExit !== 0 && !result.timedOut && !result.cancelled
+  if (terminal.outcome === "timeout") return result.timedOut && !result.cancelled
+  return result.cancelled
+}
 const claimShape = (value: unknown): value is ExecutionClaim => object(value) && text(value.ownerSession) && text(value.instance) && integer(value.pid) && integer(value.generation) && text(value.token)
 const recordShape = (value: unknown): value is ExecutionRecord => {
   if (!object(value) || !text(value.executionId) || !text(value.ownerSession) || !text(value.taskId) || !text(value.attemptId) || !integer(value.generation) || !text(value.role) || !text(value.cwd) || !text(value.policyID)) return false
@@ -115,13 +157,17 @@ const recordShape = (value: unknown): value is ExecutionRecord => {
   if (!optional(value, "descendantRisk", x => value.kind === "verifier" && value.profile === "legacy-unowned" && x === "unproven")) return false
   if (value.kind === "verifier" && value.profile === "legacy-unowned" && value.descendantRisk !== "unproven") return false
   if (value.kind === "verifier" && ("vendorRef" in value || "processRisk" in value)) return false
+  if (!optional(value, "verifierDispatch", x => value.kind === "verifier" && ["prepared", "started", "retired"].includes(x as string))) return false
+  if (value.kind === "verifier" && value.verifierDispatch === "prepared" && "terminal" in value) return false
+  if (value.kind === "verifier" && value.verifierDispatch === "retired" &&
+    (!object(value.terminal) || value.terminal.outcome !== "not-dispatched")) return false
+  if (value.kind === "verifier" && value.verifierDispatch !== "retired" && object(value.terminal) && value.terminal.outcome === "not-dispatched") return false
   if (!optional(value, "vendorRef", text) || !optional(value, "usage", x => x === "unknown")) return false
   if (!optional(value, "processRisk", x => object(x) && x.tool === "bash" && timestamp(x.at))) return false
   if (!optional(value, "cancel", x => object(x) && timestamp(x.requestedAt) && optional(x, "acknowledgedAt", timestamp))) return false
   if (!optional(value, "terminal", x => object(x) && text(x.outcome) && optional(x, "terminalAt", timestamp) && optional(x, "quiescentAt", timestamp) &&
     optional(x, "verification", y => verificationShape(y) && validProof(value as ExecutionRecord, y) && (value.kind !== "verifier" || y.output.length <= (value.maxOutputChars as number))) &&
-    (value.kind !== "verifier" || ["ok", "fail", "timeout", "killed", "unknown"].includes(x.outcome as string)) &&
-    (value.kind !== "verifier" || x.outcome === "unknown" || (verificationShape(x.verification) && verifierRefShape(value.boundaryRef))) &&
+    verifierTerminalShape(value as ExecutionRecord, x) &&
     (value.kind !== "verifier" || value.profile !== "legacy-unowned" || !("quiescentAt" in x)) &&
     (!("quiescentAt" in x) || value.kind !== "verifier" || (verificationShape(x.verification) && verifiedBoundary(value as ExecutionRecord, x.verification))))) return false
   if (!optional(value, "fence", x => object(x) && text(x.reason) && timestamp(x.at))) return false
@@ -224,9 +270,32 @@ export function createExecutionRunStore(worktree: string): ExecutionRunStore {
         return next
       })
     },
-    registerIntent(claim, value) { mutate(state => { validate(state, claim); const record = { ...value, ...(value.kind === "verifier" && value.profile === "legacy-unowned" ? { descendantRisk: "unproven" as const } : {}), usage: "unknown" as const }; if (!value.kind || !value.profile || !recordShape(record)) throw new TypeError("invalid execution intent"); if (value.generation !== claim.generation || value.ownerSession !== claim.ownerSession) throw new Error("intent identity mismatch"); if (state.executions.some(x => x.executionId === value.executionId)) throw new Error("duplicate executionId"); if (state.executions.some(x => !settled(x))) throw new ExecutionRunUnresolvedError("an execution is already unresolved"); state.executions.push(record) }) },
+    registerIntent(claim, value) { mutate(state => { validate(state, claim); const record = { ...value, ...(value.kind === "verifier" ? { verifierDispatch: "prepared" as const } : {}), ...(value.kind === "verifier" && value.profile === "legacy-unowned" ? { descendantRisk: "unproven" as const } : {}), usage: "unknown" as const }; if (!value.kind || !value.profile || !recordShape(record)) throw new TypeError("invalid execution intent"); if (value.generation !== claim.generation || value.ownerSession !== claim.ownerSession) throw new Error("intent identity mismatch"); if (state.executions.some(x => x.executionId === value.executionId)) throw new Error("duplicate executionId"); if (state.executions.some(x => !settled(x))) throw new ExecutionRunUnresolvedError("an execution is already unresolved"); state.executions.push(record) }) },
     bindVendorRef(claim, id, ref) { bounded(ref, "vendorRef"); let parsed: unknown; try { parsed = JSON.parse(ref) } catch { throw new TypeError("invalid host reference") }; mutate(s => { validate(s, claim); const e = execution(s, id); if (e.kind === "verifier" || !hostRefShape(parsed) || parsed.executionID !== id) throw new TypeError("invalid host reference"); e.vendorRef = ref; if (e.kind === "host") e.boundaryRef = parsed }) },
-    bindVerifierRef(claim, id, reference) { mutate(s => { validate(s, claim); const e = execution(s, id); if (e.kind !== "verifier" || !verifierRefShape(reference) || reference.executionID !== id || reference.profile !== e.profile || reference.inputSnapshotID !== e.inputSnapshotID || reference.inputDigest !== e.inputDigest || reference.deadlineAt !== e.deadlineAt || reference.maxOutputChars !== e.maxOutputChars) throw new TypeError("invalid verifier reference"); e.boundaryRef = { ...reference } }) },
+    bindVerifierRef(claim, id, reference) { mutate(s => { validate(s, claim); const e = execution(s, id); if (e.kind !== "verifier" || e.verifierDispatch !== "prepared" || e.terminal || !verifierRefShape(reference) || reference.executionID !== id || reference.profile !== e.profile || reference.inputSnapshotID !== e.inputSnapshotID || reference.inputDigest !== e.inputDigest || reference.deadlineAt !== e.deadlineAt || reference.maxOutputChars !== e.maxOutputChars || (e.boundaryRef && !sameBoundary(e, reference))) throw new TypeError("invalid verifier reference"); e.boundaryRef = { ...reference } }) },
+    markVerifierDispatched(claim, id) {
+      mutate(s => {
+        validate(s, claim)
+        const e = execution(s, id)
+        if (e.kind !== "verifier" || e.verifierDispatch !== "prepared" || e.generation !== claim.generation ||
+          !verifierRefShape(e.boundaryRef) || e.cancel || e.fence || e.terminal || e.reconciliation) {
+          throw new ExecutionRunUnresolvedError("verifier is not eligible for dispatch")
+        }
+        e.verifierDispatch = "started"
+      })
+    },
+    retireUndispatchedVerifier(claim, id) {
+      mutate(s => {
+        validate(s, claim)
+        const e = execution(s, id)
+        if (e.kind !== "verifier" || e.verifierDispatch !== "prepared" || e.ownerSession !== claim.ownerSession ||
+          e.generation > claim.generation || e.terminal || e.fence || e.reconciliation) {
+          throw new ExecutionRunUnresolvedError("verifier cannot be retired as undispatched")
+        }
+        e.verifierDispatch = "retired"
+        e.terminal = { outcome: "not-dispatched", terminalAt: Date.now() }
+      })
+    },
     markProcessRiskBySession(sessionID) {
       bounded(sessionID, "sessionID")
       mutate(s => {
@@ -242,9 +311,9 @@ export function createExecutionRunStore(worktree: string): ExecutionRunStore {
       })
     },
     recordCancel(claim, id, value) { if (!object(value) || !timestamp(value.requestedAt) || !optional(value, "acknowledgedAt", timestamp)) throw new TypeError("invalid cancel record"); mutate(s => { validate(s, claim); execution(s, id).cancel = { ...value } }) },
-    recordTerminal(claim, id, value) { mutate(s => { validate(s, claim); const e = execution(s, id); if ((e.processRisk || (e.kind === "host" && e.profile === "linux-single-use")) && value.quiescentAt !== undefined) throw new ExecutionRunUnresolvedError("host process quiescence is unproven"); const candidate = { ...e, terminal: value }; if (!recordShape(candidate)) throw new TypeError("invalid terminal record"); e.terminal = { ...value } }) },
+    recordTerminal(claim, id, value) { mutate(s => { validate(s, claim); const e = execution(s, id); if (e.kind === "verifier" && e.terminal) { if (isDeepStrictEqual(e.terminal, value)) return; throw new ExecutionRunUnresolvedError("terminal verifier result is immutable") }; if (e.kind === "verifier" && (value.outcome === "not-dispatched" || e.verifierDispatch !== "started" || e.generation !== claim.generation)) throw new ExecutionRunUnresolvedError("verifier terminal requires a dispatched current-generation invocation"); if ((e.processRisk || (e.kind === "host" && e.profile === "linux-single-use")) && value.quiescentAt !== undefined) throw new ExecutionRunUnresolvedError("host process quiescence is unproven"); const candidate = { ...e, terminal: value }; if (!recordShape(candidate)) throw new TypeError("invalid terminal record"); e.terminal = { ...value } }) },
     fence(claim, id, reason) { bounded(reason, "reason"); mutate(s => { validate(s, claim); execution(s, id).fence = { reason, at: Date.now() } }) },
-    reconcile(claim, id, value) { mutate(s => { validate(s, claim); const e = execution(s, id); if ((e.processRisk || (e.kind === "host" && e.profile === "linux-single-use")) && value.quiescent) throw new ExecutionRunUnresolvedError("host process quiescence is unproven"); const candidate = { ...e, reconciliation: { ...value, at: Date.now() } }; if (!recordShape(candidate)) throw new TypeError("invalid reconciliation"); e.reconciliation = candidate.reconciliation; if (value.quiescent) delete e.fence }) },
+    reconcile(claim, id, value) { mutate(s => { validate(s, claim); const e = execution(s, id); if ((e.processRisk || (e.kind === "host" && e.profile === "linux-single-use")) && value.quiescent) throw new ExecutionRunUnresolvedError("host process quiescence is unproven"); const candidate = { ...e, reconciliation: { ...value, at: Date.now() } }; if (!recordShape(candidate)) throw new TypeError("invalid reconciliation"); e.reconciliation = candidate.reconciliation; if (e.kind === "verifier" && e.terminal && value.outcome === "running") e.fence = { reason: "verifier observed running after terminal result", at: Date.now() }; if (value.quiescent) delete e.fence }) },
     assertQuiescent(claim) { const s = read(); validate(s, claim); if (s.executions.some(x => !settled(x))) throw new ExecutionRunUnresolvedError("executions are not quiescent or settled") },
     release(claim) { mutate(s => { validate(s, claim); if (s.executions.some(x => !settled(x))) throw new ExecutionRunUnresolvedError("executions are not quiescent or settled"); delete s.claim }) },
     status() { const s = read(); const { claim, ...visible } = s; return { ...visible, claim: claim && { ownerSession: claim.ownerSession, instance: claim.instance, pid: claim.pid, generation: claim.generation } } },

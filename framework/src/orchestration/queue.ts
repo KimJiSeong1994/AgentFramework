@@ -431,13 +431,18 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     const result: QueueRun = { taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: false }
     entry.recoveryBlocked = true
     entry.claim = deps.runs.claim(sessionID, deps.instance, process.pid)
-    // A previous process may have stopped after dispatch. Never replay its ledger task until
-    // every persisted execution has affirmative terminal/quiescence evidence.
+    // A previous owner may have stopped after dispatch. Do not replay until every persisted
+    // execution meets its settlement contract; legacy parent exit is trusted-work settlement, not containment.
     for (const execution of deps.runs.status().executions) {
       if (settled(execution)) continue
       if (execution.kind === "verifier") {
-        if (execution.profile === "legacy-unowned" && execution.generation !== entry.claim.generation && !execution.terminal) {
-          deps.runs.recordTerminal(entry.claim, execution.executionId, { outcome: "unknown", terminalAt: Date.now() })
+        if (execution.generation < entry.claim.generation && execution.verifierDispatch === "prepared" &&
+          !execution.terminal && !execution.fence && !execution.reconciliation) {
+          deps.runs.retireUndispatchedVerifier(entry.claim, execution.executionId)
+          continue
+        }
+        if (execution.profile === "legacy-unowned") {
+          if (!execution.fence) deps.runs.fence(entry.claim, execution.executionId, "legacy verifier dispatch or retirement cannot be proven after restart")
           continue
         }
         if (execution.boundaryRef && "kind" in execution.boundaryRef && execution.boundaryRef.kind === "verifier") {
@@ -654,12 +659,15 @@ export function createQueue(deps: ExecutionRuntime): Queue {
               const id = randomUUID()
               const deadlineAt = Date.now() + c.verify_timeout_ms
               const inputDigest = createHash("sha256").update(input.tree).digest("hex")
+              let referenceBindingOpen = true
               const request = {
                 executionID: id, supervisorSessionID: sessionID, taskID: task.id, attemptID: attempt!.attemptID,
                 generation: claim.generation, command: task.verify, cwd: root, inputSnapshotID: input.tree,
                 inputDigest, deadlineAt, maxOutputChars: c.verify_output_chars,
                 env: { PATH: "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin", PYTHONNOUSERSITE: "1", PYTHONSAFEPATH: "1", PYTHONDONTWRITEBYTECODE: "1" }, profile,
-                onReference: (reference: VerificationHandle["reference"]) => deps.runs.bindVerifierRef(claim, id, reference),
+                onReference: (reference: VerificationHandle["reference"]) => {
+                  if (referenceBindingOpen) deps.runs.bindVerifierRef(claim, id, reference)
+                },
               }
               deps.runs.registerIntent(claim, {
                 executionId: id, ownerSession: sessionID, taskId: task.id, attemptId: attempt!.attemptID,
@@ -667,43 +675,60 @@ export function createQueue(deps: ExecutionRuntime): Queue {
                 kind: "verifier", profile, inputSnapshotID: input.tree, inputDigest, deadlineAt, maxOutputChars: c.verify_output_chars,
               })
               entry.preparingExecutionID = id
-              let handle: VerificationHandle
+              const retireUnlaunched = (): void => {
+                referenceBindingOpen = false
+                try { deps.runs.retireUndispatchedVerifier(claim, id) }
+                catch (error) {
+                  entry.unresolved = true
+                  try { deps.runs.fence(claim, id, "verifier could not be retired before dispatch") } catch {}
+                  throw error
+                }
+              }
               let prepareTimer: ReturnType<typeof setTimeout> | undefined
               const prepareAbort = new Promise<"aborted">(resolve => { entry.cancelWaiter = () => resolve("aborted") })
+              let prepared: VerificationHandle | "aborted" | "timeout"
               try {
-                const prepared = await Promise.race([
+                prepared = await Promise.race([
                   deps.verifier.prepare(request), prepareAbort,
                   new Promise<"timeout">(resolve => { prepareTimer = setTimeout(() => resolve("timeout"), Math.max(0, deadlineAt - Date.now())) }),
                 ])
-                if (prepared === "aborted" || prepared === "timeout") throw new Error(`verifier preparation ${prepared} without terminal evidence`)
-                handle = prepared
-                request.onReference(handle.reference)
+                if (prepared !== "aborted" && prepared !== "timeout") {
+                  request.onReference(prepared.reference)
+                  referenceBindingOpen = false
+                }
               } catch (error) {
-                deps.runs.fence(claim, id, "verifier preparation failed without terminal evidence")
-                entry.unresolved = true
+                retireUnlaunched()
+                if (entry.aborted) return cancelled()
                 throw error
               } finally {
                 if (prepareTimer) clearTimeout(prepareTimer)
                 entry.preparingExecutionID = undefined
                 entry.cancelWaiter = undefined
               }
-              if (entry.aborted) {
-                if (profile !== "legacy-unowned") {
-                  deps.runs.fence(claim, id, "verifier pre-dispatch cancellation has no Linux domain proof")
-                  entry.unresolved = true
-                  throw new Error("verifier cancellation unresolved; queue fenced")
-                }
-                deps.runs.recordTerminal(claim, id, { outcome: "killed", terminalAt: Date.now(), verification: {
-                  profile, parentExit: null, timedOut: false, cancelled: true, isolationEstablished: false,
-                  domainState: "unknown", integrity: "unknown", output: "cancelled before verifier dispatch",
-                } })
+              if (prepared === "aborted") {
+                retireUnlaunched()
                 return cancelled()
               }
+              if (prepared === "timeout") {
+                retireUnlaunched()
+                throw new Error("verifier preparation timed out before dispatch")
+              }
+              if (entry.aborted) {
+                retireUnlaunched()
+                return cancelled()
+              }
+              if (Date.now() >= deadlineAt) {
+                retireUnlaunched()
+                throw new Error("verifier deadline expired before dispatch")
+              }
+              const handle = prepared
               const current: NonNullable<Active["verify"]> = { id, handle, claim }
               entry.verify = current
               let r: VerificationResult
               try {
                 const interrupted = new Promise<"interrupted">(resolve => { entry.cancelWaiter = () => resolve("interrupted") })
+                // Persist the possible launch before invoking the handle; do not await between these calls.
+                deps.runs.markVerifierDispatched(claim, id)
                 current.run = handle.run()
                 const result = await Promise.race([current.run, interrupted])
                 if (result === "interrupted") {
@@ -736,7 +761,10 @@ export function createQueue(deps: ExecutionRuntime): Queue {
               const invalidated = changes.files.length > 0 || r.integrity === "changed"
               const integrity = invalidated ? "changed" : profile === "legacy-unowned" || r.integrity === "unchanged" ? "unchanged" : "unknown"
               r = { ...r, integrity }
-              const outcome = r.cancelled ? "killed" : r.timedOut ? "timeout" : r.parentExit === 0 ? "ok" : "fail"
+              let outcome = "unknown"
+              if (r.cancelled) outcome = "killed"
+              else if (r.timedOut) outcome = "timeout"
+              else if (r.parentExit !== null) outcome = r.parentExit === 0 ? "ok" : "fail"
               try {
                 deps.runs.recordTerminal(claim, id, { outcome, terminalAt: Date.now(), verification: r,
                   ...(profile === "linux-single-use" && r.isolationEstablished && r.domainState === "empty" && r.proof ? { quiescentAt: Date.now() } : {}),

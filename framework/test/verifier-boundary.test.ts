@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createLegacyVerifierExecutor } from "../src/orchestration/legacy-verifier.ts"
+import { runShell } from "../src/orchestration/shell.ts"
 import type { VerificationReconciliation, VerificationRequest } from "../src/orchestration/verifier.ts"
 
 function request(cwd: string, command: string, overrides: Partial<VerificationRequest> = {}): VerificationRequest {
@@ -41,6 +42,51 @@ test("prepare is inert, references are unique and bound to the supplied input", 
     })
     expect(readFileSync(marker, "utf8")).toBe("done")
     expect(await first.run()).toMatchObject({ parentExit: 0, output: "output" })
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test("shell preserves signal termination separately from numeric exits and success", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "shell-termination-"))
+  try {
+    const signaled = await runShell("kill -KILL $$", { cwd: dir, timeoutMs: 5000 })
+    expect(signaled).toMatchObject({ ok: false, exitCode: null, signal: "SIGKILL", timedOut: false, killed: false })
+
+    for (const exitCode of [23, 128]) {
+      const numeric = await runShell(`exit ${exitCode}`, { cwd: dir, timeoutMs: 5000 })
+      expect(numeric).toMatchObject({ ok: false, exitCode, signal: null, timedOut: false, killed: false })
+    }
+
+    const success = await runShell("exit 0", { cwd: dir, timeoutMs: 5000 })
+    expect(success).toMatchObject({ ok: true, exitCode: 0, signal: null, timedOut: false, killed: false })
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test("legacy verifier classifies external signals as cancellation, not an ordinary failure", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "legacy-verifier-signal-"))
+  try {
+    const executor = createLegacyVerifierExecutor()
+    const signaled = await (await executor.prepare(request(dir, "kill -KILL $$"))).run()
+    expect(signaled).toMatchObject({ parentExit: null, timedOut: false, cancelled: true })
+
+    for (const exitCode of [23, 128]) {
+      const numeric = await (await executor.prepare(request(dir, `exit ${exitCode}`))).run()
+      expect(numeric).toMatchObject({ parentExit: exitCode, timedOut: false, cancelled: false })
+    }
+
+    const success = await (await executor.prepare(request(dir, "exit 0"))).run()
+    expect(success).toMatchObject({ parentExit: 0, timedOut: false, cancelled: false })
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test("spawn errors retain an unknown exit instead of settling successfully", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "legacy-verifier-spawn-error-"))
+  try {
+    const missing = join(dir, "missing")
+    const shellResult = await runShell("exit 0", { cwd: missing, timeoutMs: 5000 })
+    expect(shellResult).toMatchObject({ ok: false, exitCode: null, signal: null, timedOut: false })
+
+    const handle = await createLegacyVerifierExecutor().prepare(request(missing, "exit 0"))
+    expect(await handle.run()).toMatchObject({ parentExit: null, timedOut: false, cancelled: false })
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 

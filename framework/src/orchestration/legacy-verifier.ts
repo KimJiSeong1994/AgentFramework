@@ -56,7 +56,8 @@ export function createLegacyVerifierExecutor(): VerificationExecutor {
             finished = true
             return {
               profile: "legacy-unowned", parentExit: outcome.exitCode,
-              timedOut: outcome.timedOut, cancelled: outcome.killed,
+              timedOut: outcome.timedOut,
+              cancelled: outcome.killed || (outcome.signal !== null && !outcome.timedOut),
               isolationEstablished: false, domainState: "unknown", integrity: "unknown",
               output: outcome.output,
             }
