@@ -492,7 +492,9 @@ describe("queue with delegate.worktree", () => {
       "except PermissionError:",
       "  outcome = 'write-denied'",
       "finally:",
-      "  finished.write_text(outcome + '\\n')",
+      "  completion = finished.with_suffix('.complete')",
+      "  completion.write_text(outcome + '\\n')",
+      "  completion.replace(finished)",
     ].join("\n")
     const verify = verifyScript(wt.worktree, "check_delayed.sh", [
       `python3 -c ${quote(child)} ${quote(ready)} ${quote(release)} "$1" ${quote(finished)} </dev/null >/dev/null 2>&1 &`,

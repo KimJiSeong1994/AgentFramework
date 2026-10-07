@@ -151,11 +151,69 @@ cancellation acknowledgements cannot grant that authority. Authentication preced
 post-verifier snapshot, review, restoration or merge. Unknown ownership or retirement
 preserves the ledger and original baseline without replay or rebaselining.
 Unresolved bound tickets retain their input and pending-capacity allocation, even
-across boots (the pending limit is 16). Missing retirement-journal evidence remains
+across boots (16 pending tickets or 128 MiB of pending archives). Missing retirement-journal evidence remains
 unproven and is retried; there is no automatic reset or reclamation of unknown state.
 These availability limitations remain part of the unqualified, lab-only profile.
 Pure crypto tests and manager probes are not native qualification; real-process and
 real-queue qualification are separate from actual-model execution and whole-agent safety.
+
+For actual-model qualification, `scripts/lca-live-core-queue.ts` has an explicit
+`--verifier linux-qualification` route. Its default remains `legacy`. The driver
+keeps the real OpenCode worker/reviewer host and recovery callbacks, replacing only
+the verifier in a lab-local runtime copy. Run the server and driver as the installed
+profile's non-sudo controller UID, with matching isolated `HOME`, XDG directories
+and `LCA_STATE_HOME`; keep framework sources and installed authority root-owned.
+The fixture requires isolated task worktrees, enabled policy hooks, strict review,
+three protected plan steps and explicitly allowlisted verification commands.
+
+```sh
+bun scripts/lca-live-core-queue.ts \
+  --worktree /absolute/lab/work --server http://127.0.0.1:58355 \
+  --scenario success --verifier linux-qualification \
+  --receipt /absolute/lab/success.json
+```
+
+Use fresh fixtures for retry, review rejection, worker cancellation, active-verifier
+cancellation, worker interruption, checkpoint interruption and active-verifier
+interruption. Resume with
+the original receipt, parent session ID and verifier mode; never substitute a new
+ledger or baseline. Model access must use only the intended inference endpoint,
+without shared host mounts, forwarded credentials or model-administration access.
+Real model transcripts and authenticated verifier receipts are separate evidence;
+neither establishes worker/reviewer OS containment.
+
+Operational recovery stays fail-closed: preserve the ledger, private baseline,
+ownership record and exact verifier reference before diagnosing a refusal. Restore
+unavailable trusted journal access and inspect that same ticket; only an authenticated
+receipt can authorize further queue recovery. Do not replace missing journal evidence
+with parent exit, empty-group observations or operator-written JSON. If ownership or
+retirement remains unknown, quarantine the guest and preserve its disk/records; use
+a fresh guest for new qualification rather than deleting tickets to recover capacity.
+Retire processes only through authenticated held domain descriptors or whole-guest
+shutdown, never persisted PIDs or a mutable workload unit name.
+
+The 2026-10-07 final-source actual-model lab run exercised all eight scenario families
+with OpenCode 1.18.33 and local `gemma4:26b-a4b-it-mtp-q4_K_M`: nine separate
+fixtures, 16 driver invocations and real independent reviewer sessions. The installed
+authority reauthenticated 19 model-queue verifier results plus one journal probe.
+An early busy-session refusal preserved the ledger, execution identities and attempts;
+later recovery completed without replaying finished work. One active-verifier follow-up
+failed with an OpenCode worker `MessageAbortedError`; its cause remains unestablished,
+its task was not merged, and its evidence was retained. A separate unchanged-input
+fixture recheck passed. Resumed reviewers received the original cumulative diff.
+The journal probe refused retirement during lost journal access and authenticated the
+same ticket after restoration without replay. These observations do not establish
+unconditional model availability or resolve permanently missing evidence and
+unknown-bound capacity retention. Admission remains **lab-only, `qualified: false`**,
+with unchanged legacy runtime defaults.
+
+Cancellation failure receipts preserve the exact observed verifier reference before
+bounded cleanup, retain the original error and cleanup outcomes, and keep retirement
+unresolved unless native authentication succeeds. Main-worktree evidence includes
+tracked diffs and raw-name/content/permission digests for Git-visible, non-ignored
+untracked regular files. Ignored files are not covered.
+Unsupported untracked links or special files are refused, not followed or normalized;
+ACLs and extended attributes are outside this diagnostic digest.
 
 Native Claude and Codex coding profiles are not admitted. Choosing those engines refuses
 before connecting to the server; use OpenCode's provider integrations instead.
