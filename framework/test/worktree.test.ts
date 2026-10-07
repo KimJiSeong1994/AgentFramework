@@ -2,7 +2,7 @@
 // conflicts) and the queue path (worker + verify bound to the worktree, main worktree untouched until accepted,
 // failed/cancelled tasks preserved, patch kept when the merge no longer applies).
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { execFileSync } from "node:child_process"
+import { execFileSync, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { createQueue } from "../src/orchestration/queue.ts"
@@ -569,11 +569,34 @@ describe("queue with delegate.worktree", () => {
   })
 
   test("Linux-only detached verifier control reports blocked/not-run without a qualified systemd lab", async () => {
-    if (process.platform === "linux") throw new Error("Linux systemd lab must run the strict detached-verifier branch with a qualified linux-single-use runtime")
-    const runtime = getOpenCodeRuntime(makeDeps(client, wt.worktree))
-    expect((await runtime.verifier.preflight("linux-single-use")).compatible).toBe(false)
-    console.info("blocked/not-run: requires linux-systemd255 lab (1 Linux detached-verifier control)")
-  })
+    if (process.platform !== "linux") {
+      const runtime = getOpenCodeRuntime(makeDeps(client, wt.worktree))
+      expect((await runtime.verifier.preflight("linux-single-use")).compatible).toBe(false)
+      console.info("blocked/not-run: Linux native verifier qualification is not applicable on this platform")
+      return
+    }
+    if (process.env.LCA_RUN_LINUX_QUALIFICATION !== "1") {
+      console.info("blocked/not-run: set LCA_RUN_LINUX_QUALIFICATION=1 in the isolated Linux systemd verifier guest")
+      return
+    }
+    const driver = join(import.meta.dir, "../../scripts/lca-linux-verifier-queue.ts")
+    const receiptPath = join(wt.stateHome, `linux-verifier-${process.pid}-${Date.now()}.json`)
+    const result = spawnSync(process.execPath, [driver, "--scenario", "success", "--receipt", receiptPath], {
+      cwd: join(import.meta.dir, "../.."), env: { ...process.env }, encoding: "utf8", timeout: 120_000, maxBuffer: 4 * 1024 * 1024,
+    })
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(0)
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf8"))
+    expect(receipt).toMatchObject({
+      schema: "lca.linux-verifier.queue-e2.v1",
+      scenario: "success",
+      qualification: "pass",
+      observation: { queue: { done: 1, failed: 0 }, authenticatedReceiptCount: 1,
+        forgedEvidence: { mismatchedReferenceRefused: true, tamperedReceiptRefused: true } },
+    })
+    expect(JSON.stringify(receipt)).not.toContain("signing-key.pem")
+    expect(JSON.stringify(receipt)).not.toContain("inputArchive")
+  }, 125_000)
 
   test("worker and verify run in the worktree; main gets the files only after the task is accepted", async () => {
     const deps = makeDeps(client, wt.worktree, { delegate: { review: false, worktree: true } as any })

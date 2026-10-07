@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util"
 import { stateRoot } from "../state/store.ts"
 import type { VerificationProfile, VerificationReference, VerificationResult } from "../orchestration/verifier.ts"
 import type { ExecutionReference } from "./types.ts"
+import { authenticateLinuxVerification } from "./linux-domain.ts"
 
 export type ExecutionClaim = { ownerSession: string; instance: string; pid: number; generation: number; token: string }
 export type ExecutionIntent = {
@@ -61,13 +62,13 @@ const sameBoundary = (e: ExecutionRecord, ref: VerificationReference): boolean =
     ref.invocationID === bound.invocationID && ref.inputSnapshotID === bound.inputSnapshotID &&
     ref.inputDigest === bound.inputDigest && ref.deadlineAt === bound.deadlineAt &&
     ref.maxOutputChars === bound.maxOutputChars && ref.unit === bound.unit &&
-    ref.bootID === bound.bootID && ref.cgroupInode === bound.cgroupInode
+    ref.bootID === bound.bootID && isDeepStrictEqual(ref, bound)
 }
-// Structural E1 consistency only: matching persisted fields and an evidence string do not
-// authenticate systemd/cgroup observations or qualify this as native Linux authority.
+// Only authenticated root-gate retirement can establish owned verifier quiescence.
 const verifiedBoundary = (e: ExecutionRecord, result?: VerificationResult): boolean => !!result &&
   result.profile === e.profile && result.isolationEstablished && result.domainState === "empty" &&
-  !!result.proof && sameBoundary(e, result.proof.reference)
+  !!result.proof && sameBoundary(e, result.proof.reference) &&
+  authenticateLinuxVerification(result, result.proof.reference)
 export const strictQuiescent = (e: ExecutionRecord): boolean => {
   if (!e.kind || !e.profile || e.processRisk || (e.kind === "verifier" && e.fence)) return false
   if (e.kind === "verifier" && e.profile === "legacy-unowned") return false
@@ -115,15 +116,17 @@ const verifierRefShape = (value: unknown): value is VerificationReference => obj
   text(value.executionID) && profileShape(value.profile) && text(value.invocationID) && text(value.inputSnapshotID) &&
   typeof value.inputDigest === "string" && /^[a-f0-9]{64}$/.test(value.inputDigest) && timestamp(value.deadlineAt) &&
   integer(value.maxOutputChars) && value.maxOutputChars <= 65536 &&
-  optional(value, "unit", text) && optional(value, "bootID", text) && optional(value, "cgroupInode", text) &&
-  (value.profile === "legacy-unowned" || (text(value.unit) && text(value.bootID) && text(value.cgroupInode)))
+  optional(value, "unit", text) && optional(value, "bootID", text) && !("cgroupInode" in value) &&
+  (value.profile === "legacy-unowned" || (value.unit === "lca-verifier.service" && text(value.bootID)))
 const verificationShape = (value: unknown): value is VerificationResult => object(value) && profileShape(value.profile) &&
   (value.parentExit === null || Number.isSafeInteger(value.parentExit)) && typeof value.timedOut === "boolean" &&
   typeof value.cancelled === "boolean" && typeof value.isolationEstablished === "boolean" &&
   ["active", "empty", "unknown"].includes(value.domainState as string) &&
   ["unchanged", "changed", "unknown"].includes(value.integrity as string) &&
   typeof value.output === "string" && value.output.length <= 65536 &&
-  optional(value, "proof", x => object(x) && verifierRefShape(x.reference) && text(x.evidence)) &&
+  optional(value, "proof", x => object(x) && verifierRefShape(x.reference) && text(x.evidence) &&
+    optional(x, "receipt", y => typeof y === "string" && y.length > 0 && Buffer.byteLength(y, "utf8") <= 16384) &&
+    optional(x, "signature", text)) &&
   (value.profile !== "legacy-unowned" || (!value.isolationEstablished && value.domainState === "unknown"))
 const validProof = (record: ExecutionRecord, result: VerificationResult): boolean => result.profile === record.profile &&
   (!result.proof || sameBoundary(record, result.proof.reference))

@@ -17,7 +17,7 @@ function validReference(reference: VerificationReference): boolean {
     && typeof reference.inputDigest === "string" && reference.inputDigest.length > 0
     && Number.isFinite(reference.deadlineAt)
     && Number.isSafeInteger(reference.maxOutputChars) && reference.maxOutputChars > 0
-    && reference.unit === undefined && reference.bootID === undefined && reference.cgroupInode === undefined
+    && reference.unit === undefined && reference.bootID === undefined && !("cgroupInode" in reference)
 }
 
 /** Parent-shell execution only: a process-group signal cannot prove descendant quiescence. */

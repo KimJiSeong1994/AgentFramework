@@ -12,6 +12,7 @@ import { sessionDir, stateRoot } from "../state/store.ts"
 import type { ExecutionReconciliation, ExecutionReference, ExecutionRuntime, FlowRuntime } from "./types.ts"
 import { settled } from "./run-state.ts"
 import type { VerificationReference } from "../orchestration/verifier.ts"
+import { authenticateLinuxVerification } from "./linux-domain.ts"
 
 /** Only the local operator input handler may construct this value; never derive it from host output. */
 export type LocalPlanDecision =
@@ -151,12 +152,15 @@ export function createForegroundController(runtime: ExecutionRuntime) {
             if (ref.kind !== "verifier" || ref.executionID !== execution.executionId || ref.profile !== execution.profile) throw new Error("verifier reference identity mismatch")
             const pending = runtime.verifier.reconcile(ref)
             const observed = await Promise.race([pending, new Promise<null>(r => setTimeout(() => r(null), 1000))])
-            // The native retirement evidence is not yet provisioned or qualified.
-            // A matching JSON reference or a backend boolean is not authority to
-            // reconstruct a terminal pass after a crash.
-            if (observed) runtime.runs.reconcile(claim, execution.executionId, {
-              outcome: observed.outcome, quiescent: false, evidence: "linux verifier retirement not qualified",
-            })
+            if (observed) {
+              const authenticated = observed.outcome === "terminal" && !!observed.result &&
+                authenticateLinuxVerification(observed.result, ref)
+              runtime.runs.reconcile(claim, execution.executionId, {
+                outcome: observed.outcome, quiescent: authenticated,
+                evidence: authenticated ? "authenticated Linux verifier retirement" : "linux verifier retirement not authenticated",
+                ...(authenticated ? { verification: observed.result } : {}),
+              })
+            }
           } catch { /* No trusted domain proof: preserve the unresolved claim. */ }
         }
         continue

@@ -16,7 +16,7 @@ function fixture() {
 const intent = (claim: ReturnType<ReturnType<typeof createExecutionRunStore>["claim"]>, executionId: string) => ({ executionId, ownerSession: claim.ownerSession, taskId: "task", attemptId: "attempt", generation: claim.generation, role: "worker", cwd: "/tmp", policyID: "fixture-fixed-policy", kind: "host" as const, profile: "legacy-unowned" as const })
 const verifierInput = { inputSnapshotID: "snapshot-1", inputDigest: "a".repeat(64), deadlineAt: 100000, maxOutputChars: 4000 }
 const verifierIntent = (claim: ReturnType<ReturnType<typeof createExecutionRunStore>["claim"]>, executionId: string, profile: "legacy-unowned" | "linux-single-use" = "legacy-unowned") => ({ ...intent(claim, executionId), kind: "verifier" as const, profile, ...verifierInput })
-const verifierRef = (executionID: string, profile: "legacy-unowned" | "linux-single-use"): VerificationReference => ({ kind: "verifier", executionID, profile, invocationID: `invocation-${executionID}`, ...verifierInput, ...(profile === "linux-single-use" ? { unit: `unit-${executionID}`, bootID: "boot", cgroupInode: "123" } : {}) })
+const verifierRef = (executionID: string, profile: "legacy-unowned" | "linux-single-use"): VerificationReference => ({ kind: "verifier", executionID, profile, invocationID: `invocation-${executionID}`, ...verifierInput, ...(profile === "linux-single-use" ? { unit: "lca-verifier.service", bootID: "boot" } : {}) })
 const verification = (reference: VerificationReference): VerificationResult => ({ profile: reference.profile, parentExit: 0, timedOut: false, cancelled: false, isolationEstablished: reference.profile === "linux-single-use", domainState: reference.profile === "linux-single-use" ? "empty" : "unknown", integrity: "unchanged", output: "ok", proof: { reference, evidence: "boundary verified" } })
 
 test("run state rejects stale generations and ACK does not establish quiescence", () => {
@@ -416,12 +416,14 @@ test("an old normal legacy terminal without lifecycle metadata is not auto-adopt
   } finally { f.cleanup() }
 })
 
-test("linux verifier requires a matching strict boundary proof", () => {
+test("matching Linux reference and evidence text cannot mint native retirement authority", () => {
   const f = fixture()
   try {
     const c = f.store.claim("session", "instance", process.pid)
     f.store.registerIntent(c, verifierIntent(c, "linux", "linux-single-use"))
     const ref = verifierRef("linux", "linux-single-use")
+    const oldNativeReference = { ...ref, cgroupInode: "123" }
+    expect(() => f.store.bindVerifierRef(c, "linux", oldNativeReference)).toThrow(TypeError)
     f.store.bindVerifierRef(c, "linux", ref)
     f.store.markVerifierDispatched(c, "linux")
     expect(() => f.store.recordTerminal(c, "linux", { outcome: "ok", terminalAt: 11, quiescentAt: 12, verification: verification(verifierRef("other", "linux-single-use")) })).toThrow(TypeError)
@@ -432,11 +434,21 @@ test("linux verifier requires a matching strict boundary proof", () => {
       outcome: "terminal", quiescent: true, evidence: "test boundary",
       verification: verification(verifierRef("other", "linux-single-use")),
     })).toThrow(TypeError)
-    f.store.reconcile(c, "linux", {
+    const path = join(stateRoot(join(f.home, "worktree")), "execution-runs", "state.json")
+    const before = readFileSync(path)
+    expect(() => f.store.reconcile(c, "linux", {
       outcome: "terminal", quiescent: true, evidence: "test boundary", verification: verification(ref),
-    })
-    expect(strictQuiescent(f.store.status().executions[0]!)).toBe(true)
-    f.store.release(c)
+    })).toThrow(TypeError)
+    expect(readFileSync(path)).toEqual(before)
+    expect(strictQuiescent(f.store.status().executions[0]!)).toBe(false)
+    expect(() => f.store.release(c)).toThrow(ExecutionRunUnresolvedError)
+    expect(() => f.store.registerIntent(c, intent(c, "next"))).toThrow(ExecutionRunUnresolvedError)
+    const forged = JSON.parse(before.toString())
+    forged.executions[0].terminal.quiescentAt = 12
+    writeFileSync(path, JSON.stringify(forged))
+    const forgedBytes = readFileSync(path)
+    expect(() => f.store.status()).toThrow(ExecutionRunCorruptError)
+    expect(readFileSync(path)).toEqual(forgedBytes)
   } finally { f.cleanup() }
 })
 

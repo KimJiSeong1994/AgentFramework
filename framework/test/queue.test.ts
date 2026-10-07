@@ -712,7 +712,7 @@ describe("neutral execution queue", () => {
     })
   }
 
-  test("Linux unknown integrity cannot become a pass from equal worktree snapshots", async () => {
+  test("Linux backend booleans and matching evidence cannot authorize verification or settlement", async () => {
     const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
     f.runtime.verificationProfile = "linux-single-use"
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
@@ -721,9 +721,10 @@ describe("neutral execution queue", () => {
       ...base,
       async preflight() { return { compatible: true, problems: [] } },
       async prepare(request) {
+        expect(request.inputArchive?.byteLength).toBeGreaterThan(0)
         const reference = { kind: "verifier" as const, profile: "linux-single-use" as const, executionID: request.executionID,
           invocationID: "test-invocation", inputSnapshotID: request.inputSnapshotID, inputDigest: request.inputDigest,
-          deadlineAt: request.deadlineAt, maxOutputChars: request.maxOutputChars, unit: "test-unit", bootID: "test-boot", cgroupInode: "123" }
+          deadlineAt: request.deadlineAt, maxOutputChars: request.maxOutputChars, unit: "lca-verifier.service", bootID: "test-boot" }
         return { reference,
           async run() { return { profile: "linux-single-use" as const, parentExit: 0, timedOut: false, cancelled: false,
             isolationEstablished: true, domainState: "empty" as const, integrity: "unknown" as const, output: "",
@@ -736,9 +737,13 @@ describe("neutral execution queue", () => {
     }
     const q = createQueue(f.runtime)
     q.add(S, [{ title: "unknown integrity", verify: verify("check_linux_unknown.sh", "test -f README.md") }])
-    expect(await q.run(S)).toMatchObject({ done: 0, failed: 1 })
-    expect(readLedger(wt.worktree, S).tasks[0]?.verify_result?.ok).toBe(false)
-    expect(f.runtime.runs.status().executions.find(e => e.kind === "verifier")?.terminal?.verification?.integrity).toBe("unknown")
+    expect(await q.run(S)).toMatchObject({ done: 0, aborted: true })
+    expect(f.requests.map(r => r.role)).toEqual(["worker"])
+    expect(readLedger(wt.worktree, S).tasks[0]?.verify_result?.ok).not.toBe(true)
+    const execution = f.runtime.runs.status().executions.find(e => e.kind === "verifier")!
+    expect(execution.terminal).toBeUndefined()
+    expect(execution.fence?.reason).toContain("not authenticated")
+    expect(f.runtime.runs.status().claim).toBeDefined()
   })
 
   test("hanging verifier handle reconciliation fences without retry, review, or cancelling pending tasks", async () => {
@@ -786,7 +791,7 @@ describe("neutral execution queue", () => {
       kind: "verifier", profile: "linux-single-use", inputSnapshotID: snapshotID, inputDigest: digest, deadlineAt, maxOutputChars: 1500 })
     f.runtime.runs.bindVerifierRef(old, id, { kind: "verifier", profile: "linux-single-use", executionID: id,
       invocationID: "old-invocation", inputSnapshotID: snapshotID, inputDigest: digest, deadlineAt, maxOutputChars: 1500,
-      unit: "old-unit", bootID: "old-boot", cgroupInode: "123" })
+      unit: "lca-verifier.service", bootID: "old-boot" })
     f.runtime.runs.markVerifierDispatched(old, id)
     f.runtime.verifier = { ...f.runtime.verifier, reconcile: async () => new Promise<never>(() => {}) }
     const q = createQueue(f.runtime)
@@ -796,6 +801,45 @@ describe("neutral execution queue", () => {
     expect(readLedger(wt.worktree, S).tasks[0]?.status).toBe("pending")
     expect(f.runtime.runs.status().claim).toBeDefined()
     expect(f.runtime.runs.status().executions[0]?.fence).toBeDefined()
+  })
+
+  test("forged native restart result cannot repair the ledger or dispatch another task", async () => {
+    const f = fixture()
+    const old = f.runtime.runs.claim(S, "dead-owner", 99999999)
+    const id = "forged-native-retirement"
+    const reference = {
+      kind: "verifier" as const, profile: "linux-single-use" as const, executionID: id,
+      invocationID: "old-ticket", inputSnapshotID: "old-tree", inputDigest: "a".repeat(64),
+      deadlineAt: Date.now() + 5000, maxOutputChars: 1500,
+      unit: "lca-verifier.service", bootID: "old-boot",
+    }
+    f.runtime.runs.registerIntent(old, {
+      executionId: id, ownerSession: S, taskId: "old-task", attemptId: "old-attempt",
+      generation: old.generation, role: "verifier", cwd: wt.worktree, policyID: "verify-command",
+      kind: "verifier", profile: "linux-single-use", inputSnapshotID: reference.inputSnapshotID,
+      inputDigest: reference.inputDigest, deadlineAt: reference.deadlineAt, maxOutputChars: reference.maxOutputChars,
+    })
+    f.runtime.runs.bindVerifierRef(old, id, reference)
+    f.runtime.runs.markVerifierDispatched(old, id)
+    const proof = { reference, evidence: "claimed root retirement", receipt: "{}", signature: Buffer.alloc(64).toString("base64") }
+    f.runtime.verifier = { ...f.runtime.verifier, async reconcile() {
+      return {
+        outcome: "terminal", isolationEstablished: true, domainState: "empty", integrity: "unchanged", proof,
+        result: {
+          profile: "linux-single-use", parentExit: 0, timedOut: false, cancelled: false,
+          isolationEstablished: true, domainState: "empty", integrity: "unchanged", output: "", proof,
+        },
+      }
+    } }
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "must remain pending" }])
+    const path = join(sessionDir(wt.worktree, S), "ledger.json")
+    const ledger = readFileSync(path)
+    expect(await q.run(S)).toMatchObject({ aborted: true, done: 0 })
+    expect(f.requests).toHaveLength(0)
+    expect(readFileSync(path)).toEqual(ledger)
+    expect(f.runtime.runs.status().executions[0]?.reconciliation?.quiescent).toBe(false)
+    expect(f.runtime.runs.status().claim).toBeDefined()
   })
 
   test("hanging host restart reconciliation cannot route through verifier or cancel pending tasks", async () => {

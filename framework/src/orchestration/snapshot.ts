@@ -40,6 +40,8 @@ export type SnapshotStore = {
   snapshotSync(exclude?: string[]): Snapshot
   /** Capture a baseline once, or reopen and validate the persisted baseline when requireExisting is true. */
   baseline(exclude?: string[], requireExisting?: boolean): Promise<Snapshot>
+  /** Export a private tree without repository export attributes or configuration. */
+  archive(snapshot: Snapshot): Promise<Buffer | null>
   diff(before: Snapshot, after: Snapshot, maxChars: number): Promise<TreeDiff | null>
   /** put `paths` back to their content in `tree` (deleted if absent there); returns the paths actually restored */
   restore(tree: Snapshot, paths: string[]): Promise<string[]>
@@ -211,6 +213,25 @@ export async function createSnapshotStore(worktree: string, durableDirectory?: s
       try { fsyncSync(directoryFD) }
       finally { closeSync(directoryFD) }
       return snap
+    },
+    async archive(snapshot) {
+      if (!snapshot || snapshot.store !== store || !/^[0-9a-f]{40,64}$/.test(snapshot.tree)) return null
+      if (durable) assertNoStateSymlinks(worktree, dir)
+      assertPrivateDirectory(dir)
+      assertPrivateDirectory(env.GIT_OBJECT_DIRECTORY!)
+      const exportDir = mkdtempSync(join(tmpdir(), "lca-archive-"))
+      try {
+        const initialized = await git(worktree, ["init", "--bare", "--template=", exportDir])
+        if (initialized === null) return null
+        // Private info attributes override transformations from the archived tree
+        // without reading live attributes or editing the user's repository.
+        mkdirSync(join(exportDir, "info"), { recursive: true, mode: 0o700 })
+        writeFileSync(join(exportDir, "info", "attributes"), "* -export-ignore -export-subst\n", { mode: 0o600 })
+        return await gitBuffer(worktree, ["archive", "--format=tar", snapshot.tree], {
+          ...env, GIT_DIR: exportDir,
+          GIT_INDEX_FILE: join(exportDir, "empty-index"), GIT_ATTR_NOSYSTEM: "1",
+        }, 16 * 1024 * 1024)
+      } finally { rmSync(exportDir, { recursive: true, force: true }) }
     },
     async diff(before, after, maxChars) {
       if (!before || !after) return null
