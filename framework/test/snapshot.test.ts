@@ -96,6 +96,46 @@ describe("snapshot / diff", () => {
     }
   })
 
+  test("synchronous guard snapshot matches the durable snapshot for additions and tracked deletions", async () => {
+    const store = await createSnapshotStore(wt.worktree)
+    expect(store).not.toBeNull()
+    try {
+      const before = await store!.snapshot(["ignored.txt"])
+      writeFileSync(join(wt.worktree, "new.py"), "added\n")
+      unlinkSync(join(wt.worktree, "keep.py"))
+      const asyncSnapshot = await store!.snapshot(["ignored.txt"])
+      const syncSnapshot = store!.snapshotSync(["ignored.txt"])
+      expect(syncSnapshot?.tree).toBe(asyncSnapshot?.tree)
+      expect((await store!.diff(before, syncSnapshot, 10_000))?.files.sort()).toEqual(["keep.py", "new.py"])
+    } finally {
+      store!.dispose()
+    }
+  })
+
+  test("synchronous snapshots distinguish raw-byte Git names when filtering tracked deletions", async () => {
+    const store = (await createSnapshotStore(wt.worktree))!
+    try {
+      writeFileSync(join(wt.worktree, "�"), "existing Unicode filename\n")
+      writeFileSync(join(wt.worktree, " leading and trailing "), "whitespace filename\n")
+      execFileSync("git", ["add", "."], { cwd: wt.worktree })
+      const before = (await store.snapshot())!
+      // Git's index can retain an unavailable raw-byte name even on filesystems
+      // that refuse creating it (Darwin returns EILSEQ). It must not alias "�".
+      const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+        cwd: wt.worktree, input: "missing raw filename\n",
+      }).toString().trim()
+      execFileSync("git", ["update-index", "-z", "--index-info"], {
+        cwd: wt.worktree,
+        input: Buffer.concat([Buffer.from(`100644 ${blob}\t`), Buffer.from([0xff, 0])]),
+      })
+      const synchronous = store.snapshotSync()
+      const asynchronous = await store.snapshot()
+      expect(synchronous).not.toBeNull()
+      expect(synchronous?.tree).toBe(before.tree)
+      expect(synchronous?.tree).toBe(asynchronous?.tree)
+    } finally { store.dispose() }
+  })
+
   test("durable task baseline reopens with private objects and still diffs orphan edits", async () => {
     const directory = join(wt.stateHome, "snapshots", "task-baseline")
     writeFileSync(join(wt.worktree, "before-task.py"), "BASELINE = True\n")

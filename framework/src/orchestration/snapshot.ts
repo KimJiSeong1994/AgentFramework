@@ -12,7 +12,7 @@ import { closeSync, constants, fchmodSync, fsyncSync, lstatSync, mkdirSync, mkdt
 import { tmpdir } from "node:os"
 import { basename, dirname, join, relative, resolve, sep } from "node:path"
 import { stateBase, stateRoot } from "../state/store.ts"
-import { safeGit as git, safeGitBuffer as gitBuffer } from "./git-boundary.ts"
+import { safeGit as git, safeGitBuffer as gitBuffer, safeGitBufferSync, safeGitSync } from "./git-boundary.ts"
 
 /** Always excluded: the plugin's handoffs (control-plane state lives outside the worktree; ".lca/state" kept for old layouts). */
 export const ALWAYS_EXCLUDED = [".lca/state", ".lca/handoffs"]
@@ -36,6 +36,8 @@ export type SnapshotStore = {
   worktree: string
   env: Record<string, string>
   snapshot(exclude?: string[]): Promise<Snapshot>
+  /** Synchronous counterpart for final guard-to-apply checks. */
+  snapshotSync(exclude?: string[]): Snapshot
   /** Capture a baseline once, or reopen and validate the persisted baseline when requireExisting is true. */
   baseline(exclude?: string[], requireExisting?: boolean): Promise<Snapshot>
   diff(before: Snapshot, after: Snapshot, maxChars: number): Promise<TreeDiff | null>
@@ -85,7 +87,7 @@ export async function createSnapshotStore(worktree: string, durableDirectory?: s
       if (!safeControlDirectories(root)) return null
       // fresh index every time so removed files disappear from the tree
       rmSync(env.GIT_INDEX_FILE!, { force: true })
-      const pathspecs = ["--", ".", ...excludePathspecs(exclude)]
+      const pathspecs = snapshotPathspecs(exclude)
       const [cached, untracked, deleted] = await Promise.all([
         gitBuffer(worktree, ["ls-files", "--cached", "-z", ...pathspecs]),
         gitBuffer(worktree, ["ls-files", "--others", "--exclude-standard", "-z", ...pathspecs]),
@@ -93,10 +95,7 @@ export async function createSnapshotStore(worktree: string, durableDirectory?: s
       ])
       if (cached === null || untracked === null || deleted === null) return null
 
-      // Don't pass absent tracked paths to `git add`: the private index is empty, so it cannot stage their deletion.
-      const missing = new Set(nulRecords(deleted).map((path) => path.toString("hex")))
-      const trackedPaths = nulRecords(cached).filter((path) => !missing.has(path.toString("hex")))
-      const untrackedPaths = nulRecords(untracked)
+      const { trackedPaths, untrackedPaths } = snapshotEntries(cached, untracked, deleted)
 
       // Initialize the private index even when all paths are excluded; write-tree then yields the empty tree.
       if (await git(worktree, ["read-tree", "--empty"], env) === null) return null
@@ -124,6 +123,50 @@ export async function createSnapshotStore(worktree: string, durableDirectory?: s
       if (!(await addPaths(trackedPaths, true)) || !(await addPaths(untrackedPaths, false))) return null
       const tree = await git(worktree, ["write-tree"], env)
       return tree ? { tree, store } : null
+    },
+    snapshotSync(exclude = []) {
+      if (durable) assertNoStateSymlinks(worktree, dir)
+      assertPrivateDirectory(dir)
+      assertPrivateDirectory(env.GIT_OBJECT_DIRECTORY!)
+      if (!safeControlDirectories(root)) return null
+      rmSync(env.GIT_INDEX_FILE!, { force: true })
+      const pathspecs = snapshotPathspecs(exclude)
+      try {
+        const cached = safeGitBufferSync(worktree, ["ls-files", "--cached", "-z", ...pathspecs])
+        const untracked = safeGitBufferSync(worktree, ["ls-files", "--others", "--exclude-standard", "-z", ...pathspecs])
+        const deleted = safeGitBufferSync(worktree, ["ls-files", "--deleted", "-z", ...pathspecs])
+        const { trackedPaths, untrackedPaths } = snapshotEntries(cached, untracked, deleted)
+        safeGitSync(worktree, ["read-tree", "--empty"], env)
+
+        const pathspecFile = join(dir, "pathspecs")
+        const addPaths = (paths: Buffer[], force: boolean): boolean => {
+          if (!paths.length) return true
+          rmSync(pathspecFile, { force: true })
+          let fd: number | undefined
+          try {
+            fd = openSync(pathspecFile, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+            writeFileSync(fd, nulPathspecs(paths))
+            safeGitSync(worktree, [
+              "--literal-pathspecs", "add", "-A", ...(force ? ["-f"] : []),
+              `--pathspec-from-file=${pathspecFile}`, "--pathspec-file-nul",
+            ], env)
+            return true
+          } catch {
+            return false
+          } finally {
+            if (fd !== undefined) closeSync(fd)
+            rmSync(pathspecFile, { force: true })
+          }
+        }
+
+        if (!addPaths(trackedPaths, true) || !addPaths(untrackedPaths, false)) return null
+        const tree = safeGitSync(worktree, ["write-tree"], env)
+        return tree ? { tree, store } : null
+      } catch {
+        return null
+      } finally {
+        rmSync(join(dir, "pathspecs"), { force: true })
+      }
     },
     async baseline(exclude = [], requireExisting = false) {
       if (durable) assertNoStateSymlinks(worktree, dir)
@@ -247,6 +290,10 @@ export async function createSnapshotStore(worktree: string, durableDirectory?: s
       }
       try { assertNoStateSymlinks(worktree, dir) }
       catch { return }
+      try {
+        assertPrivateDirectory(dir)
+        assertPrivateDirectory(env.GIT_OBJECT_DIRECTORY!)
+      } catch { return }
       const info = lstatOrNull(dir)
       if (!info || !info.isDirectory() || info.isSymbolicLink()) return
       for (const name of ["baseline.json", "index", "pathspecs", "objects"]) {
@@ -259,6 +306,10 @@ export async function createSnapshotStore(worktree: string, durableDirectory?: s
 }
 
 type TreeEntry = { mode: string; type: string; oid: string }
+
+function snapshotPathspecs(exclude: string[]): string[] {
+  return ["--", ".", ...excludePathspecs(exclude)]
+}
 
 async function validTreeObject(worktree: string, tree: string, env: Record<string, string>): Promise<boolean> {
   if (!/^[0-9a-f]{40,64}$/.test(tree) || await git(worktree, ["cat-file", "-t", tree], env) !== "tree") return false
@@ -295,6 +346,16 @@ function nulRecords(bytes: Buffer): Buffer[] {
 
 function nulPaths(bytes: Buffer): string[] {
   return nulRecords(bytes).map((record) => record.toString("utf8"))
+}
+
+function snapshotEntries(cached: Buffer, untracked: Buffer, deleted: Buffer) {
+  // The empty private index cannot stage absent tracked paths. Keep byte identity:
+  // decoding non-UTF-8 names could alias a different file and hide a new addition.
+  const missing = new Set(nulRecords(deleted).map((path) => path.toString("hex")))
+  return {
+    trackedPaths: nulRecords(cached).filter((path) => !missing.has(path.toString("hex"))),
+    untrackedPaths: nulRecords(untracked),
+  }
 }
 
 function nulPathspecs(paths: Buffer[]): Buffer {

@@ -140,6 +140,11 @@ function safeGitBufferUnchecked(cwd: string, args: string[], extra?: Record<stri
 }
 
 export function safeGitSync(cwd: string, args: string[], extra?: Record<string, string>): string {
+  return safeGitBufferSync(cwd, args, extra).toString().trimEnd()
+}
+
+/** Preserve raw NUL-delimited paths, including filenames that are not valid UTF-8. */
+export function safeGitBufferSync(cwd: string, args: string[], extra?: Record<string, string>): Buffer {
   assertGitBoundary(cwd)
-  return execFileSync("git", [...FLAGS, ...args], { cwd, env: controlledGitEnv(extra), stdio: "pipe" }).toString().trimEnd()
+  return execFileSync("git", [...FLAGS, ...args], { cwd, env: controlledGitEnv(extra), stdio: "pipe" })
 }
