@@ -91,6 +91,34 @@ function approval(wfID: string, hash: string): LocalPlanDecision {
   return { source: "local_human", action: "approve", workflowID: wfID, planSha: hash }
 }
 
+async function verifierTakeover(dispatch: "prepared" | "started" | "unmarked") {
+  const f = fixture({ maxAttempts: 1 })
+  const submitted = await f.controller.importPlan(SESSION, save())
+  if (!submitted.result.ok) throw new Error(submitted.result.text)
+  expect(f.controller.decide(approval(submitted.result.wf.id, submitted.planSha)).ok).toBe(true)
+  const claim = f.runtime.runs.claim(SESSION, f.runtime.instance, process.pid)
+  const executionID = `verifier-${dispatch}`
+  const reference = {
+    kind: "verifier" as const, executionID, profile: "legacy-unowned" as const,
+    invocationID: `invocation-${dispatch}`, inputSnapshotID: "snapshot",
+    inputDigest: "a".repeat(64), deadlineAt: Date.now() + 10_000, maxOutputChars: 1024,
+  }
+  f.runtime.runs.registerIntent(claim, {
+    executionId: executionID, ownerSession: SESSION, taskId: "task", attemptId: "attempt",
+    generation: claim.generation, role: "verifier", cwd: wt.worktree, policyID: "verify-command",
+    kind: "verifier", profile: "legacy-unowned", inputSnapshotID: reference.inputSnapshotID,
+    inputDigest: reference.inputDigest, deadlineAt: reference.deadlineAt, maxOutputChars: reference.maxOutputChars,
+  })
+  f.runtime.runs.bindVerifierRef(claim, executionID, reference)
+  if (dispatch === "started") f.runtime.runs.markVerifierDispatched(claim, executionID)
+  const path = join(stateRoot(wt.worktree), "execution-runs", "state.json")
+  const state = JSON.parse(readFileSync(path, "utf8"))
+  state.claim.pid = 2147483647
+  if (dispatch === "unmarked") delete state.executions.at(-1).verifierDispatch
+  writeFileSync(path, JSON.stringify(state))
+  return { f, executionID }
+}
+
 async function cancelInSubprocess(worktree: string, sessionID: string) {
   const imports = {
     controller: new URL("../src/hosts/controller.ts", import.meta.url).href,
@@ -310,6 +338,29 @@ describe("external foreground imported-plan controller", () => {
     expect(readFileSync(workflowPath(wt.worktree), "utf8")).toBe(before)
     expect(f.runtime.runs.status().claim).toBeDefined()
   })
+
+  test("dead-owner takeover retires only an explicitly prepared verifier", async () => {
+    const { f, executionID } = await verifierTakeover("prepared")
+    const stopBeforeQueue = new AbortController()
+    stopBeforeQueue.abort()
+    await expect(f.controller.resume(SESSION, stopBeforeQueue.signal)).rejects.toThrow("run cancelled before dispatch")
+    expect(f.runtime.runs.status().executions.at(-1)).toMatchObject({
+      executionId: executionID, verifierDispatch: "retired", terminal: { outcome: "not-dispatched" },
+    })
+    expect(f.runtime.runs.status().claim).toBeUndefined()
+  })
+
+  for (const dispatch of ["started", "unmarked"] as const) {
+    test(`dead-owner takeover leaves ${dispatch} legacy verifier unresolved without inventing a terminal`, async () => {
+      const { f, executionID } = await verifierTakeover(dispatch)
+      await expect(f.controller.resume(SESSION)).rejects.toThrow("quiescent")
+      const execution = f.runtime.runs.status().executions.at(-1)!
+      expect(execution.executionId).toBe(executionID)
+      expect(execution.terminal).toBeUndefined()
+      expect(execution.verifierDispatch).toBe(dispatch === "unmarked" ? undefined : "started")
+      expect(f.runtime.runs.status().claim).toBeDefined()
+    })
+  }
 
   test("controller delegates protected-test restoration and failed verification to the shared queue", async () => {
     const source = save()

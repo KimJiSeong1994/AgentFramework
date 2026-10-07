@@ -73,6 +73,7 @@ describe("/status", () => {
       role: "verifier", cwd: wt.worktree, policyID: "verify-legacy", kind: "verifier", profile: "legacy-unowned",
       inputSnapshotID: ref.inputSnapshotID, inputDigest: ref.inputDigest, deadlineAt: ref.deadlineAt, maxOutputChars: ref.maxOutputChars })
     runs.bindVerifierRef(claim, "verify-1", ref)
+    runs.markVerifierDispatched(claim, "verify-1")
     runs.recordTerminal(claim, "verify-1", { outcome: "ok", terminalAt: Date.now(), verification: {
       profile: "legacy-unowned", parentExit: 0, timedOut: false, cancelled: false, isolationEstablished: false,
       domainState: "unknown", integrity: "unchanged", output: "",

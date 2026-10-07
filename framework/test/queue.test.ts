@@ -7,6 +7,7 @@ import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
 import type { ExecutionHandle, ExecutionOutcome, ExecutionReconciliation, ExecutionRequest, ExecutionRuntime } from "../src/hosts/types.ts"
 import { createQueue, getQueue, parseVerdict, reviewerPrompt, workerPrompt } from "../src/orchestration/queue.ts"
 import { createLegacyVerifierExecutor } from "../src/orchestration/legacy-verifier.ts"
+import type { VerificationHandle, VerificationRequest, VerificationResult } from "../src/orchestration/verifier.ts"
 import { createSnapshotStore } from "../src/orchestration/snapshot.ts"
 import { createTaskWorktree, worktreeRoot } from "../src/orchestration/worktree.ts"
 import { currentOwner } from "../src/flow/owner.ts"
@@ -23,6 +24,14 @@ afterEach(() => wt.cleanup())
 const write = (name: string, contents: string) => writeFileSync(join(wt.worktree, name), contents)
 const verify = (name: string, body: string) => verifyScript(wt.worktree, name, body)
 type Reply = (request: ExecutionRequest) => Promise<ExecutionOutcome> | ExecutionOutcome
+
+function legacyVerificationResult(request: VerificationRequest, patch: Partial<VerificationResult> = {}): VerificationResult {
+  return {
+    profile: request.profile, parentExit: 0, timedOut: false, cancelled: false,
+    isolationEstablished: false, domainState: "unknown", integrity: "unchanged", output: "fixture result",
+    ...patch,
+  }
+}
 
 function fixture(patch: Partial<LcaConfig> = {}) {
   const config: LcaConfig = {
@@ -413,13 +422,23 @@ describe("neutral execution queue", () => {
   test("legacy verifier persists its boundary and terminal risk before the next host intent", async () => {
     const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+    const base = f.runtime.verifier
+    let dispatchAtRun: string | undefined
+    f.runtime.verifier = { ...base, async prepare(request) {
+      const handle = await base.prepare(request)
+      return { ...handle, async run() {
+        dispatchAtRun = f.runtime.runs.status().executions.find(execution => execution.executionId === request.executionID)?.verifierDispatch
+        return handle.run()
+      } }
+    } }
     const q = createQueue(f.runtime)
     q.add(S, [{ title: "verified", verify: verify("check_first.sh", "test -f README.md") }, { title: "next" }])
     expect(await q.run(S)).toMatchObject({ done: 2 })
     const [worker, verifier, next] = f.runtime.runs.status().executions
     expect(worker).toMatchObject({ kind: "host", profile: "legacy-unowned" })
-    expect(verifier).toMatchObject({ kind: "verifier", profile: "legacy-unowned", descendantRisk: "unproven", terminal: { outcome: "ok", verification: { parentExit: 0, isolationEstablished: false, domainState: "unknown", integrity: "unchanged" } } })
+    expect(verifier).toMatchObject({ kind: "verifier", profile: "legacy-unowned", verifierDispatch: "started", descendantRisk: "unproven", terminal: { outcome: "ok", verification: { parentExit: 0, isolationEstablished: false, domainState: "unknown", integrity: "unchanged" } } })
     expect(verifier?.boundaryRef).toMatchObject({ kind: "verifier", inputSnapshotID: verifier?.inputSnapshotID, inputDigest: verifier?.inputDigest })
+    expect(dispatchAtRun).toBe("started")
     expect(next).toMatchObject({ kind: "host", profile: "legacy-unowned" })
     expect(f.runtime.runs.status().claim).toBeUndefined()
   })
@@ -449,24 +468,125 @@ describe("neutral execution queue", () => {
     expect(existsSync(join(wt.worktree, "forbidden-marker"))).toBe(false)
   })
 
-  test("dead-owner legacy missing terminal becomes unknown and repairs the running task", async () => {
+  for (const dispatch of ["started", "markerless", "unknown-terminal"] as const) {
+    test(`dead-owner legacy verifier ${dispatch} state remains fenced without replay or baseline mutation`, async () => {
+      const f = fixture({ delegate: { worktree: true, review: false } as LcaConfig["delegate"] })
+      const q = createQueue(f.runtime)
+      const [task] = q.add(S, [{ title: "restart" }])
+      const oldWorktree = (await createTaskWorktree(wt.worktree, S, task!.id, f.runtime.config.delegate.diff_exclude))!
+      writeFileSync(join(oldWorktree.path, "orphan.py"), "ORPHAN_EDIT = True\n")
+      const baselinePath = join(worktreeRoot(wt.worktree), ".recovery", S, task!.id, "baseline", "baseline.json")
+      const originalBaseline = readFileSync(baselinePath)
+      writeLedger(wt.worktree, { ...updateTask(readLedger(wt.worktree, S), task!.id, { status: "running", attempts: 1 }),
+        running: { taskId: task!.id, since: Date.now() } })
+      const ledgerPath = join(sessionDir(wt.worktree, S), "ledger.json")
+      const originalLedger = readFileSync(ledgerPath)
+
+      const old = f.runtime.runs.claim(S, "dead-owner", 99999999)
+      const id = `orphan-verifier-${dispatch}`
+      const deadlineAt = Date.now() + 1000
+      f.runtime.runs.registerIntent(old, {
+        executionId: id, ownerSession: S, taskId: task!.id, attemptId: "old-attempt",
+        generation: old.generation, role: "verifier", cwd: oldWorktree.path, policyID: "verify-command",
+        kind: "verifier", profile: "legacy-unowned", inputSnapshotID: "old-tree", inputDigest: "a".repeat(64),
+        deadlineAt, maxOutputChars: 1500,
+      })
+      if (dispatch === "started") {
+        f.runtime.runs.bindVerifierRef(old, id, {
+          kind: "verifier", profile: "legacy-unowned", executionID: id, invocationID: "old-invocation",
+          inputSnapshotID: "old-tree", inputDigest: "a".repeat(64), deadlineAt, maxOutputChars: 1500,
+        })
+        f.runtime.runs.markVerifierDispatched(old, id)
+      } else {
+        // Simulate a durable record written before verifier dispatch metadata existed.
+        const statePath = join(stateRoot(wt.worktree), "execution-runs", "state.json")
+        const state = JSON.parse(readFileSync(statePath, "utf8")) as { executions: Array<Record<string, unknown>> }
+        const execution = state.executions.find(record => record.executionId === id)!
+        delete execution.verifierDispatch
+        if (dispatch === "unknown-terminal") execution.terminal = { outcome: "unknown", terminalAt: Date.now() }
+        writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`)
+      }
+      let reconciliations = 0
+      f.runtime.verifier = { ...f.runtime.verifier, async reconcile() {
+        reconciliations++
+        return { outcome: "unknown", isolationEstablished: false, domainState: "unknown", integrity: "unknown" }
+      } }
+      f.replies.set("worker", () => ({ status: "completed", text: "must not replay" }))
+
+      expect(await q.run(S, { resumed: dispatch === "markerless" })).toMatchObject({ aborted: true, done: 0 })
+      expect(f.requests).toHaveLength(0)
+      expect(reconciliations).toBe(0)
+      expect(readFileSync(ledgerPath)).toEqual(originalLedger)
+      expect(readFileSync(baselinePath)).toEqual(originalBaseline)
+      expect(readFileSync(join(oldWorktree.path, "orphan.py"), "utf8")).toBe("ORPHAN_EDIT = True\n")
+      const recovered = f.runtime.runs.status()
+      expect(recovered.claim).toBeDefined()
+      expect(recovered.executions[0]).toMatchObject({ fence: expect.anything(), descendantRisk: "unproven" })
+      expect(recovered.executions[0]?.terminal?.outcome).toBe(dispatch === "unknown-terminal" ? "unknown" : undefined)
+      expect(recovered.executions[0]?.verifierDispatch).toBe(dispatch === "started" ? "started" : undefined)
+    })
+  }
+
+  test("dead-owner explicitly prepared verifier retires as not-dispatched without running or reconciling", async () => {
     const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
     const q = createQueue(f.runtime)
-    const [task] = q.add(S, [{ title: "restart" }])
+    const [task] = q.add(S, [{ title: "already complete" }])
+    const completed = updateTask(readLedger(wt.worktree, S), task!.id, {
+      status: "done", attempts: 1, startedAt: Date.now() - 2000, finishedAt: Date.now() - 1000,
+    })
+    writeLedger(wt.worktree, completed)
+    const ledgerPath = join(sessionDir(wt.worktree, S), "ledger.json")
+    const originalLedger = readFileSync(ledgerPath)
     const old = f.runtime.runs.claim(S, "dead-owner", 99999999)
+    const id = "prepared-verifier"
     f.runtime.runs.registerIntent(old, {
-      executionId: "orphan-verifier", ownerSession: S, taskId: task!.id, attemptId: "old-attempt",
+      executionId: id, ownerSession: S, taskId: task!.id, attemptId: "old-attempt",
       generation: old.generation, role: "verifier", cwd: wt.worktree, policyID: "verify-command",
       kind: "verifier", profile: "legacy-unowned", inputSnapshotID: "old-tree", inputDigest: "a".repeat(64),
       deadlineAt: Date.now() + 1000, maxOutputChars: 1500,
     })
+    let reconciliations = 0
+    f.runtime.verifier = { ...f.runtime.verifier, async reconcile() {
+      reconciliations++
+      return { outcome: "unknown", isolationEstablished: false, domainState: "unknown", integrity: "unknown" }
+    } }
+
+    expect(await q.run(S)).toMatchObject({ done: 0, failed: 0, aborted: false })
+    expect(f.requests).toHaveLength(0)
+    expect(reconciliations).toBe(0)
+    expect(readFileSync(ledgerPath)).toEqual(originalLedger)
+    expect(f.runtime.runs.status().claim).toBeUndefined()
+    expect(f.runtime.runs.status().executions[0]).toMatchObject({
+      verifierDispatch: "retired", terminal: { outcome: "not-dispatched" }, descendantRisk: "unproven",
+    })
+  })
+
+  test("a second queue does not retire a prepared verifier owned by a live same-generation claim", async () => {
+    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const firstQueue = createQueue(f.runtime)
+    const [task] = firstQueue.add(S, [{ title: "still running" }])
+    const claim = f.runtime.runs.claim(S, f.runtime.instance, process.pid)
+    f.runtime.runs.registerIntent(claim, {
+      executionId: "live-prepared-verifier", ownerSession: S, taskId: task!.id, attemptId: "live-attempt",
+      generation: claim.generation, role: "verifier", cwd: wt.worktree, policyID: "verify-command",
+      kind: "verifier", profile: "legacy-unowned", inputSnapshotID: "input-tree", inputDigest: "b".repeat(64),
+      deadlineAt: Date.now() + 10_000, maxOutputChars: 1500,
+    })
     writeLedger(wt.worktree, { ...updateTask(readLedger(wt.worktree, S), task!.id, { status: "running", attempts: 1 }),
       running: { taskId: task!.id, since: Date.now() } })
-    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
-    expect(await q.run(S)).toMatchObject({ done: 1 })
-    expect(f.requests).toHaveLength(1)
-    expect(readLedger(wt.worktree, S).tasks[0]?.attempts).toBe(1)
-    expect(f.runtime.runs.status().executions[0]).toMatchObject({ terminal: { outcome: "unknown" }, descendantRisk: "unproven" })
+    const ledgerPath = join(sessionDir(wt.worktree, S), "ledger.json")
+    const originalLedger = readFileSync(ledgerPath)
+
+    const secondQueue = createQueue(f.runtime)
+    expect(secondQueue).not.toBe(firstQueue)
+    expect(await secondQueue.run(S)).toMatchObject({ aborted: true, done: 0 })
+    expect(f.requests).toHaveLength(0)
+    expect(readFileSync(ledgerPath)).toEqual(originalLedger)
+    expect(f.runtime.runs.status().executions[0]).toMatchObject({
+      verifierDispatch: "prepared", fence: expect.anything(),
+    })
+    expect(f.runtime.runs.status().executions[0]?.terminal).toBeUndefined()
+    expect(f.runtime.runs.status().claim).toMatchObject({ generation: claim.generation })
   })
 
   test("missing Linux proof keeps claim and pending tasks fenced", async () => {
@@ -478,6 +598,10 @@ describe("neutral execution queue", () => {
       kind: "verifier", profile: "linux-single-use", inputSnapshotID: "old-tree", inputDigest: "a".repeat(64),
       deadlineAt: Date.now() + 1000, maxOutputChars: 1500,
     })
+    const statePath = join(stateRoot(wt.worktree), "execution-runs", "state.json")
+    const state = JSON.parse(readFileSync(statePath, "utf8"))
+    delete state.executions[0].verifierDispatch
+    writeFileSync(statePath, JSON.stringify(state))
     const q = createQueue(f.runtime)
     q.add(S, [{ title: "never started" }])
     expect(await q.run(S)).toMatchObject({ aborted: true, done: 0 })
@@ -663,6 +787,7 @@ describe("neutral execution queue", () => {
     f.runtime.runs.bindVerifierRef(old, id, { kind: "verifier", profile: "linux-single-use", executionID: id,
       invocationID: "old-invocation", inputSnapshotID: snapshotID, inputDigest: digest, deadlineAt, maxOutputChars: 1500,
       unit: "old-unit", bootID: "old-boot", cgroupInode: "123" })
+    f.runtime.runs.markVerifierDispatched(old, id)
     f.runtime.verifier = { ...f.runtime.verifier, reconcile: async () => new Promise<never>(() => {}) }
     const q = createQueue(f.runtime)
     q.add(S, [{ title: "still pending" }])
@@ -689,35 +814,162 @@ describe("neutral execution queue", () => {
     expect(f.runtime.runs.status().executions[0]?.fence).toBeDefined()
   })
 
-  test("cancelled legacy verifier records a terminal, never passes, and does not review", async () => {
-    const f = fixture({ delegate: { review: true, max_attempts: 1 } as LcaConfig["delegate"] })
-    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
-    const q = createQueue(f.runtime)
-    q.add(S, [{ title: "cancel check", verify: verify("check_slow.sh", "touch verifier-started; sleep 10") }])
-    const run = q.run(S)
-    await waitFor(() => existsSync(join(wt.worktree, "verifier-started")))
-    await q.abort(S, "stop verifier")
-    expect(await run).toMatchObject({ done: 0, cancelled: 1 })
-    expect(readLedger(wt.worktree, S).tasks[0]?.verify_result?.ok).not.toBe(true)
-    expect(f.requests.map(r => r.role)).toEqual(["worker"])
-    expect(f.runtime.runs.status().executions.find(e => e.kind === "verifier")?.terminal?.verification?.cancelled).toBe(true)
-  })
+  for (const signal of ["cancelled", "timeout", "external-signal", "unknown-result"] as const) {
+    test(`launched legacy verifier ${signal} stays fenced across resume without replacement children`, async () => {
+      const f = fixture({ delegate: { review: true, worktree: true, max_attempts: 2 } as LcaConfig["delegate"] })
+      f.replies.set("worker", request => {
+        writeFileSync(join(request.cwd, "unmerged.py"), "VALUE = 1\n")
+        return { status: "completed", text: "done" }
+      })
+      const base = f.runtime.verifier
+      let runCalls = 0
+      let verifierRequest: VerificationRequest | undefined
+      f.runtime.verifier = { ...base, async prepare(request) {
+        verifierRequest = request
+        const inert = await base.prepare(request)
+        const result = legacyVerificationResult(request, signal === "timeout"
+          ? { parentExit: null, timedOut: true }
+          : signal === "unknown-result" ? { parentExit: null } : { parentExit: null, cancelled: true })
+        return {
+          ...inert,
+          async run() {
+            runCalls++
+            return signal === "cancelled" ? new Promise<VerificationResult>(() => {}) : result
+          },
+          async requestCancel() { return { requested: true, acknowledged: true, outcome: result } },
+          async reconcile() { return { outcome: "unknown", isolationEstablished: false, domainState: "unknown", integrity: "unknown" } },
+        }
+      } }
+      const q = createQueue(f.runtime)
+      q.add(S, [{ title: "cancel check", verify: verify("check_never_run.sh", "exit 0") }])
+      const run = q.run(S)
+      if (signal === "cancelled") {
+        await waitFor(() => runCalls === 1)
+        await q.abort(S, "stop verifier")
+      }
+      expect(await run).toMatchObject({ aborted: true })
+      expect(runCalls).toBe(1)
+      expect(f.requests.map(request => request.role)).toEqual(["worker"])
+      expect(existsSync(join(wt.worktree, "unmerged.py"))).toBe(false)
+      const execution = f.runtime.runs.status().executions.find(record => record.kind === "verifier")!
+      expect(execution).toMatchObject({ verifierDispatch: "started", fence: expect.anything() })
+      expect(execution.terminal?.outcome).toBe(signal === "timeout" ? "timeout" :
+        signal === "unknown-result" ? "unknown" : signal === "cancelled" || signal === "external-signal" ? "killed" : undefined)
+      expect(execution.terminal?.verification).toMatchObject(signal === "timeout"
+        ? { parentExit: null, cancelled: false, timedOut: true }
+        : signal === "unknown-result" ? { parentExit: null, cancelled: false, timedOut: false }
+          : { parentExit: null, cancelled: true, timedOut: false })
+      expect(f.runtime.runs.status().claim).toBeDefined()
+      expect(await q.run(S)).toMatchObject({ aborted: true, done: 0 })
+      expect(f.requests.map(request => request.role)).toEqual(["worker"])
+      expect(existsSync(join(wt.worktree, "unmerged.py"))).toBe(false)
+      expect(verifierRequest).toBeDefined()
+    })
+  }
 
-  test("aborting verifier preparation fences the claim without cancelling pending ledger tasks", async () => {
+  test("aborting verifier preparation retires without dispatch and ignores late reference callbacks", async () => {
     const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
     const base = f.runtime.verifier
-    f.runtime.verifier = { ...base, prepare: async () => new Promise(() => {}) }
+    let pendingRequest: VerificationRequest | undefined
+    let releasePrepare!: (handle: VerificationHandle) => void
+    let runCalls = 0
+    let reconcileCalls = 0
+    f.runtime.verifier = { ...base, async prepare(request) {
+      pendingRequest = request
+      return new Promise<VerificationHandle>(resolve => { releasePrepare = resolve })
+    } }
     const q = createQueue(f.runtime)
     q.add(S, [{ title: "prepare hangs", verify: verify("check_prepare.sh", "test -f README.md") }, { title: "pending" }])
     const run = q.run(S)
-    await waitFor(() => f.runtime.runs.status().executions.some(e => e.kind === "verifier"))
+    await waitFor(() => pendingRequest !== undefined)
     await q.abort(S, "stop preparation")
-    expect(await run).toMatchObject({ aborted: true, done: 0 })
-    expect(f.runtime.runs.status().claim).toBeDefined()
-    expect(f.runtime.runs.status().executions.find(e => e.kind === "verifier")?.fence).toBeDefined()
-    expect(readLedger(wt.worktree, S).tasks[1]?.status).toBe("pending")
+    expect(await run).toMatchObject({ aborted: true, done: 0, cancelled: 2 })
+    const retired = f.runtime.runs.status().executions.find(e => e.kind === "verifier")!
+    expect(retired).toMatchObject({ verifierDispatch: "retired", terminal: { outcome: "not-dispatched" } })
+    expect(retired.fence).toBeUndefined()
+    expect(f.runtime.runs.status().claim).toBeUndefined()
+    expect(readLedger(wt.worktree, S).tasks[1]?.status).toBe("cancelled")
     expect(f.requests.map(r => r.role)).toEqual(["worker"])
+
+    const request = pendingRequest!
+    const reference = {
+      kind: "verifier" as const, profile: "legacy-unowned" as const, executionID: request.executionID,
+      invocationID: "late-invocation", inputSnapshotID: request.inputSnapshotID, inputDigest: request.inputDigest,
+      deadlineAt: request.deadlineAt, maxOutputChars: request.maxOutputChars,
+    }
+    request.onReference?.(reference)
+    releasePrepare({
+      reference,
+      async run() { runCalls++; return legacyVerificationResult(request) },
+      async requestCancel() { return { requested: false, acknowledged: false } },
+      async reconcile() {
+        reconcileCalls++
+        return { outcome: "unknown", isolationEstablished: false, domainState: "unknown", integrity: "unknown" }
+      },
+    })
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+    expect(runCalls).toBe(0)
+    expect(reconcileCalls).toBe(0)
+    expect(f.runtime.runs.status().executions.find(e => e.kind === "verifier")).toMatchObject({
+      verifierDispatch: "retired", terminal: { outcome: "not-dispatched" },
+    })
+    expect(f.runtime.runs.status().executions.find(e => e.kind === "verifier")?.boundaryRef).toBeUndefined()
+  })
+
+  for (const failure of ["deadline", "prepare-error"] as const) {
+    test(`verifier ${failure} before dispatch retires without a permanent fence`, async () => {
+      const f = fixture({ delegate: { review: false, verify_timeout_ms: failure === "deadline" ? 20 : DEFAULT_CONFIG.delegate.verify_timeout_ms } as LcaConfig["delegate"] })
+      f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+      const base = f.runtime.verifier
+      f.runtime.verifier = { ...base, async prepare() {
+        if (failure === "prepare-error") throw new Error("fixture prepare failure")
+        return new Promise<VerificationHandle>(() => {})
+      } }
+      const q = createQueue(f.runtime)
+      q.add(S, [{ title: "prepare failure", verify: verify("check_prepare_failure.sh", "test -f README.md") }])
+
+      expect(await q.run(S)).toMatchObject({ aborted: true, done: 0 })
+      const execution = f.runtime.runs.status().executions.find(record => record.kind === "verifier")!
+      expect(execution).toMatchObject({ verifierDispatch: "retired", terminal: { outcome: "not-dispatched" } })
+      expect(execution.fence).toBeUndefined()
+      expect(f.runtime.runs.status().claim).toBeUndefined()
+      expect(f.requests.map(request => request.role)).toEqual(["worker"])
+    })
+  }
+
+  test("a prepared verifier returned after its deadline retires even when prepare beats the timer callback", async () => {
+    const f = fixture({ delegate: { review: false, verify_timeout_ms: 40 } as LcaConfig["delegate"] })
+    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+    const base = f.runtime.verifier
+    let preparedAfterDeadline = false
+    let runCalls = 0
+    f.runtime.verifier = { ...base, async prepare(request) {
+      const handle = await base.prepare(request)
+      // Keep the event loop occupied past the deadline so the resolved prepare wins the
+      // Promise.race microtask before the overdue timeout callback can run.
+      const waitStartedAt = Date.now()
+      while (Date.now() <= request.deadlineAt && Date.now() - waitStartedAt < 250) {}
+      preparedAfterDeadline = Date.now() > request.deadlineAt
+      return {
+        ...handle,
+        async run() { runCalls++; return legacyVerificationResult(request) },
+      }
+    } }
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "late prepared verifier", verify: verify("check_late_prepare.sh", "test -f README.md") }])
+
+    expect(await q.run(S)).toMatchObject({
+      aborted: true, done: 0, abortReason: expect.stringContaining("deadline expired before dispatch"),
+    })
+    expect(preparedAfterDeadline).toBe(true)
+    expect(runCalls).toBe(0)
+    expect(f.requests.map(request => request.role)).toEqual(["worker"])
+    expect(f.runtime.runs.status().executions.find(execution => execution.kind === "verifier")).toMatchObject({
+      verifierDispatch: "retired", terminal: { outcome: "not-dispatched" },
+    })
+    expect(f.runtime.runs.status().executions.find(execution => execution.kind === "verifier")?.fence).toBeUndefined()
+    expect(f.runtime.runs.status().claim).toBeUndefined()
   })
 
   test("protected-file mutation restores original test and invalidates verification", async () => {
@@ -768,6 +1020,8 @@ describe("neutral execution queue", () => {
     expect(f.requests).toHaveLength(2)
     expect(f.requests[1]?.text).toContain("previous worker already changed files")
     expect(f.requests[0]?.executionID).not.toBe(f.requests[1]?.executionID)
+    expect(f.runtime.runs.status().executions.filter(execution => execution.kind === "verifier").map(execution => [execution.verifierDispatch, execution.terminal?.outcome]))
+      .toEqual([["started", "fail"], ["started", "ok"]])
   })
 
   test("ACK without quiescence fences execution and blocks verifier and retry", async () => {

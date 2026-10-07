@@ -139,10 +139,10 @@ export function createForegroundController(runtime: ExecutionRuntime) {
     for (const execution of runtime.runs.status().executions) {
       if (settled(execution)) continue
       if (execution.kind === "verifier") {
-        if (execution.profile === "legacy-unowned" && !execution.terminal && execution.generation < claim.generation) {
-          // A successful takeover proves the previous claim owner is dead. The
-          // immediate child may have exited, but no verifier pass was recorded.
-          runtime.runs.recordTerminal(claim, execution.executionId, { outcome: "unknown", terminalAt: Date.now() })
+        if (execution.generation < claim.generation && execution.verifierDispatch === "prepared") {
+          // The durable prepared->started transition is written before run();
+          // only its absence from an explicitly prepared record proves no launch.
+          runtime.runs.retireUndispatchedVerifier(claim, execution.executionId)
           continue
         }
         if (execution.boundaryRef && execution.profile === "linux-single-use") {

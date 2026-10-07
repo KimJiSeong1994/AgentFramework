@@ -1,18 +1,18 @@
 // Process helpers shared by the queue: run a shell command with a timeout and capture the tail of its output.
 // node:child_process is used (not Bun.spawn) so the same code runs in bun test and inside OpenCode.
 //
-// The command runs `detached` in its own process group and the timeout / abort kills the GROUP (SIGTERM, then
-// KILL): killing only `sh` leaves e.g. `pytest` children alive holding the stdout pipe, and `close` would never
-// fire (review, security M1). Resolution happens on `exit`, not `close`, for the same reason. This observes only
-// the immediate child: a detached descendant can escape the process group. Use only for legacy-unowned verification.
+// The command runs detached in its own process group; timeout / abort sends termination signals to that group
+// (SIGTERM, then SIGKILL) because killing only `sh` can leave children holding stdout open. Resolution happens on
+// `exit`, not `close`, so it observes only the immediate child and does not prove that descendants stopped.
+// Use only for legacy-unowned verification.
 import { spawn } from "node:child_process"
 import { StringDecoder } from "node:string_decoder"
 
-export type RunResult = { ok: boolean; exitCode: number | null; timedOut: boolean; killed: boolean; output: string; ms: number }
+export type RunResult = { ok: boolean; exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean; killed: boolean; output: string; ms: number }
 
 export type RunHandle = {
   result: Promise<RunResult>
-  /** kill the whole process group (used by queue.abort) */
+  /** request termination of the process group (used by queue.abort) */
   kill(reason?: string): void
 }
 
@@ -62,22 +62,22 @@ export function startShell(
     escalate = setTimeout(() => killGroup("SIGKILL"), 3000)
   }
   const timer = setTimeout(() => stop("timeout"), opts.timeoutMs)
-  const finish = (code: number | null) => {
+  const finish = (code: number | null, signal: NodeJS.Signals | null = null) => {
     if (done) return
     done = true
     clearTimeout(timer)
     if (escalate) clearTimeout(escalate)
     out += decoder.end()
     const output = out.length > max ? "…" + out.slice(out.length - max + 1) : out
-    resolveResult({ ok: code === 0 && !timedOut && !killed, exitCode: code, timedOut, killed, output: output.trimEnd(), ms: Date.now() - t0 })
-    // make sure nothing in the group outlives us
+    resolveResult({ ok: code === 0 && signal === null && !timedOut && !killed, exitCode: code, signal, timedOut, killed, output: output.trimEnd(), ms: Date.now() - t0 })
+    // Best-effort cleanup of remaining group members; this does not prove descendants have stopped.
     setTimeout(() => killGroup("SIGKILL"), 0)
   }
   child.on("error", (e) => {
     out += `\n${e.message}`
-    finish(-1)
+    finish(null)
   })
-  child.on("exit", (code, signal) => finish(code ?? (signal ? 128 : -1)))
+  child.on("exit", (code, signal) => finish(code, signal))
   return { result, kill: () => stop("kill") }
 }
 

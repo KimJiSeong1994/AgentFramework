@@ -114,6 +114,16 @@ Trusted scripted fixtures can use read/write/edit tools and the code-owned verif
 The current Darwin/shared-server verifier is `legacy-unowned`: its durable record states
 `isolationEstablished=false`, `domainState=unknown`, `descendantRisk=unproven`, and status
 renders `verification: passed (legacy-unowned, descendants unproven)` after a successful task.
+Ordinary parent exits, including nonzero exits that permit a trusted retry, remain a weak
+legacy completion policy, not descendant-retirement proof. Timeout, cancellation, observed
+parent termination signals, unknown outcomes and fenced executions do not authorize another
+attempt, review or merge. A dead coordinator does not retire its verifier descendants.
+Verifier intents record an explicit pre-dispatch lifecycle; the dispatch marker is persisted
+before invoking the executor. Only a proven never-dispatched intent can be retired without
+running or replaying it. A crash after the dispatch marker remains ambiguous even if no
+process actually started. Older verifier records without that lifecycle remain unresolved,
+including historical parent-exit results; they are not automatically migrated or adopted.
+Missing references or terminal records are not evidence of non-dispatch.
 **Do not run untrusted work through this foreground runner yet.** The preserved
 `worktree.test.ts` adversary demonstrates that a detached verifier child can still change a
 protected test after the parent exits and the legacy task is accepted. The separate
