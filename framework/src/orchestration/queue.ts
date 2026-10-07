@@ -35,6 +35,7 @@ import { DEFAULT_SUITE, extractAnswer, formatCheckRun, sampleRows, type CheckRun
 import type { LcaAgentName } from "../agents/prompts.ts"
 import type { SkillTaskFactInput, SkillVerificationFactInput } from "../telemetry/skills.ts"
 import { settled, strictQuiescent, type ExecutionClaim } from "../hosts/run-state.ts"
+import { authenticateLinuxVerification } from "../hosts/linux-domain.ts"
 import { beginExecutionActivity } from "../hosts/runtime.ts"
 import type { ExecutionHandle, ExecutionReconciliation, ExecutionReference, ExecutionRole, ExecutionRuntime } from "../hosts/types.ts"
 import type { VerificationHandle, VerificationResult } from "./verifier.ts"
@@ -448,9 +449,12 @@ export function createQueue(deps: ExecutionRuntime): Queue {
         if (execution.boundaryRef && "kind" in execution.boundaryRef && execution.boundaryRef.kind === "verifier") {
           try {
             const state = await beforeDeadline(deps.verifier.reconcile(execution.boundaryRef), Date.now() + 2000, "verifier restart reconciliation")
+            const authenticated = state.outcome === "terminal" && !!state.result &&
+              authenticateLinuxVerification(state.result, execution.boundaryRef)
             deps.runs.reconcile(entry.claim, execution.executionId, {
-              outcome: state.outcome, quiescent: false,
-              evidence: "verifier restart cannot prove qualified retirement",
+              outcome: state.outcome, quiescent: authenticated,
+              evidence: authenticated ? "authenticated Linux verifier retirement after restart" : "verifier restart cannot prove qualified retirement",
+              ...(authenticated ? { verification: state.result } : {}),
             })
           } catch (error) {
             deps.runs.fence(entry.claim, execution.executionId, `verifier recovery failed: ${String(error).slice(0, 200)}`)
@@ -689,7 +693,12 @@ export function createQueue(deps: ExecutionRuntime): Queue {
               let prepared: VerificationHandle | "aborted" | "timeout"
               try {
                 prepared = await Promise.race([
-                  deps.verifier.prepare(request), prepareAbort,
+                  (async () => {
+                    const inputArchive = profile === "linux-single-use" ? await store.archive(input) : undefined
+                    if (profile === "linux-single-use" && !inputArchive) throw new Error("owned verifier input archive unavailable")
+                    if (!referenceBindingOpen || entry.aborted || Date.now() >= deadlineAt) throw new Error("verifier preparation retired before dispatch")
+                    return deps.verifier.prepare({ ...request, ...(inputArchive ? { inputArchive } : {}) })
+                  })(), prepareAbort,
                   new Promise<"timeout">(resolve => { prepareTimer = setTimeout(() => resolve("timeout"), Math.max(0, deadlineAt - Date.now())) }),
                 ])
                 if (prepared !== "aborted" && prepared !== "timeout") {
@@ -751,6 +760,11 @@ export function createQueue(deps: ExecutionRuntime): Queue {
                 entry.unresolved = true
                 throw new Error("verifier result profile mismatch; queue fenced")
               }
+              if (profile === "linux-single-use" && !authenticateLinuxVerification(r, handle.reference)) {
+                deps.runs.fence(claim, id, "owned verifier retirement is not authenticated")
+                entry.unresolved = true
+                throw new Error("owned verifier retirement is not authenticated; queue fenced")
+              }
               const checked = await store.snapshot(c.diff_exclude)
               const changes = await store.diff(input, checked, c.diff_max_chars)
               if (!checked || !changes) {
@@ -767,13 +781,18 @@ export function createQueue(deps: ExecutionRuntime): Queue {
               else if (r.parentExit !== null) outcome = r.parentExit === 0 ? "ok" : "fail"
               try {
                 deps.runs.recordTerminal(claim, id, { outcome, terminalAt: Date.now(), verification: r,
-                  ...(profile === "linux-single-use" && r.isolationEstablished && r.domainState === "empty" && r.proof ? { quiescentAt: Date.now() } : {}),
+                  ...(profile === "linux-single-use" && authenticateLinuxVerification(r, handle.reference) ? { quiescentAt: Date.now() } : {}),
                 })
                 const reconciled = await beforeDeadline(handle.reconcile(), Date.now() + 2000, "verifier reconciliation")
+                const authenticated = profile === "linux-single-use" && reconciled.outcome === "terminal" &&
+                  !!reconciled.result && authenticateLinuxVerification(reconciled.result, handle.reference) &&
+                  reconciled.result.proof?.receipt === r.proof?.receipt &&
+                  reconciled.result.proof?.signature === r.proof?.signature
+                if (profile === "linux-single-use" && !authenticated) throw new Error("owned verifier final reconciliation is not authenticated")
                 deps.runs.reconcile(claim, id, { outcome: reconciled.outcome,
-                  quiescent: profile === "linux-single-use" && reconciled.outcome === "terminal" && reconciled.isolationEstablished && reconciled.domainState === "empty" && !!reconciled.proof,
+                  quiescent: authenticated,
                   evidence: "verifier backend reconciliation",
-                  ...(profile === "linux-single-use" && reconciled.proof ? { verification: { ...r, proof: reconciled.proof } } : {}),
+                  ...(authenticated ? { verification: r } : {}),
                 })
               } catch (error) {
                 deps.runs.fence(claim, id, "verifier terminal reconciliation failed")

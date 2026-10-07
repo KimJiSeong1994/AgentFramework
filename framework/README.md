@@ -13,12 +13,14 @@ blocking, output trimming and orchestration are done in code, not by the model.
 | OpenCode runtime | `src/hosts/{opencode,opencode-runtime,types,runtime,tool-policy,run-state}.ts` | Host execution, fixed role policy, execution ownership and durable recovery state. |
 | Workflow entry points | `src/hosts/{cli,controller}.ts`, `src/flow/`, `src/hooks/`, `src/tools/` | Import, approval, delegation, review, cancellation and status. |
 | Task execution | `src/orchestration/{queue,snapshot,worktree,git-boundary,shell,verifier,legacy-verifier}.ts` | Serial tasks, snapshots, verification and accepted changes. The current verifier remains `legacy-unowned`. |
+| Owned-verifier qualification | `src/hosts/linux-domain.ts`, `src/orchestration/linux-verifier.ts`, `scripts/linux-verifier/`, `scripts/lca-linux-verifier-{e2.py,queue.ts}` | Explicit Linux/systemd verifier boundary; not default runtime admission or worker/reviewer containment. |
 
 Review the runtime, queue, workflow callers and their tests as one integration change:
 committing the queue without its new host contracts leaves unresolved imports. Native-host
 and Seatbelt qualification results are a separate review scope, not proof that the core
-is safe for untrusted workloads. Native Claude/Codex adapters, their SDK dependencies,
-Linux domain provisioning and macOS Seatbelt experiments are not included in this core.
+is safe for untrusted workloads. Native Claude/Codex adapters, their SDK dependencies
+and macOS Seatbelt experiments are not included in this core. Linux support here is
+verifier-only and requires its own platform qualification.
 Core changes still require regression tests and type checking. Native containment claims
 additionally require the corresponding platform qualification, not just passing unit tests.
 
@@ -130,6 +132,31 @@ protected test after the parent exits and the legacy task is accepted. The separ
 `linux-single-use` strict control is blocked/not-run without an operator-provisioned local
 systemd lab and fixed units; legacy success earns no F2/F3 safety credit. No Linux owned-host
 profile or cloud provider egress is enabled by this Darwin work.
+
+The explicit `createLinuxVerifierExecutor({ qualification: true })` path requires an
+operator-installed root gate, dedicated verifier UID, systemd and unified cgroup v2.
+The installer leaves `/etc/lca-verifier/profile.json` at `qualified: false`; production
+preflight refuses it, and OpenCode runtime defaults remain legacy. Qualification scripts
+must run in an isolated lab, not a workstation containing credentials or unrelated jobs.
+Private Git inputs are exported exactly, without archive attribute transformations, with
+a 16 MiB transport limit. Unsupported archives are refused rather than normalized.
+The fixed systemd limits are 120 seconds, 512 MiB and 128 tasks; longer requested
+deadlines are refused. Cancellation targets an identity-bound cgroup descriptor.
+Retirement requires native cgroup deletion and exact PID1 journal correlation,
+not parent exit or an empty-group observation.
+Preparing a single-use ticket cannot launch the workload; durable dispatch precedes start.
+Only a root-signed receipt bound to the exact ticket, boot, native invocation, cgroup and
+result can authorize native retirement. Adapter booleans, matching JSON, test keys and
+cancellation acknowledgements cannot grant that authority. Authentication precedes the
+post-verifier snapshot, review, restoration or merge. Unknown ownership or retirement
+preserves the ledger and original baseline without replay or rebaselining.
+Unresolved bound tickets retain their input and pending-capacity allocation, even
+across boots (the pending limit is 16). Missing retirement-journal evidence remains
+unproven and is retried; there is no automatic reset or reclamation of unknown state.
+These availability limitations remain part of the unqualified, lab-only profile.
+Pure crypto tests and manager probes are not native qualification; real-process and
+real-queue qualification are separate from actual-model execution and whole-agent safety.
+
 Native Claude and Codex coding profiles are not admitted. Choosing those engines refuses
 before connecting to the server; use OpenCode's provider integrations instead.
 

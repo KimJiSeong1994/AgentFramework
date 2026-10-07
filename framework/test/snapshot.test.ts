@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process"
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createSnapshotStore, diffSnapshots, snapshotTree } from "../src/orchestration/snapshot.ts"
+import { safeGitBuffer } from "../src/orchestration/git-boundary.ts"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { runShell, startShell } from "../src/orchestration/shell.ts"
 import { stateRoot } from "../src/state/store.ts"
@@ -13,6 +14,65 @@ beforeEach(() => (wt = tempGitWorktree({ "README.md": "hi\n", "keep.py": "x = 1\
 afterEach(() => wt.cleanup())
 
 describe("snapshot / diff", () => {
+  test("owned verifier archives preserve the private tree and ignore export attributes and later edits", async () => {
+    writeFileSync(join(wt.worktree, ".gitattributes"), "protected.txt export-ignore\n")
+    writeFileSync(join(wt.worktree, "protected.txt"), "original protected input\n")
+    mkdirSync(join(wt.worktree, "nested"))
+    writeFileSync(join(wt.worktree, "nested", ".gitattributes"), "* export-ignore\n")
+    writeFileSync(join(wt.worktree, "nested", "keep.txt"), "nested original\n")
+    const binary = Buffer.from([0, 255, 1, 10])
+    const name = " leading\nbinary "
+    writeFileSync(join(wt.worktree, name), binary)
+    writeFileSync(join(wt.worktree, "run.sh"), "#!/bin/sh\nexit 0\n")
+    chmodSync(join(wt.worktree, "run.sh"), 0o755)
+    writeFileSync(join(wt.worktree, "excluded.txt"), "not a verifier input")
+    const index = readFileSync(join(wt.worktree, ".git", "index"))
+    const objects = execFileSync("git", ["count-objects", "-v"], { cwd: wt.worktree })
+    const store = (await createSnapshotStore(wt.worktree))!
+    try {
+      const snapshot = await store.snapshot(["excluded.txt"])
+      writeFileSync(join(wt.worktree, "protected.txt"), "later mutation\n")
+      const archive = await store.archive(snapshot)
+      expect(archive).not.toBeNull()
+      const output = join(wt.stateHome, "archive-output")
+      mkdirSync(output)
+      const tar = join(wt.stateHome, "input.tar")
+      writeFileSync(tar, archive!)
+      execFileSync("tar", ["-xf", tar, "-C", output])
+      expect(readFileSync(join(output, "protected.txt"), "utf8")).toBe("original protected input\n")
+      expect(readFileSync(join(output, "nested", "keep.txt"), "utf8")).toBe("nested original\n")
+      expect(readFileSync(join(output, name))).toEqual(binary)
+      expect(lstatSync(join(output, "run.sh")).mode & 0o111).not.toBe(0)
+      expect(existsSync(join(output, "excluded.txt"))).toBe(false)
+      expect(readFileSync(join(wt.worktree, ".git", "index"))).toEqual(index)
+      expect(execFileSync("git", ["count-objects", "-v"], { cwd: wt.worktree })).toEqual(objects)
+    } finally { store.dispose() }
+  })
+
+  test("archive refuses repository-defined archiver commands before any helper can execute", async () => {
+    const store = (await createSnapshotStore(wt.worktree))!
+    try {
+      const snapshot = await store.snapshot()
+      const marker = join(wt.stateHome, "external-archiver-ran")
+      execFileSync("git", ["config", "tar.tar.command", `touch ${marker}`], { cwd: wt.worktree })
+      await expect(store.archive(snapshot)).rejects.toThrow("tar.tar.command")
+      expect(existsSync(marker)).toBe(false)
+    } finally { store.dispose() }
+  })
+
+  test("private archive and Git output limits fail closed rather than returning truncated input", async () => {
+    expect(await safeGitBuffer(wt.worktree, ["show", "HEAD:README.md"], undefined, 1)).toBeNull()
+    const store = (await createSnapshotStore(wt.worktree))!
+    try {
+      writeFileSync(join(wt.worktree, "oversized.bin"), Buffer.alloc(17 * 1024 * 1024))
+      const snapshot = await store.snapshot()
+      expect(snapshot).not.toBeNull()
+      expect(await store.archive(snapshot)).toBeNull()
+      expect(await store.archive(null)).toBeNull()
+      expect(await store.archive({ tree: snapshot!.tree })).toBeNull()
+    } finally { store.dispose() }
+  })
+
   test("captures untracked + modified files without touching the user's index or HEAD", async () => {
     const before = await snapshotTree(wt.worktree)
     expect(before).not.toBeNull()

@@ -56,6 +56,7 @@ function checkConfig(file: string): void {
       || /^core\.(fsmonitor|hookspath|worktree|gitproxy|sshcommand|editor|pager|askpass|attributesfile|excludesfile|alternaterefscommand)$/.test(key)
       || (key === "core.bare" && value !== "false" && value !== "no" && value !== "off" && value !== "0")
       || /^diff\.external$/.test(key)
+      || /^tar\..*\.command$/.test(key)
       || /^url\..*\.insteadof$/.test(key)) throw new Error(`git-config: forbidden ${key}`)
   }
 }
@@ -119,23 +120,31 @@ export async function safeGit(cwd: string, args: string[], extra?: Record<string
   return result?.toString().replace(/\n+$/, "") ?? null
 }
 
-export async function safeGitBuffer(cwd: string, args: string[], extra?: Record<string, string>): Promise<Buffer | null> {
+export async function safeGitBuffer(cwd: string, args: string[], extra?: Record<string, string>, maxBytes = Infinity): Promise<Buffer | null> {
+  if (!(maxBytes > 0) || (maxBytes !== Infinity && !Number.isSafeInteger(maxBytes))) throw new TypeError("invalid Git output limit")
   assertGitBoundary(cwd)
-  return safeGitBufferUnchecked(cwd, args, extra)
+  return safeGitBufferUnchecked(cwd, args, extra, maxBytes)
 }
 
-function safeGitBufferUnchecked(cwd: string, args: string[], extra?: Record<string, string>): Promise<Buffer | null> {
+function safeGitBufferUnchecked(cwd: string, args: string[], extra?: Record<string, string>, maxBytes = Infinity): Promise<Buffer | null> {
   return new Promise((resolveResult) => {
     const chunks: Buffer[] = []
+    let bytes = 0
+    let overflow = false
     // Git treats `-c diff.external=` as an enabled (empty-name) external diff, not as disabled.
     // Keep the mandated override but explicitly prohibit invoking any external diff program.
     const command = args[0] === "diff" ? [args[0], "--no-ext-diff", ...args.slice(1)] : args
     const child = spawn("git", [...FLAGS, ...command], {
       cwd, env: controlledGitEnv(extra), stdio: ["ignore", "pipe", "pipe"],
     })
-    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk))
+    const count = (chunk: Buffer): void => {
+      bytes += chunk.length
+      if (bytes > maxBytes) { overflow = true; child.kill("SIGKILL") }
+    }
+    child.stdout.on("data", (chunk: Buffer) => { count(chunk); if (!overflow) chunks.push(chunk) })
+    child.stderr.on("data", count)
     child.on("error", () => resolveResult(null))
-    child.on("close", (code) => resolveResult(code === 0 ? Buffer.concat(chunks) : null))
+    child.on("close", (code) => resolveResult(code === 0 && !overflow ? Buffer.concat(chunks) : null))
   })
 }
 
