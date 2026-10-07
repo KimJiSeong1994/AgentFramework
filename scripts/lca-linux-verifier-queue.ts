@@ -319,7 +319,7 @@ function statusSummary(run: QueueRun, ledger: ReturnType<typeof readLedger>): Re
   }
 }
 
-function verificationRecords(records: ExecutionRecord[]): Array<{ record: ExecutionRecord; reference: VerificationReference; result: VerificationResult }> {
+export function verificationRecords(records: ExecutionRecord[]): Array<{ record: ExecutionRecord; reference: VerificationReference; result: VerificationResult }> {
   const found: Array<{ record: ExecutionRecord; reference: VerificationReference; result: VerificationResult }> = []
   for (const record of records) {
     if (record.kind !== "verifier" || !record.boundaryRef || !("kind" in record.boundaryRef)) continue
@@ -330,7 +330,7 @@ function verificationRecords(records: ExecutionRecord[]): Array<{ record: Execut
   return found
 }
 
-function assertAuthenticatedResults(records: ExecutionRecord[]): Array<Report> {
+export function assertAuthenticatedResults(records: ExecutionRecord[]): Array<Report> {
   const proofs: Array<Report> = []
   for (const { record, reference, result } of verificationRecords(records)) {
     if (!authenticateLinuxVerification(result, reference) || !result.proof?.receipt || !result.proof.signature) {
@@ -343,7 +343,7 @@ function assertAuthenticatedResults(records: ExecutionRecord[]): Array<Report> {
   return proofs
 }
 
-async function assertForgedEvidenceRefused(runtime: ExecutionRuntime, records: ExecutionRecord[]): Promise<Report> {
+export async function assertForgedEvidenceRefused(runtime: ExecutionRuntime, records: ExecutionRecord[]): Promise<Report> {
   const verified = verificationRecords(records).find(item => item.result.parentExit === 0 && !item.result.cancelled && !item.result.timedOut)
   if (!verified) fail("no-successful-receipt-for-forgery-check")
   const { reference, result } = verified
@@ -374,14 +374,14 @@ function countRuns(events: EventRecord[], role: string, taskID: string): number 
   const completedEvent = role === "reviewer" ? "reviewer-run-returned" : "worker-run-returned"
   return events.filter(event => event.event === completedEvent && event.role === role && event.taskID === taskID).length
 }
-function readCgroupPopulated(): boolean {
+export function readCgroupPopulated(): boolean {
   try {
     const raw = readFileSync(UNIT_CGROUP_EVENTS, "ascii")
     return /^populated 1$/m.test(raw)
   } catch { return false }
 }
 
-async function waitForAuthenticatedTerminal(runtime: ExecutionRuntime, reference: VerificationReference, timeoutMs: number): Promise<VerificationResult> {
+export async function waitForAuthenticatedTerminal(runtime: ExecutionRuntime, reference: VerificationReference, timeoutMs: number): Promise<VerificationResult> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const observed = await runtime.verifier.reconcile(reference)
@@ -393,7 +393,7 @@ async function waitForAuthenticatedTerminal(runtime: ExecutionRuntime, reference
   fail("native-retirement-not-authenticated-within-bound")
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs: number, code: string): Promise<void> {
+export async function waitUntil(predicate: () => boolean, timeoutMs: number, code: string): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (predicate()) return
@@ -403,13 +403,13 @@ async function waitUntil(predicate: () => boolean, timeoutMs: number, code: stri
   fail(code)
 }
 
-function taskOwnerPaths(repo: string, sessionID: string, taskID: string): { path: string; owner: string; baseline: string; ownership: string } {
+export function taskOwnerPaths(repo: string, sessionID: string, taskID: string): { path: string; owner: string; baseline: string; ownership: string } {
   const path = join(worktreeRoot(repo), sessionID, taskID)
   const owner = join(worktreeRoot(repo), ".recovery", sessionID, taskID)
   return { path, owner, baseline: join(owner, "baseline", "baseline.json"), ownership: join(owner, "ownership.json") }
 }
 
-function fileEvidence(path: string): { exists: boolean; sha256?: string; mode?: number; size?: number } {
+export function fileEvidence(path: string): { exists: boolean; sha256?: string; mode?: number; size?: number } {
   try {
     const info = lstatSync(path)
     if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) fail("unsafe-qualification-evidence-file")
