@@ -137,7 +137,11 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     // the command's own template text is rewritten in place with the outcome (same ARCH-08 pattern as /status).
     // Approval is only ever reachable through this branch for an lca-injected `approve` command turn: prose
     // "/approve"/"approved" anywhere else never reaches approveWorkflow.
-    if (commandTurn && flowOn(config) && (FLOW_COMMANDS as readonly string[]).includes(commandTurn.name)) {
+    const messageRole = (output.message as { role?: string }).role
+    // Interactive command actions require explicit user-message provenance. Noninteractive direct hook fixtures
+    // without role metadata retain their legacy command behavior.
+    const userCommandTurn = messageRole === "user" || (!deps.interactive && messageRole === undefined)
+    if (commandTurn && userCommandTurn && flowOn(config) && (FLOW_COMMANDS as readonly string[]).includes(commandTurn.name)) {
       const part = lastUserText(output.parts)
       if (part) handleFlowCommand(sessionID, commandTurn.name, commandTurn.data ?? "", part)
       else log("chat.message: flow command had no user text part", { sessionID, command: commandTurn.name })
@@ -167,7 +171,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     // Every path below may append a suffix; the final text is recorded in `finally` so a re-delivery of exactly the
     // text lca produced is not suffixed twice.
     try {
-      return await handlePart(input, part, commandTurn, now, output.message.id)
+      return await handlePart(input, part, commandTurn, now, output.message.id, messageRole === "user")
     } finally {
       markSuffixed(part)
     }
@@ -179,6 +183,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     commandTurn: ReturnType<typeof consumeCommandTurn>,
     now: number,
     messageID: string,
+    isUserMessage: boolean,
   ) {
     const { sessionID } = input
 
@@ -187,9 +192,45 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     if (flowOn(config)) {
       const wf = activeWorkflow(worktree)
       if (wf && wf.sessionID === sessionID) {
-        handleWorkflowTurn(sessionID, wf, part, !!commandTurn)
+        let authorizedWf: Workflow | null = wf
+        if (deps.interactive && isUserMessage && input.agent === "main" && !commandTurn) {
+          const authority = resolveAuthority(runtime, "plan", sessionID, now)
+          if (authority.refuse) {
+            part.text += `\n\n${authority.refuse}`
+            log("chat.message: interactive workflow turn refused", { sessionID, refuse: authority.refuse })
+            return
+          }
+          authorizedWf = authority.wf
+        }
+        if (authorizedWf) {
+          handleWorkflowTurn(sessionID, authorizedWf, part, !!commandTurn)
+          return
+        }
+      }
+    }
+
+    // Interactive LCA treats each ordinary main-agent request as a plan request. The flow's existing authority
+    // rules decide whether a new workflow may start; an active workflow is never replaced by conversational text.
+    if (deps.interactive && isUserMessage && input.agent === "main" && !commandTurn && part.text.trim()) {
+      if (!flowOn(config)) {
+        part.text += "\n\nlca interactive mode is read-only because the plan workflow is disabled."
         return
       }
+      const authority = resolveAuthority(runtime, "plan", sessionID, now)
+      if (authority.refuse) {
+        part.text += `\n\n${authority.refuse}`
+        log("chat.message: interactive plan refused", { sessionID, refuse: authority.refuse })
+        return
+      }
+      const r = startWorkflow(runtime, sessionID, "keyword", part.text, "user_keyword", now)
+      if (r.ok) {
+        part.text += flowSuffix(suffixPhase(r.wf))
+        log("chat.message: interactive request started a workflow", { sessionID, wfId: r.wf.id })
+      } else {
+        part.text += `\n\n${r.text}`
+        log("chat.message: interactive request could not start a workflow", { sessionID, error: r.text })
+      }
+      return
     }
 
     // chat.message is registered for the flow feature too (ARCH-13): with `mode.detect` disabled, no keyword

@@ -1,6 +1,9 @@
 // lca — local-first coding agent framework for OpenCode. Stage 1 core + stage 2 (ledger, delegate, /stop).
 // Assembly: loadConfig -> deps -> hook factories -> Hooks. Each factory may return undefined when disabled.
 import type { Hooks, Plugin, PluginModule } from "@opencode-ai/plugin"
+import { realpathSync } from "node:fs"
+import { resolve } from "node:path"
+import { taskWorktreeOwner } from "./orchestration/worktree.ts"
 import { loadConfig } from "./config.ts"
 import { enabled, type HookDeps } from "./hooks/types.ts"
 // Factories are filled in by the team; each file exports create<Name>Hook(deps).
@@ -11,7 +14,7 @@ import { createToolBeforeHook } from "./hooks/tool-before.ts"
 import { createToolAfterHook } from "./hooks/tool-after.ts"
 import { createEventHook } from "./hooks/event.ts"
 import { createCompactingHook } from "./hooks/compacting.ts"
-import { createCommandHook } from "./hooks/command.ts"
+import { APPROVE_COMMAND, APPROVE_TEMPLATE, createCommandHook } from "./hooks/command.ts"
 import { createDelegateTool } from "./tools/delegate.ts"
 import { createDbQueryTool } from "./tools/db-query.ts"
 import { createSchemaLookupTool } from "./tools/schema-lookup.ts"
@@ -22,12 +25,50 @@ import { getQueue } from "./orchestration/queue.ts"
 import { getOpenCodeRuntime } from "./hosts/opencode-runtime.ts"
 import { initializeSkillObservation } from "./telemetry/skill-observer.ts"
 
+function interactiveForWorktree(worktree: string): boolean {
+  const requested = process.env.LCA_INTERACTIVE_WORKTREE
+  if (requested === undefined) return false
+  if (!requested.trim()) throw new Error("lca interactive startup refused: LCA_INTERACTIVE_WORKTREE is empty")
+
+  let requestedRoot: string
+  let actualRoot: string
+  try {
+    requestedRoot = realpathSync.native(resolve(requested))
+    actualRoot = realpathSync.native(resolve(worktree))
+  } catch (e) {
+    throw new Error(`lca interactive startup refused: cannot canonicalize the bound worktree: ${(e as Error).message}`)
+  }
+  if (requestedRoot !== actualRoot) {
+    let owner: ReturnType<typeof taskWorktreeOwner>
+    try {
+      owner = taskWorktreeOwner(actualRoot)
+    } catch (e) {
+      throw new Error(`lca interactive startup refused: cannot authenticate managed task worktree (${(e as Error).message})`)
+    }
+    if (!owner || owner.mainWorktree !== requestedRoot) {
+      throw new Error(`lca interactive startup refused: LCA_INTERACTIVE_WORKTREE does not match this plugin worktree (${actualRoot})`)
+    }
+  }
+  return true
+}
+
+function requireInteractiveConfig(config: HookDeps["config"]): void {
+  const required = ["config.agents", "chat.params", "tool.delegate", "guard.plan_boundary", "flow"] as const
+  const disabled: string[] = required.filter((id) => !enabled(config, id))
+  if (!config.flow.enabled) disabled.push("flow.enabled")
+  if (disabled.length) {
+    throw new Error(`lca interactive startup refused: required hooks/config disabled: ${disabled.join(", ")}`)
+  }
+}
+
 export const LcaPlugin: Plugin = async (input) => {
+  const interactive = interactiveForWorktree(input.worktree)
   const config = loadConfig(input.worktree)
+  if (interactive) requireInteractiveConfig(config)
   const log = (msg: string, extra?: Record<string, unknown>) => {
     if (process.env.LCA_DEBUG) console.error(`[lca] ${msg}`, extra ?? "")
   }
-  const deps: HookDeps = { client: input.client, directory: input.directory, worktree: input.worktree, config, log }
+  const deps: HookDeps = { client: input.client, directory: input.directory, worktree: input.worktree, config, log, interactive: interactive || undefined }
   initializeSkillObservation(deps)
 
   // repairOnLoad is authority-free (ARCH-14) and must never break plugin startup.
@@ -39,7 +80,16 @@ export const LcaPlugin: Plugin = async (input) => {
   }
 
   const hooks: Hooks = {}
-  if (enabled(config, "config.agents")) hooks.config = createConfigHook(deps)
+  if (enabled(config, "config.agents")) {
+    const configHook = createConfigHook(deps)
+    hooks.config = interactive ? async (current) => {
+      await configHook(current)
+      const approval = (current as { command?: Record<string, { template?: string }> }).command?.[APPROVE_COMMAND]
+      if (approval?.template !== APPROVE_TEMPLATE) {
+        throw new Error(`lca interactive startup refused: user command "/${APPROVE_COMMAND}" conflicts with the typed approval command`)
+      }
+    } : configHook
+  }
   if (enabled(config, "chat.params")) hooks["chat.params"] = createChatParamsHook(deps)
   // Observation-only registration must not activate legacy mode/session handling.
   if (enabled(config, "mode.detect") || flowOn(config) || config.skill_observation?.enabled === true) hooks["chat.message"] = createChatMessageHook(deps)
