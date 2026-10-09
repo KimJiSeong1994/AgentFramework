@@ -26,11 +26,18 @@ POLKIT_DIR = "/etc/polkit-1/rules.d"
 POLKIT_RULE = f"{POLKIT_DIR}/90-lca-verifier.rules"
 SUDOERS_DIR = "/etc/sudoers.d"
 SUDOERS_DROPIN = f"{SUDOERS_DIR}/00-lca-verifier-deny"
+JOURNALD_CONF_DIR = "/etc/systemd/journald.conf.d"
+JOURNALD_DROPIN = f"{JOURNALD_CONF_DIR}/lca-verifier.conf"
 UNIT = "lca-verifier.service"
 GATE_UNIT = "lca-verifier-gate.service"
 SLICE_UNIT = "lca.slice"
 OPENSSL = "/usr/bin/openssl"
 SYSTEMCTL = "/usr/bin/systemctl"
+JOURNALCTL = "/usr/bin/journalctl"
+QUARANTINE_PATH = "/var/lib/lca-verifier/quarantine.json"
+BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
+BOOT_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+JOURNALD_DROPIN_CONTENT = "[Journal]\nStorage=persistent\n"
 
 VERIFIER_UNIT_CONTENT = """[Unit]
 Description=LCA single-use Linux verifier workload
@@ -143,6 +150,21 @@ def _canonical_json(value: Any) -> bytes:
 def _require_root_and_linux() -> None:
     if not sys.platform.startswith("linux") or os.geteuid() != 0:
         raise RuntimeError("installer requires an explicit Linux guest-root invocation")
+
+
+def _boot_epoch() -> str:
+    try:
+        descriptor = os.open(BOOT_ID_PATH, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            raw = os.read(descriptor, 128)
+        finally:
+            os.close(descriptor)
+        value = raw.decode("ascii", errors="strict").strip()
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError("current Linux boot identity is unavailable") from exc
+    if not BOOT_RE.fullmatch(value):
+        raise RuntimeError("current Linux boot identity is invalid")
+    return value
 
 
 def _mkdir(path: str, mode: int) -> None:
@@ -322,6 +344,7 @@ def _write_units_and_policy() -> None:
     _write_new(f"{SYSTEMD_DIR}/{SLICE_UNIT}", SLICE_UNIT_CONTENT.encode("utf-8"), 0o644)
     _write_new(POLKIT_RULE, POLKIT_RULE_CONTENT.encode("utf-8"), 0o644)
     _write_new(SUDOERS_DROPIN, SUDOERS_CONTENT.encode("ascii"), 0o440)
+    _write_new(JOURNALD_DROPIN, JOURNALD_DROPIN_CONTENT.encode("ascii"), 0o644)
 
 
 def _profile_files() -> dict[str, str]:
@@ -334,6 +357,7 @@ def _profile_files() -> dict[str, str]:
         f"{SYSTEMD_DIR}/{SLICE_UNIT}",
         POLKIT_RULE,
         SUDOERS_DROPIN,
+        JOURNALD_DROPIN,
     )
     hashes: dict[str, str] = {}
     for path in paths:
@@ -353,6 +377,7 @@ def _profile_files() -> dict[str, str]:
 
 def install(controller_name: str) -> None:
     _require_root_and_linux()
+    boot_epoch = _boot_epoch()
     if controller_name in {"root", SERVICE_USER}:
         raise RuntimeError("controller must be a distinct non-root account")
     try:
@@ -372,10 +397,14 @@ def install(controller_name: str) -> None:
         f"{SYSTEMD_DIR}/{SLICE_UNIT}",
         POLKIT_RULE,
         SUDOERS_DROPIN,
+        JOURNALD_DROPIN,
+        QUARANTINE_PATH,
     ]
     _ensure_no_existing(paths)
-    for directory in ("/etc", "/var", "/var/lib", "/usr", "/usr/local", SYSTEMD_DIR):
+    for directory in ("/etc", "/etc/systemd", "/var", "/var/lib", "/usr", "/usr/local", SYSTEMD_DIR):
         _require_safe_directory(directory)
+    if os.path.lexists(JOURNALD_CONF_DIR):
+        _require_safe_directory(JOURNALD_CONF_DIR)
     if os.path.lexists("/usr/local/libexec"):
         _require_safe_directory("/usr/local/libexec")
     else:
@@ -391,6 +420,8 @@ def install(controller_name: str) -> None:
     if os.path.isdir(SUDOERS_DIR):
         _require_safe_directory(SUDOERS_DIR)
     _require_sudoers_dropin_include()
+    if not os.path.lexists(JOURNALD_CONF_DIR):
+        _mkdir(JOURNALD_CONF_DIR, 0o755)
 
     verifier = _create_workload_user(controller)
     _mkdir("/etc/lca-verifier", 0o755)
@@ -411,7 +442,8 @@ def install(controller_name: str) -> None:
     _write_units_and_policy()
     _run_fixed(["/usr/sbin/visudo", "-c"])
     profile = {
-        "schema": "lca.linux-verifier.profile.v1",
+        "schema": "lca.linux-verifier.profile.v2",
+        "bootEpoch": boot_epoch,
         "unit": UNIT,
         "controllerUID": controller.pw_uid,
         "verifierUID": verifier.pw_uid,
@@ -421,6 +453,8 @@ def install(controller_name: str) -> None:
     }
     _write_new(PROFILE_PATH, _canonical_json(profile), 0o644)
     _run_fixed([SYSTEMCTL, "daemon-reload"])
+    _run_fixed([SYSTEMCTL, "restart", "systemd-journald.service"], timeout=30)
+    _run_fixed([JOURNALCTL, "--flush"], timeout=30)
     _run_fixed([SYSTEMCTL, "enable", "--now", GATE_UNIT], timeout=30)
 
 

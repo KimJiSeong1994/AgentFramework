@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import type {
-  VerificationCancelResult, VerificationExecutor, VerificationHandle, VerificationPreflight,
+  LinuxAdmissionHealth, VerificationCancelResult, VerificationExecutor, VerificationHandle, VerificationPreflight,
   VerificationProfile, VerificationReconciliation, VerificationReference, VerificationRequest, VerificationResult,
 } from "./verifier.ts"
 import {
@@ -11,6 +11,7 @@ const UNKNOWN_RECONCILIATION: VerificationReconciliation = {
   outcome: "unknown", isolationEstablished: false, domainState: "unknown", integrity: "unknown",
 }
 const CONTROL_CALL_MS = 90_000
+const PREFLIGHT_CALL_MS = 30_000
 const POLL_MS = 100
 const RETIREMENT_GRACE_MS = 45_000
 const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
@@ -103,6 +104,62 @@ function gateFailure(response: Record<string, unknown>): Error {
   return new Error(typeof response.error === "string" ? response.error.slice(0, 1024) : "Linux verifier gate refused the request")
 }
 
+const ADMISSION_REASONS = new Set<LinuxAdmissionHealth["reasons"][number]>([
+  "boot-epoch", "unknown-bound", "stale-active", "latched", "journal-persistence", "journal-entry", "journal-readable",
+])
+
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort()
+  const keys = [...expected].sort()
+  return actual.length === keys.length && actual.every((key, index) => key === keys[index])
+}
+
+function nonnegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0
+}
+
+function parseAdmissionHealth(value: unknown): LinuxAdmissionHealth | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const health = value as Record<string, unknown>
+  if (!exactKeys(health, [
+    "bootEpochMatch", "journal", "pendingTickets", "pendingBytes", "unknownBound", "staleActive",
+    "latched", "quarantineRequired", "capacityAvailable", "reasons",
+  ]) || typeof health.bootEpochMatch !== "boolean" || typeof health.latched !== "boolean" ||
+    typeof health.quarantineRequired !== "boolean" || typeof health.capacityAvailable !== "boolean" ||
+    !nonnegativeSafeInteger(health.pendingTickets) || !nonnegativeSafeInteger(health.pendingBytes) ||
+    !nonnegativeSafeInteger(health.unknownBound) || !nonnegativeSafeInteger(health.staleActive) ||
+    !health.journal || typeof health.journal !== "object" || Array.isArray(health.journal) || !Array.isArray(health.reasons)) {
+    return undefined
+  }
+  const journal = health.journal as Record<string, unknown>
+  if (!exactKeys(journal, ["persistentEffective", "persistentEntry", "readable"]) ||
+    typeof journal.persistentEffective !== "boolean" || typeof journal.persistentEntry !== "boolean" ||
+    typeof journal.readable !== "boolean" || health.reasons.length > ADMISSION_REASONS.size ||
+    health.reasons.some(reason => typeof reason !== "string" || !ADMISSION_REASONS.has(reason as LinuxAdmissionHealth["reasons"][number])) ||
+    new Set(health.reasons).size !== health.reasons.length) return undefined
+  return health as LinuxAdmissionHealth
+}
+
+function parsePreflightResponse(response: Record<string, unknown>): {
+  compatible: boolean
+  problems: string[]
+  admission: LinuxAdmissionHealth
+} | undefined {
+  if (!exactKeys(response, ["ok", "compatible", "problems", "admission"]) || response.ok !== true ||
+    typeof response.compatible !== "boolean" || !Array.isArray(response.problems) || response.problems.length > 64 ||
+    response.problems.some(problem => typeof problem !== "string" || problem.length > 1024 || problem.includes("\0"))) {
+    return undefined
+  }
+  const admission = parseAdmissionHealth(response.admission)
+  if (!admission) return undefined
+  return { compatible: response.compatible, problems: response.problems as string[], admission }
+}
+
+function admissionCompatible(admission: LinuxAdmissionHealth): boolean {
+  return admission.bootEpochMatch && admission.journal.persistentEffective && admission.journal.persistentEntry &&
+    admission.journal.readable && !admission.latched && !admission.quarantineRequired
+}
+
 export function createLinuxVerifierExecutor(options: { qualification?: boolean } = {}): VerificationExecutor {
   if (options === null || typeof options !== "object" ||
     Object.keys(options).some(key => key !== "qualification") ||
@@ -115,18 +172,29 @@ export function createLinuxVerifierExecutor(options: { qualification?: boolean }
     async preflight(profile: VerificationProfile): Promise<VerificationPreflight> {
       if (profile !== "linux-single-use") return { compatible: false, problems: [`unsupported verifier profile: ${profile}`] }
       const local = inspectLinuxVerifierProfile(qualification)
-      if (!local.compatible) return local
       try {
-        const response = await runLinuxVerifierClient("preflight", undefined, controlDeadline(), qualification)
-        if (response.compatible !== true && response.compatible !== false) {
-          return { compatible: false, problems: ["Linux verifier gate returned an invalid preflight response"] }
+        // Qualification bypass is diagnostic-only: it lets the fixed trusted profile query health,
+        // but execution paths continue to use the executor's production qualification setting.
+        const response = await runLinuxVerifierClient("preflight", undefined, Date.now() + PREFLIGHT_CALL_MS, true)
+        const parsed = parsePreflightResponse(response)
+        if (!parsed) return {
+          compatible: false,
+          problems: [...local.problems, "Linux verifier gate returned an invalid preflight health response"],
         }
-        if (!Array.isArray(response.problems) || response.problems.some(problem => typeof problem !== "string" || problem.length > 1024)) {
-          return { compatible: false, problems: ["Linux verifier gate returned invalid preflight diagnostics"] }
+        const problems = [...local.problems, ...parsed.problems]
+        if (parsed.admission.reasons.length) {
+          problems.push(`Linux admission health reasons: ${parsed.admission.reasons.join(",")}`)
         }
-        return { compatible: response.compatible, problems: response.problems as string[] }
+        return {
+          compatible: local.compatible && parsed.compatible && admissionCompatible(parsed.admission),
+          problems,
+          admission: parsed.admission,
+        }
       } catch (error) {
-        return { compatible: false, problems: [error instanceof Error ? error.message : "Linux verifier gate is unavailable"] }
+        return {
+          compatible: false,
+          problems: [...local.problems, error instanceof Error ? error.message : "Linux verifier gate is unavailable"],
+        }
       }
     },
 

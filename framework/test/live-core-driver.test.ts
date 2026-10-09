@@ -4,38 +4,100 @@ import { chmodSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  appendModelAbort,
+  assertReceiptSchemaForResume,
   assertResumeVerifierIdentity,
   assertScenarioVerifierMode,
   mainGitState,
+  modelAbortPreservation,
   parseVerifierMode,
   preserveVerifierCancellationFailure,
   queueLifecycleWaitMs,
+  selectVerifierRuntime,
   verificationProfileForMode,
   type Receipt,
 } from "../../scripts/lca-live-core-queue.ts"
+import { DEFAULT_CONFIG, type LcaConfig } from "../src/config.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import type { VerificationReference, VerificationReconciliation } from "../src/orchestration/verifier.ts"
 
-test("live driver defaults to the legacy verifier and maps explicit profiles", () => {
+test("live driver maps legacy, qualification, and production profiles", () => {
   expect(parseVerifierMode(undefined)).toBe("legacy")
   expect(parseVerifierMode("legacy")).toBe("legacy")
   expect(parseVerifierMode("linux-qualification")).toBe("linux-qualification")
+  expect(parseVerifierMode("linux-production")).toBe("linux-production")
   expect(verificationProfileForMode("legacy")).toBe("legacy-unowned")
   expect(verificationProfileForMode("linux-qualification")).toBe("linux-single-use")
-  expect(() => parseVerifierMode("unknown")).toThrow(/--verifier must be legacy or linux-qualification/)
+  expect(verificationProfileForMode("linux-production")).toBe("linux-single-use")
+  expect(() => parseVerifierMode("unknown")).toThrow(/--verifier must be legacy, linux-qualification, or linux-production/)
 })
 
 test("new live native scenarios cannot fall back to the legacy verifier", () => {
   for (const scenario of ["success", "verifier-cancel", "active-verifier"] as const) {
-    expect(() => assertScenarioVerifierMode(scenario, "legacy")).toThrow(/requires --verifier linux-qualification/)
+    expect(() => assertScenarioVerifierMode(scenario, "legacy")).toThrow(/requires --verifier linux-qualification or linux-production/)
     expect(() => assertScenarioVerifierMode(scenario, "linux-qualification")).not.toThrow()
+    expect(() => assertScenarioVerifierMode(scenario, "linux-production")).not.toThrow()
   }
   expect(() => assertScenarioVerifierMode("retry", "legacy")).not.toThrow()
 })
 
+function withVerifierRuntime(selector: LcaConfig["delegate"]["verifier"], check: (config: LcaConfig, runtime: ReturnType<typeof getOpenCodeRuntime>) => void): void {
+  const stateHome = mkdtempSync(join(tmpdir(), "lca-live-driver-runtime-state-"))
+  const worktree = mkdtempSync(join(tmpdir(), "lca-live-driver-runtime-worktree-"))
+  const previousStateHome = process.env.XDG_STATE_HOME
+  const previousLcaStateHome = process.env.LCA_STATE_HOME
+  process.env.XDG_STATE_HOME = stateHome
+  delete process.env.LCA_STATE_HOME
+  try {
+    const config: LcaConfig = {
+      ...DEFAULT_CONFIG,
+      delegate: { ...DEFAULT_CONFIG.delegate, verifier: selector },
+    }
+    const deps = { client: {} as any, directory: worktree, worktree, config, log() {} }
+    check(config, getOpenCodeRuntime(deps))
+  } finally {
+    if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = previousStateHome
+    if (previousLcaStateHome === undefined) delete process.env.LCA_STATE_HOME
+    else process.env.LCA_STATE_HOME = previousLcaStateHome
+    rmSync(stateHome, { recursive: true, force: true })
+    rmSync(worktree, { recursive: true, force: true })
+  }
+}
+
+test("linux-production keeps the ordinary linux runtime and refuses a legacy-selected fallback", () => {
+  withVerifierRuntime("linux-single-use", (config, ordinaryRuntime) => {
+    expect(ordinaryRuntime.verificationProfile).toBe("linux-single-use")
+    expect(ordinaryRuntime.linuxAdmission).toBeDefined()
+    expect(selectVerifierRuntime(config, ordinaryRuntime, "linux-production")).toBe(ordinaryRuntime)
+  })
+  withVerifierRuntime("legacy-unowned", (config, ordinaryRuntime) => {
+    expect(() => selectVerifierRuntime(config, ordinaryRuntime, "linux-production"))
+      .toThrow(/requires fixture config delegate\.verifier=linux-single-use/)
+    expect(ordinaryRuntime.verificationProfile).toBe("legacy-unowned")
+  })
+})
+
+test("linux-qualification lab runtime retains its qualification admission guard", () => {
+  withVerifierRuntime("legacy-unowned", (config, ordinaryRuntime) => {
+    const labRuntime = selectVerifierRuntime(config, ordinaryRuntime, "linux-qualification")
+    expect(labRuntime).not.toBe(ordinaryRuntime)
+    expect(labRuntime.verificationProfile).toBe("linux-single-use")
+    expect(labRuntime.linuxAdmission).toBeDefined()
+  })
+})
+
 test("resume requires an exact verifier identity and refuses missing or mismatched receipts", () => {
   expect(() => assertResumeVerifierIdentity("linux-qualification", "linux-qualification")).not.toThrow()
+  expect(() => assertResumeVerifierIdentity("linux-production", "linux-production")).not.toThrow()
   expect(() => assertResumeVerifierIdentity("legacy", "linux-qualification")).toThrow(/missing or has a mismatched verifier identity/)
   expect(() => assertResumeVerifierIdentity(undefined, "legacy")).toThrow(/missing or has a mismatched verifier identity/)
+})
+
+test("resume refuses schema-1 receipts rather than inventing an empty abort history", () => {
+  expect(() => assertReceiptSchemaForResume(1, undefined)).toThrow(/schema-1 receipts are not upgraded/)
+  expect(() => assertReceiptSchemaForResume(2, undefined)).toThrow(/schema-2 resume receipt is missing modelAborts/)
+  expect(() => assertReceiptSchemaForResume(2, [])).not.toThrow()
 })
 
 test("live qualification waits cover configured queue and task lifecycles beyond two minutes", () => {
@@ -137,9 +199,61 @@ test("main worktree evidence refuses untracked symlinks instead of following the
   }
 })
 
+test("model abort capture is exact, bounded, retains failed-attempt lineage, and protects the main worktree", () => {
+  const worktree = mkdtempSync(join(tmpdir(), "lca-live-model-abort-"))
+  const receipt = cancellationReceipt()
+  const earlierFailure = { at: new Date(0).toISOString(), phase: "attempt 1", name: "Error", message: "verification failed" }
+  receipt.failures.push(earlierFailure)
+  try {
+    execFileSync("git", ["init", "--quiet"], { cwd: worktree })
+    execFileSync("git", ["config", "user.name", "Live model abort test"], { cwd: worktree })
+    execFileSync("git", ["config", "user.email", "live-model-abort@localhost"], { cwd: worktree })
+    writeFileSync(join(worktree, "tracked.py"), "value = 0\n")
+    execFileSync("git", ["add", "tracked.py"], { cwd: worktree })
+    execFileSync("git", ["-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "fixture"], { cwd: worktree })
+
+    const protectedMain = mainGitState(worktree)
+    const ledgerBefore = { sha256: "a".repeat(64), size: 20 }
+    const preservation = modelAbortPreservation(
+      { mainGitState: protectedMain, ledger: ledgerBefore },
+      { mainGitState: mainGitState(worktree), ledger: { ...ledgerBefore } },
+    )
+    expect(preservation).toEqual({ merged: false, ledgerPreserved: true })
+
+    const observation = {
+      scenario: "resume" as const,
+      lineage: [
+        { executionID: "worker-attempt-1", attemptID: "attempt-1", kind: "host", role: "worker", outcome: "failed" },
+        { executionID: "worker-attempt-2", attemptID: "attempt-2", kind: "host", role: "worker" },
+      ],
+      taskID: "t2",
+      attempt: 2,
+      phase: "resume existing queue ledger",
+      ...preservation,
+    }
+    const textOnlyMatch = { errorName: "APIError", error: "MessageAbortedError" }
+    expect(appendModelAbort(receipt, textOnlyMatch.errorName, { ...observation, merged: true, ledgerPreserved: false })).toBe(false)
+    expect(appendModelAbort(receipt, "MessageAbortedError", observation)).toBe(true)
+    expect(receipt.modelAborts).toEqual([{ errorName: "MessageAbortedError", ...observation }])
+    expect(receipt.modelAborts[0]?.lineage[0]).toMatchObject({ executionID: "worker-attempt-1", outcome: "failed" })
+    expect(receipt.modelAborts[0]).toMatchObject({ attempt: 2, merged: false, ledgerPreserved: true })
+    expect(receipt.failures).toEqual([earlierFailure])
+    expect(JSON.stringify(receipt.modelAborts)).not.toContain("cause")
+    expect(JSON.stringify(receipt.modelAborts)).not.toContain("verification failed")
+
+    writeFileSync(join(worktree, "tracked.py"), "value = 1\n")
+    expect(modelAbortPreservation(
+      { mainGitState: protectedMain, ledger: ledgerBefore },
+      { mainGitState: mainGitState(worktree), ledger: { ...ledgerBefore, size: 21 } },
+    )).toEqual({ merged: true, ledgerPreserved: false })
+  } finally {
+    rmSync(worktree, { recursive: true, force: true })
+  }
+})
+
 function cancellationReceipt(): Receipt {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     receiptPath: "/tmp/cancel-cleanup-receipt.json",
     scenario: "verifier-cancel",
     baseIdentity: {
@@ -155,6 +269,7 @@ function cancellationReceipt(): Receipt {
     },
     nativeSessionIDs: { parentSessionID: "session-1", childSessionIDs: [] },
     runs: [],
+    modelAborts: [],
     failures: [],
   }
 }

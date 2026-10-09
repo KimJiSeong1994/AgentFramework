@@ -11,9 +11,10 @@ import { writeJsonAtomic } from "../state/store.ts"
 import { activeWorkflow, planJsonPath, readWorkflow, renderArtifact } from "../flow/state.ts"
 import { applyEvent, flowLimits } from "../flow/runtime.ts"
 import { canonicalPlanSha, coercePlan, planMdPath, renderPlanMd, validatePlan, type Plan, type ReviewView } from "../flow/plan.ts"
-import { runPlanReview } from "../flow/review.ts"
+import { runPlanReview, type PlanReviewResult } from "../flow/review.ts"
 import type { FlowEvent } from "../flow/machine.ts"
 import { getOpenCodeRuntime } from "../hosts/opencode-runtime.ts"
+import { LinuxAdmissionRefused } from "../hosts/types.ts"
 
 export const LCA_FLOW_DESCRIPTION =
   'Plan workflow control. "status": show plan/mode/ledger/queue status. "plan": submit the plan (3-10 steps: ' +
@@ -60,6 +61,7 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       }
 
       // op === "plan"
+      runtime.linuxAdmission?.assertBootEpoch()
       const wf = activeWorkflow(deps.worktree)
       if (!wf || wf.sessionID !== ctx.sessionID) {
         const text = wf
@@ -78,6 +80,13 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       const revision = 1 + wf.counters.code_invalid + wf.counters.review_iterations + wf.counters.user_rejections
       const plan: Plan = coercePlan(args.plan, revision)
       const errors = validatePlan(plan, deps.worktree, deps.config.delegate.verify_allow)
+
+      try {
+        await runtime.linuxAdmission?.admitNewExecution()
+      } catch (e) {
+        if (e instanceof LinuxAdmissionRefused) return { title: "lca_flow: refused", output: e.message }
+        throw e
+      }
 
       if (errors.length > 0) {
         const r = applyEvent(deps, wf, "submit_invalid", "model_tool", {}, (w) => w, { errorCount: errors.length })
@@ -103,7 +112,15 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       if (!submitted.ok) return { title: "lca_flow: refused", output: `lca: ${submitted.text}` }
 
       // review runs inside this tool call (main is blocked; no race with the queue). Esc (ctx.abort) aborts it (T8).
-      const result = await runPlanReview(runtime, submitted.wf, plan, ctx.abort)
+      let admissionRefusal: LinuxAdmissionRefused | undefined
+      let result: PlanReviewResult
+      try {
+        result = await runPlanReview(runtime, submitted.wf, plan, ctx.abort)
+      } catch (e) {
+        if (!(e instanceof LinuxAdmissionRefused) || e.phase !== "admit") throw e
+        admissionRefusal = e
+        result = { verdict: "none", findings: [], note: "aborted" }
+      }
 
       const limits = flowLimits(deps)
       let event: FlowEvent
@@ -120,6 +137,9 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       const current = readWorkflow(deps.worktree)
       if (!current || current.id !== wf.id || current.lastSeq !== submitted.wf.lastSeq || current.phase !== "reviewing") {
         deps.log("lca_flow: workflow changed during review; result dropped", { wfId: wf.id })
+        if (admissionRefusal) {
+          return { title: "lca_flow: refused", output: `${admissionRefusal.message}\nThe workflow changed; no review_aborted transition was written.` }
+        }
         return { title: "lca_flow: workflow changed", output: "lca: the workflow changed during review (cancelled or replaced); stop and check /status." }
       }
       const reviewView: ReviewView = { verdict: result.verdict, findings: result.findings, ...(note ? { note } : {}) }
@@ -137,10 +157,14 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
         }),
         { findings: result.findings.length },
       )
-      if (!reviewed.ok) return { title: "lca_flow: workflow changed", output: `lca: ${reviewed.text}` }
+      if (!reviewed.ok) {
+        if (admissionRefusal) return { title: "lca_flow: refused", output: `${admissionRefusal.message}\n${reviewed.text}` }
+        return { title: "lca_flow: workflow changed", output: `lca: ${reviewed.text}` }
+      }
       const finalWf = reviewed.wf
       deps.log("lca_flow: plan reviewed", { wfId: wf.id, verdict: result.verdict, note, phase: finalWf.phase })
 
+      if (admissionRefusal) return { title: "lca_flow: refused", output: admissionRefusal.message }
       if (finalWf.phase === "pending_approval") {
         return { title: "lca_flow: plan saved", output: `Plan saved to ${mdPath}. Tell the user to /approve or /reject <reason>. Stop.` }
       }

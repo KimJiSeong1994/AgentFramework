@@ -21,7 +21,7 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { canonicalPlanSha, coercePlan, planToTasks, validatePlan, type Plan } from "../framework/src/flow/plan.ts"
 import { loadConfig, type LcaConfig } from "../framework/src/config.ts"
 import { authenticateLinuxVerification } from "../framework/src/hosts/linux-domain.ts"
-import { getOpenCodeRuntime } from "../framework/src/hosts/opencode-runtime.ts"
+import { createLinuxAdmission, getOpenCodeRuntime } from "../framework/src/hosts/opencode-runtime.ts"
 import type {
   ExecutionCancelResult,
   ExecutionHandle,
@@ -55,7 +55,7 @@ const BUSY_POLL_INTERVAL_MS = 100
 const INJECTED_CODE = 'def normalize_space(text):\n    return ""\n'
 
 export type Scenario = "success" | "retry" | "reject" | "cancel" | "verifier-cancel" | "interrupt" | "checkpoint" | "active-verifier" | "resume"
-export type VerifierMode = "legacy" | "linux-qualification"
+export type VerifierMode = "legacy" | "linux-qualification" | "linux-production"
 type Args = { worktree: string; server: string; scenario: Scenario; verifier: VerifierMode; receipt: string; session?: string }
 type AnyRecord = Record<string, unknown>
 
@@ -69,7 +69,7 @@ type ChildRecord = {
   preparedAt: number
   dispatchedAt?: number
   runFinishedAt?: number
-  hostRunReturn?: { status: ExecutionOutcome["status"]; childMessageID?: string }
+  hostRunReturn?: { status: ExecutionOutcome["status"]; childMessageID?: string; errorName?: string }
   runFailure?: { name: string; message: string }
   requestCancelCalls: Array<{
     requestedAt: number
@@ -91,8 +91,19 @@ type BusyObservation = {
   finishedAt: number
 }
 
+export type ModelAbortRecord = {
+  errorName: "MessageAbortedError"
+  scenario: Scenario
+  lineage: AnyRecord[]
+  taskID: string
+  attempt: number
+  phase: string
+  merged: boolean
+  ledgerPreserved: boolean
+}
+
 export type Receipt = {
-  schemaVersion: 1
+  schemaVersion: 2
   receiptPath: string
   scenario: Scenario
   baseIdentity: {
@@ -110,6 +121,7 @@ export type Receipt = {
   nativeSessionIDs: { parentSessionID?: string; childSessionIDs: string[] }
   plan?: { path: string; sha256: string; stepCount: number }
   runs: AnyRecord[]
+  modelAborts: ModelAbortRecord[]
   failures: Array<{ at: string; phase: string; name: string; message: string }>
 }
 
@@ -119,12 +131,12 @@ function fail(message: string): never {
 
 export function parseVerifierMode(value: string | undefined): VerifierMode {
   if (value === undefined) return "legacy"
-  if (value === "legacy" || value === "linux-qualification") return value
-  return fail("--verifier must be legacy or linux-qualification")
+  if (value === "legacy" || value === "linux-qualification" || value === "linux-production") return value
+  return fail("--verifier must be legacy, linux-qualification, or linux-production")
 }
 
 export function verificationProfileForMode(mode: VerifierMode): VerificationProfile {
-  return mode === "linux-qualification" ? "linux-single-use" : "legacy-unowned"
+  return mode === "legacy" ? "legacy-unowned" : "linux-single-use"
 }
 
 export function assertResumeVerifierIdentity(identity: unknown, expected: VerifierMode): void {
@@ -133,8 +145,58 @@ export function assertResumeVerifierIdentity(identity: unknown, expected: Verifi
 
 export function assertScenarioVerifierMode(scenario: Scenario, verifier: VerifierMode): void {
   if ((scenario === "success" || scenario === "verifier-cancel" || scenario === "active-verifier") &&
-      verifier !== "linux-qualification") {
-    fail(`scenario ${scenario} requires --verifier linux-qualification`)
+      verifier === "legacy") {
+    fail(`scenario ${scenario} requires --verifier linux-qualification or linux-production`)
+  }
+}
+
+export function assertReceiptSchemaForResume(schemaVersion: unknown, modelAborts: unknown): void {
+  if (schemaVersion !== 2) {
+    fail("resume requires a schema-2 receipt with modelAborts; schema-1 receipts are not upgraded")
+  }
+  if (!Array.isArray(modelAborts)) fail("schema-2 resume receipt is missing modelAborts")
+}
+
+export function selectVerifierRuntime(
+  config: LcaConfig,
+  baseRuntime: ExecutionRuntime,
+  mode: VerifierMode,
+): ExecutionRuntime {
+  if (mode === "linux-production") {
+    if (config.delegate.verifier !== "linux-single-use") {
+      fail("linux-production requires fixture config delegate.verifier=linux-single-use")
+    }
+    if (baseRuntime.verificationProfile !== "linux-single-use" || !baseRuntime.linuxAdmission) {
+      fail("linux-production did not receive the ordinary linux-single-use OpenCode runtime")
+    }
+    return baseRuntime
+  }
+  if (mode === "legacy") return baseRuntime
+  return {
+    ...baseRuntime,
+    verificationProfile: "linux-single-use",
+    verifier: createLinuxVerifierExecutor({ qualification: true }),
+    linuxAdmission: createLinuxAdmission({ qualification: true }),
+  }
+}
+
+export function appendModelAbort(
+  receipt: Receipt,
+  errorName: unknown,
+  observation: Omit<ModelAbortRecord, "errorName">,
+): boolean {
+  if (errorName !== "MessageAbortedError") return false
+  receipt.modelAborts.push({ errorName, ...observation })
+  return true
+}
+
+export function modelAbortPreservation(
+  before: { mainGitState: unknown; ledger: unknown } | undefined,
+  after: { mainGitState: unknown; ledger: unknown } | undefined,
+): Pick<ModelAbortRecord, "merged" | "ledgerPreserved"> {
+  return {
+    merged: !before || !after || !sameEvidence(before.mainGitState, after.mainGitState),
+    ledgerPreserved: !!before && !!after && sameEvidence(before.ledger, after.ledger),
   }
 }
 
@@ -155,7 +217,7 @@ function parseArgs(argv: string[]): Args {
   const receipt = fields.get("--receipt")
   const verifier = parseVerifierMode(fields.get("--verifier"))
   if (!worktreeArg || !serverArg || !scenario || !receipt) {
-    fail("usage: bun scripts/lca-live-core-queue.ts --worktree ABSOLUTE_GIT_ROOT --server http://127.0.0.1:PORT --scenario success|retry|reject|cancel|verifier-cancel|interrupt|checkpoint|active-verifier|resume --receipt ABSOLUTE_JSON_PATH [--verifier legacy|linux-qualification] [--session ID]")
+    fail("usage: bun scripts/lca-live-core-queue.ts --worktree ABSOLUTE_GIT_ROOT --server http://127.0.0.1:PORT --scenario success|retry|reject|cancel|verifier-cancel|interrupt|checkpoint|active-verifier|resume --receipt ABSOLUTE_JSON_PATH [--verifier legacy|linux-qualification|linux-production] [--session ID]")
   }
   if (!(scenario === "success" || scenario === "retry" || scenario === "reject" || scenario === "cancel" ||
     scenario === "verifier-cancel" || scenario === "interrupt" || scenario === "checkpoint" ||
@@ -285,7 +347,7 @@ async function parentSession(client: any, worktree: string, sessionID?: string):
 
 function initialReceipt(args: Args): Receipt {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     receiptPath: args.receipt,
     scenario: args.scenario,
     baseIdentity: {
@@ -301,6 +363,7 @@ function initialReceipt(args: Args): Receipt {
     },
     nativeSessionIDs: { childSessionIDs: [] },
     runs: [],
+    modelAborts: [],
     failures: [],
   }
 }
@@ -317,7 +380,8 @@ function beginReceipt(args: Args): Receipt {
   let prior: Receipt
   try { prior = JSON.parse(readFileSync(args.receipt, "utf8")) as Receipt }
   catch { return fail("resume requires a readable receipt from the interrupted run") }
-  if (prior.schemaVersion !== 1 || !["interrupt", "checkpoint", "active-verifier", "resume"].includes(prior.scenario) || prior.baseIdentity.worktree !== args.worktree
+  assertReceiptSchemaForResume(prior.schemaVersion, prior.modelAborts)
+  if (!["interrupt", "checkpoint", "active-verifier", "resume"].includes(prior.scenario) || prior.baseIdentity.worktree !== args.worktree
     || prior.baseIdentity.serverOrigin !== args.server || prior.nativeSessionIDs.parentSessionID !== args.session
     || !Array.isArray(prior.runs) || !["interrupt", "checkpoint", "active-verifier"].includes(String(prior.runs[0]?.scenario))
     || !Array.isArray(prior.failures) || !Array.isArray(prior.nativeSessionIDs.childSessionIDs)) {
@@ -442,6 +506,7 @@ function installTrackedHost(
   runtime: ExecutionRuntime,
   scenario: Scenario,
   verifierMode: VerifierMode,
+  phase: () => string,
   receipt: Receipt,
   children: ChildRecord[],
   injection: AnyRecord,
@@ -470,19 +535,61 @@ function installTrackedHost(
         reference: handle.reference,
         async run(): Promise<ExecutionOutcome> {
           child.dispatchedAt = Date.now()
+          let abortCheckpoint: { mainGitState: unknown; ledger: unknown } | undefined
+          try {
+            abortCheckpoint = {
+              mainGitState: mainGitState(runtime.worktree),
+              ledger: fileDigest(ledgerPath(runtime.worktree, request.supervisorSessionID)),
+            }
+          } catch { /* An abort still gets recorded conservatively below. */ }
           try {
             const outcome = await handle.run()
             child.runFinishedAt = Date.now()
             child.hostRunReturn = {
               status: outcome.status,
               ...(outcome.childMessageID ? { childMessageID: outcome.childMessageID } : {}),
+              ...(outcome.errorName ? { errorName: outcome.errorName.slice(0, 128) } : {}),
             }
-            if (verifierMode === "linux-qualification" && request.role === "worker" && outcome.status === "completed" &&
+            if (outcome.errorName === "MessageAbortedError") {
+              let attempt = 0
+              let lineage: AnyRecord[] = []
+              let captureFailure: Error | undefined = abortCheckpoint
+                ? undefined
+                : new Error("model abort pre-run preservation observation was unavailable")
+              try {
+                const ledger = readLedger(runtime.worktree, request.supervisorSessionID)
+                attempt = ledger.tasks.find(task => task.id === request.taskID)?.attempts ?? 0
+                lineage = taskExecutionLineage(runtime, request.supervisorSessionID, request.taskID)
+                if (attempt < 1 || !lineage.length) throw new Error("model abort task lineage was unavailable")
+              } catch {
+                captureFailure ??= new Error("model abort task lineage observation was unavailable")
+              }
+              let after: { mainGitState: unknown; ledger: unknown } | undefined
+              try {
+                after = {
+                  mainGitState: mainGitState(runtime.worktree),
+                  ledger: fileDigest(ledgerPath(runtime.worktree, request.supervisorSessionID)),
+                }
+              } catch {
+                captureFailure ??= new Error("model abort preservation observation was unavailable")
+              }
+              const preservation = modelAbortPreservation(abortCheckpoint, after)
+              appendModelAbort(receipt, outcome.errorName, {
+                scenario,
+                lineage,
+                taskID: request.taskID.slice(0, 128),
+                attempt,
+                phase: phase().slice(0, 128),
+                ...preservation,
+              })
+              if (captureFailure) recordFailure(receipt, phase(), captureFailure)
+            }
+            if (verifierMode !== "legacy" && request.role === "worker" && outcome.status === "completed" &&
               !taskBaselineLineages[request.taskID]) {
               taskBaselineLineages[request.taskID] = captureTaskBaselineLineage(runtime, request.supervisorSessionID, request.taskID)
             }
             const injectAfterWorker = scenario === "reject" ||
-              (scenario === "retry" && verifierMode === "linux-qualification")
+              (scenario === "retry" && verifierMode !== "legacy")
             if (injectAfterWorker && request.role === "worker" && outcome.status === "completed" && !injection.appliedAt) {
               applyRejectInjection(child, injection)
             }
@@ -667,9 +774,11 @@ function taskExecutionLineage(runtime: ExecutionRuntime, sessionID: string, task
     .filter(execution => execution.taskId === taskID)
     .map(execution => ({
       executionID: execution.executionId,
+      attemptID: execution.attemptId,
       kind: execution.kind,
       role: execution.role,
       profile: execution.profile,
+      outcome: execution.terminal?.outcome,
       inputSnapshotID: execution.inputSnapshotID,
       inputDigest: execution.inputDigest,
     }))
@@ -882,7 +991,7 @@ function assertNativeRecordProfiles(runtime: ExecutionRuntime, sessionID: string
   if (executionRecordsFor(runtime, sessionID).some(execution =>
     (execution.kind === "verifier" && execution.profile !== "linux-single-use") ||
     (execution.kind === "host" && execution.profile !== "legacy-unowned"))) {
-    fail("Linux qualification changed the host or verifier execution profile")
+    fail("Linux execution changed the host or verifier execution profile")
   }
 }
 
@@ -1065,14 +1174,17 @@ function createRuntime(worktree: string, client: any, scenario: Scenario, verifi
     config.delegate.max_attempts !== attempts) {
     fail(`fixture .lca/lca.jsonc must set review=true, review_strict=true, max_attempts=${attempts}; local overrides would conflict with the server's fixed policy`)
   }
-  if (verifierMode === "linux-qualification") {
-    if (config.delegate.worktree !== true) fail("Linux qualification requires isolated task worktrees")
+  if (verifierMode === "linux-production" && config.delegate.verifier !== "linux-single-use") {
+    fail("linux-production requires fixture config delegate.verifier=linux-single-use")
+  }
+  if (verifierMode !== "legacy") {
+    if (config.delegate.worktree !== true) fail("Linux verifier modes require isolated task worktrees")
     if (!enabled(config, "config.agents") || !enabled(config, "chat.params")) {
-      fail("Linux qualification requires config.agents and chat.params hooks to be enabled")
+      fail("Linux verifier modes require config.agents and chat.params hooks to be enabled")
     }
     if (!Number.isSafeInteger(config.delegate.verify_output_chars) || config.delegate.verify_output_chars < 1 ||
       config.delegate.verify_output_chars > 65_536) {
-      fail("Linux qualification verify_output_chars must be an integer from 1 through 65536")
+      fail("Linux verifier verify_output_chars must be an integer from 1 through 65536")
     }
   }
   const deps: HookDeps = {
@@ -1083,9 +1195,7 @@ function createRuntime(worktree: string, client: any, scenario: Scenario, verifi
     log: () => {},
   }
   const baseRuntime = getOpenCodeRuntime(deps)
-  const runtime: ExecutionRuntime = verifierMode === "linux-qualification"
-    ? { ...baseRuntime, verificationProfile: verificationProfileForMode(verifierMode), verifier: createLinuxVerifierExecutor({ qualification: true }) }
-    : baseRuntime
+  const runtime = selectVerifierRuntime(config, baseRuntime, verifierMode)
   return { runtime, queue: createQueue(runtime) }
 }
 
@@ -1587,7 +1697,8 @@ async function runDriver(args: Args, receipt: Receipt): Promise<void> {
     }
     receipt.runs.push(run)
     let { runtime, queue } = createRuntime(args.worktree, client, args.scenario, args.verifier)
-    if (args.verifier === "linux-qualification") {
+    runtime.linuxAdmission?.assertBootEpoch()
+    if (args.verifier !== "legacy") {
       phase = "preflight native Linux verifier"
       const preflight = await runtime.verifier.preflight(runtime.verificationProfile)
       run.verifierPreflight = preflight
@@ -1598,10 +1709,10 @@ async function runDriver(args: Args, receipt: Receipt): Promise<void> {
     const injection: AnyRecord = {}
     const taskBaselineLineages: Record<string, TaskBaselineLineage> = {}
     run.taskBaselineLineages = taskBaselineLineages
-    if (args.verifier === "linux-qualification" && (args.scenario === "retry" || args.scenario === "reject")) {
+    if (args.verifier !== "legacy" && (args.scenario === "retry" || args.scenario === "reject")) {
       run.driver_fault_injection = injection
     }
-    installTrackedHost(runtime, args.scenario, args.verifier, receipt, children, injection, taskBaselineLineages)
+    installTrackedHost(runtime, args.scenario, args.verifier, () => phase, receipt, children, injection, taskBaselineLineages)
     run.children = children
 
     if (args.scenario === "resume") {
@@ -1633,7 +1744,7 @@ async function runDriver(args: Args, receipt: Receipt): Promise<void> {
       run.completedTaskIDsBefore = beforeLedger.tasks.filter((task) => task.status === "done").map((task) => task.id)
       const beforeTaskExecutionIDs = durableTaskExecutionIDs(runtime, parentID)
       run.beforeTaskExecutionIDs = beforeTaskExecutionIDs
-      if (args.verifier === "linux-qualification") captureLinuxVerificationEvidence(run, runtime, parentID)
+      if (args.verifier !== "legacy") captureLinuxVerificationEvidence(run, runtime, parentID)
 
       phase = "resume existing queue ledger"
       const queueResult: QueueRun = await queue.run(parentID, { resumed: true })
@@ -1646,7 +1757,7 @@ async function runDriver(args: Args, receipt: Receipt): Promise<void> {
       run.completedTaskIDsAfter = afterLedger.tasks.filter((task) => task.status === "done").map((task) => task.id)
       const afterTaskExecutionIDs = durableTaskExecutionIDs(runtime, parentID)
       run.afterTaskExecutionIDs = afterTaskExecutionIDs
-      if (args.verifier === "linux-qualification") {
+      if (args.verifier !== "legacy") {
         captureLinuxVerificationEvidence(run, runtime, parentID)
         assertNativeRecordProfiles(runtime, parentID)
       }
@@ -1740,9 +1851,9 @@ async function runDriver(args: Args, receipt: Receipt): Promise<void> {
       const firstResult = await queuePromise
       run.queueResult = firstResult
       run.afterFirstRun = snapshot(runtime, args.worktree, parentID)
-      if (args.verifier === "linux-qualification") assertNativeRecordProfiles(runtime, parentID)
+      if (args.verifier !== "legacy") assertNativeRecordProfiles(runtime, parentID)
       const workerCountBeforeRetry = workerDispatchCount(children)
-      const executionIDsBeforeRetry = args.verifier === "linux-qualification" ? durableExecutionIDs(runtime, parentID) : undefined
+      const executionIDsBeforeRetry = args.verifier !== "legacy" ? durableExecutionIDs(runtime, parentID) : undefined
       run.retryQueueResult = await queue.run(parentID)
       run.workerDispatchesBeforeRetry = workerCountBeforeRetry
       run.workerDispatchesAfterRetry = workerDispatchCount(children)
@@ -1844,7 +1955,7 @@ async function runDriver(args: Args, receipt: Receipt): Promise<void> {
         const state = runtime.runs.status()
         if (ledger.tasks[0]?.status === "done" && ledger.tasks.slice(1).every(task => task.status === "pending") &&
           !state.executions.some(execution => execution.ownerSession === parentID && execution.taskId === added[1]!.id)) {
-          if (args.verifier === "linux-qualification") captureLinuxVerificationEvidence(run, runtime, parentID)
+          if (args.verifier !== "legacy") captureLinuxVerificationEvidence(run, runtime, parentID)
           run.interruption = {
             boundary: "verified_task_checkpoint_before_next_execution_intent",
             persistedAt: new Date().toISOString(),
@@ -1896,7 +2007,7 @@ async function runDriver(args: Args, receipt: Receipt): Promise<void> {
       }
 
       const currentLedger = readLedger(args.worktree, parentID)
-      if (args.verifier === "linux-qualification") captureLinuxVerificationEvidence(run, runtime, parentID)
+      if (args.verifier !== "legacy") captureLinuxVerificationEvidence(run, runtime, parentID)
       run.interruption = {
         persistedAt: new Date().toISOString(),
         parentSessionID: parentID,
@@ -1917,14 +2028,14 @@ async function runDriver(args: Args, receipt: Receipt): Promise<void> {
     const queueResult = await queuePromise
     run.queueResult = queueResult
     run.injection = Object.keys(injection).length ? injection : undefined
-    if (args.verifier === "linux-qualification" && injection.appliedAt !== undefined) {
+    if (args.verifier !== "legacy" && injection.appliedAt !== undefined) {
       run.driver_fault_injection = injection
     }
     const after = snapshot(runtime, args.worktree, parentID)
     run.after = after
     const ledger = readLedger(args.worktree, parentID)
     if (args.scenario === "retry") validateRetryObservation(receipt, run, runtime, ledger.tasks)
-    if (args.verifier === "linux-qualification") {
+    if (args.verifier !== "legacy") {
       captureLinuxVerificationEvidence(run, runtime, parentID)
       assertNativeRecordProfiles(runtime, parentID)
       if (args.scenario === "success" || args.scenario === "retry") {
@@ -2010,7 +2121,7 @@ async function main(): Promise<void> {
     process.exitCode = 1
   }
   process.stdout.write(`${JSON.stringify({ receipt: args.receipt })}\n`)
-  if (receipt.failures.length > priorFailureCount) process.exitCode = 1
+  if (receipt.failures.length > priorFailureCount || receipt.modelAborts.length > 0) process.exitCode = 1
 }
 
 if (import.meta.main) void main()

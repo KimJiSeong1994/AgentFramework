@@ -5,13 +5,14 @@ import { DEFAULT_CONFIG } from "../src/config.ts"
 import { createForegroundController, readForegroundStatus, type LocalPlanDecision } from "../src/hosts/controller.ts"
 import { createExecutionRunStore } from "../src/hosts/run-state.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
-import type { ExecutionOutcome, ExecutionRequest, ExecutionRuntime } from "../src/hosts/types.ts"
-import { canonicalPlanJson, canonicalPlanSha, type Plan } from "../src/flow/plan.ts"
+import { LinuxAdmissionRefused, type ExecutionOutcome, type ExecutionRequest, type ExecutionRuntime, type LinuxAdmission } from "../src/hosts/types.ts"
+import { canonicalPlanJson, canonicalPlanSha, planMdPath, type Plan } from "../src/flow/plan.ts"
 import { clearReviewSession } from "../src/flow/review.ts"
-import { readWorkflow, planJsonPath, workflowPath, writeWorkflow } from "../src/flow/state.ts"
+import { currentOwner } from "../src/flow/owner.ts"
+import { readWorkflow, newWorkflow, planJsonPath, workflowPath, writeWorkflow } from "../src/flow/state.ts"
 import { stopHeartbeat } from "../src/flow/runtime.ts"
 import { ledgerPath, readLedger } from "../src/state/ledger.ts"
-import { modeStatePath, stateRoot } from "../src/state/store.ts"
+import { modeStatePath, sessionDir, stateRoot } from "../src/state/store.ts"
 import { tempGitWorktree, verifyScript, waitFor } from "./guards-helpers.ts"
 import { createLegacyVerifierExecutor } from "../src/orchestration/legacy-verifier.ts"
 
@@ -28,6 +29,7 @@ function fixture(opts: {
   maxAttempts?: number
   instance?: string
   worker?: (request: ExecutionRequest) => ExecutionOutcome | Promise<ExecutionOutcome>
+  linuxAdmission?: LinuxAdmission
 } = {}) {
   const config = { ...DEFAULT_CONFIG, delegate: { ...DEFAULT_CONFIG.delegate, worktree: false, max_attempts: opts.maxAttempts ?? DEFAULT_CONFIG.delegate.max_attempts } }
   const requests: ExecutionRequest[] = []
@@ -39,6 +41,7 @@ function fixture(opts: {
   const runtime: ExecutionRuntime = {
     instance: opts.instance ?? "local-controller", directory: wt.worktree, worktree: wt.worktree, stateRoot: stateRoot(wt.worktree), config,
     log: () => {}, runs: createExecutionRunStore(wt.worktree), verificationProfile: "legacy-unowned", verifier: createLegacyVerifierExecutor(),
+    ...(opts.linuxAdmission ? { linuxAdmission: opts.linuxAdmission } : {}),
     observe: { task(fact) { if (fact.status === "started") resumeRequests.push(fact.resumeRequested) } },
     policy: createExecutionPolicy(config, { directory: wt.worktree, worktree: wt.worktree }),
     host: {
@@ -449,5 +452,109 @@ describe("external foreground imported-plan controller", () => {
     expect(execution.reconciliation).toMatchObject({ outcome: "unknown", quiescent: false })
     expect(owner.runtime.runs.status().claim).toBeDefined()
     expect(readLedger(wt.worktree, SESSION).tasks.filter(task => task.status === "running")).toHaveLength(0)
+  })
+
+  test("boot-epoch refusal precedes controller import, run, and resume state access", async () => {
+    const refused = new LinuxAdmissionRefused("epoch", ["boot-epoch"])
+    let epochChecks = 0
+    const f = fixture({ linuxAdmission: {
+      assertBootEpoch() { epochChecks++; throw refused },
+      async admitNewExecution() { throw refused },
+      async admitPlanSubmission() { throw refused },
+      consumePlanSubmission() { throw refused },
+    } })
+    const runs = f.runtime.runs
+    let claimCalls = 0
+    let statusCalls = 0
+    const claim = runs.claim.bind(runs)
+    const status = runs.status.bind(runs)
+    runs.claim = (...args) => { claimCalls++; return claim(...args) }
+    runs.status = () => { statusCalls++; return status() }
+
+    const source = save()
+    await expect(f.controller.importPlan(SESSION, source)).rejects.toBe(refused)
+    expect(existsSync(workflowPath(wt.worktree))).toBe(false)
+    expect(existsSync(sessionDir(wt.worktree, SESSION))).toBe(false)
+
+    const workflow = writeWorkflow(wt.worktree, { ...newWorkflow(SESSION, currentOwner(), "command", "test"), phase: "executing" })
+    const before = readFileSync(workflowPath(wt.worktree))
+    await expect(f.controller.run(SESSION)).rejects.toBe(refused)
+    await expect(f.controller.resume(SESSION)).rejects.toBe(refused)
+    expect(readFileSync(workflowPath(wt.worktree))).toEqual(before)
+    expect(readWorkflow(wt.worktree)?.id).toBe(workflow.id)
+    expect(epochChecks).toBe(3)
+    expect(claimCalls).toBe(0)
+    expect(statusCalls).toBe(0)
+  })
+
+  test("A4b refusal leaves no workflow or session directory after same-boot reconciliation", async () => {
+    const refused = new LinuxAdmissionRefused("admit", ["latched"])
+    let submissions = 0
+    let hostCalls = 0
+    const f = fixture({ linuxAdmission: {
+      assertBootEpoch() {},
+      async admitNewExecution() { throw refused },
+      async admitPlanSubmission() { submissions++; throw refused },
+      consumePlanSubmission() { throw new TypeError("unexpected token consumption") },
+    } })
+    f.runtime.host.prepare = async () => { hostCalls++; throw new Error("unexpected host execution") }
+    await expect(f.controller.importPlan(SESSION, save())).rejects.toBe(refused)
+    expect(submissions).toBe(1)
+    expect(existsSync(workflowPath(wt.worktree))).toBe(false)
+    expect(existsSync(sessionDir(wt.worktree, SESSION))).toBe(false)
+    expect(existsSync(join(wt.worktree, ".lca", "plans"))).toBe(false)
+    expect(hostCalls).toBe(0)
+    expect(f.runtime.runs.status().claim).toBeUndefined()
+  })
+
+  test("A13 A4b admits writes once; a later A5 refusal keeps submitted plan, releases claim, and propagates", async () => {
+    const refused = new LinuxAdmissionRefused("admit", ["latched"])
+    const events: string[] = []
+    let admissions = 0
+    let a5HadClaimAndNoIntent = false
+    let readAdmissionState: (() => ReturnType<ExecutionRuntime["runs"]["status"]>) | undefined
+    const admitNewExecution = async () => {
+      admissions++
+      events.push(`admitNewExecution:${admissions}`)
+      if (admissions === 2) {
+        const status = readAdmissionState!()
+        a5HadClaimAndNoIntent = !!status.claim && status.executions.length === 0
+        throw refused
+      }
+    }
+    const linuxAdmission: LinuxAdmission = {
+      assertBootEpoch() {},
+      admitNewExecution,
+      async admitPlanSubmission(sessionID) {
+        events.push("admitPlanSubmission")
+        expect(sessionID).toBe(SESSION)
+        await admitNewExecution()
+        return Object.freeze({ purpose: "plan-submission" as const, sessionID })
+      },
+      consumePlanSubmission(admission, sessionID) {
+        events.push("consumePlanSubmission")
+        expect(admission).toEqual({ purpose: "plan-submission", sessionID })
+        expect(sessionID).toBe(SESSION)
+      },
+    }
+    const f = fixture({ linuxAdmission })
+    readAdmissionState = () => f.runtime.runs.status()
+    const source = save()
+    let thrown: unknown
+    try { await f.controller.importPlan(SESSION, source) }
+    catch (error) { thrown = error }
+
+    expect(thrown).toBe(refused)
+    expect(events).toEqual(["admitPlanSubmission", "admitNewExecution:1", "consumePlanSubmission", "admitNewExecution:2"])
+    expect(a5HadClaimAndNoIntent).toBe(true)
+    expect(f.requests).toHaveLength(0)
+    const workflow = readWorkflow(wt.worktree)!
+    expect(workflow).toMatchObject({ phase: "pending_approval", review: { verdict: "none", note: "aborted" } })
+    expect(JSON.parse(readFileSync(planJsonPath(wt.worktree, workflow.id), "utf8"))).toEqual(plan())
+    expect(readFileSync(join(wt.worktree, planMdPath(workflow.id)), "utf8")).toContain("verdict: none")
+    expect(f.runtime.runs.status()).toMatchObject({ executions: [], claim: undefined })
+    const otherOwner = f.runtime.runs.claim("other-session", "same-boot-owner", process.pid)
+    expect(otherOwner.ownerSession).toBe("other-session")
+    f.runtime.runs.release(otherOwner)
   })
 })

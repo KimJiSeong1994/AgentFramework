@@ -12,8 +12,8 @@ blocking, output trimming and orchestration are done in code, not by the model.
 | --- | --- | --- |
 | OpenCode runtime | `src/hosts/{opencode,opencode-runtime,types,runtime,tool-policy,run-state}.ts` | Host execution, fixed role policy, execution ownership and durable recovery state. |
 | Workflow entry points | `src/hosts/{cli,controller}.ts`, `src/flow/`, `src/hooks/`, `src/tools/` | Import, approval, delegation, review, cancellation and status. |
-| Task execution | `src/orchestration/{queue,snapshot,worktree,git-boundary,shell,verifier,legacy-verifier}.ts` | Serial tasks, snapshots, verification and accepted changes. The current verifier remains `legacy-unowned`. |
-| Owned-verifier qualification | `src/hosts/linux-domain.ts`, `src/orchestration/linux-verifier.ts`, `scripts/linux-verifier/`, `scripts/lca-linux-verifier-{e2.py,queue.ts}` | Explicit Linux/systemd verifier boundary; not default runtime admission or worker/reviewer containment. |
+| Task execution | `src/orchestration/{queue,snapshot,worktree,git-boundary,shell,verifier,legacy-verifier}.ts` | Serial tasks, snapshots, verification and accepted changes. The default verifier remains `legacy-unowned`. |
+| Owned-verifier qualification | `src/hosts/linux-domain.ts`, `src/orchestration/linux-verifier.ts`, `scripts/linux-verifier/`, `scripts/lca-linux-verifier-{e2.py,queue.ts}` | Opt-in Linux/systemd verifier boundary; not default admission or worker/reviewer containment. |
 
 Review the runtime, queue, workflow callers and their tests as one integration change:
 committing the queue without its new host contracts leaves unresolved imports. Native-host
@@ -206,6 +206,99 @@ same ticket after restoration without replay. These observations do not establis
 unconditional model availability or resolve permanently missing evidence and
 unknown-bound capacity retention. Admission remains **lab-only, `qualified: false`**,
 with unchanged legacy runtime defaults.
+
+### Single-boot operational admission
+
+The historical run above does **not** qualify the newer admission implementation.
+Operational eligibility still requires its own passing regressions, native fault
+tests, actual production-path canary and strict model soak. No production deployment
+or worker/reviewer OS containment is implied.
+
+Select the verifier explicitly in the ordinary user/project LCA configuration:
+
+```json
+{ "delegate": { "verifier": "linux-single-use" } }
+```
+
+An absent selector retains `legacy-unowned`; project settings override user settings.
+An invalid selector, malformed configuration or unreadable configuration (including
+an inaccessible ancestor) is fatal, never a fallback to legacy. Diagnostics contain
+the configuration path and error category, not its contents. This fail-closed loading
+also applies when the intended configuration was legacy. Host worker/reviewer records
+always remain `legacy-unowned`, regardless of the verifier selection.
+
+The root-installed v2 profile pins `bootEpoch` to its installation boot. Older
+profiles are refused rather than migrated; preserve their guests and evidence.
+Any reboot, even with zero execution records, refuses new work before accessing
+old controller state. Do not repair, move or rebaseline that state. Use a new guest.
+Each guest retains its original signing key; key rotation and disk/memory snapshot
+rollback are unsupported.
+
+The installer leaves `qualified: false` and installs a hashed journald persistence
+drop-in. Admission checks effective persistent storage, a current-boot entry in the
+persistent journal, and journal readability. Persistence is not a guarantee against
+vacuum, disk exhaustion or permanent evidence loss. Unknown bound tickets and
+current-boot active tickets still unproven after `deadlineAt + 120 seconds` cause
+permanent root-owned quarantine, as does an epoch mismatch. Restoring journal access
+does not clear that quarantine. Same-ticket native inspection/cancellation and
+same-boot reconciliation remain available, but cannot authorize new work on a
+quarantined guest. Time, health, quarantine and controller bookkeeping never prove
+retirement.
+
+Capacity exhaustion alone is transient refusal: new reservations stop at the
+existing 16-ticket/128-MiB limits, but an already-reserved ticket is not charged again
+at start. Unknown bound records and inputs stay counted and preserved. Never delete
+records or clear the quarantine file to reclaim capacity.
+
+Admission refusals carry bounded reason codes through the tools/controller. The
+foreground CLI prints those codes and exits **3**. Initial plan-submission refusal
+does not write workflow state; a later pre-review refusal retains the already
+submitted plan with `review_aborted`. The controller's single-use, session-bound
+submission object prevents a redundant admission check between submission writes;
+it cannot bypass the fresh review/worker checks or grant verifier authority.
+
+Qualification uses at most two **new** isolated guests and checks free space for
+each guest disk plus 20 GiB before allocation. Only the disposable canary may receive
+`qualified: true`, after negative tests pass; existing guests, defaults and actual
+production remain unchanged. `--verifier linux-production` uses ordinary runtime
+configuration rather than a lab executor override. Eligibility requires three
+independent fixtures for each of the eight scenario families, with zero unexpected
+failures. Retain failures and stop eligibility on an unexplained model abort.
+Quarantine/reboot handling is stop-and-preserve, not legacy fallback or rollback.
+
+The host-side `scripts/lca-soak-supervisor.ts` owns evidence before provisioning:
+exclusive writer lock, append-only events, a separate tail anchor and immutable
+per-invocation receipt snapshots. Workloads receive no writable audit path.
+`scripts/lca-soak-manifest.ts --check <evidence-root>` checks lineage completeness
+and retained outcomes. This detects incomplete runs and accidental truncation,
+not deliberate edits by the host owner; neither manifest nor anchor is native
+retirement evidence.
+
+Each evidence directory also retains a private, immutable `soak-binding.json`:
+`{schema:"lca.soak-binding.v1",vmC:"<SSH target>",fixtures:<normalized lca.soak-fixtures.v1>}`.
+The normalized fixture object includes every provisioning and invocation argv,
+working directory, timeout, lineage/fixture identity, receipt path and resume
+policy. Its SHA-256 is recorded in the first `supervisor-start` event, then covered
+by the manifest chain and tail anchor. The checker uses that retained object to
+recompute each original effective argv hash, including the parent session ID
+resolved from invocation 1's immutable snapshot. `--restart` requires the same
+normalized fixture object and SSH target and refuses mismatches before lock
+creation, tail recovery, evidence writes or child/SSH launches. This host-owned
+hash binding detects accidental changes; it is not external authentication and
+does not protect against deliberate edits by the host owner.
+
+The parent-supplied remote driver transport must report the driver's planned
+self-SIGKILL as remote numeric exit status `137` (`signal: null`) after preserving
+the matching receipt assertions. A SIGKILL observed on the local transport/SSH
+child remains `killed` and unexpected; the supervisor never upgrades a local
+signal to the remote status. For timeout, SIGINT/SIGTERM and receipt overflow,
+the supervisor signals only its directly owned `ChildProcess` handle; it does not
+create or signal process groups and makes no claim that descendants were terminated
+or retired. A direct child's exit releases its handle even if a descendant keeps a
+receipt pipe open. Receipt capture gets a bounded drain window, then the owned read
+stream is destroyed and incomplete output is reported as a failure; the supervisor
+does not wait indefinitely or signal that descendant. PTY allocation and log capture
+remain responsibilities of the parent transport, not claims made by the supervisor.
 
 Cancellation failure receipts preserve the exact observed verifier reference before
 bounded cleanup, retain the original error and cleanup outcomes, and keep retirement

@@ -7,13 +7,67 @@ import { createExecutionRunStore, type ExecutionRecord, type ExecutionRunStore }
 import { createExecutionPolicy } from "./tool-policy.ts"
 import { createOpenCodeHost, type OpenCodeRecoveryContext } from "./opencode.ts"
 import { createLegacyVerifierExecutor } from "../orchestration/legacy-verifier.ts"
+import { createLinuxVerifierExecutor } from "../orchestration/linux-verifier.ts"
+import { inspectLinuxVerifierProfile, linuxBootEpochMatches } from "./linux-domain.ts"
 import { taskWorktreeOwner } from "../orchestration/worktree.ts"
 import { stateRoot } from "../state/store.ts"
 import { realpathSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
-import { EXECUTION_ROLES, type ExecutionReference, type ExecutionRuntime, type ExecutionRole } from "./types.ts"
+import { EXECUTION_ROLES, LinuxAdmissionRefused, type LinuxAdmission, type LinuxAdmissionReason,
+  type PlanSubmissionAdmission, type ExecutionReference, type ExecutionRuntime, type ExecutionRole } from "./types.ts"
 
 const runtimes = new WeakMap<HookDeps, ExecutionRuntime>()
+
+/** Fixed installed-root admission only. This never supplies retirement evidence. */
+export function createLinuxAdmission({ qualification = false }: { qualification?: boolean } = {}): LinuxAdmission {
+  if (typeof qualification !== "boolean") throw new TypeError("invalid Linux admission mode")
+  const verifier = createLinuxVerifierExecutor({ qualification })
+  const submissions = new WeakSet<PlanSubmissionAdmission>()
+  const admitNewExecution = async (): Promise<void> => {
+    const reasons: LinuxAdmissionReason[] = []
+    const local = inspectLinuxVerifierProfile(qualification)
+    for (const problem of local.problems) {
+      reasons.push(problem === "root verifier profile is not qualified for production" ? "unqualified" : "profile-invalid")
+    }
+    const result = await verifier.preflight("linux-single-use")
+    const health = result.admission
+    if (!health || (!result.compatible && !health.reasons.length &&
+      (!health.bootEpochMatch || !health.journal.persistentEffective ||
+        !health.journal.persistentEntry || !health.journal.readable))) {
+      reasons.push("gate-unavailable")
+    } else {
+      if (!health.bootEpochMatch) reasons.push("boot-epoch")
+      if (!health.journal.persistentEffective) reasons.push("journal-persistence")
+      if (!health.journal.persistentEntry) reasons.push("journal-entry")
+      if (!health.journal.readable) reasons.push("journal-readable")
+      if (health.unknownBound) reasons.push("unknown-bound")
+      if (health.staleActive) reasons.push("stale-active")
+      if (health.latched) reasons.push("latched")
+      if (!health.capacityAvailable && result.compatible && !reasons.length) reasons.push("capacity-exhausted")
+      if ((!result.compatible || health.quarantineRequired) && !reasons.length) reasons.push("gate-unavailable")
+    }
+    if (reasons.length) throw new LinuxAdmissionRefused("admit", reasons)
+  }
+  return {
+    assertBootEpoch() {
+      if (!inspectLinuxVerifierProfile(true).compatible) throw new LinuxAdmissionRefused("epoch", ["profile-invalid"])
+      if (!linuxBootEpochMatches()) throw new LinuxAdmissionRefused("epoch", ["boot-epoch"])
+    },
+    admitNewExecution,
+    async admitPlanSubmission(sessionID) {
+      if (!sessionID) throw new TypeError("invalid plan submission session")
+      await admitNewExecution()
+      const admission: PlanSubmissionAdmission = Object.freeze({ purpose: "plan-submission", sessionID })
+      submissions.add(admission)
+      return admission
+    },
+    consumePlanSubmission(admission, sessionID) {
+      if (!admission || !submissions.has(admission) || admission.purpose !== "plan-submission" ||
+          admission.sessionID !== sessionID) throw new TypeError("invalid plan submission admission")
+      submissions.delete(admission)
+    },
+  }
+}
 
 /** Assemble the single OpenCode runtime per plugin instance; shared modules only receive ExecutionRuntime. */
 export function getOpenCodeRuntime(deps: HookDeps): ExecutionRuntime {
@@ -39,6 +93,10 @@ export function getOpenCodeRuntime(deps: HookDeps): ExecutionRuntime {
     },
   } : undefined)
 
+  const verificationProfile = deps.config.delegate.verifier
+  if (verificationProfile !== "legacy-unowned" && verificationProfile !== "linux-single-use") {
+    throw new TypeError("invalid verifier selection")
+  }
   const runtime: ExecutionRuntime = {
     instance: INSTANCE_ID,
     directory: deps.directory,
@@ -47,8 +105,9 @@ export function getOpenCodeRuntime(deps: HookDeps): ExecutionRuntime {
     config: deps.config,
     log: deps.log,
     host,
-    verificationProfile: "legacy-unowned",
-    verifier: createLegacyVerifierExecutor(),
+    verificationProfile,
+    verifier: verificationProfile === "linux-single-use" ? createLinuxVerifierExecutor() : createLegacyVerifierExecutor(),
+    ...(verificationProfile === "linux-single-use" ? { linuxAdmission: createLinuxAdmission({ qualification: false }) } : {}),
     runs,
     policy,
     observe: {

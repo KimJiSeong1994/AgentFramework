@@ -61,6 +61,8 @@ export type ExecutionOutcome = {
   status: "completed" | "failed" | "cancelled" | "unresolved" | "incomplete"
   text?: string
   error?: string
+  /** Bounded SDK error classification, never an inferred cause or unbounded error payload. */
+  errorName?: string
   childMessageID?: string
   outputLimitReached?: boolean
   usage?: unknown
@@ -117,6 +119,44 @@ export type ExecutionObservation = {
   verification?: (fact: SkillVerificationFactInput) => void
 }
 
+export const LINUX_ADMISSION_REASONS = [
+  "boot-epoch", "profile-invalid", "unqualified", "journal-persistence", "journal-entry",
+  "journal-readable", "unknown-bound", "stale-active", "latched", "capacity-exhausted", "gate-unavailable",
+] as const
+export type LinuxAdmissionReason = (typeof LINUX_ADMISSION_REASONS)[number]
+export type LinuxAdmissionRefusal = { phase: "epoch" | "admit"; reasons: readonly LinuxAdmissionReason[] }
+
+export class LinuxAdmissionRefused extends Error {
+  readonly kind = "linux-admission-refused"
+  readonly phase: LinuxAdmissionRefusal["phase"]
+  readonly reasons: readonly LinuxAdmissionReason[]
+
+  constructor(phase: LinuxAdmissionRefusal["phase"], reasons: readonly LinuxAdmissionReason[]) {
+    if ((phase !== "epoch" && phase !== "admit") || !reasons.length ||
+        reasons.some(reason => !LINUX_ADMISSION_REASONS.includes(reason))) {
+      throw new TypeError("invalid Linux admission refusal")
+    }
+    const bounded = [...new Set(reasons)]
+    super(`lca: linux admission refused (${phase}): ${bounded.join(",")}`)
+    this.name = "LinuxAdmissionRefused"
+    this.phase = phase
+    this.reasons = Object.freeze(bounded)
+  }
+}
+
+/** Instance-validated, single-use permission for plan writes, never execution or retirement authority. */
+export interface PlanSubmissionAdmission {
+  readonly purpose: "plan-submission"
+  readonly sessionID: string
+}
+
+export interface LinuxAdmission {
+  assertBootEpoch(): void
+  admitNewExecution(): Promise<void>
+  admitPlanSubmission(sessionID: string): Promise<PlanSubmissionAdmission>
+  consumePlanSubmission(admission: PlanSubmissionAdmission, sessionID: string): void
+}
+
 export type ExecutionRuntime = {
   instance: string
   directory: string
@@ -127,6 +167,7 @@ export type ExecutionRuntime = {
   host: ExecutionHost
   verificationProfile: VerificationProfile
   verifier: VerificationExecutor
+  linuxAdmission?: LinuxAdmission
   runs: ExecutionRunStore
   policy: ExecutionPolicy
   observe?: ExecutionObservation

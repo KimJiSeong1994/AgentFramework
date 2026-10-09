@@ -1,8 +1,9 @@
 // lca configuration: user (~/.config/lca/lca.jsonc) -> project (<worktree>/.lca/lca.jsonc), project wins per key.
 // Contract owned by the scaffold. Fill-in lives here; other modules only import the types + loadConfig.
-import { existsSync, readFileSync } from "node:fs"
+import { lstatSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+import { parse as parseJsonWithComments, type ParseError } from "jsonc-parser"
 
 export type Mode = "none" | "ulw" | "plan" | "data"
 
@@ -160,6 +161,8 @@ export type LcaConfig = {
   }
   /** Stage 2: serial worker delegation (delegate tool + idle-loop resume). */
   delegate: {
+    /** Explicit verifier selection; Linux admission never falls back to the legacy executor. */
+    verifier: "legacy-unowned" | "linux-single-use"
     /** run the reviewer child session on each task's diff + verify output */
     review: boolean
     /**
@@ -287,6 +290,7 @@ export const DEFAULT_CONFIG: LcaConfig = {
     min_margin: 0.2,
   },
   delegate: {
+    verifier: "legacy-unowned",
     review: true,
     worktree: false,
     review_strict: false,
@@ -318,12 +322,11 @@ export const DEFAULT_CONFIG: LcaConfig = {
   data: DATA_DEFAULTS,
 }
 
-// Strip line comments, block comments and trailing commas from JSONC. Good enough for config files.
 export function parseJsonc<T = unknown>(text: string): T {
-  const noBlock = text.replace(/\/\*[\s\S]*?\*\//g, "")
-  const noLine = noBlock.replace(/(^|[^:"'\\])\/\/.*$/gm, "$1")
-  const noTrailing = noLine.replace(/,(\s*[}\]])/g, "$1")
-  return JSON.parse(noTrailing) as T
+  const errors: ParseError[] = []
+  const value = parseJsonWithComments(text, errors, { allowTrailingComma: true })
+  if (errors.length) throw new SyntaxError("invalid JSONC")
+  return value as T
 }
 
 function deepMerge<T extends Record<string, any>>(base: T, patch: Partial<T> | undefined): T {
@@ -347,15 +350,71 @@ export function projectConfigPath(worktree: string): string {
   return join(worktree, ".lca", "lca.jsonc")
 }
 
+export type ConfigErrorKind = "unreadable" | "not-a-file" | "invalid-jsonc" | "invalid-verifier-selector"
+
+export class ConfigError extends Error {
+  constructor(readonly path: string, readonly kind: ConfigErrorKind) {
+    super(`lca: config ${path}: ${kind}`)
+    this.name = "ConfigError"
+  }
+}
+
+function configReadError(path: string, error: unknown): ConfigError {
+  const code = (error as NodeJS.ErrnoException)?.code
+  return new ConfigError(path, code === "ENOTDIR" || code === "EISDIR" ? "not-a-file" : "unreadable")
+}
+
+function configIsAbsent(path: string): boolean {
+  let cursor = path
+  for (;;) {
+    let entry: ReturnType<typeof lstatSync>
+    try {
+      entry = lstatSync(cursor)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw configReadError(path, error)
+      const parent = dirname(cursor)
+      if (parent === cursor) throw configReadError(path, error)
+      cursor = parent
+      continue
+    }
+    if (cursor === path) return false
+    if (entry.isSymbolicLink()) {
+      try { entry = statSync(cursor) }
+      catch (error) { throw configReadError(path, error) }
+    }
+    if (!entry.isDirectory()) throw new ConfigError(path, "not-a-file")
+    return true
+  }
+}
+
 export function loadConfig(worktree: string): LcaConfig {
   let cfg = DEFAULT_CONFIG
+  let selectorPath = projectConfigPath(worktree)
   for (const p of [userConfigPath(), projectConfigPath(worktree)]) {
-    if (!existsSync(p)) continue
+    let text: string
     try {
-      cfg = deepMerge(cfg, parseJsonc<Partial<LcaConfig>>(readFileSync(p, "utf8")))
+      text = readFileSync(p, "utf8")
     } catch (e) {
-      console.error(`[lca] invalid config ${p}: ${(e as Error).message}`)
+      if ((e as NodeJS.ErrnoException)?.code === "ENOENT" && configIsAbsent(p)) continue
+      throw configReadError(p, e)
     }
+    let patch: Partial<LcaConfig>
+    try {
+      patch = parseJsonc<Partial<LcaConfig>>(text)
+      if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw new Error()
+    } catch {
+      throw new ConfigError(p, "invalid-jsonc")
+    }
+    if (Object.hasOwn(patch, "delegate")) {
+      if (!patch.delegate || typeof patch.delegate !== "object" || Array.isArray(patch.delegate)) {
+        throw new ConfigError(p, "invalid-verifier-selector")
+      }
+      if (Object.hasOwn(patch.delegate, "verifier")) selectorPath = p
+    }
+    cfg = deepMerge(cfg, patch)
+  }
+  if (cfg.delegate.verifier !== "legacy-unowned" && cfg.delegate.verifier !== "linux-single-use") {
+    throw new ConfigError(selectorPath, "invalid-verifier-selector")
   }
   return cfg
 }

@@ -36,7 +36,7 @@ from typing import Any, Iterator
 
 
 PROTOCOL = "lca.linux-verifier.v1"
-PROFILE_SCHEMA = "lca.linux-verifier.profile.v1"
+PROFILE_SCHEMA = "lca.linux-verifier.profile.v2"
 RECORD_SCHEMA = "lca.linux-verifier.record.v1"
 RECEIPT_SCHEMA = "lca.linux-verifier.retirement.v1"
 UNIT = "lca-verifier.service"
@@ -44,6 +44,7 @@ GATE_UNIT = "lca-verifier-gate.service"
 CONTROL_SOCKET = "/run/lca-verifier/control.sock"
 RUNNER_SOCKET = "/run/lca-verifier/runner.sock"
 PROFILE_PATH = "/etc/lca-verifier/profile.json"
+JOURNALD_DROPIN = "/etc/systemd/journald.conf.d/lca-verifier.conf"
 HELPER_DIR = "/usr/local/libexec/lca-verifier"
 STATE_DIR = "/var/lib/lca-verifier"
 RECORD_DIR = f"{STATE_DIR}/records"
@@ -53,9 +54,11 @@ GIT_TMP_DIR = f"{PRIVATE_DIR}/git-tmp"
 ACTIVATION_LOCK = f"{STATE_DIR}/activation.lock"
 SIGNING_KEY = f"{PRIVATE_DIR}/signing-key.pem"
 CURRENT_INPUT = f"{STATE_DIR}/current"
+QUARANTINE_PATH = f"{STATE_DIR}/quarantine.json"
 CGROUP_ROOT = "/sys/fs/cgroup"
 SYSTEMCTL = "/usr/bin/systemctl"
 JOURNALCTL = "/usr/bin/journalctl"
+SYSTEMD_ANALYZE = "/usr/bin/systemd-analyze"
 OPENSSL = "/usr/bin/openssl"
 GIT = "/usr/bin/git"
 CGROUP_PATH = "/lca.slice/lca-verifier.service"
@@ -90,6 +93,7 @@ HEX40_OR_64 = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 INVOCATION_RE = re.compile(r"^[0-9a-f]{32}$")
 BOOT_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+MACHINE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 REQUIRED_PROFILE_FILES = {
     f"{HELPER_DIR}/gate.py",
@@ -100,6 +104,7 @@ REQUIRED_PROFILE_FILES = {
     "/etc/systemd/system/lca.slice",
     "/etc/polkit-1/rules.d/90-lca-verifier.rules",
     "/etc/sudoers.d/00-lca-verifier-deny",
+    JOURNALD_DROPIN,
 }
 _PROCESS_STATE_MUTEX = threading.RLock()
 _ACTIVATION_MUTEX = threading.Lock()
@@ -789,6 +794,9 @@ def _load_profile(*, check_hashes: bool = True) -> dict[str, Any]:
         raise GateError("root verifier profile is invalid") from exc
     if profile.get("schema") != PROFILE_SCHEMA or profile.get("unit") != UNIT:
         raise GateError("root verifier profile schema is unsupported")
+    boot_epoch = profile.get("bootEpoch")
+    if not isinstance(boot_epoch, str) or not BOOT_RE.fullmatch(boot_epoch):
+        raise GateError("root verifier boot epoch is invalid")
     if not isinstance(profile.get("qualified"), bool):
         raise GateError("root verifier qualification field is invalid")
     for key in ("controllerUID", "verifierUID"):
@@ -831,6 +839,122 @@ def _check_profile_files(profile: dict[str, Any]) -> None:
         raw = _read_secure_file(path, limit=16 * 1024 * 1024)
         if hashlib.sha256(raw).hexdigest() != expected:
             raise GateError("installed verifier helper or unit hash changed")
+
+
+def _empty_admission_health() -> dict[str, Any]:
+    return {
+        "bootEpochMatch": False,
+        "journal": {"persistentEffective": False, "persistentEntry": False, "readable": False},
+        "pendingTickets": 0,
+        "pendingBytes": 0,
+        "unknownBound": 0,
+        "staleActive": 0,
+        "latched": False,
+        "quarantineRequired": False,
+        "capacityAvailable": False,
+        "reasons": [],
+    }
+
+
+def _admission_health(profile: dict[str, Any], records: list[dict[str, Any]] | None) -> dict[str, Any]:
+    try:
+        current_boot = _boot_id()
+    except (OSError, UnicodeError, UnknownState):
+        current_boot = None
+    boot_epoch_match = (
+        current_boot is not None
+        and isinstance(profile.get("bootEpoch"), str)
+        and BOOT_RE.fullmatch(profile["bootEpoch"]) is not None
+        and profile["bootEpoch"] == current_boot
+    )
+
+    try:
+        journal = _journal_health(current_boot)
+    except (OSError, UnknownState, ValueError, subprocess.SubprocessError):
+        journal = {"persistentEffective": False, "persistentEntry": False, "readable": False}
+
+    unknown_bound = 0 if records is not None else 1
+    stale_active = 0
+    now_ms = int(time.time() * 1000)
+    pending: list[dict[str, Any]] = []
+    if records is not None:
+        for record in records:
+            state = record["state"]
+            binding = record.get("binding")
+            if state == "unknown" and isinstance(binding, dict):
+                unknown_bound += 1
+            if (
+                state in {"bound", "running", "retiring", "proving"}
+                and isinstance(binding, dict)
+                and current_boot is not None
+                and binding.get("bootID") == current_boot
+            ):
+                deadline = record.get("reference", {}).get("deadlineAt")
+                if (
+                    isinstance(deadline, bool)
+                    or not isinstance(deadline, int)
+                    or now_ms > deadline + MAX_RUNTIME_MS
+                ):
+                    stale_active += 1
+        pending = [
+            record for record in records
+            if record["state"] in {"prepared", "launching", "bound", "running", "retiring", "proving"}
+            or (record["state"] == "unknown" and isinstance(record.get("binding"), dict))
+            or os.path.lexists(record["inputPath"])
+        ]
+
+    pending_tickets = len(pending)
+    pending_bytes = sum(record["archiveBytes"] for record in pending)
+    capacity_available = (
+        records is not None
+        and pending_tickets < MAX_PENDING_TICKETS
+        and pending_bytes < MAX_PENDING_ARCHIVE_BYTES
+    )
+
+    reasons: set[str] = set()
+    if not boot_epoch_match:
+        reasons.add("boot-epoch")
+    if unknown_bound:
+        reasons.add("unknown-bound")
+    if stale_active:
+        reasons.add("stale-active")
+    if not journal["persistentEffective"]:
+        reasons.add("journal-persistence")
+    if not journal["persistentEntry"]:
+        reasons.add("journal-entry")
+    if not journal["readable"]:
+        reasons.add("journal-readable")
+
+    quarantine_reasons = [
+        reason for reason in ("boot-epoch", "unknown-bound", "stale-active") if reason in reasons
+    ]
+    latched = _quarantine_is_latched()
+    if quarantine_reasons and not latched:
+        try:
+            _create_quarantine_latch(profile, current_boot, quarantine_reasons)
+        except OSError:
+            pass
+        latched = _quarantine_is_latched()
+    if latched:
+        reasons.add("latched")
+
+    reason_order = (
+        "boot-epoch", "unknown-bound", "stale-active", "latched",
+        "journal-persistence", "journal-entry", "journal-readable",
+    )
+    ordered_reasons = [reason for reason in reason_order if reason in reasons]
+    return {
+        "bootEpochMatch": boot_epoch_match,
+        "journal": journal,
+        "pendingTickets": pending_tickets,
+        "pendingBytes": pending_bytes,
+        "unknownBound": unknown_bound,
+        "staleActive": stale_active,
+        "latched": latched,
+        "quarantineRequired": bool(quarantine_reasons or latched),
+        "capacityAvailable": capacity_available,
+        "reasons": ordered_reasons,
+    }
 
 
 def _check_state_dirs() -> None:
@@ -1020,6 +1144,22 @@ def _validate_terminal_record(record: dict[str, Any]) -> None:
         or receipt_result.get("outputSha256") != hashlib.sha256(result["output"].encode("utf-8")).hexdigest()
     ):
         raise GateError("terminal authority signed result does not match its output")
+
+
+def _read_admission_records() -> list[dict[str, Any]]:
+    _check_state_dirs()
+    try:
+        names = os.listdir(RECORD_DIR)
+    except OSError as exc:
+        raise GateError("authority records are unavailable") from exc
+    records: list[dict[str, Any]] = []
+    for name in sorted(names):
+        if name.startswith(".tmp-"):
+            raise GateError("interrupted authority record write is unresolved")
+        if not re.fullmatch(r"[0-9a-f]{32}\.json", name):
+            raise GateError("unexpected file in authority record directory")
+        records.append(_load_record(name[:-5]))
+    return records
 
 
 def _iter_records() -> Iterator[dict[str, Any]]:
@@ -1400,6 +1540,204 @@ def _journal_retirement(binding: dict[str, Any]) -> str | None:
     return None
 
 
+def _bounded_command_output(arguments: list[str], *, timeout: float, max_bytes: int) -> bytes | None:
+    try:
+        process = subprocess.Popen(
+            arguments,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_manager_environment(),
+        )
+    except OSError:
+        return None
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    try:
+        assert process.stdout is not None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("fixed journal probe timed out")
+            readable, _, _ = select.select([process.stdout], [], [], remaining)
+            if not readable:
+                raise TimeoutError("fixed journal probe timed out")
+            chunk = os.read(process.stdout.fileno(), min(64 * 1024, max_bytes + 1 - len(output)))
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > max_bytes:
+                process.kill()
+                process.wait(timeout=1)
+                return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or process.wait(timeout=remaining) != 0:
+            return None
+        return bytes(output)
+    except (OSError, subprocess.SubprocessError, TimeoutError, ValueError):
+        if process.poll() is None:
+            with contextlib.suppress(OSError):
+                process.kill()
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            process.wait(timeout=1)
+        return None
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def _journal_storage_is_persistent(configuration: str) -> bool:
+    source: str | None = None
+    section: str | None = None
+    effective: tuple[str | None, str | None] | None = None
+    for line in configuration.splitlines():
+        marker = re.fullmatch(r"#\s+(/[^\r\n]+)", line)
+        if marker:
+            source = marker.group(1).strip()
+            section = None
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        if stripped.startswith("["):
+            section = stripped[1:-1] if stripped.endswith("]") else None
+            continue
+        if section != "Journal" or not re.match(r"^\s*Storage\s*=", line):
+            continue
+        setting = re.fullmatch(r"\s*Storage\s*=\s*([^\s#;]*)(?:\s*[#;].*)?\s*", line)
+        effective = (setting.group(1) if setting else None, source)
+    return effective == ("persistent", JOURNALD_DROPIN)
+
+
+def _journal_config_is_persistent() -> bool:
+    output = _bounded_command_output(
+        [SYSTEMD_ANALYZE, "cat-config", "systemd/journald.conf"],
+        timeout=5,
+        max_bytes=256 * 1024,
+    )
+    if output is None:
+        return False
+    try:
+        configuration = output.decode("utf-8", errors="strict")
+    except UnicodeError:
+        return False
+    return _journal_storage_is_persistent(configuration)
+
+
+def _persistent_journal_directory() -> str | None:
+    try:
+        raw = _read_secure_file("/etc/machine-id", limit=128)
+        machine_id = raw.decode("ascii", errors="strict")
+        if machine_id.endswith("\n"):
+            machine_id = machine_id[:-1]
+        if not MACHINE_ID_RE.fullmatch(machine_id):
+            return None
+        path = f"/var/log/journal/{machine_id}"
+        _safe_path(path, expected_type=stat.S_IFDIR)
+        return path
+    except (GateError, OSError, UnicodeError):
+        return None
+
+
+def _journal_has_current_pid1_entry(boot_id: str, directory: str | None) -> bool:
+    boot_compact = boot_id.replace("-", "")
+    arguments = [JOURNALCTL]
+    if directory is not None:
+        arguments.append(f"--directory={directory}")
+    arguments.extend(("--no-pager", "--output=json", f"--boot={boot_compact}", "-n", "1", "_PID=1"))
+    output = _bounded_command_output(arguments, timeout=8, max_bytes=2 * 1024 * 1024)
+    if output is None:
+        return False
+    try:
+        lines = output.decode("utf-8", errors="strict").splitlines()
+        if not lines:
+            return False
+        for line in lines:
+            entry = json.loads(line, object_pairs_hook=_unique_object)
+            if not isinstance(entry, dict) or entry.get("_PID") != "1" or entry.get("_BOOT_ID") != boot_compact:
+                return False
+        return True
+    except (ValueError, UnicodeError, json.JSONDecodeError):
+        return False
+
+
+def _journald_service_is_running() -> bool:
+    output = _bounded_command_output(
+        [SYSTEMCTL, "show", "--no-pager", "--property=ActiveState,SubState", "systemd-journald.service"],
+        timeout=5,
+        max_bytes=16 * 1024,
+    )
+    if output is None:
+        return False
+    try:
+        lines = output.decode("utf-8", errors="strict").splitlines()
+    except UnicodeError:
+        return False
+    properties: dict[str, str] = {}
+    for line in lines:
+        name, separator, value = line.partition("=")
+        if not separator or name not in {"ActiveState", "SubState"} or name in properties:
+            return False
+        properties[name] = value
+    return properties == {"ActiveState": "active", "SubState": "running"}
+
+
+def _journal_health(boot_id: str | None) -> dict[str, bool]:
+    journal_directory = _persistent_journal_directory()
+    readable_entry = bool(boot_id is not None and _journal_has_current_pid1_entry(boot_id, None))
+    journald_running = _journald_service_is_running()
+    return {
+        "persistentEffective": _journal_config_is_persistent(),
+        "persistentEntry": bool(
+            boot_id is not None
+            and journal_directory is not None
+            and _journal_has_current_pid1_entry(boot_id, journal_directory)
+        ),
+        "readable": bool(readable_entry and journald_running),
+    }
+
+
+def _quarantine_is_latched() -> bool:
+    try:
+        os.lstat(QUARANTINE_PATH)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _create_quarantine_latch(profile: dict[str, Any], boot_id: str | None, reasons: list[str]) -> None:
+    content = _canonical_json({
+        "schema": "lca.linux-verifier.quarantine.v1",
+        "bootEpoch": profile.get("bootEpoch"),
+        "observedBootID": boot_id,
+        "reasons": reasons,
+    }) + b"\n"
+    descriptor = os.open(
+        QUARANTINE_PATH,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        os.fchown(descriptor, 0, 0)
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(content)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError(errno.EIO, "quarantine latch write made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory_fd = os.open(STATE_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _check_signing_key(profile: dict[str, Any]) -> None:
     info = _safe_path(SIGNING_KEY, expected_type=stat.S_IFREG, private=True)
     if info.st_mode & 0o777 != 0o600:
@@ -1578,12 +1916,21 @@ class LinuxVerifierGate:
 
     def preflight(self) -> dict[str, Any]:
         problems: list[str] = []
+        admission = _empty_admission_health()
         try:
             if not sys.platform.startswith("linux") or os.geteuid() != 0:
                 raise GateError("native root Linux service is unavailable")
             _assert_initial_user_namespace()
             _check_state_dirs()
             profile = _load_profile(check_hashes=True)
+            with _exclusive_lock():
+                try:
+                    records = _read_admission_records()
+                except (GateError, OSError):
+                    records = None
+                admission = _admission_health(profile, records)
+            if admission["reasons"]:
+                problems.append(f"Linux admission health reasons: {','.join(admission['reasons'])}")
             if _boot_id() == "":
                 raise GateError("boot identity is unavailable")
             if not os.path.isfile("/sys/fs/cgroup/cgroup.controllers") or not os.path.isfile(f"{CGROUP_ROOT}/lca.slice/cgroup.kill"):
@@ -1600,7 +1947,7 @@ class LinuxVerifierGate:
             _check_signing_key(profile)
         except (OSError, ValueError, GateError, UnknownState, IndexError) as exc:
             problems.append(str(exc) if isinstance(exc, GateError) else "native verifier environment failed a fixed compatibility check")
-        return {"ok": True, "compatible": not problems, "problems": problems}
+        return {"ok": True, "compatible": not problems, "problems": problems, "admission": admission}
 
     def _read_all_records(self) -> list[dict[str, Any]]:
         return list(_iter_records())
@@ -1629,6 +1976,13 @@ class LinuxVerifierGate:
             with _exclusive_lock():
                 _assert_initial_user_namespace()
                 profile = _load_profile(check_hashes=True)
+                try:
+                    admission_records = _read_admission_records()
+                except (GateError, OSError):
+                    admission_records = None
+                admission = _admission_health(profile, admission_records)
+                if admission["reasons"]:
+                    raise GateError(f"Linux admission health refused: {','.join(admission['reasons'])}")
                 records = self._read_all_records()
                 now_ms = int(time.time() * 1000)
                 for record in records:
@@ -1780,14 +2134,26 @@ class LinuxVerifierGate:
                 reference, record = self._check_request_reference(reference)
                 if record["state"] != "prepared":
                     return self._unknown(record, "ticket is not an unused prepared ticket")
-                if _boot_id() != reference["bootID"]:
-                    _cancel_prepared_locked(record, "ticket belongs to a different boot", cancelled=False)
-                    return self._unknown(record, "ticket belongs to a different boot")
-                if int(time.time() * 1000) >= reference["deadlineAt"]:
-                    _cancel_prepared_locked(record, "ticket deadline expired before activation", timed_out=True, cancelled=False)
-                    return self._unknown(record, "ticket deadline expired before activation")
                 try:
                     profile = _load_profile(check_hashes=True)
+                    try:
+                        admission_records = _read_admission_records()
+                    except (GateError, OSError):
+                        admission_records = None
+                    admission = _admission_health(profile, admission_records)
+                    if admission["reasons"]:
+                        _cancel_prepared_locked(
+                            record,
+                            f"Linux admission health refused: {','.join(admission['reasons'])}",
+                            cancelled=False,
+                        )
+                        return self._unknown(record, "Linux admission health refused")
+                    if _boot_id() != reference["bootID"]:
+                        _cancel_prepared_locked(record, "ticket belongs to a different boot", cancelled=False)
+                        return self._unknown(record, "ticket belongs to a different boot")
+                    if int(time.time() * 1000) >= reference["deadlineAt"]:
+                        _cancel_prepared_locked(record, "ticket deadline expired before activation", timed_out=True, cancelled=False)
+                        return self._unknown(record, "ticket deadline expired before activation")
                     _check_signing_key(profile)
                     before_status = self._assert_unit_inactive(profile)
                     if _safe_input_tree(record["inputPath"], reference["inputSnapshotID"]) != "unchanged":

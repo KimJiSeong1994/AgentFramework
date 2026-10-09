@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { createExecutionRunStore, ExecutionRunBusyError, ExecutionRunCorruptError, ExecutionRunUnresolvedError, settled, strictQuiescent } from "../src/hosts/run-state.ts"
 import type { VerificationReference, VerificationResult } from "../src/orchestration/verifier.ts"
 import { stateRoot } from "../src/state/store.ts"
@@ -449,6 +450,110 @@ test("matching Linux reference and evidence text cannot mint native retirement a
     const forgedBytes = readFileSync(path)
     expect(() => f.store.status()).toThrow(ExecutionRunCorruptError)
     expect(readFileSync(path)).toEqual(forgedBytes)
+  } finally { f.cleanup() }
+})
+
+test("unit characterization only, not native Linux proof: a Linux verifier record is rejected after a boot change", async () => {
+  const f = fixture()
+  try {
+    const runStateModule = new URL("../src/hosts/run-state.ts", import.meta.url).href
+    const linuxDomainModule = fileURLToPath(new URL("../src/hosts/linux-domain.ts", import.meta.url))
+    const stateStoreModule = new URL("../src/state/store.ts", import.meta.url).href
+    const script = `import { mock } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+let mockedBoot = "boot-A";
+mock.module(${JSON.stringify(linuxDomainModule)}, () => ({
+  authenticateLinuxVerification(result, reference) {
+    return reference?.bootID === mockedBoot && result?.profile === "linux-single-use" &&
+      result?.isolationEstablished === true && result?.domainState === "empty" &&
+      result?.proof?.reference?.bootID === mockedBoot;
+  },
+}));
+const { createExecutionRunStore, ExecutionRunCorruptError, settled } = await import(${JSON.stringify(runStateModule)});
+const { stateRoot } = await import(${JSON.stringify(stateStoreModule)});
+const worktree = process.env.RUN_STATE_WORKTREE;
+const store = createExecutionRunStore(worktree);
+const claim = store.claim("session", "instance", process.pid);
+const executionID = "linux-verifier-boot-change";
+const input = { inputSnapshotID: "snapshot-1", inputDigest: "a".repeat(64), deadlineAt: Date.now() + 60000, maxOutputChars: 4000 };
+store.registerIntent(claim, {
+  executionId: executionID, ownerSession: claim.ownerSession, taskId: "task", attemptId: "attempt",
+  generation: claim.generation, role: "worker", cwd: "/tmp", policyID: "fixture-fixed-policy",
+  kind: "verifier", profile: "linux-single-use", ...input,
+});
+const reference = {
+  kind: "verifier", executionID, profile: "linux-single-use", invocationID: "invocation-boot-change",
+  ...input, unit: "lca-verifier.service", bootID: "boot-A",
+};
+const result = {
+  profile: "linux-single-use", parentExit: 0, timedOut: false, cancelled: false,
+  isolationEstablished: true, domainState: "empty", integrity: "unchanged", output: "ok",
+  proof: { reference, evidence: "test-contained authenticator fixture" },
+};
+store.bindVerifierRef(claim, executionID, reference);
+store.markVerifierDispatched(claim, executionID);
+store.recordTerminal(claim, executionID, {
+  outcome: "ok", terminalAt: Date.now(), quiescentAt: Date.now(), verification: result,
+});
+const accepted = store.status().executions[0];
+const settledUnderBootA = settled(accepted);
+store.assertQuiescent(claim);
+store.release(claim);
+const path = join(stateRoot(worktree), "execution-runs", "state.json");
+const releasedUnderBootA = !store.status().claim;
+const before = readFileSync(path);
+const settledRecord = JSON.parse(before.toString("utf8")).executions[0];
+mockedBoot = "boot-B";
+const settledUnderBootB = settled(settledRecord);
+const capture = action => {
+  try { action(); return { threw: false, exact: false, name: "none" }; }
+  catch (error) {
+    return {
+      threw: true,
+      exact: error instanceof ExecutionRunCorruptError,
+      name: error?.constructor?.name ?? "unknown",
+    };
+  }
+};
+const readFailure = capture(() => store.status());
+const settleFailure = capture(() => store.assertQuiescent(claim));
+const releaseFailure = capture(() => store.release(claim));
+console.log(JSON.stringify({
+  settledUnderBootA, releasedUnderBootA,
+  settledUnderBootB, readFailure, settleFailure, releaseFailure,
+  bytesUnchanged: readFileSync(path).equals(before),
+}));`
+    const env = {
+      PATH: process.env.PATH ?? "", HOME: f.home, XDG_STATE_HOME: f.home,
+      RUN_STATE_WORKTREE: join(f.home, "worktree"),
+    }
+    const child = Bun.spawn([process.execPath, "-e", script], {
+      cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe",
+    })
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ])
+    expect(stderr).toBe("")
+    expect(exitCode).toBe(0)
+    const result = JSON.parse(stdout) as {
+      settledUnderBootA: boolean
+      releasedUnderBootA: boolean
+      settledUnderBootB: boolean
+      readFailure: { threw: boolean; exact: boolean; name: string }
+      settleFailure: { threw: boolean; exact: boolean; name: string }
+      releaseFailure: { threw: boolean; exact: boolean; name: string }
+      bytesUnchanged: boolean
+    }
+    expect(result).toEqual({
+      settledUnderBootA: true,
+      releasedUnderBootA: true,
+      settledUnderBootB: false,
+      readFailure: { threw: true, exact: true, name: "ExecutionRunCorruptError" },
+      settleFailure: { threw: true, exact: true, name: "ExecutionRunCorruptError" },
+      releaseFailure: { threw: true, exact: true, name: "ExecutionRunCorruptError" },
+      bytesUnchanged: true,
+    })
   } finally { f.cleanup() }
 })
 
