@@ -3,7 +3,7 @@ import { DEFAULT_CONFIG } from "../src/config.ts"
 import { newWorkflow, writeWorkflow } from "../src/flow/state.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { clearReviewSession, isReviewSession, markReviewSession, parsePlanVerdict, reviewToolCapProblem, runPlanReview } from "../src/flow/review.ts"
-import { createExecutionRunStore } from "../src/hosts/run-state.ts"
+import { createExecutionRunStore, settled } from "../src/hosts/run-state.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
 import type { ExecutionOutcome, ExecutionRequest, ExecutionRuntime } from "../src/hosts/types.ts"
 import type { Plan } from "../src/flow/plan.ts"
@@ -35,6 +35,7 @@ function fixture(options: {
   prepareWait?: () => Promise<void>
   ttl?: number
   model?: string
+  verificationProfile?: "legacy-unowned" | "linux-single-use"
 } = {}) {
   const config = { ...DEFAULT_CONFIG, models: { ...DEFAULT_CONFIG.models, ...(options.model ? { reviewer: options.model } : {}) }, delegate: { ...DEFAULT_CONFIG.delegate, review_ttl_ms: options.ttl ?? 200 } }
   const runs = createExecutionRunStore(wt.worktree)
@@ -43,7 +44,7 @@ function fixture(options: {
   let request: ExecutionRequest | undefined
   const runtime: ExecutionRuntime = {
     instance: "review-fixture", directory: wt.worktree, worktree: wt.worktree, stateRoot: wt.stateHome,
-    config, log: () => {}, runs, policy, verificationProfile: "legacy-unowned", verifier: createLegacyVerifierExecutor(),
+    config, log: () => {}, runs, policy, verificationProfile: options.verificationProfile ?? "legacy-unowned", verifier: createLegacyVerifierExecutor(),
     host: {
       identity: { engine: "fixture", profile: "review" },
       preflight: async () => ({ compatible: true, controls: {}, problems: [] }),
@@ -101,6 +102,25 @@ describe("reviewToolCapProblem", () => {
 })
 
 describe("runPlanReview with neutral runtime", () => {
+  for (const verificationProfile of ["legacy-unowned", "linux-single-use"] as const) {
+    test(`plan review remains a legacy-unowned host execution under ${verificationProfile} verification profile`, async () => {
+      const f = fixture({ verificationProfile })
+      const verdict = await runPlanReview(f.runtime, wf(), plan())
+      const status = f.runs.status()
+      const execution = status.executions[0]!
+      expect(execution).toMatchObject({
+        kind: "host",
+        profile: "legacy-unowned",
+        terminal: { outcome: "completed" },
+        reconciliation: { outcome: "terminal", quiescent: true },
+      })
+      expect(settled(execution)).toBe(true)
+      expect(status.claim).toBeUndefined()
+      expect(f.calls).toEqual(["prepare", "run", "reconcile"])
+      expect(verdict).toEqual({ verdict: "okay", findings: [] })
+    })
+  }
+
   test("durably records intent and ref before run, enforces immutable reviewer policy, then releases", async () => {
     const f = fixture({ text: "- concrete\nVERDICT: ITERATE" })
     expect(await runPlanReview(f.runtime, wf(), plan())).toEqual({ verdict: "iterate", findings: ["concrete"] })

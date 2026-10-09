@@ -2,8 +2,9 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { expect, test } from "bun:test"
 import {
-  authenticateLinuxVerification, isCurrentLinuxVerifierReference, linuxRootFileMetadataTrusted,
-  linuxRootPathMetadataTrusted, linuxUserNamespaceMapTrusted, verifyLinuxVerificationCrypto,
+  authenticateLinuxVerification, isCurrentLinuxVerifierReference, linuxBootEpochMatches,
+  linuxRootFileMetadataTrusted, linuxRootPathMetadataTrusted, linuxUserNamespaceMapTrusted,
+  linuxVerifierProfileShapeValid, verifyLinuxVerificationCrypto,
 } from "../src/hosts/linux-domain.ts"
 import type { VerificationReference, VerificationResult } from "../src/orchestration/verifier.ts"
 
@@ -11,11 +12,23 @@ const { privateKey, publicKey } = generateKeyPairSync("ed25519")
 const bootID = "11111111-1111-4111-8111-111111111111"
 const ticket = "2".repeat(32)
 const tree = "a".repeat(40)
+const JOURNAL_DROPIN_PATH = "/etc/systemd/journald.conf.d/lca-verifier.conf"
 const reference: VerificationReference = {
   kind: "verifier", executionID: "execution-1", profile: "linux-single-use", invocationID: ticket,
   inputSnapshotID: tree, inputDigest: createHash("sha256").update(tree).digest("hex"),
   deadlineAt: 2_000_000_000_000, maxOutputChars: 128, unit: "lca-verifier.service", bootID,
 }
+const profileFiles = [
+  "/usr/local/libexec/lca-verifier/gate.py",
+  "/usr/local/libexec/lca-verifier/runner.py",
+  "/usr/local/libexec/lca-verifier/client.py",
+  "/etc/systemd/system/lca-verifier.service",
+  "/etc/systemd/system/lca-verifier-gate.service",
+  "/etc/systemd/system/lca.slice",
+  "/etc/polkit-1/rules.d/90-lca-verifier.rules",
+  "/etc/sudoers.d/00-lca-verifier-deny",
+  JOURNAL_DROPIN_PATH,
+]
 
 function signedResult(options: {
   receipt?: Record<string, unknown>
@@ -128,6 +141,31 @@ test("root profile path metadata rejects foreign owners, writable modes and syml
   expect(linuxRootPathMetadataTrusted(rootDirectory, "directory")).toBe(true)
   expect(linuxRootPathMetadataTrusted({ ...rootDirectory, mode: 0o40775 }, "directory")).toBe(false)
   expect(linuxRootPathMetadataTrusted({ ...rootDirectory, isSymbolicLink: true }, "directory")).toBe(false)
+})
+
+test("only the exact v2 profile shape with a canonical boot epoch and journal drop-in hash is accepted", () => {
+  const profile = {
+    schema: "lca.linux-verifier.profile.v2",
+    bootEpoch: bootID,
+    unit: "lca-verifier.service",
+    controllerUID: 1000,
+    verifierUID: 1001,
+    publicKeyPem: "ed25519 public key",
+    files: Object.fromEntries(profileFiles.map(path => [path, "a".repeat(64)])),
+    qualified: false,
+  }
+  expect(linuxVerifierProfileShapeValid(profile)).toBe(true)
+  expect(linuxVerifierProfileShapeValid({ ...profile, schema: "lca.linux-verifier.profile.v1" })).toBe(false)
+  expect(linuxVerifierProfileShapeValid({ ...profile, bootEpoch: "11111111111141118111111111111111" })).toBe(false)
+  const withoutDropin = Object.fromEntries(
+    Object.entries(profile.files).filter(([path]) => path !== JOURNAL_DROPIN_PATH),
+  )
+  expect(linuxVerifierProfileShapeValid({ ...profile, files: withoutDropin })).toBe(false)
+  expect(linuxVerifierProfileShapeValid({ ...profile, extra: true })).toBe(false)
+})
+
+test("boot epoch comparator fails closed off Linux", () => {
+  if (process.platform !== "linux") expect(linuxBootEpochMatches()).toBe(false)
 })
 
 test("namespace maps must be the single complete initial-namespace mapping", () => {

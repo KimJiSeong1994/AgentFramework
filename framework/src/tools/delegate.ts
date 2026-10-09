@@ -10,6 +10,7 @@ import { suiteProblem } from "../data/check.ts"
 import { taskTextProblem } from "../orchestration/gaming.ts"
 import { getQueue } from "../orchestration/queue.ts"
 import { getOpenCodeRuntime } from "../hosts/opencode-runtime.ts"
+import { LinuxAdmissionRefused } from "../hosts/types.ts"
 import { openTasks, protectedFiles, readLedger, summarizeLedger } from "../state/ledger.ts"
 import { clearAbort, readAbort } from "../state/store.ts"
 import { MAIN_AGENT } from "../hooks/tool-before.ts"
@@ -41,7 +42,8 @@ export const delegateArgs = {
 }
 
 export function createDelegateTool(deps: HookDeps): ToolDefinition {
-  const queue = getQueue(getOpenCodeRuntime(deps))
+  const runtime = getOpenCodeRuntime(deps)
+  const queue = getQueue(runtime)
   return tool({
     description: DELEGATE_DESCRIPTION,
     args: delegateArgs,
@@ -49,6 +51,7 @@ export function createDelegateTool(deps: HookDeps): ToolDefinition {
       if (ctx.agent && ctx.agent !== MAIN_AGENT) {
         throw new Error(`lca: delegate is only available to the ${MAIN_AGENT} agent (current agent: ${ctx.agent}). Do the work directly.`)
       }
+      runtime.linuxAdmission?.assertBootEpoch()
       const sessionID = ctx.sessionID
       if (ctx.abort.aborted) throw new Error("lca: aborted before the task queue started")
       if (queue.isRunning(sessionID)) {
@@ -112,6 +115,7 @@ export function createDelegateTool(deps: HookDeps): ToolDefinition {
         const runPromise = queue.run(sessionID, { messageID: ctx.messageID, resumed: args.resume === true })
         if (ctx.abort.aborted) onAbort() // aborted between the check above and run(): the entry now exists
         const run = await runPromise
+        if (run.refused) throw new LinuxAdmissionRefused(run.refused.phase, run.refused.reasons)
         const ledger = readLedger(deps.worktree, sessionID)
         if (run.noSnapshot && ledger.tasks.some((t) => taskIds.includes(t.id) && t.kind !== "data")) notes.push("This directory is not a git repository: the reviewer and the protected-file guard were unavailable, only the verify commands were checked.")
         const closing = "Report this result to the user now, in at most 10 lines. Do not rerun the tests or fix failed tasks yourself unless the user asks."

@@ -258,14 +258,31 @@ describe("OpenCode execution host contract", () => {
     expect(await handle.reconcile()).toMatchObject({ outcome: "running", quiescent: false })
   })
 
-  it("recognizes only a correlated completed abort response as terminal", async () => {
+  it("retains the exact SDK name for a correlated MessageAbortedError response", async () => {
     const sdk = client({ prompt: async () => ({ data: {
       info: { sessionID: "vendor-session", parentID: "msg_execution", role: "assistant", error: { name: "MessageAbortedError" } },
       parts: [],
     } }) })
     const handle = await createOpenCodeHost(sdk.value, policyBinding().capabilities).prepare(request())
-    expect(await handle.run()).toMatchObject({ status: "cancelled" })
+    expect(await handle.run()).toMatchObject({ status: "cancelled", errorName: "MessageAbortedError" })
     expect(await handle.reconcile()).toMatchObject({ outcome: "terminal", quiescent: true })
+  })
+
+  it("retains bounded SDK response names and rejects malicious names", async () => {
+    const responseError = client({ prompt: async () => ({ error: { name: "SDKFailure", message: "response rejected" } }) })
+    const responseHandle = await createOpenCodeHost(responseError.value, policyBinding().capabilities).prepare(request())
+    expect(await responseHandle.run()).toMatchObject({ status: "failed", error: "SDKFailure", errorName: "SDKFailure" })
+
+    const maliciousName = `SDKFailure\n${"x".repeat(200)}`
+    const malformedResponse = client({ prompt: async () => ({ data: {
+      info: { sessionID: "vendor-session", parentID: "msg_execution", role: "assistant", error: { name: maliciousName } },
+      parts: [],
+    } }) })
+    const malformedHandle = await createOpenCodeHost(malformedResponse.value, policyBinding().capabilities).prepare(request())
+    const outcome = await malformedHandle.run()
+    expect(outcome).toMatchObject({ status: "failed", error: "[object Object]" })
+    expect(outcome).not.toHaveProperty("errorName")
+    expect(outcome.error).not.toContain(maliciousName)
   })
 
   it("cannot claim quiescence after a native shell tool may leave a descendant", async () => {

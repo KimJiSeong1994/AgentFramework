@@ -9,6 +9,7 @@ import type {
 const PROFILE_PATH = "/etc/lca-verifier/profile.json"
 const CLIENT_PATH = "/usr/local/libexec/lca-verifier/client.py"
 const UNIT_PATH = "/etc/systemd/system/lca-verifier.service"
+const JOURNAL_DROPIN_PATH = "/etc/systemd/journald.conf.d/lca-verifier.conf"
 const PRIVILEGED_POLICY_FILES = new Set([
   "/etc/polkit-1/rules.d/90-lca-verifier.rules",
   "/etc/sudoers.d/00-lca-verifier-deny",
@@ -22,9 +23,10 @@ const REQUIRED_PROFILE_FILES = [
   "/etc/systemd/system/lca.slice",
   "/etc/polkit-1/rules.d/90-lca-verifier.rules",
   "/etc/sudoers.d/00-lca-verifier-deny",
+  JOURNAL_DROPIN_PATH,
 ] as const
 const PROTOCOL = "lca.linux-verifier.v1"
-const PROFILE_SCHEMA = "lca.linux-verifier.profile.v1"
+const PROFILE_SCHEMA = "lca.linux-verifier.profile.v2"
 const RECEIPT_SCHEMA = "lca.linux-verifier.retirement.v1"
 const RECEIPT_EVIDENCE = "authenticated Linux gate retirement"
 const UNIT = "lca-verifier.service"
@@ -46,6 +48,7 @@ const SHA256 = /^[0-9a-f]{64}$/
 
 type LinuxVerifierProfile = {
   schema: typeof PROFILE_SCHEMA
+  bootEpoch: string
   unit: typeof UNIT
   controllerUID: number
   verifierUID: number
@@ -151,8 +154,9 @@ function readSecureRootFile(path: string, maxBytes: number): Buffer {
 }
 
 function safeProfileShape(value: unknown): value is LinuxVerifierProfile {
-  if (!object(value) || !ownKeysAre(value, ["schema", "unit", "controllerUID", "verifierUID", "publicKeyPem", "files", "qualified"])) return false
-  if (value.schema !== PROFILE_SCHEMA || value.unit !== UNIT || !positiveInteger(value.controllerUID) ||
+  if (!object(value) || !ownKeysAre(value, ["schema", "bootEpoch", "unit", "controllerUID", "verifierUID", "publicKeyPem", "files", "qualified"])) return false
+  if (value.schema !== PROFILE_SCHEMA || typeof value.bootEpoch !== "string" || !UUID.test(value.bootEpoch) ||
+    value.unit !== UNIT || !positiveInteger(value.controllerUID) ||
     !positiveInteger(value.verifierUID) || value.controllerUID === value.verifierUID ||
     !text(value.publicKeyPem, 8192) || !bool(value.qualified) || !object(value.files) ||
     Object.keys(value.files).length !== REQUIRED_PROFILE_FILES.length) return false
@@ -468,6 +472,22 @@ export async function runLinuxVerifierClient(
 /** A structural/current-boot check only; it does not establish native proof or inspect gate state. */
 export function isCurrentLinuxVerifierReference(reference: VerificationReference): boolean {
   return validReference(reference) && reference.bootID === bootID()
+}
+
+/** Compares the fixed, root-authenticated profile epoch with procfs without accepting caller trust inputs. */
+export function linuxBootEpochMatches(): boolean {
+  if (process.platform !== "linux") return false
+  try {
+    const currentBootID = bootID()
+    if (!currentBootID) return false
+    const native = loadNativeProfile({ qualification: true })
+    return native.trusted?.profile.bootEpoch === currentBootID
+  } catch { return false }
+}
+
+/** Checks only exact profile-v2 structure; a true result does not establish root trust. */
+export function linuxVerifierProfileShapeValid(value: unknown): boolean {
+  return safeProfileShape(value)
 }
 
 /** Validates the fixed profile and installed files only; it does not verify gate connectivity or a result. */

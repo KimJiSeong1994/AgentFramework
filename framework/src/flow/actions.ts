@@ -4,7 +4,7 @@ import { writeJsonAtomic, readJson } from "../state/store.ts"
 import { applyEvent, flowLimits, type FlowResult } from "./runtime.ts"
 import { canonicalPlanJson, canonicalPlanSha, coercePlan, planMdPath, renderPlanMd, validatePlan, type Plan, type ReviewView } from "./plan.ts"
 import { runPlanReview } from "./review.ts"
-import type { ExecutionRuntime } from "../hosts/types.ts"
+import { LinuxAdmissionRefused, type ExecutionRuntime, type PlanSubmissionAdmission } from "../hosts/types.ts"
 import type { FlowEvent } from "./machine.ts"
 
 export type PlanSubmission = { result: FlowResult; planSha: string; renderedPlan?: string }
@@ -32,6 +32,24 @@ export function savedPlan(runtime: ExecutionRuntime, wf: Workflow): Plan | null 
 
 export async function submitImportedPlan(runtime: ExecutionRuntime, wf: Workflow, plan: Plan, signal?: AbortSignal): Promise<PlanSubmission> {
   if (wf.phase !== "planning") throw new Error("workflow is not awaiting an imported plan")
+  await runtime.linuxAdmission?.admitNewExecution()
+  return writeAndReviewImportedPlan(runtime, wf, plan, signal)
+}
+
+export async function submitAdmittedImportedPlan(
+  runtime: ExecutionRuntime,
+  wf: Workflow,
+  plan: Plan,
+  admission: PlanSubmissionAdmission,
+  signal?: AbortSignal,
+): Promise<PlanSubmission> {
+  if (!runtime.linuxAdmission) throw new TypeError("lca: plan-submission admission is unavailable")
+  if (wf.phase !== "planning") throw new Error("workflow is not awaiting an imported plan")
+  runtime.linuxAdmission.consumePlanSubmission(admission, wf.sessionID)
+  return writeAndReviewImportedPlan(runtime, wf, plan, signal)
+}
+
+async function writeAndReviewImportedPlan(runtime: ExecutionRuntime, wf: Workflow, plan: Plan, signal?: AbortSignal): Promise<PlanSubmission> {
   const planSha = canonicalPlanSha(plan)
   const mdPath = planMdPath(wf.id)
   writeJsonAtomic(planJsonPath(runtime.worktree, wf.id), plan)
@@ -41,13 +59,19 @@ export async function submitImportedPlan(runtime: ExecutionRuntime, wf: Workflow
   }), { jsonSha: planSha })
   if (!submitted.ok) return { result: submitted, planSha }
 
-  const review = await runPlanReview(runtime, submitted.wf, plan, signal)
+  let admissionRefusal: LinuxAdmissionRefused | undefined
+  const review = await runPlanReview(runtime, submitted.wf, plan, signal).catch((error: unknown) => {
+    if (!(error instanceof LinuxAdmissionRefused) || error.phase !== "admit") throw error
+    admissionRefusal = error
+    return { verdict: "none" as const, findings: [], note: "aborted" as const }
+  })
   const event: FlowEvent = review.note === "aborted" ? "review_aborted" :
     review.verdict === "iterate" ? "review_iterate" : review.verdict === "okay" ? "review_okay" : "review_none"
   const capped = event === "review_iterate" && submitted.wf.counters.review_iterations + 1 >= flowLimits(runtime).max_review_iterations
   const note = review.note === "aborted" ? "aborted" : capped ? "cap" : undefined
   const current = readWorkflow(runtime.worktree)
   if (!current || current.id !== wf.id || current.phase !== "reviewing" || current.lastSeq !== submitted.wf.lastSeq) {
+    if (admissionRefusal) throw admissionRefusal
     return { result: { ok: false, text: "workflow changed during plan review", wf: current }, planSha }
   }
   const view: ReviewView = { verdict: review.verdict, findings: review.findings, ...(note ? { note } : {}) }
@@ -56,5 +80,6 @@ export async function submitImportedPlan(runtime: ExecutionRuntime, wf: Workflow
     ...w, planRef: { ...w.planRef!, mdSha: reviewedMdSha },
     review: { verdict: review.verdict, findings: review.findings, planSha, ...(note ? { note } : {}) },
   }), { findings: review.findings.length })
+  if (admissionRefusal) throw admissionRefusal
   return { result, planSha, ...(result.ok ? { renderedPlan: renderPlanMd(wf.id, plan, view) } : {}) }
 }

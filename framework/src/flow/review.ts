@@ -3,7 +3,7 @@
 // The only model text read is the verdict line (parsePlanVerdict, reuses the parseVerdict normalisation ideas);
 // findings are advisory only — approval is the user's decision (/approve), never this reviewer's.
 import { randomUUID } from "node:crypto"
-import type { ExecutionHandle, ExecutionOutcome, ExecutionRuntime } from "../hosts/types.ts"
+import { LinuxAdmissionRefused, type ExecutionHandle, type ExecutionOutcome, type ExecutionRuntime } from "../hosts/types.ts"
 import { beginExecutionActivity } from "../hosts/runtime.ts"
 import { estimateTokens } from "../tokens.ts"
 import { getQueue } from "../orchestration/queue.ts"
@@ -89,6 +89,7 @@ export function reviewToolCapProblem(sessionID: string, max: number): string | n
  * No vendor response, including an abort acknowledgement, proves quiescence by itself.
  */
 export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, plan: Plan, signal?: AbortSignal): Promise<PlanReviewResult> {
+  runtime.linuxAdmission?.assertBootEpoch()
   if (getQueue(runtime).isRunning(wf.sessionID)) return { verdict: "none", findings: [] }
   if (signal?.aborted) return { verdict: "none", findings: [], note: "aborted" }
   const releaseActivity = beginExecutionActivity(runtime, wf.sessionID, "review")
@@ -109,6 +110,8 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
   let vendorSessionID: string | undefined
   let quiescent = false
   let registered = false
+  let quiescenceAsserted = false
+  let admissionReleaseFailed = false
   try {
     const observeWorkflowCancellation = () => {
       if (reviewSignal.aborted) return
@@ -129,6 +132,22 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
     if (reviewSignal.aborted) return aborted
     claim = runs.claim(wf.sessionID, runtime.instance, process.pid)
     runs.assertQuiescent(claim)
+    quiescenceAsserted = true
+    try {
+      await runtime.linuxAdmission?.admitNewExecution()
+    } catch (e) {
+      if (e instanceof LinuxAdmissionRefused && claim && quiescenceAsserted && !registered) {
+        const held = claim
+        claim = undefined
+        try {
+          runs.release(held)
+        } catch (releaseError) {
+          admissionReleaseFailed = true
+          throw releaseError
+        }
+      }
+      throw e
+    }
     const policy = runtime.policy.resolve("reviewer")
     executionID = randomUUID()
     const deadlineAt = Date.now() + runtime.config.delegate.review_ttl_ms
@@ -140,7 +159,7 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
     }
     runs.registerIntent(claim, { executionId: executionID, ownerSession: wf.sessionID, taskId: wf.id,
       attemptId: base.attemptID, generation: claim.generation, role: "reviewer", cwd: runtime.directory, policyID: policy.id,
-      kind: "host", profile: runtime.verificationProfile })
+      kind: "host", profile: "legacy-unowned" })
     registered = true
     let prepareTimer: ReturnType<typeof setTimeout> | undefined
     let onPrepareAbort: (() => void) | undefined
@@ -235,6 +254,8 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
       if (onAbort) reviewSignal.removeEventListener("abort", onAbort)
     }
   } catch (e) {
+    if (e instanceof LinuxAdmissionRefused) throw e
+    if (admissionReleaseFailed) throw e
     runtime.log("plan review: execution failed", { error: e instanceof Error ? e.message : String(e) })
     if (claim && executionID && registered) {
       if (!quiescent) runs.fence(claim, executionID, "review preparation or execution failed without quiescence proof")

@@ -9,6 +9,7 @@ import { readWorkflow } from "../flow/state.ts"
 import type { HookDeps } from "../hooks/types.ts"
 import { getOpenCodeRuntime } from "./opencode-runtime.ts"
 import { createForegroundController, readForegroundStatus } from "./controller.ts"
+import { LinuxAdmissionRefused } from "./types.ts"
 
 const COMMANDS = new Set(["status", "import", "approve", "reject", "run", "resume", "cancel"])
 type CliArgs = { command: string; worktree: string; server?: string; session?: string; plan?: string; workflow?: string; sha?: string; engine: "opencode" | "claude" | "codex"; json: boolean }
@@ -127,12 +128,14 @@ export async function runCli(args: CliArgs): Promise<string> {
     (!process.stdin.isTTY || !process.stderr.isTTY)) {
     throw new Error("local human approval or rejection requires an interactive terminal")
   }
+  const config = loadConfig(root)
   const client = await checkedClient(args.server!, root)
   const deps: HookDeps = {
-    client, directory: root, worktree: root, config: loadConfig(root),
+    client, directory: root, worktree: root, config,
     log: (message, fields) => console.error(`lca: ${message}`, fields ? Object.keys(fields).join(",") : ""),
   }
   const runtime = getOpenCodeRuntime(deps)
+  runtime.linuxAdmission?.assertBootEpoch()
   const controller = createForegroundController(runtime)
   if (args.command === "import") {
     const session = await client.session.get({ path: { id: args.session! }, query: { directory: root } })
@@ -195,10 +198,15 @@ export async function runCli(args: CliArgs): Promise<string> {
 }
 
 if (import.meta.main) {
-  const fail = () => {
+  const fail = (error: unknown) => {
+    if (error instanceof LinuxAdmissionRefused) {
+      console.error(error.message)
+      process.exitCode = 3
+      return
+    }
     console.error("lca: command refused or failed; inspect read-only status for durable state")
     process.exitCode = 1
   }
   try { runCli(parseCliArgs(process.argv.slice(2))).then(text => console.log(text)).catch(fail) }
-  catch { fail() }
+  catch (error) { fail(error) }
 }

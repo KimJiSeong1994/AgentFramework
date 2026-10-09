@@ -43,7 +43,18 @@ const nonempty = (value: unknown): value is string => typeof value === "string" 
 const timestamp = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  return error instanceof Error ? error.message : structuredErrorName(error) ?? String(error)
+}
+
+function structuredErrorName(error: unknown): string | undefined {
+  if (!object(error) || typeof error.name !== "string" ||
+      !/^[A-Za-z0-9_.-]{1,128}$/.test(error.name)) return undefined
+  return error.name
+}
+
+function outcomeError(error: unknown): Pick<ExecutionOutcome, "error" | "errorName"> {
+  const errorName = structuredErrorName(error)
+  return { error: errorMessage(error), ...(errorName ? { errorName } : {}) }
 }
 
 function messagePartsValid(value: unknown, sessionID: string, messageID: string): boolean {
@@ -323,7 +334,7 @@ export function createOpenCodeHost(client: Client, capabilities?: OpenCodeHostCa
               },
             })
             if (result.error) {
-              outcome = { status: "failed", error: errorMessage(result.error) }
+              outcome = { status: "failed", ...outcomeError(result.error) }
             } else {
               const response = result.data
               const parts: unknown = response?.parts
@@ -343,7 +354,7 @@ export function createOpenCodeHost(client: Client, capabilities?: OpenCodeHostCa
                 terminalResponse = true
                 outcome = {
                   status: response.info.error.name === "MessageAbortedError" ? "cancelled" : "failed",
-                  error: errorMessage(response.info.error),
+                  ...outcomeError(response.info.error),
                 }
               } else if (text) {
                 terminalResponse = true
@@ -354,7 +365,7 @@ export function createOpenCodeHost(client: Client, capabilities?: OpenCodeHostCa
               }
             }
           } catch (error) {
-            outcome = { status: "failed", error: errorMessage(error) }
+            outcome = { status: "failed", ...outcomeError(error) }
           }
           return outcome
         },

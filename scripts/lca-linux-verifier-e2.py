@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 PROTOCOL = "lca.linux-verifier.v1"
-PROFILE_SCHEMA = "lca.linux-verifier.profile.v1"
+PROFILE_SCHEMA = "lca.linux-verifier.profile.v2"
 RECEIPT_SCHEMA = "lca.linux-verifier.retirement.v1"
 PROFILE_PATH = Path("/etc/lca-verifier/profile.json")
 CLIENT_PATH = Path("/usr/local/libexec/lca-verifier/client.py")
@@ -59,6 +59,7 @@ RETIREMENT_MESSAGE_IDS = {
     "7ad2d189f7e94e70a38c781354912448",
     "d9b373ed55a64feb8242e02dbe79a49c",
 }
+BOOT_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
 
@@ -107,6 +108,9 @@ def load_profile() -> tuple[dict[str, Any], str]:
     except (UnicodeDecodeError, json.JSONDecodeError):
         fail("invalid-root-profile")
     if not isinstance(profile, dict) or profile.get("schema") != PROFILE_SCHEMA:
+        fail("invalid-root-profile")
+    boot_epoch = profile.get("bootEpoch")
+    if not isinstance(boot_epoch, str) or not BOOT_RE.fullmatch(boot_epoch):
         fail("invalid-root-profile")
     if profile.get("unit") != UNIT or not isinstance(profile.get("qualified"), bool):
         fail("invalid-root-profile")

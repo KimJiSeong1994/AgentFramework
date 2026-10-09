@@ -37,7 +37,8 @@ import type { SkillTaskFactInput, SkillVerificationFactInput } from "../telemetr
 import { settled, strictQuiescent, type ExecutionClaim } from "../hosts/run-state.ts"
 import { authenticateLinuxVerification } from "../hosts/linux-domain.ts"
 import { beginExecutionActivity } from "../hosts/runtime.ts"
-import type { ExecutionHandle, ExecutionReconciliation, ExecutionReference, ExecutionRole, ExecutionRuntime } from "../hosts/types.ts"
+import { LinuxAdmissionRefused, type LinuxAdmissionRefusal, type ExecutionHandle, type ExecutionReconciliation,
+  type ExecutionReference, type ExecutionRole, type ExecutionRuntime } from "../hosts/types.ts"
 import type { VerificationHandle, VerificationResult } from "./verifier.ts"
 import { createSnapshotStore, type Snapshot } from "./snapshot.ts"
 import { createTaskWorktree, hasTaskWorktreeState, reopenTaskWorktree, type TaskWorktree } from "./worktree.ts"
@@ -56,6 +57,8 @@ export type QueueRun = {
   aborted: boolean
   /** why it was aborted, when it was */
   abortReason?: string
+  /** Admission refused without dispatch; this is not ordinary cancellation or execution failure. */
+  refused?: LinuxAdmissionRefusal
   /** Another queue/review already owns this worktree's in-process execution slot. */
   skipped?: "already_running" | "execution_busy"
   /** review + protected-file guard were unavailable (not a git repository) */
@@ -270,6 +273,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
   }
 
   const add: Queue["add"] = (sessionID, tasks) => {
+    deps.linuxAdmission?.assertBootEpoch()
     if (!deps.dataChecks && tasks.some((task) => task.kind === "data")) throw new Error("data checks unavailable for this execution runtime")
     const { ledger, added } = addTasks(readLedger(deps.worktree, sessionID), tasks)
     writeLedger(deps.worktree, ledger)
@@ -278,6 +282,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
   }
 
   const cancelOpenTasks: Queue["cancelOpen"] = (sessionID, reason) => {
+    deps.linuxAdmission?.assertBootEpoch()
     if (deps.runs.status().executions.some(execution => !settled(execution))) return []
     const { ledger, ids } = cancelOpen(readLedger(deps.worktree, sessionID), reason)
     if (ids.length) {
@@ -287,7 +292,8 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     return ids
   }
 
-  const run: Queue["run"] = (sessionID, origin) => {
+  const run: Queue["run"] = async (sessionID, origin) => {
+    deps.linuxAdmission?.assertBootEpoch()
     const existing = active.get(sessionID)
     if (existing) return Promise.resolve({ taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: false, skipped: "already_running" })
     const releaseActivity = beginExecutionActivity(deps, sessionID, "queue")
@@ -313,6 +319,22 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     }
     entry.promise = runLoop(sessionID, entry, origin)
       .catch((e: unknown) => {
+        if (e instanceof LinuxAdmissionRefused) {
+          if (e.phase === "epoch") throw e
+          if (entry.attempt) {
+            finishAttemptObservation(entry.attempt, "failed", "failed", entry.attempt.review)
+            entry.attempt = undefined
+          }
+          if (!entry.discard && !entry.recoveryBlocked) {
+            const ledger = readLedger(deps.worktree, sessionID)
+            const running = ledger.tasks.find(task => task.status === "running")
+            if (running) writeLedger(deps.worktree, updateTask(ledger, running.id, {
+              status: "failed", error: `linux admission refused: ${e.reasons.join(",")}`, finishedAt: Date.now(),
+            }))
+          }
+          return { taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: false,
+            refused: { phase: e.phase, reasons: e.reasons } } satisfies QueueRun
+        }
         // Do not rewrite the ledger when startup recovery cannot prove quiescence: a later safe retry needs its exact
         // running/pending task state. After dispatch starts, retain the existing failed/cancelled repair behavior.
         const msg = (e as Error)?.message ?? String(e)
@@ -431,6 +453,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
   async function runLoop(sessionID: string, entry: Active, origin?: QueueOrigin): Promise<QueueRun> {
     const result: QueueRun = { taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: false }
     entry.recoveryBlocked = true
+    deps.linuxAdmission?.assertBootEpoch()
     entry.claim = deps.runs.claim(sessionID, deps.instance, process.pid)
     // A previous owner may have stopped after dispatch. Do not replay until every persisted
     // execution meets its settlement contract; legacy parent exit is trusted-work settlement, not containment.
@@ -498,6 +521,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
         throw new Error(`task worktree recovery refused for ${task.id}: existing worktree requires an explicit resumed run`)
       }
     }
+    if (deps.linuxAdmission) await deps.linuxAdmission.admitNewExecution()
     entry.recoveryBlocked = false
     // A crashed run may have left a task `running`; give it its attempt back and run it again. The ledger counter is
     // not a stable identity, so the restarted attempt gets a new UUID and no guessed resumeOfAttemptID.
@@ -511,6 +535,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     result.taskIds = ledger.tasks.filter((t) => t.status === "pending").map((t) => t.id)
 
     for (;;) {
+      if (deps.linuxAdmission) await deps.linuxAdmission.admitNewExecution()
       ledger = readLedger(deps.worktree, sessionID)
       const task = nextPending(ledger)
       if (!task) break
@@ -1216,6 +1241,7 @@ async function runChild(
     ...request, handlers: deps.policy.handlers(request),
     onReference: (reference: ExecutionReference) => deps.runs.bindVendorRef(claim, executionID, JSON.stringify(reference)),
   }
+  if (deps.linuxAdmission) await deps.linuxAdmission.admitNewExecution()
   deps.runs.registerIntent(claim, {
     executionId: executionID, ownerSession: parentID, taskId: request.taskID,
     attemptId: attemptID, generation: claim.generation, role: agent, cwd: request.cwd, policyID: policy.id,

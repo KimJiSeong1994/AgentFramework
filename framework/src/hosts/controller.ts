@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, realpathSync } from "node:fs"
 import { isAbsolute, relative, resolve, sep } from "node:path"
-import { importedPlan, savedPlan, submitImportedPlan, type PlanSubmission } from "../flow/actions.ts"
+import { importedPlan, savedPlan, submitAdmittedImportedPlan, submitImportedPlan, type PlanSubmission } from "../flow/actions.ts"
 import { canonicalPlanSha, planToTasks } from "../flow/plan.ts"
 import { INSTANCE_ID, pidAlive } from "../flow/owner.ts"
 import { applyEvent, approveWorkflow, cancelWorkflow, resolveAuthority, settle, startWorkflow, type FlowResult } from "../flow/runtime.ts"
@@ -9,7 +9,7 @@ import { activeWorkflow, readWorkflow, type Workflow } from "../flow/state.ts"
 import { getQueue, type QueueRun } from "../orchestration/queue.ts"
 import { readLedger, OPEN_STATUSES } from "../state/ledger.ts"
 import { sessionDir, stateRoot } from "../state/store.ts"
-import type { ExecutionReconciliation, ExecutionReference, ExecutionRuntime, FlowRuntime } from "./types.ts"
+import { LinuxAdmissionRefused, type ExecutionReconciliation, type ExecutionReference, type ExecutionRuntime, type FlowRuntime } from "./types.ts"
 import { settled } from "./run-state.ts"
 import type { VerificationReference } from "../orchestration/verifier.ts"
 import { authenticateLinuxVerification } from "./linux-domain.ts"
@@ -40,6 +40,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
   }
 
   function settlePendingCancellation(sessionID: string, workflowID: string): void {
+    runtime.linuxAdmission?.assertBootEpoch()
     const current = readWorkflow(root)
     if (!current || current.id !== workflowID || current.sessionID !== sessionID || !current.pendingCancel) return
     if (queue.isRunning(sessionID) || (reviewActivity?.sessionID === sessionID && reviewActivity.workflowID === workflowID)) return
@@ -51,6 +52,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
   }
 
   function hasActiveWork(sessionID: string, wf: Workflow): boolean {
+    runtime.linuxAdmission?.assertBootEpoch()
     if (queue.isRunning(sessionID) || (reviewActivity?.sessionID === sessionID && reviewActivity.workflowID === wf.id)) return true
     const status = runtime.runs.status()
     if (status.claim?.ownerSession === sessionID && pidAlive(status.claim.pid)) return true
@@ -75,6 +77,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
   }
 
   function validateImportedPlan(value: unknown, sessionID?: string) {
+    runtime.linuxAdmission?.assertBootEpoch()
     const existing = activeWorkflow(root)
     if (existing && sessionID && existing.sessionID !== sessionID) throw new Error("another session owns the workflow")
     if (existing && existing.phase !== "planning") throw new Error(`workflow is ${existing.phase}, not awaiting a plan`)
@@ -83,6 +86,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
   }
 
   async function importPlan(sessionID: string, sourcePath: string, signal?: AbortSignal, parsed?: unknown): Promise<PlanSubmission> {
+    runtime.linuxAdmission?.assertBootEpoch()
     if (!flowOn(runtime.config)) throw new Error("plan workflow is disabled")
     if (!sessionID || sessionID.includes("/") || sessionID.includes("\\") || sessionID === "." || sessionID === "..") throw new Error("invalid session ID")
     const existing = activeWorkflow(root)
@@ -94,6 +98,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
     const preflight = await runtime.host.preflight(runtime.host.identity.profile)
     if (!preflight.compatible || preflight.problems.length) throw new Error(`host incompatible: ${preflight.problems.join("; ") || "required controls unavailable"}`)
     await reconcile(sessionID)
+    const admission = await runtime.linuxAdmission?.admitPlanSubmission(sessionID)
     mkdirSync(sessionDir(root, sessionID), { recursive: true })
     const authority = existing ? resolveAuthority(runtime, "approve", sessionID) : null
     if (authority?.refuse || (existing && authority?.wf?.id !== existing.id)) throw new Error(authority?.refuse ?? "workflow changed during reconciliation")
@@ -104,7 +109,11 @@ export function createForegroundController(runtime: ExecutionRuntime) {
     const abort = () => review.abort()
     signal?.addEventListener("abort", abort, { once: true })
     if (signal?.aborted) review.abort()
-    try { return await submitImportedPlan(runtime, started.wf, plan, review.signal) }
+    try {
+      return admission
+        ? await submitAdmittedImportedPlan(runtime, started.wf, plan, admission, review.signal)
+        : await submitImportedPlan(runtime, started.wf, plan, review.signal)
+    }
     finally {
       signal?.removeEventListener("abort", abort)
       if (reviewActivity?.abort === review) reviewActivity = undefined
@@ -113,6 +122,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
   }
 
   function decide(decision: LocalPlanDecision): FlowResult {
+    runtime.linuxAdmission?.assertBootEpoch()
     if (!decision || decision.source !== "local_human" || !["approve", "reject"].includes(decision.action) ||
       typeof decision.workflowID !== "string" || typeof decision.planSha !== "string") throw new Error("a typed local human decision is required")
     const wf = readWorkflow(root)
@@ -136,6 +146,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
   }
 
   async function reconcile(sessionID: string): Promise<void> {
+    runtime.linuxAdmission?.assertBootEpoch()
     const claim = runtime.runs.claim(sessionID, runtime.instance, process.pid)
     for (const execution of runtime.runs.status().executions) {
       if (settled(execution)) continue
@@ -182,6 +193,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
   }
 
   async function runInternal(sessionID: string, signal: AbortSignal | undefined, resumed: boolean): Promise<{ run: QueueRun; workflow: Workflow }> {
+    runtime.linuxAdmission?.assertBootEpoch()
     const wf = workflow(sessionID, "executing")
     if (wf.pendingCancel) {
       settlePendingCancellation(sessionID, wf.id)
@@ -214,6 +226,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
     signal?.addEventListener("abort", abort, { once: true })
     try {
       const result = await queue.run(sessionID, resumed ? { resumed: true } : undefined)
+      if (result.refused) throw new LinuxAdmissionRefused(result.refused.phase, result.refused.reasons)
       if (runtime.runs.status().executions.some(e => !settled(e))) throw new Error("execution unresolved; fence retained")
       const current = readWorkflow(root)
       if (!current || current.id !== wf.id || current.sessionID !== sessionID) throw new Error("workflow changed during foreground run")
@@ -237,6 +250,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
   }
 
   async function resume(sessionID: string, signal?: AbortSignal) {
+    runtime.linuxAdmission?.assertBootEpoch()
     const wf = activeWorkflow(root)
     if (!wf) throw new Error("no active workflow to resume")
     if (wf.sessionID !== sessionID) throw new Error("no workflow owned by this session")

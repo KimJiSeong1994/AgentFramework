@@ -65,7 +65,36 @@ export type VerificationReconciliation = {
 }
 
 export type VerificationCancelResult = { requested: boolean; acknowledged: boolean; outcome?: VerificationResult }
-export type VerificationPreflight = { compatible: boolean; problems: string[] }
+export type LinuxAdmissionHealth = {
+  bootEpochMatch: boolean
+  journal: {
+    persistentEffective: boolean
+    persistentEntry: boolean
+    readable: boolean
+  }
+  pendingTickets: number
+  pendingBytes: number
+  unknownBound: number
+  staleActive: number
+  latched: boolean
+  quarantineRequired: boolean
+  capacityAvailable: boolean
+  reasons: Array<
+    | "boot-epoch"
+    | "unknown-bound"
+    | "stale-active"
+    | "latched"
+    | "journal-persistence"
+    | "journal-entry"
+    | "journal-readable"
+  >
+}
+
+export type VerificationPreflight = {
+  compatible: boolean
+  problems: string[]
+  admission?: LinuxAdmissionHealth
+}
 
 export interface VerificationHandle {
   readonly reference: VerificationReference
