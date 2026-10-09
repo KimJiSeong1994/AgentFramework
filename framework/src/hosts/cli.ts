@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readFileSync, realpathSync } from "node:fs"
+import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs"
 import { resolve } from "node:path"
 import { createInterface } from "node:readline/promises"
 import { pathToFileURL } from "node:url"
@@ -10,33 +10,106 @@ import type { HookDeps } from "../hooks/types.ts"
 import { getOpenCodeRuntime } from "./opencode-runtime.ts"
 import { createForegroundController, readForegroundStatus } from "./controller.ts"
 import { LinuxAdmissionRefused } from "./types.ts"
+import { InteractiveLaunchError, launchInteractive, parseInteractiveArgs, propagateInteractiveExit } from "./interactive.ts"
 
 const COMMANDS = new Set(["status", "import", "approve", "reject", "run", "resume", "cancel"])
 type CliArgs = { command: string; worktree: string; server?: string; session?: string; plan?: string; workflow?: string; sha?: string; engine: "opencode" | "claude" | "codex"; json: boolean }
 
+export class CliUsageError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "CliUsageError"
+  }
+}
+
+const CLI_USAGE = `Usage:
+  lca [chat] [--worktree PATH]
+  lca <command> --worktree PATH [options]
+
+Interactive chat:
+  lca
+  lca chat [--worktree PATH]
+
+Bare 'lca' and 'lca chat' start the installed OpenCode TUI in the current Git worktree,
+or in the canonical worktree selected by --worktree. The TUI uses the existing configured
+model and the LCA plan/approval flow; it does not auto-approve permissions or start Ollama.
+
+Commands:
+  status   --worktree PATH [--session ID] [--json]
+  import   --worktree PATH --server URL --session ID --plan PATH
+  approve  --worktree PATH --server URL --workflow ID --sha SHA
+  reject   --worktree PATH --server URL --workflow ID --sha SHA
+  run      --worktree PATH --server URL (--plan PATH | --session ID)
+  resume   --worktree PATH --server URL --session ID
+  cancel   --worktree PATH --server URL --session ID
+
+Status reads local workflow state; all other commands require the local OpenCode service.
+
+Examples:
+  lca status --worktree /path/to/repo
+  lca status --worktree /path/to/repo --json
+  lca run --plan plan.json --worktree /path/to/repo --server http://127.0.0.1:4096
+
+Prerequisites and safety:
+  The --worktree path must name an accessible directory. Mutating commands require an already-running,
+  trusted local OpenCode service and the project's LCA plugin. run --plan, approve and reject require
+  a local interactive terminal for explicit human decisions. Standalone commands do not start a server;
+  interactive chat owns a separate OpenCode TUI child process. Neither path auto-approves plans or
+  performs native-host qualification.
+
+Run 'lca --help' for this usage. Exit codes: 0 success/help, 1 runtime refusal or failure,
+2 invalid arguments or inaccessible worktree, 3 Linux admission refusal.`
+
 export function parseCliArgs(argv: string[]): CliArgs {
   const [command, ...rest] = argv
-  if (!command || !COMMANDS.has(command)) throw new Error("usage: lca <status|import|approve|reject|run|resume|cancel> --worktree PATH [options]")
+  if (!command) throw new CliUsageError("missing command; see 'lca --help'")
+  if (!COMMANDS.has(command)) throw new CliUsageError("unknown command; see 'lca --help' for supported commands")
   const fields: Record<string, string> = {}
   let json = false
   const allowed = new Set(["--worktree", "--server", "--session", "--plan", "--workflow", "--sha", "--engine"])
   for (let index = 0; index < rest.length; index++) {
     const flag = rest[index]!
-    if (flag === "--json") { if (json) throw new Error("duplicate --json"); json = true; continue }
-    if (!allowed.has(flag) || !rest[index + 1] || rest[index + 1]!.startsWith("--") || fields[flag]) throw new Error(`invalid or duplicate option ${flag}`)
+    if (flag === "--json") {
+      if (json) throw new CliUsageError("duplicate --json option")
+      json = true
+      continue
+    }
+    if (!allowed.has(flag)) throw new CliUsageError("unknown option; see 'lca --help' for supported options")
+    if (!rest[index + 1] || rest[index + 1]!.startsWith("--")) {
+      throw new CliUsageError(`missing value for ${flag}`)
+    }
+    if (Object.hasOwn(fields, flag)) throw new CliUsageError(`duplicate ${flag} option`)
     fields[flag] = rest[++index]!
   }
-  if (!fields["--worktree"]) throw new Error("--worktree is required")
-  if (json && command !== "status") throw new Error("--json is only available for read-only status")
+  if (!fields["--worktree"]) throw new CliUsageError("--worktree is required")
+  if (json && command !== "status") throw new CliUsageError("--json is only available for read-only status")
   const engine = fields["--engine"] ?? "opencode"
-  if (!["opencode", "claude", "codex"].includes(engine)) throw new Error("unknown execution engine")
-  if (command !== "status" && !fields["--server"]) throw new Error("--server must name an already-running local OpenCode service")
-  if (command === "import" && (!fields["--session"] || !fields["--plan"])) throw new Error("import requires --session and --plan")
-  if ((command === "approve" || command === "reject") && (!fields["--workflow"] || !fields["--sha"])) throw new Error(`${command} requires --workflow and --sha`)
-  if (command === "cancel" && !fields["--session"]) throw new Error("cancel requires --session")
-  if (command === "resume" && !fields["--session"]) throw new Error("resume requires --session")
-  if (command === "run" && !fields["--session"] && !fields["--plan"]) throw new Error("run requires --plan or --session")
-  return { command, worktree: realpathSync(fields["--worktree"]),
+  if (!["opencode", "claude", "codex"].includes(engine)) {
+    throw new CliUsageError("invalid --engine; choose opencode, claude, or codex")
+  }
+  if (command !== "status" && !fields["--server"]) {
+    throw new CliUsageError("--server must name an already-running local OpenCode service")
+  }
+  if (command === "import" && (!fields["--session"] || !fields["--plan"])) {
+    throw new CliUsageError("import requires --session and --plan")
+  }
+  if ((command === "approve" || command === "reject") && (!fields["--workflow"] || !fields["--sha"])) {
+    throw new CliUsageError("approve and reject require --workflow and --sha")
+  }
+  if (command === "cancel" && !fields["--session"]) throw new CliUsageError("cancel requires --session")
+  if (command === "resume" && !fields["--session"]) throw new CliUsageError("resume requires --session")
+  if (command === "run" && !fields["--session"] && !fields["--plan"]) {
+    throw new CliUsageError("run requires --plan or --session")
+  }
+  let worktree: string
+  try {
+    worktree = realpathSync(fields["--worktree"])
+    if (!statSync(worktree).isDirectory()) throw new Error()
+    accessSync(worktree, constants.R_OK | constants.X_OK)
+  } catch {
+    throw new CliUsageError("--worktree must name an accessible directory; check the path and permissions")
+  }
+  return { command, worktree,
     ...(fields["--server"] ? { server: fields["--server"] } : {}),
     ...(fields["--session"] ? { session: fields["--session"] } : {}),
     ...(fields["--plan"] ? { plan: fields["--plan"] } : {}),
@@ -46,17 +119,20 @@ export function parseCliArgs(argv: string[]): CliArgs {
 }
 
 function localServer(address: string): string {
-  const url = new URL(address)
+  let url: URL
+  try { url = new URL(address) } catch {
+    throw new CliUsageError("OpenCode server must be an explicit HTTP loopback IP and port")
+  }
   if (url.protocol !== "http:" || !["127.0.0.1", "[::1]"].includes(url.hostname) ||
     url.username || url.password || url.pathname !== "/" || url.search || url.hash || !url.port) {
-    throw new Error("OpenCode server must be an explicit HTTP loopback IP and port")
+    throw new CliUsageError("OpenCode server must be an explicit HTTP loopback IP and port")
   }
   return url.origin
 }
 
 async function checkedClient(server: string, root: string): Promise<OpencodeClient> {
   const { createOpencodeClient } = await import("@opencode-ai/sdk")
-  const client = createOpencodeClient({ baseUrl: localServer(server), directory: root })
+  const client = createOpencodeClient({ baseUrl: server, directory: root })
   const [path, config, agents] = await Promise.all([
     client.path.get({ query: { directory: root } }),
     client.config.get({ query: { directory: root } }),
@@ -123,13 +199,14 @@ export async function runCli(args: CliArgs): Promise<string> {
     const status = readForegroundStatus(flow, sessionID, args.json)
     return typeof status === "string" ? status : JSON.stringify(status)
   }
+  const server = localServer(args.server!)
   if (args.engine !== "opencode") throw new Error("native coding profile is not admitted for this engine")
   if ((args.command === "run" && args.plan || args.command === "approve" || args.command === "reject") &&
     (!process.stdin.isTTY || !process.stderr.isTTY)) {
     throw new Error("local human approval or rejection requires an interactive terminal")
   }
   const config = loadConfig(root)
-  const client = await checkedClient(args.server!, root)
+  const client = await checkedClient(server, root)
   const deps: HookDeps = {
     client, directory: root, worktree: root, config,
     log: (message, fields) => console.error(`lca: ${message}`, fields ? Object.keys(fields).join(",") : ""),
@@ -197,16 +274,46 @@ export async function runCli(args: CliArgs): Promise<string> {
   }
 }
 
-if (import.meta.main) {
-  const fail = (error: unknown) => {
-    if (error instanceof LinuxAdmissionRefused) {
-      console.error(error.message)
-      process.exitCode = 3
-      return
-    }
-    console.error("lca: command refused or failed; inspect read-only status for durable state")
-    process.exitCode = 1
+function failCli(error: unknown): void {
+  if (error instanceof LinuxAdmissionRefused) {
+    console.error(error.message)
+    process.exitCode = 3
+    return
   }
-  try { runCli(parseCliArgs(process.argv.slice(2))).then(text => console.log(text)).catch(fail) }
-  catch (error) { fail(error) }
+  if (error instanceof CliUsageError) {
+    console.error(`lca: ${error.message}`)
+    console.error("Run 'lca --help' for usage.")
+    process.exitCode = 2
+    return
+  }
+  if (error instanceof InteractiveLaunchError) {
+    console.error(`lca: ${error.message}`)
+    process.exitCode = 1
+    return
+  }
+  console.error("lca: command refused or failed; inspect read-only status for durable state")
+  process.exitCode = 1
 }
+
+function main(argv: string[]): void {
+  const interactiveRequested = argv.length === 0 || argv[0] === "chat" || argv[0] === "--worktree"
+  if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h") ||
+    interactiveRequested && argv.some((arg) => arg === "--help" || arg === "-h")) {
+    console.log(CLI_USAGE)
+    return
+  }
+  if (interactiveRequested) {
+    try {
+      const args = parseInteractiveArgs(argv[0] === "chat" ? argv.slice(1) : argv)
+      launchInteractive(args).then(propagateInteractiveExit).catch(failCli)
+    } catch (error) {
+      if (error instanceof InteractiveLaunchError) failCli(new CliUsageError(error.message))
+      else failCli(error)
+    }
+    return
+  }
+  try { runCli(parseCliArgs(argv)).then(text => console.log(text)).catch(failCli) }
+  catch (error) { failCli(error) }
+}
+
+if (import.meta.main) main(process.argv.slice(2))

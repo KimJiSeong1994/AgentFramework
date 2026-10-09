@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
-import { parseCliArgs, runCli } from "../src/hosts/cli.ts"
+import { CliUsageError, parseCliArgs, runCli } from "../src/hosts/cli.ts"
 import { stateRoot } from "../src/state/store.ts"
 import { tempWorktree } from "./guards-helpers.ts"
 
@@ -10,7 +10,110 @@ let wt: ReturnType<typeof tempWorktree>
 beforeEach(() => { wt = tempWorktree() })
 afterEach(() => wt.cleanup())
 
+async function invokeCli(argv: string[]) {
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, "../src/hosts/cli.ts"), ...argv], {
+    cwd: wt.worktree,
+    env: { ...process.env, XDG_CONFIG_HOME: join(wt.stateHome, "config") },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+  ])
+  return { exitCode, stdout, stderr }
+}
+
 describe("foreground CLI", () => {
+  test("help flags print usage without touching state", async () => {
+    for (const argv of [["--help"], ["-h"], ["chat", "--help"], ["chat", "-h"]]) {
+      const result = await invokeCli(argv)
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain("Usage:")
+      expect(result.stdout).toContain("lca status --worktree")
+      expect(result.stdout).toContain("lca run --plan")
+      expect(result.stdout).toContain("Standalone commands do not start a server")
+      expect(result.stderr).toBe("")
+      expect(existsSync(stateRoot(wt.worktree))).toBe(false)
+    }
+  })
+
+  test("bare invocation and explicit chat refuse non-TTY input before host lookup", async () => {
+    for (const argv of [[], ["chat", "--worktree", wt.worktree]]) {
+      const result = await invokeCli(argv)
+      expect(result.exitCode).toBe(1)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toContain("chat requires an interactive terminal")
+      expect(existsSync(stateRoot(wt.worktree))).toBe(false)
+    }
+  })
+
+  test("valid status succeeds in a subprocess without creating state", async () => {
+    const result = await invokeCli(["status", "--worktree", wt.worktree, "--json"])
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ workflow: null })
+    expect(result.stderr).toBe("")
+    expect(existsSync(stateRoot(wt.worktree))).toBe(false)
+  })
+
+  test("malformed and missing arguments exit 2 with safe diagnostics and no state mutation", async () => {
+    const secret = "cli-private-argument-sentinel"
+    const cases = [
+      { argv: ["status"], diagnostic: "--worktree is required" },
+      { argv: ["status", "--worktree"], diagnostic: "missing value for --worktree" },
+      { argv: ["status", "--worktree", wt.worktree, "--json", "--json"], diagnostic: "duplicate --json" },
+      { argv: ["status", "--worktree", wt.worktree, "--session", secret, "--session", secret], diagnostic: "duplicate --session" },
+      { argv: ["status", "--worktree", wt.worktree, `--${secret}`], diagnostic: "unknown option" },
+      { argv: ["status", "--worktree", wt.worktree, "--engine", secret], diagnostic: "invalid --engine" },
+      { argv: [secret], diagnostic: "unknown command" },
+    ]
+    for (const { argv, diagnostic } of cases) {
+      const result = await invokeCli(argv)
+      expect(result.exitCode).toBe(2)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toContain(diagnostic)
+      expect(result.stderr).toContain("lca --help")
+      expect(result.stderr).not.toContain(secret)
+      expect(existsSync(stateRoot(wt.worktree))).toBe(false)
+    }
+  })
+
+  test("inaccessible worktree paths exit 2 without disclosing the supplied path", async () => {
+    const privatePath = join(wt.worktree, "missing-private-worktree-sentinel")
+    const result = await invokeCli(["status", "--worktree", privatePath])
+    expect(result.exitCode).toBe(2)
+    expect(result.stderr).toContain("--worktree must name an accessible directory")
+    expect(result.stderr).not.toContain(privatePath)
+    expect(result.stdout).toBe("")
+    expect(existsSync(stateRoot(wt.worktree))).toBe(false)
+  })
+
+  test("runtime configuration failures remain redacted", async () => {
+    const secret = "private-config-sentinel"
+    const config = join(wt.worktree, ".lca", "lca.jsonc")
+    mkdirSync(join(wt.worktree, ".lca"), { recursive: true })
+    writeFileSync(config, `{"private":"${secret}", broken`)
+    const result = await invokeCli(["status", "--worktree", wt.worktree])
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain("lca: command refused or failed")
+    expect(result.stderr).not.toContain(secret)
+    expect(result.stderr).not.toContain(config)
+    expect(result.stdout).toBe("")
+    expect(existsSync(stateRoot(wt.worktree))).toBe(false)
+  })
+
+  test("invalid server addresses are usage errors before config or server access", async () => {
+    const secret = "private-config-sentinel"
+    mkdirSync(join(wt.worktree, ".lca"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".lca", "lca.jsonc"), `{"private":"${secret}", broken`)
+    const result = await invokeCli(["run", "--worktree", wt.worktree, "--server", "https://192.0.2.1:4096", "--session", "ses_local"])
+    expect(result.exitCode).toBe(2)
+    expect(result.stderr).toContain("loopback IP")
+    expect(result.stderr).not.toContain(secret)
+    expect(result.stderr).toContain("lca --help")
+    expect(existsSync(stateRoot(wt.worktree))).toBe(false)
+  })
+
   test("status is read-only without a server, SDK session, credential, or model", async () => {
     const args = parseCliArgs(["status", "--worktree", wt.worktree, "--json"])
     expect(existsSync(stateRoot(wt.worktree))).toBe(false)
@@ -161,6 +264,7 @@ describe("foreground CLI", () => {
   })
 
   test("mutations need an explicit local server, while options reject duplicates", () => {
+    expect(() => parseCliArgs(["import", "--worktree", wt.worktree, "--session", "s", "--plan", "plan.json"])).toThrow(CliUsageError)
     expect(() => parseCliArgs(["import", "--worktree", wt.worktree, "--session", "s", "--plan", "plan.json"])).toThrow("--server")
     expect(() => parseCliArgs(["resume", "--worktree", wt.worktree, "--server", "http://127.0.0.1:4096"])).toThrow("--session")
     expect(() => parseCliArgs(["status", "--worktree", wt.worktree, "--worktree", wt.worktree])).toThrow("duplicate")

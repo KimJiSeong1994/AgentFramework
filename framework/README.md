@@ -68,6 +68,43 @@ The framework's per-role output ceiling is further limited by a lower OpenCode r
 the selected model's declared positive finite output limit. Invalid explicit limits are rejected.
 This is a request bound, not evidence that a remote provider enforces it or stops billing.
 
+## Interactive OpenCode chat
+
+Bare `lca` and `lca chat [--worktree PATH]` launch the installed OpenCode TUI as a directly owned
+child process (`--agent main`, inherited terminal I/O, no `--auto`).
+The worktree defaults to the current directory and is canonicalized to its Git worktree root. Chat
+requires a TTY, an installed `opencode`, `flow.enabled: true`, and the plugin-required
+`config.agents`, `chat.params`, `tool.delegate`, and `guard.plan_boundary` hooks. It references this
+project's exact `.opencode/plugins/lca.ts` bridge when present; otherwise it injects the bundled
+LCA plugin URL through child-only `OPENCODE_CONFIG_CONTENT`. Project config discovery is disabled,
+so the project bridge is loaded explicitly rather than by autoload.
+
+Chat creates a private, temporary `XDG_CONFIG_HOME` profile (0700 directory, 0600 config) containing
+only the configured OpenCode `provider`, `model`, and `small_model` selections, then removes it after
+the child exits. Durable `XDG_DATA_HOME`, `XDG_STATE_HOME`, and LCA state paths are preserved. The
+existing global LCA config is copied with private permissions into the temporary profile so the
+plugin retains the same LCA policy; its source file is not modified. The
+profile excludes global plugins and disables project config discovery; the only loaded plugin is
+the project bridge or bundled LCA plugin. Project OpenCode configs, competing project
+plugins/agent/command files, legacy
+`~/.opencode` configs/plugins/profiles, custom config directories, and permission/TUI/model-registry
+environment overrides are refused. `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT` are accepted only
+when they contain supported model/provider/plugin fields; model/provider values are validated and
+copied into the temporary profile, and only the LCA plugin is injected into child config. Chat
+requires an explicitly configured model in OpenCode or LCA `models.main`, with no implicit
+provider/model fallback. It never starts or
+installs Ollama and makes no project/global configuration writes.
+
+The same OpenCode TUI owns the conversation and session lifecycle; `lca` does not create a second
+chat client or orchestration loop. Describe a request, inspect the generated plan, then type
+`/approve` or `/reject`; `/status` reports the workflow when enabled and `/cancel` ends it. Plan-phase
+writes are blocked until approval. The launcher prints a concise notice that the LCA-only profile
+excludes non-LCA global/project plugins and settings. Chat exit codes are the child's exit codes,
+and child signals are re-raised by `lca`.
+
+This chat lifecycle is separate from the standalone `lca run --server ...` imported-plan runner
+below: the standalone runner talks to an already-running local service and does not launch a TUI.
+
 ## Foreground imported-plan runner (OpenCode)
 
 The standalone runner uses the real, already-running local OpenCode service with this project's
@@ -75,10 +112,27 @@ LCA plugin; it never starts a daemon or falls back to another engine or model. T
 canonical JSON inside the worktree (3–10 steps). For example:
 
 ```sh
+lca status --worktree /path/to/repo
+lca run --plan plan.json --worktree /path/to/repo --server http://127.0.0.1:4096
+lca status --worktree /path/to/repo --json
+
+# Equivalent source-tree entry point; additional workflow commands:
 bun src/hosts/cli.ts run --plan plan.json --worktree /path/to/repo --server http://127.0.0.1:4096
 bun src/hosts/cli.ts status --worktree /path/to/repo --json
 bun src/hosts/cli.ts resume --session SESSION_ID --worktree /path/to/repo --server http://127.0.0.1:4096
 ```
+
+`lca --help` and `lca -h` print usage and exit 0 before accessing a worktree, configuration, state
+or server. Bare `lca` launches interactive chat as described above. The supplied worktree must be an accessible directory. Mutating
+commands require an already-running, trusted local OpenCode service and this project's LCA plugin;
+`run --plan`, `approve` and `reject` also require an interactive local terminal for explicit human
+decisions. Standalone commands do not start a server or provide interactive chat; the separate
+chat command launches an OpenCode TUI child and is not the standalone runner. Neither path
+auto-approves plans or establishes native-host qualification.
+
+Exit codes: **0** means success or help; **1** is a redacted runtime refusal/failure; **2** is
+invalid command-line usage or an inaccessible worktree; **3** is a `LinuxAdmissionRefused`
+admission refusal with bounded reason codes.
 
 `run --plan` validates and advisory-reviews the saved plan, shows its canonical file/hash, and
 requires an interactive local terminal to type `APPROVE <workflow-id> <plan-sha>` or

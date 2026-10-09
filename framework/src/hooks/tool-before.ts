@@ -114,7 +114,30 @@ export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.ex
       return
     }
 
-    if (boundaryOn && flowOn(deps.config)) {
+    // In interactive mode, a missing, foreign, terminal, or stuck workflow never unlocks main-session writes.
+    // The read-only planning allowlist remains available so a failed chat-start hook cannot fail open. This is a
+    // tool policy boundary, not OS containment; authenticated worker/reviewer sessions were handled above.
+    if (deps.interactive) {
+      const wf = activeWorkflow(deps.worktree)
+      const ownRunnable = !!wf && wf.sessionID === input.sessionID && wf.phase !== "stuck"
+        && (BOUNDARY_PHASES.has(wf.phase) || wf.phase === "executing")
+      if (!ownRunnable) {
+        const args = (output.args ?? {}) as Record<string, unknown>
+        let ok = BOUNDARY_ALLOWED_TOOLS.has(input.tool)
+        if (ok && input.tool === "bash") {
+          ok = bashPolicyProblem(typeof args.command === "string" ? args.command : "") === null
+        }
+        if (!ok) {
+          deps.log("blocked tool without an owned interactive workflow", { sessionID: input.sessionID, tool: input.tool, workflowID: wf?.id, phase: wf?.phase })
+          if (wf?.sessionID === input.sessionID) {
+            appendEvents(deps.worktree, [{ wf: wf.id, type: "boundary_denied", actor: "model_tool", data: { tool: input.tool, phase: wf.phase } }])
+          }
+          throw new Error("lca: interactive mode is read-only without an owned active plan workflow; /cancel does not enable direct edits.")
+        }
+      }
+    }
+
+    if (deps.interactive || (boundaryOn && flowOn(deps.config))) {
       const wf = activeWorkflow(deps.worktree)
       if (wf && wf.sessionID === input.sessionID) {
         if (inPlanningBoundary(wf)) {

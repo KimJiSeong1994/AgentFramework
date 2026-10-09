@@ -10,6 +10,8 @@ export type HookDeps = {
   worktree: string
   config: LcaConfig
   log: Logger
+  /** Interactive LCA launcher mode, enabled only after the plugin validates its worktree binding. */
+  interactive?: boolean
 }
 
 /** Hook ids used with config.disabled_hooks. Keep in sync with src/index.ts. */
