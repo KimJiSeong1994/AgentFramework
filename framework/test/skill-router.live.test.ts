@@ -4,6 +4,7 @@ import type { TextPart, UserMessage } from "@opencode-ai/sdk"
 import { resolve } from "node:path"
 import { readFileSync } from "node:fs"
 import { DEFAULT_CONFIG, loadConfig } from "../src/config.ts"
+import { createOpenCodeSkillPermissionSource } from "../src/hosts/opencode-skill-source.ts"
 import { createSkillRouter } from "../src/routing/router.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { EMPTY_MODE, readModeState } from "../src/state/store.ts"
@@ -24,7 +25,7 @@ test.skipIf(!host || !endpoint)("real host catalog -> live OpenJev -> applied op
     log: (message, extra) => logs.push({ message, extra }),
   }
   const text = "Before changing authentication, investigate the dependencies and provide a numbered implementation plan with files, risks and verification steps. Do not edit anything."
-  const router = createSkillRouter(deps)
+  const router = createSkillRouter(deps, createOpenCodeSkillPermissionSource(deps))
   const result = await router.recommend("router-live-smoke", "synthetic-1", text)
   console.log("LIVE_ROUTER", JSON.stringify({ result, logs }))
   expect(result).toMatchObject({ skill: "plan", reason: "recommended" })

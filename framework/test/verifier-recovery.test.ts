@@ -11,7 +11,7 @@ import { createQueue } from "../src/orchestration/queue.ts"
 import { createLegacyVerifierExecutor } from "../src/orchestration/legacy-verifier.ts"
 import { worktreeRoot } from "../src/orchestration/worktree.ts"
 import { ledgerPath } from "../src/state/ledger.ts"
-import { stateRoot } from "../src/state/store.ts"
+import { executionRunDirectory, stateRoot } from "../src/state/store.ts"
 import { GIT_TEST_ENV, tempGitWorktree } from "./guards-helpers.ts"
 
 const SESSION = `ses_verifier_recovery_${randomUUID()}`
@@ -255,10 +255,10 @@ async function bounded<T>(promise: Promise<T>, timeoutMs: number, description: s
   } finally { if (timer) clearTimeout(timer) }
 }
 
-test("legacy verifier coordinator crash retains a started fence while a detached fixture child remains independent", async () => {
-  const previousStateHome = process.env.LCA_STATE_HOME
+test("legacy verifier coordinator crash preserves started ownership while a detached fixture child remains independent", async () => {
   const fixture = tempGitWorktree({ "README.md": "ORIGINAL_BASELINE\n" })
   const worktree = realpathSync(fixture.worktree)
+  const runStatePath = join(executionRunDirectory(worktree), "state.json")
   const home = join(fixture.stateHome, `verifier-recovery-${randomUUID()}`)
   const requestLogPath = join(home, "host-requests.jsonl")
   const verifierHelperPath = join(home, "verifier-helper.mjs")
@@ -268,6 +268,11 @@ test("legacy verifier coordinator crash retains a started fence while a detached
   let resumedQueue: ReturnType<typeof createQueue> | undefined
   let coordinatorExited = false
   let preserveFixture = false
+  const preservationReasons: string[] = []
+  let capturedRunState: { path: string; bytes: Buffer; claim: { ownerSession: string; instance: string; pid: number; generation: number } | undefined } | undefined
+  let capturedLedger: { path: string; bytes: Buffer } | undefined
+  let capturedBaseline: { path: string; bytes: Buffer } | undefined
+  let capturedPrivateBaseline: { path: string; bytes: Buffer } | undefined
   const coordinatorInstance = `crashed-coordinator-${randomUUID()}`
 
   try {
@@ -279,7 +284,9 @@ test("legacy verifier coordinator crash retains a started fence while a detached
       cwd: worktree, env: GIT_TEST_ENV, stdio: "pipe",
     })
 
-    const baselineBytes = readFileSync(join(worktree, "README.md"))
+    const baselinePath = join(worktree, "README.md")
+    const baselineBytes = readFileSync(baselinePath)
+    capturedBaseline = { path: baselinePath, bytes: baselineBytes }
     expect(baselineBytes).toEqual(execFileSync("git", ["show", "HEAD:README.md"], { cwd: worktree, env: GIT_TEST_ENV }))
     const imports = {
       config: new URL("../src/config.ts", import.meta.url).href,
@@ -329,6 +336,7 @@ test("legacy verifier coordinator crash retains a started fence while a detached
     const isolatedWorkerBytesAtCrash = readFileSync(join(isolatedTaskWorktree, "README.md"))
     const privateBaselinePath = join(worktreeRoot(worktree), ".recovery", SESSION, requestsAtCrash[0]!.taskID, "baseline", "baseline.json")
     const privateBaselineAtCrash = readFileSync(privateBaselinePath)
+    capturedPrivateBaseline = { path: privateBaselinePath, bytes: privateBaselineAtCrash }
     expect(isolatedWorkerBytesAtCrash.toString()).toBe("UNMERGED_WORKER_EDIT\n")
     expect(readFileSync(join(worktree, "README.md"))).toEqual(baselineBytes)
 
@@ -347,8 +355,13 @@ test("legacy verifier coordinator crash retains a started fence while a detached
     expect(startedBeforeResume!.reconciliation).toBeUndefined()
     expect(settled(startedBeforeResume!)).toBe(false)
     expect(startedBeforeResume!.boundaryRef).toMatchObject({ kind: "verifier", profile: "legacy-unowned" })
+    const claimAtCrash = coordinatorRunState.status().claim
+    expect(claimAtCrash).toMatchObject({ ownerSession: SESSION, instance: coordinatorInstance, pid: coordinatorPid })
+    const runStateBytesAtCrash = readFileSync(runStatePath)
+    capturedRunState = { path: runStatePath, bytes: runStateBytesAtCrash, claim: claimAtCrash }
 
     const ledgerBytesAtCrash = readFileSync(ledgerFile)
+    capturedLedger = { path: ledgerFile, bytes: ledgerBytesAtCrash }
     const requestBytesAtCrash = readFileSync(requestLogPath)
     resumedQueue = createQueue(runtimeFor(worktree, requestLogPath, `resumer-${randomUUID()}`))
     const resumed = await bounded(resumedQueue.run(SESSION, { resumed: true }), 5_000, "fail-closed queue recovery")
@@ -359,7 +372,9 @@ test("legacy verifier coordinator crash retains a started fence while a detached
     expect(startedAfterResume!.verifierDispatch).toBe("started")
     expect(startedAfterResume!.terminal).toBeUndefined()
     expect(settled(startedAfterResume!)).toBe(false)
-    expect(startedAfterResume!.fence).toBeDefined()
+    expect(startedAfterResume).toEqual(startedBeforeResume)
+    expect(createExecutionRunStore(worktree).status().claim).toEqual(claimAtCrash)
+    expect(readFileSync(runStatePath)).toEqual(runStateBytesAtCrash)
     expect(readFileSync(ledgerFile)).toEqual(ledgerBytesAtCrash)
     expect(readFileSync(privateBaselinePath)).toEqual(privateBaselineAtCrash)
     expect(readFileSync(requestLogPath)).toEqual(requestBytesAtCrash)
@@ -376,7 +391,9 @@ test("legacy verifier coordinator crash retains a started fence while a detached
     const startedAfterChildRelease = createExecutionRunStore(worktree).status().executions.find((record) => record.kind === "verifier")
     expect(startedAfterChildRelease?.verifierDispatch).toBe("started")
     expect(startedAfterChildRelease?.terminal).toBeUndefined()
-    expect(startedAfterChildRelease?.fence).toBeDefined()
+    expect(startedAfterChildRelease).toEqual(startedBeforeResume)
+    expect(createExecutionRunStore(worktree).status().claim).toEqual(claimAtCrash)
+    expect(readFileSync(runStatePath)).toEqual(runStateBytesAtCrash)
     expect(settled(startedAfterChildRelease!)).toBe(false)
     expect(readFileSync(ledgerFile)).toEqual(ledgerBytesAtCrash)
     expect(readFileSync(privateBaselinePath)).toEqual(privateBaselineAtCrash)
@@ -388,6 +405,8 @@ test("legacy verifier coordinator crash retains a started fence while a detached
       verifierDispatch: startedAfterResume!.verifierDispatch,
       recoveryAborted: resumed.aborted,
       postCrashHostRoles: readRequests(requestLogPath).slice(requestsAtCrash.length).map((request) => request.role),
+      runStateUnchanged: true,
+      ownershipRetained: true,
       ledgerUnchanged: true,
       originalBaselineUnchanged: true,
       privateBaselineUnchanged: true,
@@ -400,16 +419,16 @@ test("legacy verifier coordinator crash retains a started fence while a detached
       try {
         await bounded(coordinator.exited, 4_000, "fixture coordinator cleanup")
         coordinatorExited = true
-      } catch { preserveFixture = true }
+      } catch { preserveFixture = true; preservationReasons.push("coordinator exit was not observed") }
     }
 
     if (resumedQueue) {
       try { await bounded(resumedQueue.abort(SESSION, "verifier recovery fixture teardown"), 4_000, "resumer queue teardown") }
-      catch { preserveFixture = true }
+      catch { preserveFixture = true; preservationReasons.push("resumer teardown did not settle") }
     }
 
     let owned: FixtureProcess[] = []
-    try { owned = ownedProcesses(home) } catch { preserveFixture = true }
+    try { owned = ownedProcesses(home) } catch { preserveFixture = true; preservationReasons.push("owned fixture records could not be inspected") }
     for (const processFixture of owned) {
       writeFileSync(join(home, `release-writer-${processFixture.token}`), "")
       writeFileSync(join(home, `release-helper-${processFixture.token}`), "")
@@ -418,22 +437,44 @@ test("legacy verifier coordinator crash retains a started fence while a detached
       const excluded = new Set([process.pid, coordinator?.pid ?? -1])
       for (const pid of [processFixture.verifierPid, processFixture.verifierParentPid, processFixture.detachedPid]) {
         // Never signal a persisted PID: it may have been reused. Release only our token-bound fixtures.
-        if (pid > 1 && !excluded.has(pid) && !(await waitForPidExit(pid, 2_000))) preserveFixture = true
+        if (pid > 1 && !excluded.has(pid) && !(await waitForPidExit(pid, 2_000))) {
+          preserveFixture = true
+          preservationReasons.push(`token-bound fixture pid ${pid} did not exit after release`)
+        }
       }
     }
 
-    if (coordinatorExited && owned.length === 0) {
-      try {
-        const possiblyLaunchedVerifier = createExecutionRunStore(worktree).status().executions.some((record) =>
-          record.kind === "verifier" && record.verifierDispatch === "started")
-        if (possiblyLaunchedVerifier) preserveFixture = true
-      } catch { preserveFixture = true }
+    try {
+      const status = createExecutionRunStore(worktree).status()
+      if (status.claim) {
+        preserveFixture = true
+        preservationReasons.push(`run-store claim remains for ${status.claim.ownerSession}/${status.claim.instance} (pid ${status.claim.pid})`)
+      }
+      const unsettled = status.executions.filter((record) => !settled(record))
+      if (unsettled.length > 0) {
+        preserveFixture = true
+        preservationReasons.push(`${unsettled.length} unsettled run-store execution(s) remain`)
+      }
+    } catch {
+      preserveFixture = true
+      preservationReasons.push("run-store authority could not be inspected")
     }
     if (preserveFixture) {
-      if (previousStateHome === undefined) delete process.env.LCA_STATE_HOME
-      else process.env.LCA_STATE_HOME = previousStateHome
-      console.error(`verifier recovery fixture retained at ${home} because every possible writer could not be proven stopped`)
+      fixture.executionAuthority.release({ preserve: true })
+      fixture.releaseEnvironment()
+      console.error(`verifier recovery fixture retained because cleanup admission was blocked (${preservationReasons.join("; ") || "fixture process state was unresolved"}); durable authority does not establish that a writer is still alive; home: ${home}; stateHome: ${fixture.stateHome}; worktree: ${fixture.worktree}; run state: ${runStatePath}; execution authority: ${fixture.executionAuthority.keyDirectory}`)
     } else fixture.cleanup()
   }
-  expect(preserveFixture).toBe(false)
+  {
+    expect(preserveFixture).toBe(true)
+    expect(capturedRunState).toBeDefined()
+    expect(createExecutionRunStore(worktree).status().claim).toEqual(capturedRunState!.claim)
+    expect(readFileSync(capturedRunState!.path).equals(capturedRunState!.bytes)).toBe(true)
+    expect(capturedLedger).toBeDefined()
+    expect(readFileSync(capturedLedger!.path).equals(capturedLedger!.bytes)).toBe(true)
+    expect(capturedBaseline).toBeDefined()
+    expect(readFileSync(capturedBaseline!.path).equals(capturedBaseline!.bytes)).toBe(true)
+    expect(capturedPrivateBaseline).toBeDefined()
+    expect(readFileSync(capturedPrivateBaseline!.path).equals(capturedPrivateBaseline!.bytes)).toBe(true)
+  }
 }, 30_000)

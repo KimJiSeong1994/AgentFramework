@@ -5,7 +5,7 @@ import type { Part, TextPart, UserMessage } from "@opencode-ai/sdk"
 import { createLcaFlowTool } from "../src/tools/lca-flow.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { applyEvent, cancelWorkflow, repairOnLoad, startWorkflow, stopHeartbeat } from "../src/flow/runtime.ts"
-import { newWorkflow, readEvents, readWorkflow, workflowPath, writeWorkflow } from "../src/flow/state.ts"
+import { newWorkflow, readEvents, readWorkflow, workflowPath, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
 import { currentOwner, startHeartbeat } from "../src/flow/owner.ts"
 import { readModeState } from "../src/state/store.ts"
 import { bashPolicyProblem } from "../src/flow/bash-policy.ts"
@@ -42,7 +42,7 @@ const plan = {
 describe("compare-and-swap: the workflow cannot be resurrected or overwritten by a late review", () => {
   test("/cancel during the review keeps the workflow cancelled", async () => {
     const deps = makeDeps(client, wt.worktree)
-    startWorkflow(deps, S, "command", "do it", "user_command")
+    startWorkflow(deps, S, "command", "do it", "user_command", "opencode")
     client.replies.reviewer = {
       text: "VERDICT: OKAY",
       run: async () => {
@@ -58,14 +58,14 @@ describe("compare-and-swap: the workflow cannot be resurrected or overwritten by
 
   test("/cancel then a new /plan during the review keeps the new workflow intact", async () => {
     const deps = makeDeps(client, wt.worktree)
-    const first = startWorkflow(deps, S, "command", "first", "user_command")
+    const first = startWorkflow(deps, S, "command", "first", "user_command", "opencode")
     if (!first.ok) throw new Error(first.text)
     let secondId = ""
     client.replies.reviewer = {
       text: "VERDICT: OKAY",
       run: async () => {
         cancelWorkflow(deps, readWorkflow(wt.worktree)!, false, () => {})
-        const b = startWorkflow(deps, S, "command", "second", "user_command")
+        const b = startWorkflow(deps, S, "command", "second", "user_command", "opencode")
         if (!b.ok) throw new Error(b.text)
         secondId = b.wf.id
       },
@@ -79,7 +79,7 @@ describe("compare-and-swap: the workflow cannot be resurrected or overwritten by
 
   test("applyEvent refuses a stale record and keeps a fresher heartbeat", () => {
     const deps = makeDeps(client, wt.worktree)
-    const r = startWorkflow(deps, S, "command", "x", "user_command")
+    const r = startWorkflow(deps, S, "command", "x", "user_command", "opencode")
     if (!r.ok) throw new Error(r.text)
     const stale = r.wf
     // a newer event moved the workflow on
@@ -89,7 +89,7 @@ describe("compare-and-swap: the workflow cannot be resurrected or overwritten by
     expect(again.ok).toBe(false)
     // heartbeat refreshed on disk is not rolled back by a transition built from an older owner value
     const cur = readWorkflow(wt.worktree)!
-    writeWorkflow(wt.worktree, { ...cur, owner: { ...cur.owner, heartbeatAt: cur.owner.heartbeatAt + 60_000 } })
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...cur, owner: { ...cur.owner, heartbeatAt: cur.owner.heartbeatAt + 60_000 } }))
     const fresh = readWorkflow(wt.worktree)!
     const t = applyEvent(deps, { ...fresh, owner: { ...fresh.owner, heartbeatAt: 1 } }, "submit_invalid", "model_tool")
     expect(t.ok).toBe(true)
@@ -98,7 +98,7 @@ describe("compare-and-swap: the workflow cannot be resurrected or overwritten by
 
   test("Esc during the review aborts it (T8) without a real verdict", async () => {
     const deps = makeDeps(client, wt.worktree)
-    startWorkflow(deps, S, "command", "do it", "user_command")
+    startWorkflow(deps, S, "command", "do it", "user_command", "opencode")
     const c = ctx()
     client.replies.reviewer = { text: "VERDICT: ITERATE", delayMs: 200 }
     setTimeout(() => c.controller.abort(), 20)
@@ -112,14 +112,14 @@ describe("compare-and-swap: the workflow cannot be resurrected or overwritten by
 describe("load repair leaves a live foreign owner alone", () => {
   test("reviewing owned by another live instance is not flipped to pending_approval", () => {
     const deps = makeDeps(client, wt.worktree)
-    const wf = newWorkflow(S, { instance: "inst_other", pid: process.pid, heartbeatAt: Date.now() }, "command", "x")
-    writeWorkflow(wt.worktree, { ...wf, phase: "reviewing" })
+    const wf = newWorkflow(S, { instance: "inst_other", pid: process.pid, heartbeatAt: Date.now() }, "command", "x", "opencode")
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...wf, phase: "reviewing" }))
     // the owning session must exist for liveness
     const { mkdirSync } = require("node:fs") as typeof import("node:fs")
     const { sessionDir } = require("../src/state/store.ts") as typeof import("../src/state/store.ts")
     mkdirSync(sessionDir(wt.worktree, S), { recursive: true })
     const before = readFileSync(workflowPath(wt.worktree), "utf8")
-    expect(repairOnLoad(deps)).toBeNull()
+    expect(repairOnLoad(deps, "opencode")).toBeNull()
     expect(readFileSync(workflowPath(wt.worktree), "utf8")).toBe(before)
   })
 })
@@ -221,7 +221,7 @@ describe("bash policy combined-flag bypasses", () => {
 
 test("events stay readable after the fixes (sanity)", () => {
   const deps = makeDeps(client, wt.worktree)
-  startWorkflow(deps, S, "command", "x", "user_command")
+  startWorkflow(deps, S, "command", "x", "user_command", "opencode")
   expect(readEvents(wt.worktree).length).toBeGreaterThan(0)
   expect(existsSync(workflowPath(wt.worktree))).toBe(true)
 })

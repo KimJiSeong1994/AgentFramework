@@ -10,9 +10,11 @@ import { abortPath, createIdleLoop } from "../loop/idle.ts"
 import { getQueue } from "../orchestration/queue.ts"
 import { recordToolOutcome } from "../telemetry/outcomes.ts"
 import { onSessionDeleted } from "../flow/runtime.ts"
+import { readWorkflow, readWorkflowForWrite, withFlowTransaction, workflowEngineRefusal } from "../flow/state.ts"
 import { flowOn } from "../flow/status.ts"
 import { observeSkillMessage, observeSkillPart, observeRelatedToolPart, observeSkillBoundary } from "../telemetry/skill-observer.ts"
 import { getOpenCodeRuntime, policyForOpenCodeSession } from "../hosts/opencode-runtime.ts"
+import { settled } from "../hosts/run-state.ts"
 
 const MAX_TRACKED_MESSAGES = 200
 const MAX_TRACKED_CALLS = 200
@@ -23,7 +25,8 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
   const repeatOn = enabled(deps.config, "guard.repeat")
   const toolHistoryOn = enabled(deps.config, "tool.history")
   const idle = createIdleLoop(deps)
-  const queue = getQueue(getOpenCodeRuntime(deps))
+  const runtime = getOpenCodeRuntime(deps)
+  const queue = getQueue(runtime)
 
   /** messageID -> role, from message.updated (TextPart carries no role). */
   const roles = new Map<string, "user" | "assistant">()
@@ -85,24 +88,69 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
       case "session.deleted": {
         const id = event.properties.info?.id
         if (id) {
+          const workflow = readWorkflow(deps.worktree)
+          if (workflow?.sessionID === id) {
+            const refusal = workflowEngineRefusal(workflow, runtime.host.identity.engine)
+            if (refusal) {
+              deps.log("session.deleted: workflow engine refused", { sessionID: id, reason: refusal })
+              return
+            }
+          }
           observeSkillBoundary(deps, id, "deleted")
           guards.repetition.clear(id)
           guards.repeat.clear(id)
           const running = queue.isRunning(id)
+          const completion = running ? queue.completion(id) : undefined
+          const hasUnsettledWork = () => {
+            const status = runtime.runs.status()
+            return status.claim?.ownerSession === id ||
+              status.executions.some(execution => execution.ownerSession === id && !settled(execution))
+          }
+          const hasActiveWork = running || hasUnsettledWork()
+          let abortWork: ReturnType<typeof queue.abort> | undefined
+          const abortQueue = () => {
+            if (running) abortWork ??= queue.abort(id, "session deleted", { discard: true })
+          }
+          const removeOwnedSession = () => withFlowTransaction(deps.worktree, tx => {
+            const current = readWorkflowForWrite(tx)
+            if (current.corrupt || (current.wf?.sessionID === id &&
+              (current.wf.id !== workflow?.id || workflowEngineRefusal(current.wf, runtime.host.identity.engine)))) {
+              deps.log("session.deleted: changed or unknown workflow prevents cleanup", { sessionID: id })
+              return
+            }
+            if (hasUnsettledWork()) {
+              deps.log("session.deleted: unresolved execution prevents cleanup", { sessionID: id })
+              return
+            }
+            removeSessionDir(deps.worktree, id)
+          })
           if (flowOn(deps.config)) {
             try {
-              onSessionDeleted(deps, id, running, () => {
-                void queue.abort(id, "session deleted", { discard: true })
-              })
+              const result = onSessionDeleted(deps, id, runtime.host.identity.engine, hasActiveWork, abortQueue)
+              if (result && !result.ok) {
+                deps.log("session.deleted: workflow refused cleanup", { sessionID: id, reason: result.text })
+                return
+              }
             } catch (e) {
               deps.log("session.deleted: workflow handling failed", { sessionID: id, error: (e as Error).message })
+              return
             }
           }
           if (running) {
             // discard: the queue must not resurrect the deleted session's state dir while it winds down
-            void queue.abort(id, "session deleted", { discard: true }).finally(() => removeSessionDir(deps.worktree, id))
+            abortQueue()
+            if (!completion) {
+              deps.log("session.deleted: owned runner completion unavailable", { sessionID: id })
+              return
+            }
+            try {
+              await completion
+              await removeOwnedSession()
+            } catch {
+              deps.log("session.deleted: cleanup not proven safe", { sessionID: id })
+            }
           } else {
-            removeSessionDir(deps.worktree, id)
+            removeOwnedSession()
           }
         }
         return

@@ -4,12 +4,107 @@
 //   <stateRoot>/workflow/archive/<id>.json terminal workflows
 //   <stateRoot>/workflow/events.jsonl      append-only, global monotonic seq across workflows
 //   <stateRoot>/workflow/plans/<id>.json   canonical plan (M1)
-import { createHash, randomBytes } from "node:crypto"
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { createHash, randomBytes, randomUUID } from "node:crypto"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
-import { readJsonChecked, stateRoot, writeJsonAtomic } from "../state/store.ts"
+import { stateRoot, writeJsonAtomic } from "../state/store.ts"
 import type { Counters, FlowCore, Phase, StuckCause } from "./machine.ts"
 import { TERMINAL, ZERO_COUNTERS } from "./machine.ts"
+import { INSTANCE_ID } from "./owner.ts"
+import type { Plan } from "./plan.ts"
+
+declare const flowTxBrand: unique symbol
+export type FlowTx = { readonly [flowTxBrand]: true }
+
+type FlowTxState = { worktree: string; dir: string; lock: string; identity: string; active: boolean }
+type SynchronousCallbackResult<T> = Extract<T, PromiseLike<unknown>> extends never ? [] : [never]
+const flowTxState = new WeakMap<FlowTx, FlowTxState>()
+const heldFlowDirs = new Set<string>()
+
+export class FlowTransactionBusyError extends Error {
+  constructor() {
+    super("flow transaction is busy; retry later")
+    this.name = "FlowTransactionBusyError"
+  }
+}
+
+export class FlowTransactionIntegrityError extends Error {
+  constructor() {
+    super("flow transaction lock ownership changed; lock left in place")
+    this.name = "FlowTransactionIntegrityError"
+  }
+}
+
+export class CorruptWorkflowError extends Error {
+  constructor(path: string) {
+    super(`corrupt workflow state at ${path}; refusing flow write`)
+    this.name = "CorruptWorkflowError"
+  }
+}
+
+/** Exclusive, synchronous transaction for cooperating writers sharing this external state root. */
+export function withFlowTransaction<T>(
+  worktree: string,
+  fn: (tx: FlowTx) => T,
+  ..._syncOnly: SynchronousCallbackResult<T>
+): T {
+  const dir = flowDir(worktree)
+  const lock = join(dir, "workflow.lock")
+  if (heldFlowDirs.has(dir)) throw new TypeError("nested flow transaction")
+  mkdirSync(dir, { recursive: true })
+  const identity = JSON.stringify({ pid: process.pid, instance: INSTANCE_ID, token: randomUUID() })
+  try {
+    symlinkSync(identity, lock)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new FlowTransactionBusyError()
+    throw error
+  }
+  heldFlowDirs.add(dir)
+  const tx = Object.freeze({}) as FlowTx
+  const state: FlowTxState = { worktree, dir, lock, identity, active: true }
+  flowTxState.set(tx, state)
+  try {
+    const result = (fn as (tx: FlowTx) => unknown)(tx)
+    if (isThenable(result)) {
+      void Promise.resolve(result).catch(() => {})
+      throw new TypeError("flow transaction callback must be synchronous")
+    }
+    return result as T
+  } finally {
+    state.active = false
+    heldFlowDirs.delete(dir)
+    let owner: string
+    try {
+      owner = readlinkSync(lock)
+    } catch {
+      throw new FlowTransactionIntegrityError()
+    }
+    if (owner !== identity) throw new FlowTransactionIntegrityError()
+    unlinkSync(lock)
+  }
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  if ((typeof value !== "object" || value === null) && typeof value !== "function") return false
+  return typeof (value as { then?: unknown }).then === "function"
+}
+
+function assertFlowTx(tx: FlowTx): FlowTxState {
+  const state = flowTxState.get(tx)
+  if (!state || !state.active) throw new TypeError("flow transaction is no longer active")
+  let owner: string
+  try {
+    owner = readlinkSync(state.lock)
+  } catch {
+    throw new FlowTransactionIntegrityError()
+  }
+  if (owner !== state.identity) throw new FlowTransactionIntegrityError()
+  return state
+}
+
+export function assertFlowTxWorktree(tx: FlowTx, worktree: string): void {
+  if (flowDir(worktree) !== assertFlowTx(tx).dir) throw new TypeError("flow transaction belongs to a different worktree")
+}
 
 export type Owner = { instance: string; pid: number; heartbeatAt: number }
 export type EventActor = "code" | "user_command" | "user_keyword" | "user_message" | "model_tool"
@@ -18,6 +113,8 @@ export type Workflow = {
   version: 1
   id: string
   kind: "plan"
+  /** Observed host identity; legacy or malformed values remain readable but confer no execution authority. */
+  engine?: unknown
   phase: Phase
   stuckCause?: StuckCause
   /** authority key */
@@ -48,6 +145,19 @@ export type FlowEventLine = {
 }
 
 export const REQUEST_MAX = 2000
+const ENGINE_MAX = 512
+
+function validEngine(engine: unknown): engine is string {
+  return typeof engine === "string" && engine.length > 0 && engine.length <= ENGINE_MAX
+}
+
+/** Refuse host use unless the persisted workflow and this host identify the same bounded engine. */
+export function workflowEngineRefusal(wf: Workflow, expectedEngine: unknown): string | undefined {
+  if (!validEngine(wf.engine)) return "workflow engine identity is missing or malformed; recovery refused"
+  if (!validEngine(expectedEngine)) return "host engine identity is missing or malformed; recovery refused"
+  if (wf.engine !== expectedEngine) return "workflow engine identity mismatch; recovery refused"
+  return undefined
+}
 
 export function flowDir(worktree: string): string {
   return join(stateRoot(worktree), "workflow")
@@ -79,27 +189,37 @@ function isWorkflow(v: unknown): v is Workflow {
 
 export type ReadWorkflowResult = { wf: Workflow | null; corrupt?: string }
 
-/** A corrupt or wrong-shaped workflow.json is moved aside (never silently overwritten). */
+/** Corrupt workflow state is reported in place; even status reads never rename it. */
 export function readWorkflowChecked(worktree: string): ReadWorkflowResult {
   const path = workflowPath(worktree)
-  const r = readJsonChecked<unknown>(path, null)
-  if (r.corrupt) return { wf: null, corrupt: r.corrupt }
-  if (r.value === null) return { wf: null }
-  if (!isWorkflow(r.value)) {
-    const moved = `${path}.corrupt-${Date.now()}`
-    try {
-      renameSync(path, moved)
-    } catch {}
-    return { wf: null, corrupt: moved }
+  if (!existsSync(path)) return { wf: null }
+  let value: unknown
+  try {
+    value = JSON.parse(readFileSync(path, "utf8")) as unknown
+  } catch {
+    return { wf: null, corrupt: path }
   }
-  return { wf: r.value }
+  if (!isWorkflow(value)) return { wf: null, corrupt: path }
+  return { wf: value }
 }
 
 export function readWorkflow(worktree: string): Workflow | null {
   return readWorkflowChecked(worktree).wf
 }
 
-export function writeWorkflow(worktree: string, wf: Workflow, now = Date.now()): Workflow {
+export function readWorkflowForWrite(tx: FlowTx): ReadWorkflowResult {
+  const { worktree } = assertFlowTx(tx)
+  return readWorkflowChecked(worktree)
+}
+
+function assertNoCorruptWorkflow(tx: FlowTx): void {
+  const result = readWorkflowForWrite(tx)
+  if (result.corrupt) throw new CorruptWorkflowError(result.corrupt)
+}
+
+export function writeWorkflow(tx: FlowTx, wf: Workflow, now = Date.now()): Workflow {
+  const { worktree } = assertFlowTx(tx)
+  assertNoCorruptWorkflow(tx)
   const next = { ...wf, updatedAt: now }
   writeJsonAtomic(workflowPath(worktree), next)
   return next
@@ -112,8 +232,10 @@ export function activeWorkflow(worktree: string): Workflow | null {
 }
 
 /** Move a terminal workflow.json into archive/<id>.json. Returns the archived id, or null when nothing moved. */
-export function rotate(worktree: string): string | null {
-  const wf = readWorkflow(worktree)
+export function rotate(tx: FlowTx): string | null {
+  const { worktree } = assertFlowTx(tx)
+  assertNoCorruptWorkflow(tx)
+  const wf = readWorkflowForWrite(tx).wf
   if (!wf || !TERMINAL.has(wf.phase)) return null
   writeJsonAtomic(archivePath(worktree, wf.id), wf)
   rmSync(workflowPath(worktree), { force: true })
@@ -151,7 +273,9 @@ export function readEvents(worktree: string, wfId?: string): FlowEventLine[] {
 }
 
 /** Append events with a global monotonic seq. Returns the last seq written. */
-export function appendEvents(worktree: string, events: Array<Omit<FlowEventLine, "seq" | "at"> & { at?: number }>, now = Date.now()): number {
+export function appendEvents(tx: FlowTx, events: Array<Omit<FlowEventLine, "seq" | "at"> & { at?: number }>, now = Date.now()): number {
+  const { worktree } = assertFlowTx(tx)
+  assertNoCorruptWorkflow(tx)
   let seq = lastEventSeq(worktree)
   if (events.length === 0) return seq
   const path = eventsPath(worktree)
@@ -166,11 +290,19 @@ export function sha256(text: string): string {
 }
 
 /** Write a code-rendered artifact under <worktree>/<rel>; returns its sha256. */
-export function renderArtifact(worktree: string, rel: string, text: string): string {
+export function renderArtifact(tx: FlowTx, rel: string, text: string): string {
+  const { worktree } = assertFlowTx(tx)
+  assertNoCorruptWorkflow(tx)
   const path = join(worktree, rel)
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, text)
   return sha256(text)
+}
+
+export function writePlanJson(tx: FlowTx, id: string, plan: Plan): void {
+  const { worktree } = assertFlowTx(tx)
+  assertNoCorruptWorkflow(tx)
+  writeJsonAtomic(planJsonPath(worktree, id), plan)
 }
 
 export function fileSha(worktree: string, rel: string): string | null {
@@ -205,11 +337,13 @@ export function withCore(wf: Workflow, core: FlowCore): Workflow {
   return next
 }
 
-export function newWorkflow(sessionID: string, owner: Owner, entry: Workflow["entry"], request: string, now = Date.now()): Workflow {
+export function newWorkflow(sessionID: string, owner: Owner, entry: Workflow["entry"], request: string, engine: string, now = Date.now()): Workflow {
+  if (!validEngine(engine)) throw new TypeError("workflow engine must be a nonempty string no longer than 512 characters")
   return {
     version: 1,
     id: newWorkflowId(now),
     kind: "plan",
+    engine,
     phase: "planning",
     sessionID,
     owner,

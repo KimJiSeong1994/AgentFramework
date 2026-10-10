@@ -7,9 +7,11 @@ import type { HookDeps } from "../hooks/types.ts"
 import { MAIN_AGENT } from "../hooks/tool-before.ts"
 import { flowOn, renderStatus } from "../flow/status.ts"
 import { getQueue } from "../orchestration/queue.ts"
-import { writeJsonAtomic } from "../state/store.ts"
-import { activeWorkflow, planJsonPath, readWorkflow, renderArtifact } from "../flow/state.ts"
-import { applyEvent, flowLimits } from "../flow/runtime.ts"
+import {
+  activeWorkflow, assertFlowTxWorktree, CorruptWorkflowError, readWorkflowForWrite,
+  renderArtifact, workflowEngineRefusal, withFlowTransaction, writePlanJson, type Workflow,
+} from "../flow/state.ts"
+import { applyEvent, applyEventIn, flowLimits } from "../flow/runtime.ts"
 import { canonicalPlanSha, coercePlan, planMdPath, renderPlanMd, validatePlan, type Plan, type ReviewView } from "../flow/plan.ts"
 import { runPlanReview, type PlanReviewResult } from "../flow/review.ts"
 import type { FlowEvent } from "../flow/machine.ts"
@@ -44,6 +46,22 @@ function numbered(errors: string[]): string {
   return errors.map((e, i) => `${i + 1}. ${e}`).join("\n")
 }
 
+function currentWorkflowRefusal(runtime: ReturnType<typeof getOpenCodeRuntime>, expected: Workflow): string | undefined {
+  return withFlowTransaction(runtime.worktree, (tx) => {
+    assertFlowTxWorktree(tx, runtime.worktree)
+    const checked = readWorkflowForWrite(tx)
+    if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+    const current = checked.wf
+    if (!current) return "lca: workflow changed meanwhile; stop and check /status"
+    const refusal = workflowEngineRefusal(current, runtime.host.identity.engine)
+    if (refusal) return `lca: ${refusal}`
+    if (current.id !== expected.id || current.lastSeq !== expected.lastSeq || current.phase !== expected.phase || current.engine !== expected.engine) {
+      return "lca: workflow changed meanwhile; stop and check /status"
+    }
+    return undefined
+  })
+}
+
 export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
   const runtime = getOpenCodeRuntime(deps)
   return tool({
@@ -63,6 +81,8 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       // op === "plan"
       runtime.linuxAdmission?.assertBootEpoch()
       const wf = activeWorkflow(deps.worktree)
+      const engineRefusal = wf && workflowEngineRefusal(wf, runtime.host.identity.engine)
+      if (engineRefusal) return { title: "lca_flow: refused", output: `lca: ${engineRefusal}` }
       if (!wf || wf.sessionID !== ctx.sessionID) {
         const text = wf
           ? `lca: plan workflow ${wf.id} is owned by another session.`
@@ -88,6 +108,9 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
         throw e
       }
 
+      const postAdmissionRefusal = currentWorkflowRefusal(runtime, wf)
+      if (postAdmissionRefusal) return { title: "lca_flow: refused", output: postAdmissionRefusal }
+
       if (errors.length > 0) {
         const r = applyEvent(deps, wf, "submit_invalid", "model_tool", {}, (w) => w, { errorCount: errors.length })
         if (!r.ok) return { title: "lca_flow: refused", output: `lca: ${r.text}` }
@@ -102,14 +125,29 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       // valid: raw plan json (coercePlan + canonicalPlanSha round-trips it on read, e.g. at /approve) + initial
       // md, submit_valid (T4 -> reviewing)
       const jsonSha = canonicalPlanSha(plan)
-      const jsonPath = planJsonPath(deps.worktree, wf.id)
-      writeJsonAtomic(jsonPath, plan)
       const mdPath = planMdPath(wf.id)
-      let mdSha = renderArtifact(deps.worktree, mdPath, renderPlanMd(wf.id, plan))
-      const planRef = { jsonSha, mdPath, mdSha, revision: plan.revision }
-
-      const submitted = applyEvent(deps, wf, "submit_valid", "model_tool", {}, (w) => ({ ...w, planRef }), { jsonSha })
+      const initialMd = renderPlanMd(wf.id, plan)
+      const submitted = withFlowTransaction(deps.worktree, (tx) => {
+        assertFlowTxWorktree(tx, deps.worktree)
+        const checked = readWorkflowForWrite(tx)
+        if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+        const current = checked.wf
+        const refusal = current && workflowEngineRefusal(current, runtime.host.identity.engine)
+        if (refusal) return { ok: false as const, text: refusal, wf: current }
+        if (!current || current.id !== wf.id || current.engine !== wf.engine || current.phase !== wf.phase || current.lastSeq !== wf.lastSeq) {
+          return { ok: false as const, text: "workflow changed meanwhile; stop and check /status", wf: current }
+        }
+        if (current.phase !== "planning") return { ok: false as const, text: "workflow is not awaiting a plan", wf: current }
+        writePlanJson(tx, current.id, plan)
+        const mdSha = renderArtifact(tx, mdPath, initialMd)
+        return applyEventIn(tx, runtime, current, "submit_valid", "model_tool", {}, (w) => ({
+          ...w, planRef: { jsonSha, mdPath, mdSha, revision: plan.revision },
+        }), { jsonSha })
+      })
       if (!submitted.ok) return { title: "lca_flow: refused", output: `lca: ${submitted.text}` }
+
+      const preReviewRefusal = currentWorkflowRefusal(runtime, submitted.wf)
+      if (preReviewRefusal) return { title: "lca_flow: refused", output: preReviewRefusal }
 
       // review runs inside this tool call (main is blocked; no race with the queue). Esc (ctx.abort) aborts it (T8).
       let admissionRefusal: LinuxAdmissionRefused | undefined
@@ -134,29 +172,26 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       // The workflow may have changed while the review ran (/cancel, a new /plan): check before touching the md, and
       // let applyEvent's compare-and-swap refuse the write if it changes in between. One guarded write carries both
       // the review and the new md sha.
-      const current = readWorkflow(deps.worktree)
-      if (!current || current.id !== wf.id || current.lastSeq !== submitted.wf.lastSeq || current.phase !== "reviewing") {
-        deps.log("lca_flow: workflow changed during review; result dropped", { wfId: wf.id })
-        if (admissionRefusal) {
-          return { title: "lca_flow: refused", output: `${admissionRefusal.message}\nThe workflow changed; no review_aborted transition was written.` }
-        }
-        return { title: "lca_flow: workflow changed", output: "lca: the workflow changed during review (cancelled or replaced); stop and check /status." }
-      }
       const reviewView: ReviewView = { verdict: result.verdict, findings: result.findings, ...(note ? { note } : {}) }
-      mdSha = renderArtifact(deps.worktree, mdPath, renderPlanMd(wf.id, plan, reviewView))
-      const reviewed = applyEvent(
-        deps,
-        submitted.wf,
-        event,
-        "code",
-        {},
-        (w) => ({
+      const reviewedMd = renderPlanMd(wf.id, plan, reviewView)
+      const reviewed = withFlowTransaction(deps.worktree, (tx) => {
+        assertFlowTxWorktree(tx, deps.worktree)
+        const checked = readWorkflowForWrite(tx)
+        if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+        const current = checked.wf
+        const refusal = current && workflowEngineRefusal(current, runtime.host.identity.engine)
+        if (refusal) return { ok: false as const, text: refusal, wf: current }
+        if (!current || current.id !== submitted.wf.id || current.engine !== submitted.wf.engine ||
+            current.lastSeq !== submitted.wf.lastSeq || current.phase !== "reviewing") {
+          return { ok: false as const, text: "workflow changed during review", wf: current }
+        }
+        const reviewedMdSha = renderArtifact(tx, mdPath, reviewedMd)
+        return applyEventIn(tx, runtime, current, event, "code", {}, (w) => ({
           ...w,
-          planRef: { ...w.planRef!, mdSha },
+          planRef: { ...w.planRef!, mdSha: reviewedMdSha },
           review: { verdict: result.verdict, findings: result.findings, planSha: jsonSha, ...(note ? { note } : {}) },
-        }),
-        { findings: result.findings.length },
-      )
+        }), { findings: result.findings.length })
+      })
       if (!reviewed.ok) {
         if (admissionRefusal) return { title: "lca_flow: refused", output: `${admissionRefusal.message}\n${reviewed.text}` }
         return { title: "lca_flow: workflow changed", output: `lca: ${reviewed.text}` }

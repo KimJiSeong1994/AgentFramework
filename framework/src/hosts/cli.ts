@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs"
 import { resolve } from "node:path"
-import { createInterface } from "node:readline/promises"
 import { pathToFileURL } from "node:url"
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import { loadConfig } from "../config.ts"
@@ -9,6 +8,8 @@ import { readWorkflow } from "../flow/state.ts"
 import type { HookDeps } from "../hooks/types.ts"
 import { getOpenCodeRuntime } from "./opencode-runtime.ts"
 import { createForegroundController, readForegroundStatus } from "./controller.ts"
+import { humanDecision } from "./operator.ts"
+import { AdmissionRefusal, assertHostAdmission } from "./required-controls.ts"
 import { LinuxAdmissionRefused } from "./types.ts"
 import { InteractiveLaunchError, launchInteractive, parseInteractiveArgs, propagateInteractiveExit } from "./interactive.ts"
 
@@ -55,7 +56,8 @@ Prerequisites and safety:
   trusted local OpenCode service and the project's LCA plugin. run --plan, approve and reject require
   a local interactive terminal for explicit human decisions. Standalone commands do not start a server;
   interactive chat owns a separate OpenCode TUI child process. Neither path auto-approves plans or
-  performs native-host qualification.
+  performs native-host qualification. Host admission refuses when required control evidence is unavailable;
+  the CLI does not expose raw vendor preflight diagnostics.
 
 Run 'lca --help' for this usage. Exit codes: 0 success/help, 1 runtime refusal or failure,
 2 invalid arguments or inaccessible worktree, 3 Linux admission refusal.`
@@ -175,21 +177,6 @@ async function checkedClient(server: string, root: string): Promise<OpencodeClie
   return client
 }
 
-async function humanDecision(action: "approve" | "reject" | "choose", workflowID: string, sha: string): Promise<{ action: "approve" | "reject"; reason?: string }> {
-  if (!process.stdin.isTTY || !process.stderr.isTTY) throw new Error("local human approval or rejection requires an interactive terminal")
-  const terminal = createInterface({ input: process.stdin, output: process.stderr })
-  try {
-    const approve = `APPROVE ${workflowID} ${sha}`
-    const reject = `REJECT ${workflowID} ${sha}`
-    const answer = (await terminal.question(`Inspect the saved canonical plan first. Type '${approve}' or '${reject} <reason>': `)).trim()
-    if (answer === approve && action !== "reject") return { action: "approve" }
-    if (answer.startsWith(`${reject} `) && answer.slice(reject.length).trim() && action !== "approve") {
-      return { action: "reject", reason: answer.slice(reject.length).trim() }
-    }
-    throw new Error("local operator decision did not match workflow ID and plan hash")
-  } finally { terminal.close() }
-}
-
 /** Status never constructs an SDK client or loads an auth source. All other commands require an explicit local service. */
 export async function runCli(args: CliArgs): Promise<string> {
   const root = args.worktree
@@ -222,10 +209,7 @@ export async function runCli(args: CliArgs): Promise<string> {
     return `workflow ${result.result.wf.id} ${result.result.wf.phase}; plan_sha ${result.planSha}; inspect ${result.result.wf.planRef?.mdPath ?? "saved plan"}`
   }
   if (args.command === "approve" || args.command === "reject") {
-    const entered = await humanDecision(args.command, args.workflow!, args.sha!)
-    const decision = args.command === "approve"
-      ? { source: "local_human" as const, action: "approve" as const, workflowID: args.workflow!, planSha: args.sha! }
-      : { source: "local_human" as const, action: "reject" as const, workflowID: args.workflow!, planSha: args.sha!, reason: entered.reason! }
+    const decision = await humanDecision(args.command, args.workflow!, args.sha!)
     const result = controller.decide(decision)
     if (!result.ok) throw new Error(result.text)
     return `workflow ${result.wf.id} ${result.wf.phase}`
@@ -240,6 +224,9 @@ export async function runCli(args: CliArgs): Promise<string> {
     if (!source.startsWith(`${root}/`)) throw new Error("plan source must be inside the canonical worktree")
     const parsed = JSON.parse(readFileSync(source, "utf8")) as unknown
     controller.validateImportedPlan(parsed, args.session)
+    const preflight = await runtime.host.preflight(runtime.host.identity.profile)
+    assertHostAdmission(preflight)
+    if (abort.signal.aborted) throw new Error("run cancelled before parent session creation")
     const existing = readWorkflow(root)
     let sessionID = args.session ?? (existing?.phase === "planning" ? existing.sessionID : undefined)
     if (!sessionID) {
@@ -248,13 +235,13 @@ export async function runCli(args: CliArgs): Promise<string> {
       sessionID = created.data.id
     }
     const submitted = await controller.importPlan(sessionID, args.plan, abort.signal, parsed)
+    if (abort.signal.aborted) throw new Error("run cancelled before operator decision")
     if (!submitted.result.ok || submitted.result.wf.phase !== "pending_approval") {
       throw new Error("plan did not reach pending operator approval")
     }
     console.error(`lca: inspect ${submitted.result.wf.planRef?.mdPath ?? "saved canonical plan"}; workflow ${submitted.result.wf.id}; sha ${submitted.planSha}`)
     const choice = await humanDecision("choose", submitted.result.wf.id, submitted.planSha)
-    const decided = controller.decide({ source: "local_human", workflowID: submitted.result.wf.id, planSha: submitted.planSha,
-      ...(choice.action === "approve" ? { action: "approve" } : { action: "reject", reason: choice.reason! }) })
+    const decided = controller.decide(choice)
     if (!decided.ok) throw new Error(decided.text)
     if (choice.action === "reject") return `workflow ${decided.wf.id} ${decided.wf.phase}; rejected by local operator`
     args = { ...args, session: sessionID }
@@ -275,6 +262,11 @@ export async function runCli(args: CliArgs): Promise<string> {
 }
 
 function failCli(error: unknown): void {
+  if (error instanceof AdmissionRefusal) {
+    console.error("lca: host admission refused; required host control evidence is unavailable. Use a host that can provide all required execution controls before proceeding.")
+    process.exitCode = 1
+    return
+  }
   if (error instanceof LinuxAdmissionRefused) {
     console.error(error.message)
     process.exitCode = 3

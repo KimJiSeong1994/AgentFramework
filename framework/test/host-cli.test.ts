@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url"
 import { CliUsageError, parseCliArgs, runCli } from "../src/hosts/cli.ts"
 import { stateRoot } from "../src/state/store.ts"
 import { tempWorktree } from "./guards-helpers.ts"
+import { withTerminalLine } from "./operator-helpers.ts"
 
 let wt: ReturnType<typeof tempWorktree>
 beforeEach(() => { wt = tempWorktree() })
@@ -22,6 +23,35 @@ async function invokeCli(argv: string[]) {
     child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
   ])
   return { exitCode, stdout, stderr }
+}
+
+function admissionServer(worktree: string, sessionID: string) {
+  const plugin = pathToFileURL(join(realpathSync(worktree), ".opencode/plugins/lca.ts")).href
+  const dangerous = ["edit", "write", "patch", "bash", "task", "delegate", "webfetch"]
+  const denied = Object.fromEntries(dangerous.map(tool => [tool, "deny"]))
+  const nativeRules = [{ permission: "*", pattern: "*", action: "allow" },
+    ...dangerous.map(tool => ({ permission: tool, pattern: "*", action: "deny" }))]
+  let parentReads = 0
+  let sessionPosts = 0
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
+    const path = new URL(req.url).pathname
+    if (path === "/path") return Response.json({ worktree })
+    if (path === "/config") return Response.json({ plugin: [plugin], agent: { reviewer: { mode: "subagent", permission: denied } } })
+    if (path === "/agent") return Response.json([
+      { name: "main", mode: "primary" }, { name: "worker", mode: "subagent" },
+      { name: "reviewer", mode: "subagent", permission: nativeRules },
+    ])
+    if (req.method === "GET" && path === `/session/${sessionID}`) {
+      parentReads++
+      return Response.json({ id: sessionID, directory: worktree })
+    }
+    if (req.method === "POST" && path.startsWith("/session")) {
+      sessionPosts++
+      return Response.json({ id: "unexpected-child-session" })
+    }
+    return Response.json({})
+  } })
+  return { server, get parentReads() { return parentReads }, get sessionPosts() { return sessionPosts } }
 }
 
 describe("foreground CLI", () => {
@@ -100,6 +130,71 @@ describe("foreground CLI", () => {
     expect(result.stderr).not.toContain(config)
     expect(result.stdout).toBe("")
     expect(existsSync(stateRoot(wt.worktree))).toBe(false)
+  })
+
+  test("admission refusals print a bounded actionable message without leaking input", async () => {
+    const secret = "private-admission-control-sentinel"
+    const sessionID = `ses_${secret}`
+    const planPath = `revision-${secret}.json`
+    writeFileSync(join(wt.worktree, planPath), JSON.stringify({
+      goal: "fix the bug",
+      steps: [
+        { title: "one", files: ["src/a.py"], detail: "d", verify: "sh verify-a.test.sh" },
+        { title: "two", files: ["src/b.py"], detail: "d", verify: "sh verify-b.test.sh" },
+        { title: "three", files: ["src/c.py"], detail: "d", verify: "sh verify-c.test.sh" },
+      ],
+      risks: ["might break x"],
+      revision: 1,
+    }))
+    mkdirSync(join(wt.worktree, ".lca"), { recursive: true })
+
+    for (const disabledHooks of [["config.agents"], []]) {
+      writeFileSync(join(wt.worktree, ".lca/lca.jsonc"), JSON.stringify({ disabled_hooks: disabledHooks, flow: { enabled: true } }))
+      const fixture = admissionServer(wt.worktree, sessionID)
+      try {
+        const result = await invokeCli(["import", "--worktree", wt.worktree, "--server", `http://127.0.0.1:${fixture.server.port}`,
+          "--session", sessionID, "--plan", planPath])
+        expect(result.exitCode).toBe(1)
+        expect(result.stdout).toBe("")
+        expect(result.stderr).toContain("host admission refused")
+        expect(result.stderr).toContain("required host control evidence is unavailable")
+        expect(result.stderr).toContain("required execution controls")
+        expect(result.stderr).not.toContain(secret)
+        expect(result.stderr).not.toContain("OpenCode plugin does not provide")
+        expect(result.stderr).not.toContain(planPath)
+        expect(fixture.parentReads).toBe(1)
+        expect(fixture.sessionPosts).toBe(0)
+        expect(existsSync(stateRoot(wt.worktree))).toBe(false)
+      } finally { fixture.server.stop(true) }
+    }
+  })
+
+  test("run with an imported plan refuses admission before creating a parent session", async () => {
+    const sessionID = "ses_unused"
+    const source = join(wt.worktree, "revision.json")
+    writeFileSync(source, JSON.stringify({
+      goal: "fix the bug",
+      steps: [
+        { title: "one", files: ["src/a.py"], detail: "d", verify: "sh verify-a.test.sh" },
+        { title: "two", files: ["src/b.py"], detail: "d", verify: "sh verify-b.test.sh" },
+        { title: "three", files: ["src/c.py"], detail: "d", verify: "sh verify-c.test.sh" },
+      ],
+      risks: ["might break x"],
+      revision: 1,
+    }))
+    mkdirSync(join(wt.worktree, ".lca"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".lca/lca.jsonc"), JSON.stringify({ flow: { enabled: true } }))
+    const fixture = admissionServer(wt.worktree, sessionID)
+    try {
+      const args = parseCliArgs(["run", "--worktree", wt.worktree, "--server", `http://127.0.0.1:${fixture.server.port}`,
+        "--plan", "revision.json"])
+      await withTerminalLine("", async () => {
+        await expect(runCli(args)).rejects.toThrow("required control statuses unavailable")
+      })
+      expect(fixture.sessionPosts).toBe(0)
+      expect(fixture.parentReads).toBe(0)
+      expect(existsSync(stateRoot(wt.worktree))).toBe(false)
+    } finally { fixture.server.stop(true) }
   })
 
   test("invalid server addresses are usage errors before config or server access", async () => {

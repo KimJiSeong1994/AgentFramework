@@ -7,10 +7,11 @@ import { createCommandHook, STATUS_COMMAND, STATUS_DESCRIPTION, STATUS_TEMPLATE,
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { createConfigHook } from "../src/hooks/config.ts"
 import { STATUS_MARKER } from "../src/flow/status.ts"
-import { eventsPath, newWorkflow, workflowPath, writeWorkflow } from "../src/flow/state.ts"
+import { eventsPath, newWorkflow, workflowPath, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
 import { fakeDeps } from "./helpers.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { createExecutionRunStore } from "../src/hosts/run-state.ts"
 import { addTasks, emptyLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
 
@@ -26,8 +27,8 @@ beforeEach(() => {
 afterEach(() => wt.cleanup())
 
 function putWorkflow(patch: Record<string, unknown> = {}) {
-  const wf = { ...newWorkflow(S, currentOwner(), "command", "do it"), ...patch }
-  return writeWorkflow(wt.worktree, wf as any)
+  const wf = { ...newWorkflow(S, currentOwner(), "command", "do it", "opencode"), ...patch }
+  return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf as any))
 }
 
 async function runStatus(deps = makeDeps(client, wt.worktree), sessionID = S) {
@@ -50,12 +51,14 @@ describe("/status", () => {
   })
 
   test("read-only status renders unresolved execution and never clears cancellation ACK", async () => {
-    const runs = createExecutionRunStore(wt.worktree)
+    const deps = makeDeps(client, wt.worktree)
+    const runtime = getOpenCodeRuntime(deps)
+    const runs = runtime.runs
     const claim = runs.claim(S, "fixture", process.pid)
-    runs.registerIntent(claim, { executionId: "exec", ownerSession: S, taskId: "task", attemptId: "attempt", generation: claim.generation, role: "worker", cwd: wt.worktree, policyID: "fixture-fixed-policy", kind: "host", profile: "legacy-unowned" })
+    runs.registerIntent(claim, { executionId: "exec", ownerSession: S, taskId: "task", attemptId: "attempt", generation: claim.generation, role: "worker", cwd: wt.worktree, policyID: "fixture-fixed-policy", kind: "host", engine: runtime.host.identity.engine, profile: "legacy-unowned" })
     runs.recordCancel(claim, "exec", { requestedAt: 1, acknowledgedAt: 2 })
     const before = runs.status()
-    const text = await runStatus()
+    const text = await runStatus(deps)
     expect(text).toContain("execution: 1 unresolved, 1 cancel ACK")
     expect(text).toContain("usage unknown")
     expect(runs.status()).toEqual(before)

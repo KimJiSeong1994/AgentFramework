@@ -9,7 +9,7 @@ import { mkdirSync, readFileSync } from "node:fs"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { stripModeKeywords } from "../src/modes/detect.ts"
 import { hasFlowSuffix, hasModeSuffix } from "../src/modes/instructions.ts"
-import { activeWorkflow, archivePath, eventsPath, newWorkflow, readEvents, readWorkflow, workflowPath, writeWorkflow, type Workflow } from "../src/flow/state.ts"
+import { activeWorkflow, archivePath, eventsPath, newWorkflow, readEvents, readWorkflow, workflowPath, writeWorkflow, type Workflow, withFlowTransaction } from "../src/flow/state.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { readModeState, sessionDir } from "../src/state/store.ts"
 import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
@@ -26,8 +26,8 @@ beforeEach(() => {
 afterEach(() => wt.cleanup())
 
 function putWorkflow(sessionID: string, patch: Record<string, unknown> = {}): Workflow {
-  const wf = { ...newWorkflow(sessionID, currentOwner(), "command", "an earlier request"), ...patch }
-  return writeWorkflow(wt.worktree, wf as Workflow)
+  const wf = { ...newWorkflow(sessionID, currentOwner(), "command", "an earlier request", "opencode"), ...patch }
+  return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf as Workflow))
 }
 
 async function sendText(text: string, sessionID = S, deps = makeDeps(client, wt.worktree)): Promise<string> {

@@ -14,6 +14,7 @@ import { LinuxAdmissionRefused } from "../hosts/types.ts"
 import { openTasks, protectedFiles, readLedger, summarizeLedger } from "../state/ledger.ts"
 import { clearAbort, readAbort } from "../state/store.ts"
 import { MAIN_AGENT } from "../hooks/tool-before.ts"
+import { activeWorkflow, readWorkflow, workflowEngineRefusal } from "../flow/state.ts"
 
 export const DELEGATE_DESCRIPTION =
   "Run coding tasks one after another in isolated worker sessions and get one report back. Use it for work with " +
@@ -41,6 +42,14 @@ export const delegateArgs = {
   resume: z.boolean().optional().describe("true: run the unfinished tasks of an interrupted run instead of adding tasks"),
 }
 
+function taggedWorkflowRefusal(deps: HookDeps, engine: unknown, tasks: Array<{ wf?: { id: string } }>): string | undefined {
+  const workflowIDs = new Set(tasks.flatMap((task) => task.wf ? [task.wf.id] : []))
+  if (workflowIDs.size === 0) return undefined
+  const workflow = readWorkflow(deps.worktree)
+  if (!workflow || [...workflowIDs].some((id) => id !== workflow.id)) return "workflow identity unavailable; recovery refused"
+  return workflowEngineRefusal(workflow, engine)
+}
+
 export function createDelegateTool(deps: HookDeps): ToolDefinition {
   const runtime = getOpenCodeRuntime(deps)
   const queue = getQueue(runtime)
@@ -62,7 +71,11 @@ export function createDelegateTool(deps: HookDeps): ToolDefinition {
       if (readAbort(deps.worktree, sessionID)?.reason === "user_stop") {
         throw new Error("lca: the user stopped the task queue (/stop). Do not call delegate again until the user asks for more work.")
       }
-      if (clearAbort(deps.worktree, sessionID, { keepUserStop: true })) deps.log("delegate: cleared stale abort marker", { sessionID })
+      const active = activeWorkflow(deps.worktree)
+      if (active?.sessionID === sessionID) {
+        const refusal = workflowEngineRefusal(active, runtime.host.identity.engine)
+        if (refusal) throw new Error(`lca: ${refusal}`)
+      }
 
       const tasks = args.tasks ?? []
       const notes: string[] = []
@@ -70,6 +83,9 @@ export function createDelegateTool(deps: HookDeps): ToolDefinition {
       // A model that re-sends the same list after an interruption means "resume", not "start over" (live review E2a).
       const ledgerNow = readLedger(deps.worktree, sessionID)
       const open = openTasks(ledgerNow)
+      const workflowRefusal = taggedWorkflowRefusal(deps, runtime.host.identity.engine, open)
+      if (workflowRefusal) throw new Error(`lca: ${workflowRefusal}`)
+      if (clearAbort(deps.worktree, sessionID, { keepUserStop: true })) deps.log("delegate: cleared stale abort marker", { sessionID })
       let resume = !!args.resume
       const norm = (s: string) => s.trim().toLowerCase()
       const known = new Set(ledgerNow.tasks.map((t) => norm(t.title)))

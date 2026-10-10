@@ -11,6 +11,7 @@ import { openTasks, readLedger } from "../state/ledger.ts"
 import { markResumeOffered, resumeMessage } from "../loop/idle.ts"
 import { getQueue } from "../orchestration/queue.ts"
 import { getOpenCodeRuntime } from "../hosts/opencode-runtime.ts"
+import { createOpenCodeSkillPermissionSource } from "../hosts/opencode-skill-source.ts"
 import { enabled } from "./types.ts"
 import { flowSuffix, modeSuffix, type FlowPhase } from "../modes/instructions.ts"
 import { hasLcaMarker, stripForgedMarkers } from "../modes/markers.ts"
@@ -24,7 +25,7 @@ import {
   REJECT_COMMAND, REJECT_TEMPLATE_PREFIX, REJECT_TEMPLATE_SUFFIX, STATUS_COMMAND,
 } from "./command.ts"
 import { flowOn, renderStatus } from "../flow/status.ts"
-import { activeWorkflow, fileSha, planJsonPath, type Workflow } from "../flow/state.ts"
+import { activeWorkflow, fileSha, planJsonPath, readWorkflow, workflowEngineRefusal, type Workflow } from "../flow/state.ts"
 import { applyEvent, approveWorkflow, cancelWorkflow, resolveAuthority, startWorkflow } from "../flow/runtime.ts"
 import { canonicalPlanSha, coercePlan, planMdPath, planToTasks } from "../flow/plan.ts"
 import type { TaskInput } from "../state/ledger.ts"
@@ -67,7 +68,22 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
   const { worktree, config, log } = deps
   const runtime = getOpenCodeRuntime(deps)
   const queue = getQueue(runtime)
-  const router = createSkillRouter(deps)
+  const permissionSource = createOpenCodeSkillPermissionSource(deps)
+  const router = createSkillRouter(deps, permissionSource)
+
+  function persistedWorkflowRefusal(): string | undefined {
+    const workflow = readWorkflow(worktree)
+    return workflow ? workflowEngineRefusal(workflow, runtime.host.identity.engine) : undefined
+  }
+
+  function taggedTasksRefusal(tasks: Array<{ wf?: { id: string } }>): string | undefined {
+    const workflowIDs = new Set(tasks.flatMap((task) => task.wf ? [task.wf.id] : []))
+    if (workflowIDs.size === 0) return undefined
+    const workflow = readWorkflow(worktree)
+    if (!workflow || [...workflowIDs].some((id) => id !== workflow.id)) return "workflow identity unavailable; recovery refused"
+    return workflowEngineRefusal(workflow, runtime.host.identity.engine)
+  }
+
   return async (input, output) => {
     const textPart = lastUserText(output.parts)
     const replay = !!textPart && alreadySuffixed(textPart)
@@ -125,7 +141,10 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     if (commandTurn?.name === STATUS_COMMAND) {
       const part = lastUserText(output.parts)
       if (part) {
-        resolveAuthority(runtime, "status", sessionID)
+        const workflow = readWorkflow(worktree)
+        const refusal = workflow && workflowEngineRefusal(workflow, runtime.host.identity.engine)
+        if (refusal) log("/status takeover skipped: workflow engine identity refused", { sessionID, reason: refusal })
+        else resolveAuthority(runtime, "status", sessionID, runtime.host.identity.engine)
         part.text = renderStatus(runtime, sessionID, queue.isRunning(sessionID)) + "\n\nReply only: ok"
         log("chat.message: /status rendered", { sessionID })
       } else {
@@ -192,9 +211,15 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     if (flowOn(config)) {
       const wf = activeWorkflow(worktree)
       if (wf && wf.sessionID === sessionID) {
+        const refusal = workflowEngineRefusal(wf, runtime.host.identity.engine)
+        if (refusal) {
+          part.text += `\n\nlca: ${refusal}`
+          log("chat.message: workflow engine identity refused", { sessionID, reason: refusal })
+          return
+        }
         let authorizedWf: Workflow | null = wf
         if (deps.interactive && isUserMessage && input.agent === "main" && !commandTurn) {
-          const authority = resolveAuthority(runtime, "plan", sessionID, now)
+          const authority = resolveAuthority(runtime, "plan", sessionID, runtime.host.identity.engine, now)
           if (authority.refuse) {
             part.text += `\n\n${authority.refuse}`
             log("chat.message: interactive workflow turn refused", { sessionID, refuse: authority.refuse })
@@ -216,13 +241,19 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
         part.text += "\n\nlca interactive mode is read-only because the plan workflow is disabled."
         return
       }
-      const authority = resolveAuthority(runtime, "plan", sessionID, now)
+      const refusal = persistedWorkflowRefusal()
+      if (refusal) {
+        part.text += `\n\nlca: ${refusal}`
+        log("chat.message: interactive plan refused", { sessionID, reason: refusal })
+        return
+      }
+      const authority = resolveAuthority(runtime, "plan", sessionID, runtime.host.identity.engine, now)
       if (authority.refuse) {
         part.text += `\n\n${authority.refuse}`
         log("chat.message: interactive plan refused", { sessionID, refuse: authority.refuse })
         return
       }
-      const r = startWorkflow(runtime, sessionID, "keyword", part.text, "user_keyword", now)
+      const r = startWorkflow(runtime, sessionID, "keyword", part.text, "user_keyword", runtime.host.identity.engine, now)
       if (r.ok) {
         part.text += flowSuffix(suffixPhase(r.wf))
         log("chat.message: interactive request started a workflow", { sessionID, wfId: r.wf.id })
@@ -259,14 +290,20 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     // An active workflow in a DIFFERENT session is not "no workflow" for T1/T20 purposes; resolveAuthority handles
     // that (owning-session takeover / foreign dead-owner T20 then T1, or a same-session-live refusal).
     if (detection && detection.mode === "plan" && flowOn(config)) {
-      const a = resolveAuthority(runtime, "plan", sessionID, now)
+      const refusal = persistedWorkflowRefusal()
+      if (refusal) {
+        part.text = `lca: ${refusal}`
+        log("chat.message: plan keyword refused", { sessionID, refusal })
+        return
+      }
+      const a = resolveAuthority(runtime, "plan", sessionID, runtime.host.identity.engine, now)
       if (a.refuse) {
         part.text = a.refuse
         log("chat.message: plan keyword refused", { sessionID, refuse: a.refuse })
         return
       }
       const request = stripModeKeywords(part.text).trim() || "(no request text given)"
-      const r = startWorkflow(runtime, sessionID, "keyword", request, "user_keyword", now)
+      const r = startWorkflow(runtime, sessionID, "keyword", request, "user_keyword", runtime.host.identity.engine, now)
       if (r.ok) {
         part.text += flowSuffix(suffixPhase(r.wf))
         log("chat.message: plan keyword started a workflow", { sessionID, wfId: r.wf.id })
@@ -340,6 +377,11 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       const ledger = readLedger(worktree, sessionID)
       const open = openTasks(ledger)
       if (open.length === 0) return ""
+      const refusal = taggedTasksRefusal(open)
+      if (refusal) {
+        log("resume offer skipped: workflow engine identity refused", { sessionID, reason: refusal })
+        return ""
+      }
       const told = new Set(ledger.resumeNotifiedFor ?? [])
       if (open.every((t) => told.has(t.id))) return ""
       markResumeOffered(deps, sessionID, open.map((t) => t.id))
@@ -412,8 +454,14 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
    */
   function handleFlowCommand(sessionID: string, command: string, args: string, part: TextPart): void {
     const now = Date.now()
+    const persistedRefusal = persistedWorkflowRefusal()
+    if (persistedRefusal) {
+      part.text = `lca: ${persistedRefusal}`
+      log(`chat.message: /${command} refused`, { sessionID, reason: persistedRefusal })
+      return
+    }
     if (command === PLAN_COMMAND) {
-      const a = resolveAuthority(runtime, "plan", sessionID, now)
+      const a = resolveAuthority(runtime, "plan", sessionID, runtime.host.identity.engine, now)
       if (a.refuse) {
         part.text = a.refuse
         return
@@ -421,13 +469,13 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       // authorize() itself allows every command for the owning session regardless of phase; startWorkflow is the
       // one that refuses a second /plan while non-terminal and applies T18+T1 when the existing workflow is stuck.
       const request = args.trim() || "(no request text given)"
-      const r = startWorkflow(runtime, sessionID, "command", request, "user_command", now)
+      const r = startWorkflow(runtime, sessionID, "command", request, "user_command", runtime.host.identity.engine, now)
       part.text = r.ok ? `Request: ${request}\n\n${PLAN_TEMPLATE}` : r.text
       log("chat.message: /plan", { sessionID, ok: r.ok })
       return
     }
     if (command === APPROVE_COMMAND) {
-      const a = resolveAuthority(runtime, "approve", sessionID, now)
+      const a = resolveAuthority(runtime, "approve", sessionID, runtime.host.identity.engine, now)
       if (a.refuse) {
         part.text = a.refuse
         return
@@ -435,6 +483,11 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       const wf = a.wf
       if (!wf) {
         part.text = "no plan awaiting approval"
+        return
+      }
+      const refusal = workflowEngineRefusal(wf, runtime.host.identity.engine)
+      if (refusal) {
+        part.text = `lca: ${refusal}`
         return
       }
       const queueRunning = queue.isRunning(wf.sessionID)
@@ -453,13 +506,23 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
         }
       }
       const mdShaOk = !!wf.planRef && fileSha(worktree, planMdPath(wf.id)) === wf.planRef.mdSha
+      const current = readWorkflow(worktree)
+      const currentRefusal = current && workflowEngineRefusal(current, runtime.host.identity.engine)
+      if (currentRefusal) {
+        part.text = `lca: ${currentRefusal}`
+        return
+      }
+      if (!current || current.id !== wf.id || current.engine !== wf.engine || current.lastSeq !== wf.lastSeq || current.phase !== wf.phase) {
+        part.text = "lca: workflow changed meanwhile; stop and check /status"
+        return
+      }
       const r = approveWorkflow(runtime, wf, inputs, { queueRunning, planShaOk, mdShaOk }, now)
       part.text = r.ok ? APPROVE_TEMPLATE : r.text
       log("chat.message: /approve", { sessionID, ok: r.ok, queueRunning, planShaOk, mdShaOk })
       return
     }
     if (command === REJECT_COMMAND) {
-      const a = resolveAuthority(runtime, "reject", sessionID, now)
+      const a = resolveAuthority(runtime, "reject", sessionID, runtime.host.identity.engine, now)
       if (a.refuse) {
         part.text = a.refuse
         return
@@ -469,6 +532,11 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
         part.text = "no plan awaiting approval"
         return
       }
+      const refusal = workflowEngineRefusal(wf, runtime.host.identity.engine)
+      if (refusal) {
+        part.text = `lca: ${refusal}`
+        return
+      }
       const reason = args.trim() || "(no reason given)"
       const r = applyEvent(runtime, wf, "reject", "user_command", {}, (w) => w, { reason })
       part.text = r.ok ? `${REJECT_TEMPLATE_PREFIX}${reason}${REJECT_TEMPLATE_SUFFIX}` : r.text
@@ -476,7 +544,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       return
     }
     if (command === CANCEL_COMMAND) {
-      const a = resolveAuthority(runtime, "cancel", sessionID, now)
+      const a = resolveAuthority(runtime, "cancel", sessionID, runtime.host.identity.engine, now)
       if (a.refuse) {
         part.text = a.refuse
         return
@@ -484,6 +552,11 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       const wf = a.wf
       if (!wf) {
         part.text = "no active workflow"
+        return
+      }
+      const refusal = workflowEngineRefusal(wf, runtime.host.identity.engine)
+      if (refusal) {
+        part.text = `lca: ${refusal}`
         return
       }
       const queueRunning = queue.isRunning(wf.sessionID)

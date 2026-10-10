@@ -1,12 +1,12 @@
 import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, beforeEach, expect, test } from "bun:test"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { submitAdmittedImportedPlan, submitImportedPlan } from "../src/flow/actions.ts"
 import { currentOwner } from "../src/flow/owner.ts"
-import { newWorkflow, planJsonPath, workflowPath, writeWorkflow } from "../src/flow/state.ts"
+import { eventsPath, newWorkflow, planJsonPath, workflowPath, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
 import { LinuxAdmissionRefused, type ExecutionRuntime, type LinuxAdmission } from "../src/hosts/types.ts"
 import { createExecutionRunStore } from "../src/hosts/run-state.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
@@ -126,13 +126,14 @@ test("mid-child G-admit refusal fails only the current task without registering 
 })
 
 test("direct imported-plan A4c refusal occurs before plan and workflow writes", async () => {
-  const workflow = newWorkflow(SESSION, currentOwner(), "command", "approved test workflow")
-  writeWorkflow(wt.worktree, workflow)
+  const workflow = newWorkflow(SESSION, currentOwner(), "command", "approved test workflow", "fixture")
+  withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, workflow))
   const before = readFileSync(workflowPath(wt.worktree))
   const refused = new LinuxAdmissionRefused("admit", ["latched"])
   let checks = 0
   const runtime = {
     worktree: wt.worktree,
+    host: { identity: { engine: "fixture" } },
     linuxAdmission: {
       async admitNewExecution() { checks++; throw refused },
     },
@@ -144,6 +145,40 @@ test("direct imported-plan A4c refusal occurs before plan and workflow writes", 
   expect(existsSync(planJsonPath(wt.worktree, workflow.id))).toBe(false)
   expect(existsSync(join(wt.worktree, planMdPath(workflow.id)))).toBe(false)
 })
+
+for (const changedEngine of ["foreign", "missing"] as const) {
+  test(`plan admission rechecks ${changedEngine} persisted engine before artifacts or events`, async () => {
+    let calls = 0
+    let changedBytes: Buffer | undefined
+    const linuxAdmission: LinuxAdmission = {
+      assertBootEpoch() {},
+      async admitNewExecution() {
+        calls++
+        const path = workflowPath(wt.worktree)
+        const current = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>
+        if (changedEngine === "missing") delete current.engine
+        else current.engine = "foreign-engine"
+        writeFileSync(path, JSON.stringify(current))
+        changedBytes = readFileSync(path)
+      },
+      async admitPlanSubmission() { throw new Error("not used") },
+      consumePlanSubmission() { throw new Error("not used") },
+    }
+    const { runtime } = queueRuntime(linuxAdmission)
+    const workflow = newWorkflow(SESSION, currentOwner(), "command", "approved test workflow", "fixture")
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, workflow))
+
+    await expect(submitImportedPlan(runtime, workflow, plan())).rejects.toThrow("workflow engine identity")
+
+    expect(calls).toBe(1)
+    expect(changedBytes).toBeDefined()
+    expect(readFileSync(workflowPath(wt.worktree)).equals(changedBytes!)).toBe(true)
+    expect(existsSync(planJsonPath(wt.worktree, workflow.id))).toBe(false)
+    expect(existsSync(join(wt.worktree, planMdPath(workflow.id)))).toBe(false)
+    expect(existsSync(ledgerPath(wt.worktree, SESSION))).toBe(false)
+    expect(existsSync(eventsPath(wt.worktree))).toBe(false)
+  })
+}
 
 function isolated(source: string, extraEnv: Record<string, string> = {}): any {
   const child = spawnSync(process.execPath, ["-e", source], {
@@ -158,7 +193,7 @@ function isolated(source: string, extraEnv: Record<string, string> = {}): any {
 
 test("unit only, not native proof: fixed-native mocks show unqualified and latched reasons aggregate", () => {
   const modules = {
-    runtime: fileURLToPath(new URL("../src/hosts/opencode-runtime.ts", import.meta.url)),
+    runtime: fileURLToPath(new URL("../src/hosts/runtime.ts", import.meta.url)),
     domain: fileURLToPath(new URL("../src/hosts/linux-domain.ts", import.meta.url)),
   }
   const outcome = isolated(`import { mock } from "bun:test";
@@ -247,7 +282,7 @@ console.log(JSON.stringify({ refusal, capacity, unavailable, tokenFrozen: Object
 
 test("plan-submission token misuse and legacy-runtime use fail before imported-plan writes", () => {
   const modules = {
-    runtime: fileURLToPath(new URL("../src/hosts/opencode-runtime.ts", import.meta.url)),
+    runtime: fileURLToPath(new URL("../src/hosts/runtime.ts", import.meta.url)),
     domain: fileURLToPath(new URL("../src/hosts/linux-domain.ts", import.meta.url)),
     actions: fileURLToPath(new URL("../src/flow/actions.ts", import.meta.url)),
     owner: fileURLToPath(new URL("../src/flow/owner.ts", import.meta.url)),
@@ -275,7 +310,7 @@ mock.module(${JSON.stringify(modules.domain)}, () => ({
 const { createLinuxAdmission } = await import(${JSON.stringify(modules.runtime)});
 const { submitAdmittedImportedPlan } = await import(${JSON.stringify(modules.actions)});
 const { currentOwner } = await import(${JSON.stringify(modules.owner)});
-const { newWorkflow, writeWorkflow, workflowPath, planJsonPath } = await import(${JSON.stringify(modules.state)});
+const { newWorkflow, writeWorkflow, withFlowTransaction, workflowPath, planJsonPath } = await import(${JSON.stringify(modules.state)});
 const { planMdPath } = await import(${JSON.stringify(modules.plan)});
 const { readFileSync, existsSync } = await import("node:fs");
 const { join } = await import("node:path");
@@ -289,15 +324,16 @@ const wrongSession = await owner.admitPlanSubmission("session-A");
 const wrongRuntime = await owner.admitPlanSubmission("session-A");
 const plan = { goal: "g", revision: 1, risks: ["r"], steps: [1,2,3].map(n => ({ title: "s"+n, files: ["src/s"+n+".ts"], detail: "d", verify: "bun test test/s"+n+".test.ts" })) };
 const outcomes = [];
+const baseRuntime = { worktree: root, host: { identity: { engine: "fixture" } } };
 for (const [label, runtime, sessionID, admission] of [
-  ["fabricated", { linuxAdmission: owner }, "session-A", { purpose: "plan-submission", sessionID: "session-A" }],
-  ["reused", { linuxAdmission: owner }, "session-A", spent],
-  ["wrong-session", { linuxAdmission: owner }, "session-B", wrongSession],
-  ["wrong-runtime", { linuxAdmission: other }, "session-A", wrongRuntime],
-  ["legacy", {}, "session-A", token],
+  ["fabricated", { ...baseRuntime, linuxAdmission: owner }, "session-A", { purpose: "plan-submission", sessionID: "session-A" }],
+  ["reused", { ...baseRuntime, linuxAdmission: owner }, "session-A", spent],
+  ["wrong-session", { ...baseRuntime, linuxAdmission: owner }, "session-B", wrongSession],
+  ["wrong-runtime", { ...baseRuntime, linuxAdmission: other }, "session-A", wrongRuntime],
+  ["legacy", baseRuntime, "session-A", token],
 ]) {
-  const workflow = newWorkflow(sessionID, currentOwner(), "command", "plan");
-  writeWorkflow(root, workflow);
+  const workflow = newWorkflow(sessionID, currentOwner(), "command", "plan", "fixture");
+  withFlowTransaction(root, tx => writeWorkflow(tx, workflow));
   const before = readFileSync(workflowPath(root));
   const jsonPath = planJsonPath(root, workflow.id);
   const mdPath = join(root, planMdPath(workflow.id));
@@ -387,18 +423,18 @@ import { join } from "node:path";
 import { DEFAULT_CONFIG } from ${JSON.stringify(fileURLToPath(new URL("../src/config.ts", import.meta.url)))};
 import { LinuxAdmissionRefused } from ${JSON.stringify(fileURLToPath(new URL("../src/hosts/types.ts", import.meta.url)))};
 import { currentOwner } from ${JSON.stringify(fileURLToPath(new URL("../src/flow/owner.ts", import.meta.url)))};
-import { newWorkflow, writeWorkflow, readWorkflow, workflowPath, planJsonPath } from ${JSON.stringify(fileURLToPath(new URL("../src/flow/state.ts", import.meta.url)))};
+import { newWorkflow, writeWorkflow, withFlowTransaction, readWorkflow, workflowPath, planJsonPath } from ${JSON.stringify(fileURLToPath(new URL("../src/flow/state.ts", import.meta.url)))};
 import { planMdPath } from ${JSON.stringify(fileURLToPath(new URL("../src/flow/plan.ts", import.meta.url)))};
 const root = process.env.LCA_ADMISSION_TEST_WORKTREE;
 let admissions = 0;
 const refused = new LinuxAdmissionRefused("admit", ["latched"]);
-const runtime = { linuxAdmission: { assertBootEpoch() {}, async admitNewExecution() { admissions++; throw refused; } } };
+const runtime = { host: { identity: { engine: "opencode" } }, linuxAdmission: { assertBootEpoch() {}, async admitNewExecution() { admissions++; throw refused; } } };
 const runtimeExports = await import(${JSON.stringify(modules.runtime)});
 mock.module(${JSON.stringify(modules.runtime)}, () => ({ ...runtimeExports, getOpenCodeRuntime() { return runtime; } }));
 const { createLcaFlowTool } = await import(${JSON.stringify(modules.tool)});
 const sessionID = "lca-session";
-const workflow = newWorkflow(sessionID, currentOwner(), "command", "test");
-writeWorkflow(root, workflow);
+const workflow = newWorkflow(sessionID, currentOwner(), "command", "test", "opencode");
+withFlowTransaction(root, tx => writeWorkflow(tx, workflow));
 const before = readFileSync(workflowPath(root));
 const config = DEFAULT_CONFIG;
 const deps = { client: {}, directory: root, worktree: root, config, log() {} };
@@ -422,8 +458,8 @@ console.log(JSON.stringify({ admissions,
 
 test("admitted-plan wrapper refuses a legacy runtime before imported-plan writes", async () => {
   const runtime = {} as ExecutionRuntime
-  const workflow = newWorkflow(SESSION, currentOwner(), "command", "legacy")
-  writeWorkflow(wt.worktree, workflow)
+  const workflow = newWorkflow(SESSION, currentOwner(), "command", "legacy", "fixture")
+  withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, workflow))
   const before = readFileSync(workflowPath(wt.worktree))
   await expect(submitAdmittedImportedPlan(runtime, workflow, plan(), { purpose: "plan-submission", sessionID: SESSION })).rejects.toThrow(TypeError)
   expect(readFileSync(workflowPath(wt.worktree))).toEqual(before)

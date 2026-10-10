@@ -24,6 +24,7 @@ import { repairOnLoad } from "./flow/runtime.ts"
 import { getQueue } from "./orchestration/queue.ts"
 import { getOpenCodeRuntime } from "./hosts/opencode-runtime.ts"
 import { initializeSkillObservation } from "./telemetry/skill-observer.ts"
+import { activeWorkflow, workflowEngineRefusal } from "./flow/state.ts"
 
 function interactiveForWorktree(worktree: string): boolean {
   const requested = process.env.LCA_INTERACTIVE_WORKTREE
@@ -74,7 +75,10 @@ export const LcaPlugin: Plugin = async (input) => {
   // repairOnLoad is authority-free (ARCH-14) and must never break plugin startup.
   try {
     const runtime = getOpenCodeRuntime(deps)
-    repairOnLoad(runtime, (sessionID) => getQueue(runtime).isRunning(sessionID))
+    const workflow = activeWorkflow(deps.worktree)
+    const refusal = workflow && workflowEngineRefusal(workflow, runtime.host.identity.engine)
+    if (refusal) log("repairOnLoad skipped: workflow engine identity refused", { reason: refusal })
+    else repairOnLoad(runtime, runtime.host.identity.engine, (sessionID) => getQueue(runtime).isRunning(sessionID))
   } catch (e) {
     log("repairOnLoad failed", { error: (e as Error).message })
   }

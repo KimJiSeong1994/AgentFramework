@@ -5,6 +5,7 @@ import { join } from "node:path"
 import type { TextPart, UserMessage } from "@opencode-ai/sdk"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
+import { createOpenCodeSkillPermissionSource } from "../src/hosts/opencode-skill-source.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { createSkillRouter } from "../src/routing/router.ts"
 import { EMPTY_MODE, readModeState } from "../src/state/store.ts"
@@ -38,6 +39,10 @@ function part(text: string, id = "m1", synthetic = false): TextPart {
 
 async function turn(hook: ReturnType<typeof createChatMessageHook>, p: TextPart, agent = "main") {
   await hook({ sessionID: p.sessionID, agent }, { parts: [p], message: { id: p.messageID } as UserMessage })
+}
+
+function createRouter() {
+  return createSkillRouter(deps, createOpenCodeSkillPermissionSource(deps))
 }
 
 beforeEach(() => {
@@ -140,7 +145,7 @@ describe("skill router adversarial contract", () => {
       rules.push({ permission: "skill", pattern: "plan", action: "deny" })
       return answer()
     }
-    const revoked = await createSkillRouter(deps).recommend("s2", "revoked-in-flight", "Investigate")
+    const revoked = await createRouter().recommend("s2", "revoked-in-flight", "Investigate")
     expect(revoked.skill).toBeNull()
     expect(revoked.reason).toBe("candidate_changed")
     expect(requests).toHaveLength(1)
@@ -157,7 +162,7 @@ describe("skill router adversarial contract", () => {
 
     for (const [i, outcome] of outcomes.entries()) {
       handler = outcome
-      const result = await createSkillRouter(deps).recommend("s1", `invalid-${i}`, "Investigate")
+      const result = await createRouter().recommend("s1", `invalid-${i}`, "Investigate")
       expect(result.skill).toBeNull()
     }
     expect(requests).toHaveLength(outcomes.length)
@@ -221,7 +226,7 @@ describe("skill router adversarial contract", () => {
   })
 
   test("common GitHub and cloud credentials in user text are withheld", async () => {
-    const router = createSkillRouter(deps)
+    const router = createRouter()
     const syntheticCredentials = [
       "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
       "AIzaSyD1234567890_abcdefghijklmnopqrstuvwxyz",
@@ -243,7 +248,7 @@ describe("skill router adversarial contract", () => {
     servers.push(destination)
     handler = () => Response.redirect(`http://127.0.0.1:${destination.port}/v1/systemone`)
 
-    const result = await createSkillRouter(deps).recommend("s1", "redirect", "Investigate")
+    const result = await createRouter().recommend("s1", "redirect", "Investigate")
 
     expect(result.skill).toBeNull()
     expect(requests).toHaveLength(1)

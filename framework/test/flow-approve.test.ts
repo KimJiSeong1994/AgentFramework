@@ -8,7 +8,7 @@ import { createCommandHook, APPROVE_COMMAND, APPROVE_TEMPLATE } from "../src/hoo
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { getQueue } from "../src/orchestration/queue.ts"
-import { newWorkflow, planJsonPath, readWorkflow, writeWorkflow, type Workflow } from "../src/flow/state.ts"
+import { newWorkflow, planJsonPath, readWorkflow, renderArtifact, writeWorkflow, type Workflow, withFlowTransaction } from "../src/flow/state.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { canonicalPlanSha, planMdPath, renderPlanMd, type Plan } from "../src/flow/plan.ts"
 import { readLedger, tasksForWorkflow } from "../src/state/ledger.ts"
@@ -44,16 +44,16 @@ function putApprovablePlan(patch: Record<string, unknown> = {}): Workflow {
   mkdirSync(jsonPath.replace(/\/[^/]+$/, ""), { recursive: true })
   writeFileSync(jsonPath, JSON.stringify(PLAN))
   const mdPath = planMdPath("wfid")
-  const mdSha = require("../src/flow/state.ts").renderArtifact(wt.worktree, mdPath, renderPlanMd("wfid", PLAN))
+  const mdSha = withFlowTransaction(wt.worktree, tx => renderArtifact(tx, mdPath, renderPlanMd("wfid", PLAN)))
   const jsonSha = canonicalPlanSha(PLAN)
   const wf: Workflow = {
-    ...newWorkflow(S, currentOwner(), "command", "add a widget"),
+    ...newWorkflow(S, currentOwner(), "command", "add a widget", "opencode"),
     id: "wfid",
     phase: "pending_approval",
     planRef: { jsonSha, mdPath, mdSha, revision: 1 },
     ...patch,
   } as Workflow
-  return writeWorkflow(wt.worktree, wf)
+  return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf))
 }
 
 /** Drive /approve exactly as OpenCode would: command.execute.before marks the turn, chat.message does the work. */

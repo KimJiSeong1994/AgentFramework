@@ -38,8 +38,13 @@ export type ExecutionRequest = {
   deadlineAt: number
   policy: ExecutionPolicySnapshot
   handlers: ExecutionPolicyHandlers
-  /** Persist this reference immediately when the host learns it, before any fallible policy binding. */
-  onReference?: (reference: ExecutionReference) => void
+  /**
+   * Persist one canonical recovery reference synchronously. During prepare, call before policy binding
+   * or returning; during run, emit immediately once the adapter learns a stable engine recovery ID and
+   * before run() settles. Never delay it to collect optional metadata or emit an enriched replacement.
+   * Identical repeats are permitted. The callback must return undefined.
+   */
+  onReference?: (reference: ExecutionReference) => undefined
 }
 
 export type ExecutionReference = {
@@ -83,6 +88,7 @@ export type ExecutionReconciliation = {
 }
 
 export interface ExecutionHandle {
+  /** Immutable preparation-time identity; later vendor IDs are persisted only through onReference. */
   readonly reference: ExecutionReference
   run(): Promise<ExecutionOutcome>
   /** An acknowledgement is not terminal completion or quiescence. */
@@ -93,7 +99,11 @@ export interface ExecutionHandle {
 export interface ExecutionHost {
   readonly identity: HostIdentity
   preflight(profile: string): Promise<{ compatible: boolean; controls: Record<string, "supported" | "unsupported" | "unknown">; problems: string[] }>
-  /** Must prepare an inert handle; runtime persists the execution intent before calling handle.run(). */
+  /**
+   * Must prepare an inert handle; runtime persists the execution intent before calling handle.run().
+   * Until an engine recovery ID is known, handle.reference may contain only executionID. Any later
+   * actual vendor ID is persisted through onReference; a process with no ID remains unknown after restart.
+   */
   prepare(request: ExecutionRequest): Promise<ExecutionHandle>
   /** Reconcile a persisted vendor reference after restart without preparing or replaying execution. */
   reconcile(reference: ExecutionReference): Promise<ExecutionReconciliation>

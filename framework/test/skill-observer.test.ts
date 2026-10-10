@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from 
 import { spawnSync } from "node:child_process"
 import { join, resolve } from "node:path"
 import { loadConfig, projectConfigPath } from "../src/config.ts"
+import type { CoreDeps } from "../src/deps.ts"
 import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
 import { createEventHook } from "../src/hooks/event.ts"
 import { observationConfigGeneration, observeRelatedToolPart, observeSkillBoundary, observeSkillMessage, observeSkillPart, observeSkillTurn, skillObservationBinding } from "../src/telemetry/skill-observer.ts"
@@ -20,6 +21,23 @@ const campaign = "observer-fixture"
 const skill = (callID: string, status = "error") => ({
   type: "tool", tool: "skill", sessionID: "session-one", messageID: "assistant-one", callID,
   state: { status, input: { name: "fixture-skill", extra: "PRIVATE_ARGUMENT_SENTINEL" }, error: "PRIVATE_ERROR_SENTINEL", time: { start: Date.now(), end: Date.now() } },
+})
+
+test("host-neutral dependencies retain observation and history refusal", () => {
+  activateSkillCampaign(wt.worktree, campaign)
+  const config = structuredClone(loadConfig(wt.worktree))
+  config.skill_observation = { ...config.skill_observation, ...configuration.skill_observation }
+  const deps: CoreDeps = { directory: wt.worktree, worktree: wt.worktree, config, log() {} }
+  const generation = observationConfigGeneration(deps)
+  expect(skillObservationBinding(deps)?.campaignID).toBe(campaign)
+  observeSkillPart(deps, skill("neutral-call"))
+  expect(getSkillCampaignStatus(wt.worktree).callCount).toBe(1)
+
+  config.disabled_hooks.push("tool.history")
+  expect(skillObservationBinding(deps)).toBeNull()
+  expect(observationConfigGeneration(deps)).not.toBe(generation)
+  observeSkillPart(deps, skill("refused-neutral-call"))
+  expect(getSkillCampaignStatus(wt.worktree).callCount).toBe(1)
 })
 
 test("off, history-disabled and config-only hooks cannot create a campaign", async () => {

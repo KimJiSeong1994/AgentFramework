@@ -1,15 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, symlinkSync } from "node:fs"
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
 import { createToolAfterHook } from "../src/hooks/tool-after.ts"
 import { createChatParamsHook } from "../src/hooks/chat-params.ts"
 import { isErrorOutput, relativizePaths } from "../src/hosts/tool-policy.ts"
 import { createEventHook } from "../src/hooks/event.ts"
-import { writeJsonAtomic, sessionInfoPath, writeModeState, readModeState, EMPTY_MODE } from "../src/state/store.ts"
+import { writeJsonAtomic, sessionInfoPath, writeModeState, readModeState, executionRunDirectory, EMPTY_MODE } from "../src/state/store.ts"
 import { createTaskWorktree } from "../src/orchestration/worktree.ts"
 import { fakeClient, makeDeps, tempGitWorktree, tempWorktree, type FakeClient } from "./guards-helpers.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
+import { ExecutionRunUnresolvedError } from "../src/hosts/run-state.ts"
 import type { ExecutionRequest, ExecutionRole } from "../src/hosts/types.ts"
 
 const S = "ses_t"
@@ -67,7 +68,7 @@ async function createLinkedFixture(options: LinkedFixtureOptions = {}) {
       attemptId: "linked-attempt", generation: claim.generation, role,
       cwd: options.cwd ?? linked.path,
       policyID: options.policyID ?? ownerRuntime.policy.resolve(role).id,
-      kind: "host", profile: options.profile ?? "legacy-unowned",
+      kind: "host", engine: ownerRuntime.host.identity.engine, profile: options.profile ?? "legacy-unowned",
     })
     runs.bindVendorRef(claim, executionID, JSON.stringify({
       executionID, vendorSessionID: LINKED_SESSION,
@@ -92,9 +93,22 @@ async function createLinkedFixture(options: LinkedFixtureOptions = {}) {
         attemptId: "linked-attempt-duplicate", generation: claim.generation, role,
         cwd: options.cwd ?? linked.path,
         policyID: options.policyID ?? ownerRuntime.policy.resolve(role).id,
-        kind: "host", profile: options.profile ?? "legacy-unowned",
+        kind: "host", engine: ownerRuntime.host.identity.engine, profile: options.profile ?? "legacy-unowned",
       })
-      runs.bindVendorRef(claim, duplicateID, JSON.stringify({ executionID: duplicateID, vendorSessionID: LINKED_SESSION }))
+      const duplicateReference = { executionID: duplicateID, vendorSessionID: LINKED_SESSION }
+      const statePath = join(executionRunDirectory(main.worktree), "state.json")
+      const beforeBinding = readFileSync(statePath)
+      expect(() => runs.bindVendorRef(claim!, duplicateID, JSON.stringify(duplicateReference)))
+        .toThrow(ExecutionRunUnresolvedError)
+      expect(readFileSync(statePath)).toEqual(beforeBinding)
+      // Inject corruption directly: the public binder must never create this state.
+      const state = JSON.parse(beforeBinding.toString()) as {
+        executions: Array<{ executionId: string; vendorRef?: string; boundaryRef?: unknown }>
+      }
+      const duplicate = state.executions.find(record => record.executionId === duplicateID)!
+      duplicate.vendorRef = JSON.stringify(duplicateReference)
+      duplicate.boundaryRef = duplicateReference
+      writeFileSync(statePath, JSON.stringify(state))
     }
   }
   const serverDeps = makeDeps(fakeClient(), linked.path)
@@ -117,9 +131,10 @@ async function withLinkedFixture<T>(options: LinkedFixtureOptions, run: (fixture
 describe("tool.execute.before", () => {
   test("plugin recovers a reviewer policy from the durable execution reference", async () => {
     const owner = makeDeps(client, wt.worktree)
-    const runs = getOpenCodeRuntime(owner).runs
+    const ownerRuntime = getOpenCodeRuntime(owner)
+    const runs = ownerRuntime.runs
     const claim = runs.claim(S, "external-controller", process.pid)
-    runs.registerIntent(claim, { executionId: "external-review", ownerSession: S, taskId: "plan", attemptId: "attempt", generation: claim.generation, role: "reviewer", cwd: wt.worktree, policyID: getOpenCodeRuntime(owner).policy.resolve("reviewer").id, kind: "host", profile: "legacy-unowned" })
+    runs.registerIntent(claim, { executionId: "external-review", ownerSession: S, taskId: "plan", attemptId: "attempt", generation: claim.generation, role: "reviewer", cwd: wt.worktree, policyID: ownerRuntime.policy.resolve("reviewer").id, kind: "host", engine: ownerRuntime.host.identity.engine, profile: "legacy-unowned" })
     runs.bindVendorRef(claim, "external-review", JSON.stringify({ executionID: "external-review", vendorSessionID: "review-native" }))
     const server = makeDeps(fakeClient(), wt.worktree)
     const hook = createToolBeforeHook(server)
@@ -136,7 +151,7 @@ describe("tool.execute.before", () => {
     const runs = ownerRuntime.runs
     const claim = runs.claim(S, "external-controller", process.pid)
     runs.registerIntent(claim, { executionId: "drift", ownerSession: S, taskId: "task", attemptId: "attempt",
-      generation: claim.generation, role: "worker", cwd: wt.worktree, policyID: ownerRuntime.policy.resolve("worker").id, kind: "host", profile: "legacy-unowned" })
+      generation: claim.generation, role: "worker", cwd: wt.worktree, policyID: ownerRuntime.policy.resolve("worker").id, kind: "host", engine: ownerRuntime.host.identity.engine, profile: "legacy-unowned" })
     runs.bindVendorRef(claim, "drift", JSON.stringify({ executionID: "drift", vendorSessionID: "drift-child" }))
     const server = makeDeps(fakeClient(), wt.worktree, { guards: { ...owner.config.guards, repeat_limit: owner.config.guards.repeat_limit + 1 } })
     await expect(createToolBeforeHook(server)({ tool: "read", sessionID: "drift-child", callID: "read-1" }, { args: { filePath: "x" } }))
@@ -336,7 +351,7 @@ describe("tool.execute.after", () => {
     }
     runtime.policy.bindSession(S, runtime.policy.handlers(request), snapshot)
     const claim = runtime.runs.claim("main", "review-fixture", process.pid)
-    runtime.runs.registerIntent(claim, { executionId: request.executionID, ownerSession: "main", taskId: request.taskID, attemptId: request.attemptID, generation: claim.generation, role: request.role, cwd: request.cwd, policyID: snapshot.id, kind: "host", profile: "legacy-unowned" })
+    runtime.runs.registerIntent(claim, { executionId: request.executionID, ownerSession: "main", taskId: request.taskID, attemptId: request.attemptID, generation: claim.generation, role: request.role, cwd: request.cwd, policyID: snapshot.id, kind: "host", engine: runtime.host.identity.engine, profile: "legacy-unowned" })
     runtime.runs.bindVendorRef(claim, request.executionID, JSON.stringify({ executionID: request.executionID, vendorSessionID: S }))
     const hookBefore = createToolBeforeHook(deps)
     const hookAfter = createToolAfterHook(deps)

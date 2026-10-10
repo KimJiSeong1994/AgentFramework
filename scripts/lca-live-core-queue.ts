@@ -21,7 +21,8 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { canonicalPlanSha, coercePlan, planToTasks, validatePlan, type Plan } from "../framework/src/flow/plan.ts"
 import { loadConfig, type LcaConfig } from "../framework/src/config.ts"
 import { authenticateLinuxVerification } from "../framework/src/hosts/linux-domain.ts"
-import { createLinuxAdmission, getOpenCodeRuntime } from "../framework/src/hosts/opencode-runtime.ts"
+import { createLinuxAdmission } from "../framework/src/hosts/runtime.ts"
+import { getOpenCodeRuntime } from "../framework/src/hosts/opencode-runtime.ts"
 import type {
   ExecutionCancelResult,
   ExecutionHandle,

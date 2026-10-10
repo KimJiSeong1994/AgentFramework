@@ -1,15 +1,10 @@
 // Shared dependency bag every hook factory receives. Owned by the scaffold; do not add per-hook state here.
 import type { PluginInput } from "@opencode-ai/plugin"
 import type { LcaConfig } from "../config.ts"
+import type { CoreDeps } from "../deps.ts"
 
-export type Logger = (msg: string, extra?: Record<string, unknown>) => void
-
-export type HookDeps = {
+export type HookDeps = CoreDeps & {
   client: PluginInput["client"]
-  directory: string
-  worktree: string
-  config: LcaConfig
-  log: Logger
   /** Interactive LCA launcher mode, enabled only after the plugin validates its worktree binding. */
   interactive?: boolean
 }

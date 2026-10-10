@@ -1,13 +1,13 @@
-// One database backend per plugin instance, opened lazily (a missing file is reported at call time, not at startup).
+// One database backend per dependency object, opened lazily (a missing file is reported at call time, not at startup).
 // Shared by the `db_query` tool (analyst) and the queue's data-task pipeline (re-execution + checks).
-import type { HookDeps } from "../hooks/types.ts"
+import type { CoreDeps } from "../deps.ts"
 import { openSqlite, type Backend } from "./sqlite.ts"
 import { openPostgres } from "./postgres.ts"
 import { resolvePath } from "./schema.ts"
 
-const backends = new WeakMap<HookDeps, Backend>()
+const backends = new WeakMap<CoreDeps, Backend>()
 
-export function getBackend(deps: HookDeps): Backend {
+export function getBackend(deps: CoreDeps): Backend {
   const cache = backends.get(deps)
   if (cache) return cache
   const d = deps.config.data

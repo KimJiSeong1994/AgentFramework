@@ -8,7 +8,7 @@ import { getGuards } from "../guards/registry.ts"
 import { errorExcerpt } from "../guards/repeat.ts"
 import { trimToolOutput } from "../guards/trim.ts"
 import { appendHint, recoveryHint } from "../guards/recover.ts"
-import { activeWorkflow } from "../flow/state.ts"
+import { activeWorkflow, workflowEngineRefusal } from "../flow/state.ts"
 import { flowOn } from "../flow/status.ts"
 import { settle } from "../flow/runtime.ts"
 import { getQueue } from "../orchestration/queue.ts"
@@ -68,6 +68,11 @@ export function createToolAfterHook(deps: HookDeps): NonNullable<Hooks["tool.exe
     if (input.tool === "delegate" && flowOn(deps.config)) {
       const wf = activeWorkflow(deps.worktree)
       if (wf && wf.sessionID === input.sessionID) {
+        const refusal = workflowEngineRefusal(wf, runtime.host.identity.engine)
+        if (refusal) {
+          deps.log("tool.execute.after: workflow engine refused", { sessionID: input.sessionID, reason: refusal })
+          return
+        }
         try {
           settle(runtime, wf, getQueue(runtime).isRunning(input.sessionID))
         } catch (e) {

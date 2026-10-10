@@ -4,6 +4,7 @@
 // findings are advisory only — approval is the user's decision (/approve), never this reviewer's.
 import { randomUUID } from "node:crypto"
 import { LinuxAdmissionRefused, type ExecutionHandle, type ExecutionOutcome, type ExecutionRuntime } from "../hosts/types.ts"
+import { assertPreparedHostReference, hostReferenceHasVendorID } from "../hosts/run-state.ts"
 import { beginExecutionActivity } from "../hosts/runtime.ts"
 import { estimateTokens } from "../tokens.ts"
 import { getQueue } from "../orchestration/queue.ts"
@@ -112,6 +113,52 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
   let registered = false
   let quiescenceAsserted = false
   let admissionReleaseFailed = false
+  const cancelAndReconcile = async (): Promise<boolean> => {
+    if (!claim || !executionID || !handle) return false
+    const requestedAt = Date.now()
+    const cancelDeadline = requestedAt + 1000
+    runs.recordCancel(claim, executionID, { requestedAt })
+    const cancel = await Promise.race([
+      handle.requestCancel("review timeout or abort", cancelDeadline).catch(() => null),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
+    ])
+    if (cancel?.acknowledged) runs.recordCancel(claim, executionID, { requestedAt, acknowledgedAt: Date.now() })
+    let proven = false
+    if (cancel?.terminal && cancel.quiescent) {
+      runs.recordTerminal(claim, executionID, { outcome: "cancelled", terminalAt: Date.now(), quiescentAt: Date.now() })
+      proven = true
+    } else {
+      const reconciled = await Promise.race([
+        handle.reconcile().catch(() => null),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
+      ])
+      if (reconciled) {
+        runs.reconcile(claim, executionID, reconciled)
+        proven = reconciled.outcome === "terminal" && reconciled.quiescent
+      }
+    }
+    if (proven) {
+      try {
+        runs.assertQuiescent(claim)
+        return true
+      } catch { /* Fence below; the store is the final authority. */ }
+    }
+    runs.fence(claim, executionID, "review cancellation ended without terminal quiescence")
+    return false
+  }
+  let markedReviewSessionID: string | undefined
+  const captureReference = (candidate: unknown): void => {
+    assertPreparedHostReference(candidate, executionID!)
+    runs.bindVendorRef(claim!, executionID!, JSON.stringify(candidate))
+    if (candidate.vendorSessionID) {
+      vendorSessionID = candidate.vendorSessionID
+      if (markedReviewSessionID !== vendorSessionID) {
+        if (markedReviewSessionID) throw new Error("review vendor session reference changed")
+        markedReviewSessionID = vendorSessionID
+        markReviewSession(vendorSessionID)
+      }
+    }
+  }
   try {
     const observeWorkflowCancellation = () => {
       if (reviewSignal.aborted) return
@@ -159,7 +206,7 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
     }
     runs.registerIntent(claim, { executionId: executionID, ownerSession: wf.sessionID, taskId: wf.id,
       attemptId: base.attemptID, generation: claim.generation, role: "reviewer", cwd: runtime.directory, policyID: policy.id,
-      kind: "host", profile: "legacy-unowned" })
+      kind: "host", engine: runtime.host.identity.engine, profile: "legacy-unowned" })
     registered = true
     let prepareTimer: ReturnType<typeof setTimeout> | undefined
     let onPrepareAbort: (() => void) | undefined
@@ -167,7 +214,7 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
     try {
       prepared = await Promise.race([
         runtime.host.prepare({ ...base, handlers: runtime.policy.handlers(base),
-          onReference: (reference) => runs.bindVendorRef(claim!, executionID!, JSON.stringify(reference)) }),
+          onReference: (reference) => { captureReference(reference) } }),
         new Promise<null>((resolve) => { prepareTimer = setTimeout(() => resolve(null), Math.max(0, deadlineAt - Date.now())) }),
         new Promise<null>((resolve) => {
           onPrepareAbort = () => resolve(null)
@@ -184,16 +231,10 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
       return aborted
     }
     handle = prepared
-    vendorSessionID = handle.reference.vendorSessionID
-    if (handle.reference.executionID !== executionID || !vendorSessionID) {
-      runs.fence(claim, executionID, "review host returned an incomplete reference")
-      return aborted
-    }
-    runs.bindVendorRef(claim, executionID, JSON.stringify(handle.reference))
-    markReviewSession(vendorSessionID)
+    assertPreparedHostReference(handle.reference, executionID)
+    if (hostReferenceHasVendorID(handle.reference)) captureReference(handle.reference)
     if (reviewSignal.aborted) {
-      runs.recordTerminal(claim, executionID, { outcome: "cancelled", terminalAt: Date.now(), quiescentAt: Date.now() })
-      quiescent = true
+      quiescent = await cancelAndReconcile()
       return aborted
     }
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -205,32 +246,14 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
       if (reviewSignal.aborted) resolve(null)
     })
     try {
+      runs.markHostDispatched(claim, executionID)
       let outcome = await Promise.race<ExecutionOutcome | null>([handle.run(), timeout])
       if (outcome !== null) {
         observeWorkflowCancellation()
         if (reviewSignal.aborted) outcome = null
       }
       if (outcome === null) {
-        runs.fence(claim, executionID, "review cancelled before quiescence")
-        const requestedAt = Date.now()
-        const cancelDeadline = requestedAt + 1000
-        const cancel = await Promise.race([
-          handle.requestCancel("review timeout or abort", cancelDeadline).catch(() => null),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
-        ])
-        runs.recordCancel(claim, executionID, { requestedAt, ...(cancel?.acknowledged ? { acknowledgedAt: Date.now() } : {}) })
-        if (cancel?.terminal) runs.recordTerminal(claim, executionID, { outcome: "cancelled", terminalAt: Date.now(), ...(cancel.quiescent ? { quiescentAt: Date.now() } : {}) })
-        if (cancel?.terminal && cancel.quiescent) quiescent = true
-        else {
-          const reconciled = await Promise.race([
-            handle.reconcile().catch(() => null),
-            new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
-          ])
-          if (reconciled) {
-            runs.reconcile(claim, executionID, reconciled)
-            quiescent = reconciled.quiescent
-          }
-        }
+        quiescent = await cancelAndReconcile()
         return aborted
       }
       runs.recordTerminal(claim, executionID, { outcome: outcome.status, terminalAt: Date.now() })
@@ -240,7 +263,11 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
       ])
       if (reconciled) {
         runs.reconcile(claim, executionID, reconciled)
-        quiescent = reconciled.quiescent
+        quiescent = reconciled.outcome === "terminal" && reconciled.quiescent
+      }
+      if (quiescent) {
+        try { runs.assertQuiescent(claim) }
+        catch { quiescent = false }
       }
       if (!quiescent) {
         runs.fence(claim, executionID, "review terminal response lacks quiescence proof")
@@ -264,12 +291,12 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
   } finally {
     try {
       if (claim && quiescent) {
+        runs.assertQuiescent(claim)
+        runs.release(claim)
         if (vendorSessionID) {
           clearReviewSession(vendorSessionID)
           runtime.policy.unbindSession(vendorSessionID)
         }
-        runs.assertQuiescent(claim)
-        runs.release(claim)
       }
     } finally {
       if (workflowCancelTimer) clearInterval(workflowCancelTimer)

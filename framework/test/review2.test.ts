@@ -357,15 +357,27 @@ describe("resume offer on the next user message; /stop settles; session.deleted 
 
   test("session.deleted while the queue runs: abort + the state dir is not resurrected", async () => {
     const deps = makeDeps(client, wt.worktree, noReview)
-    const q = getQueue(getOpenCodeRuntime(deps))
+    const runtime = getOpenCodeRuntime(deps)
+    const q = getQueue(runtime)
     let started = false
     client.replies.worker = { text: "x", run: () => ((started = true), new Promise<void>(() => {})) }
     q.add(S, [{ title: "a" }, { title: "b" }])
     const running = q.run(S)
     await waitFor(() => started)
+    const completion = q.completion(S)
+    expect(completion).toBeDefined()
     await createEventHook(deps)({ event: { type: "session.deleted", properties: { info: { id: S } } } } as any)
+    const result = await completion!
+    expect(result).toMatchObject({ taskIds: ["t1", "t2"], done: 0, failed: 0, cancelled: 2, aborted: true })
+    expect(result.done + result.failed + result.cancelled).toBeLessThanOrEqual(result.taskIds.length)
+    expect(q.completion(S)).toBeUndefined()
+    const runState = runtime.runs.status()
+    expect(runState.claim).toBeUndefined()
+    expect(runState.executions).toHaveLength(1)
+    expect(runState.executions[0]).toMatchObject({
+      terminal: { outcome: "cancelled" }, reconciliation: { outcome: "terminal", quiescent: true },
+    })
     await running
-    await new Promise((r) => setTimeout(r, 20))
     expect(existsSync(sessionDir(wt.worktree, S))).toBe(false)
     expect(existsSync(join(wt.worktree, ".lca/handoffs", S))).toBe(false)
   })

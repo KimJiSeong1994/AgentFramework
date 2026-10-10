@@ -124,8 +124,8 @@ describe("config hook", () => {
 
   test("does not mutate AGENT_DEFS", async () => {
     await run({}, deps({ models: { worker: "ollama/x" } }))
-    expect(AGENT_DEFS.worker.model).toBeUndefined()
-    expect(AGENT_DEFS.worker.temperature).toBeUndefined()
+    expect(Object.hasOwn(AGENT_DEFS.worker, "model")).toBe(false)
+    expect(Object.hasOwn(AGENT_DEFS.worker, "temperature")).toBe(false)
   })
 
   test("user-defined agent with the same name wins per key, nested tools/permission merge", async () => {

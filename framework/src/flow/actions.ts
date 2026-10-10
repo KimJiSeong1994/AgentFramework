@@ -1,13 +1,109 @@
 // Host-neutral plan submission and advisory review. Operator approval is deliberately not an action here.
-import { readWorkflow, planJsonPath, renderArtifact, fileSha, type Workflow } from "./state.ts"
-import { writeJsonAtomic, readJson } from "../state/store.ts"
-import { applyEvent, flowLimits, type FlowResult } from "./runtime.ts"
+import {
+  assertFlowTxWorktree, CorruptWorkflowError, readWorkflowForWrite,
+  planJsonPath, renderArtifact, fileSha, workflowEngineRefusal, withFlowTransaction, writePlanJson,
+  type FlowTx, type Workflow,
+} from "./state.ts"
+import { readJson } from "../state/store.ts"
+import { applyEventIn, flowLimits, type FlowResult } from "./runtime.ts"
 import { canonicalPlanJson, canonicalPlanSha, coercePlan, planMdPath, renderPlanMd, validatePlan, type Plan, type ReviewView } from "./plan.ts"
 import { runPlanReview } from "./review.ts"
 import { LinuxAdmissionRefused, type ExecutionRuntime, type PlanSubmissionAdmission } from "../hosts/types.ts"
 import type { FlowEvent } from "./machine.ts"
 
 export type PlanSubmission = { result: FlowResult; planSha: string; renderedPlan?: string }
+
+function workflowRefusal(runtime: ExecutionRuntime, wf: Workflow): string | undefined {
+  return workflowEngineRefusal(wf, runtime.host.identity.engine)
+}
+
+function changedResult(current: Workflow | null): FlowResult {
+  return { ok: false, text: "workflow changed during plan submission", wf: current }
+}
+
+type WorkflowSnapshot = { current: Workflow } | { result: FlowResult }
+
+function currentSnapshot(runtime: ExecutionRuntime, expected: Workflow): WorkflowSnapshot {
+  return withFlowTransaction(runtime.worktree, (tx) => {
+    assertFlowTxWorktree(tx, runtime.worktree)
+    const checked = readWorkflowForWrite(tx)
+    if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+    const inputRefusal = workflowRefusal(runtime, expected)
+    if (inputRefusal) throw new Error(inputRefusal)
+    const current = checked.wf
+    if (!current) return { result: changedResult(null) }
+    const currentRefusal = workflowRefusal(runtime, current)
+    if (currentRefusal) throw new Error(currentRefusal)
+    if (current.id !== expected.id || current.engine !== expected.engine || current.phase !== expected.phase || current.lastSeq !== expected.lastSeq) {
+      return { result: changedResult(current) }
+    }
+    return { current }
+  })
+}
+
+function submitPlanIn(
+  tx: FlowTx,
+  runtime: ExecutionRuntime,
+  expected: Workflow,
+  plan: Plan,
+  actor: "code" | "model_tool",
+  jsonSha: string,
+  mdText: string,
+): FlowResult {
+  assertFlowTxWorktree(tx, runtime.worktree)
+  const checked = readWorkflowForWrite(tx)
+  if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+  const current = checked.wf
+  const inputRefusal = workflowRefusal(runtime, expected)
+  if (inputRefusal) throw new Error(inputRefusal)
+  if (!current) return changedResult(null)
+  const currentRefusal = workflowRefusal(runtime, current)
+  if (currentRefusal) throw new Error(currentRefusal)
+  if (current.id !== expected.id || current.engine !== expected.engine || current.phase !== expected.phase || current.lastSeq !== expected.lastSeq) {
+    return changedResult(current)
+  }
+  if (current.phase !== "planning") return { ok: false, text: "workflow is not awaiting a plan", wf: current }
+
+  const mdPath = planMdPath(current.id)
+  writePlanJson(tx, current.id, plan)
+  const mdSha = renderArtifact(tx, mdPath, mdText)
+  return applyEventIn(tx, runtime, current, "submit_valid", actor, {}, (w) => ({
+    ...w, planRef: { jsonSha, mdPath, mdSha, revision: plan.revision },
+  }), { jsonSha })
+}
+
+function reviewPlanIn(
+  tx: FlowTx,
+  runtime: ExecutionRuntime,
+  expected: Workflow,
+  mdPath: string,
+  mdText: string,
+  event: FlowEvent,
+  jsonSha: string,
+  review: ReviewView,
+  note: "aborted" | "cap" | undefined,
+): FlowResult {
+  assertFlowTxWorktree(tx, runtime.worktree)
+  const checked = readWorkflowForWrite(tx)
+  if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+  const current = checked.wf
+  const inputRefusal = workflowRefusal(runtime, expected)
+  if (inputRefusal) throw new Error(inputRefusal)
+  if (!current) return { ok: false, text: "workflow changed during plan review", wf: null }
+  const currentRefusal = workflowRefusal(runtime, current)
+  if (currentRefusal) throw new Error(currentRefusal)
+  if (current.id !== expected.id || current.engine !== expected.engine || current.phase !== expected.phase || current.lastSeq !== expected.lastSeq) {
+    return { ok: false, text: "workflow changed during plan review", wf: current }
+  }
+  if (current.phase !== "reviewing") return { ok: false, text: "workflow changed during plan review", wf: current }
+
+  const reviewedMdSha = renderArtifact(tx, mdPath, mdText)
+  return applyEventIn(tx, runtime, current, event, "code", {}, (w) => ({
+    ...w,
+    planRef: { ...w.planRef!, mdSha: reviewedMdSha },
+    review: { verdict: review.verdict, findings: review.findings, planSha: jsonSha, ...(note ? { note } : {}) },
+  }), { findings: review.findings.length })
+}
 
 /** Reject noncanonical shapes rather than silently dropping a field supplied by an external file. */
 export function importedPlan(value: unknown, revision: number, runtime: ExecutionRuntime): Plan {
@@ -31,6 +127,8 @@ export function savedPlan(runtime: ExecutionRuntime, wf: Workflow): Plan | null 
 }
 
 export async function submitImportedPlan(runtime: ExecutionRuntime, wf: Workflow, plan: Plan, signal?: AbortSignal): Promise<PlanSubmission> {
+  const beforeAdmission = currentSnapshot(runtime, wf)
+  if ("result" in beforeAdmission) return { result: beforeAdmission.result, planSha: canonicalPlanSha(plan) }
   if (wf.phase !== "planning") throw new Error("workflow is not awaiting an imported plan")
   await runtime.linuxAdmission?.admitNewExecution()
   return writeAndReviewImportedPlan(runtime, wf, plan, signal)
@@ -44,20 +142,29 @@ export async function submitAdmittedImportedPlan(
   signal?: AbortSignal,
 ): Promise<PlanSubmission> {
   if (!runtime.linuxAdmission) throw new TypeError("lca: plan-submission admission is unavailable")
+  const beforeAdmission = currentSnapshot(runtime, wf)
+  if ("result" in beforeAdmission) return { result: beforeAdmission.result, planSha: canonicalPlanSha(plan) }
   if (wf.phase !== "planning") throw new Error("workflow is not awaiting an imported plan")
   runtime.linuxAdmission.consumePlanSubmission(admission, wf.sessionID)
   return writeAndReviewImportedPlan(runtime, wf, plan, signal)
 }
 
 async function writeAndReviewImportedPlan(runtime: ExecutionRuntime, wf: Workflow, plan: Plan, signal?: AbortSignal): Promise<PlanSubmission> {
+  const initial = currentSnapshot(runtime, wf)
+  if ("result" in initial) return { result: initial.result, planSha: canonicalPlanSha(plan) }
+  if (initial.current.phase !== "planning") return { result: { ok: false, text: "workflow is not awaiting a plan", wf: initial.current }, planSha: canonicalPlanSha(plan) }
   const planSha = canonicalPlanSha(plan)
   const mdPath = planMdPath(wf.id)
-  writeJsonAtomic(planJsonPath(runtime.worktree, wf.id), plan)
-  const mdSha = renderArtifact(runtime.worktree, mdPath, renderPlanMd(wf.id, plan))
-  const submitted = applyEvent(runtime, wf, "submit_valid", "code", {}, w => ({
-    ...w, planRef: { jsonSha: planSha, mdPath, mdSha, revision: plan.revision },
-  }), { jsonSha: planSha })
+  const initialMd = renderPlanMd(wf.id, plan)
+  const submitted = withFlowTransaction(runtime.worktree, (tx) =>
+    submitPlanIn(tx, runtime, wf, plan, "code", planSha, initialMd))
   if (!submitted.ok) return { result: submitted, planSha }
+
+  const beforeReview = currentSnapshot(runtime, submitted.wf)
+  if ("result" in beforeReview) return { result: beforeReview.result, planSha }
+  if (beforeReview.current.phase !== "reviewing") {
+    return { result: { ok: false, text: "workflow changed before plan review", wf: beforeReview.current }, planSha }
+  }
 
   let admissionRefusal: LinuxAdmissionRefused | undefined
   const review = await runPlanReview(runtime, submitted.wf, plan, signal).catch((error: unknown) => {
@@ -69,17 +176,11 @@ async function writeAndReviewImportedPlan(runtime: ExecutionRuntime, wf: Workflo
     review.verdict === "iterate" ? "review_iterate" : review.verdict === "okay" ? "review_okay" : "review_none"
   const capped = event === "review_iterate" && submitted.wf.counters.review_iterations + 1 >= flowLimits(runtime).max_review_iterations
   const note = review.note === "aborted" ? "aborted" : capped ? "cap" : undefined
-  const current = readWorkflow(runtime.worktree)
-  if (!current || current.id !== wf.id || current.phase !== "reviewing" || current.lastSeq !== submitted.wf.lastSeq) {
-    if (admissionRefusal) throw admissionRefusal
-    return { result: { ok: false, text: "workflow changed during plan review", wf: current }, planSha }
-  }
   const view: ReviewView = { verdict: review.verdict, findings: review.findings, ...(note ? { note } : {}) }
-  const reviewedMdSha = renderArtifact(runtime.worktree, mdPath, renderPlanMd(wf.id, plan, view))
-  const result = applyEvent(runtime, submitted.wf, event, "code", {}, w => ({
-    ...w, planRef: { ...w.planRef!, mdSha: reviewedMdSha },
-    review: { verdict: review.verdict, findings: review.findings, planSha, ...(note ? { note } : {}) },
-  }), { findings: review.findings.length })
+  const reviewedMd = renderPlanMd(wf.id, plan, view)
+  const result = withFlowTransaction(runtime.worktree, (tx) =>
+    reviewPlanIn(tx, runtime, submitted.wf, mdPath, reviewedMd, event, planSha, view, note))
+  if (!result.ok) return { result, planSha }
   if (admissionRefusal) throw admissionRefusal
   return { result, planSha, ...(result.ok ? { renderedPlan: renderPlanMd(wf.id, plan, view) } : {}) }
 }
