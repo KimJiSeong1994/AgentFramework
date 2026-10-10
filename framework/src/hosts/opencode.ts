@@ -302,7 +302,13 @@ export function createOpenCodeHost(client: Client, capabilities?: OpenCodeHostCa
         executionID: request.executionID,
         vendorSessionID: created.data.id,
       }
-      request.onReference?.(reference)
+      let persistenceResult: unknown
+      try { persistenceResult = request.onReference?.(reference) }
+      catch { throw new Error("OpenCode reference persistence failed") }
+      if (persistenceResult !== undefined) {
+        void Promise.resolve(persistenceResult).catch(() => {})
+        throw new Error("OpenCode reference persistence must complete synchronously")
+      }
       capabilities.policy.bindSession(created.data.id, request.handlers, request.policy)
       if (!capabilities.applyOutputLimit(created.data.id, request.policy.maxOutputTokens)
         || !capabilities.applyThinking(created.data.id, request.policy.thinking)) {

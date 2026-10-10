@@ -4,7 +4,8 @@
 // turn, then chat.message does the §5.2/§5.3/§5.5 state work and rewrites the command's own text in place, the
 // lca_flow tool runs the review inline, and tool.execute.after settles on delegate return.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs"
+import { $ } from "bun"
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import {
   APPROVE_COMMAND, APPROVE_TEMPLATE, CANCEL_COMMAND, CANCEL_TEMPLATE, PLAN_COMMAND, PLAN_TEMPLATE,
@@ -19,10 +20,10 @@ import { createIdleLoop } from "../src/loop/idle.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { repairOnLoad } from "../src/flow/runtime.ts"
 import { createDelegateTool } from "../src/tools/delegate.ts"
-import { readEvents, readWorkflow, writeWorkflow, newWorkflow, planJsonPath, renderArtifact, type Workflow } from "../src/flow/state.ts"
+import { readEvents, readWorkflow, writeWorkflow, newWorkflow, planJsonPath, renderArtifact, workflowPath, type Workflow, withFlowTransaction } from "../src/flow/state.ts"
 import { currentOwner, INSTANCE_ID } from "../src/flow/owner.ts"
 import { canonicalPlanSha, planMdPath, renderPlanMd, type Plan } from "../src/flow/plan.ts"
-import { readLedger, tasksForWorkflow, writeLedger, addTasks } from "../src/state/ledger.ts"
+import { ledgerPath, readLedger, tasksForWorkflow, writeLedger, addTasks } from "../src/state/ledger.ts"
 import { sessionDir, writeJsonAtomic } from "../src/state/store.ts"
 import { getQueue } from "../src/orchestration/queue.ts"
 import { createTaskWorktree, taskWorktreeOwner } from "../src/orchestration/worktree.ts"
@@ -88,6 +89,41 @@ async function runUserTurn(
 
 function eventTypes(worktree: string, wfId: string): string[] {
   return readEvents(worktree, wfId).map((e) => e.type)
+}
+
+for (const [label, engine] of [
+  ["missing", undefined],
+  ["foreign", "other-engine"],
+  ["malformed", { engine: "opencode" }],
+] as const) {
+  test(`${label} workflow engine prevents plugin repair and typed command mutations`, async () => {
+    const wf = withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, {
+      ...newWorkflow(S, currentOwner(), "command", "preserve workflow", "opencode"),
+      engine, phase: "reviewing",
+    }))
+    const before = readFileSync(workflowPath(wt.worktree))
+    const deps = makeDeps(client, wt.worktree)
+    await LcaPlugin({
+      client: deps.client, directory: wt.worktree, worktree: wt.worktree,
+      project: { id: "fixture", worktree: wt.worktree, time: { created: 0 } },
+      serverUrl: new URL("http://127.0.0.1:1"),
+      experimental_workspace: { register() { throw new Error("unexpected workspace registration") } },
+      $,
+    })
+    expect(before.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
+    for (const [command, args, template] of [
+      [PLAN_COMMAND, "new plan", PLAN_TEMPLATE],
+      [APPROVE_COMMAND, "", APPROVE_TEMPLATE],
+      [REJECT_COMMAND, "change it", `${REJECT_TEMPLATE_PREFIX}change it${REJECT_TEMPLATE_SUFFIX}`],
+      [CANCEL_COMMAND, "", CANCEL_TEMPLATE],
+    ] as const) {
+      expect(await runCommand(deps, command, args, template)).toContain("engine identity")
+      expect(before.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
+    }
+    expect(eventTypes(wt.worktree, wf.id)).toEqual([])
+    expect(existsSync(ledgerPath(wt.worktree, S))).toBe(false)
+    expect(client.created).toEqual([])
+  })
 }
 
 describe("1) /plan -> review (ITERATE then OKAY) -> /approve -> tasks done -> delegate return settles -> done", () => {
@@ -173,15 +209,15 @@ describe("2) /reject from pending_approval -> planning, counters.user_rejections
     mkdirSync(jsonPath.replace(/\/[^/]+$/, ""), { recursive: true })
     writeJsonAtomic(jsonPath, PLAN)
     const mdPath = planMdPath("wfid")
-    const mdSha = renderArtifact(wt.worktree, mdPath, renderPlanMd("wfid", PLAN))
+    const mdSha = withFlowTransaction(wt.worktree, flowTx => renderArtifact(flowTx, mdPath, renderPlanMd("wfid", PLAN)))
     const jsonSha = canonicalPlanSha(PLAN)
     const wf: Workflow = {
-      ...newWorkflow(S, currentOwner(), "command", "add a widget"),
+      ...newWorkflow(S, currentOwner(), "command", "add a widget", "opencode"),
       id: "wfid",
       phase: "pending_approval",
       planRef: { jsonSha, mdPath, mdSha, revision: 1 },
     }
-    writeWorkflow(wt.worktree, wf)
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf))
 
     const deps = makeDeps(client, wt.worktree)
     const text = await runCommand(deps, REJECT_COMMAND, "needs more detail", `${REJECT_TEMPLATE_PREFIX}<reason>${REJECT_TEMPLATE_SUFFIX}`)
@@ -199,8 +235,8 @@ describe("3) /cancel in executing while the queue runs -> pendingCancel, settles
     wt.cleanup()
     wt = tempGitWorktree()
     mkdirSync(sessionDir(wt.worktree, S), { recursive: true })
-    const wf = { ...newWorkflow(S, currentOwner(), "command", "do the thing"), phase: "executing" as const, taskIds: ["t1"] }
-    writeWorkflow(wt.worktree, wf)
+    const wf = { ...newWorkflow(S, currentOwner(), "command", "do the thing", "opencode"), phase: "executing" as const, taskIds: ["t1"] }
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf))
     const { ledger } = addTasks(readLedger(wt.worktree, S), [{ title: "tagged task" }], Date.now(), { id: wf.id, planSha: "s" })
     writeLedger(wt.worktree, ledger)
 
@@ -262,16 +298,16 @@ describe("5) two plugin instances on one state root: a foreign LIVE session refu
     mkdirSync(jsonPath.replace(/\/[^/]+$/, ""), { recursive: true })
     writeJsonAtomic(jsonPath, PLAN)
     const mdPath = planMdPath("wfid")
-    const mdSha = renderArtifact(wt.worktree, mdPath, renderPlanMd("wfid", PLAN))
+    const mdSha = withFlowTransaction(wt.worktree, flowTx => renderArtifact(flowTx, mdPath, renderPlanMd("wfid", PLAN)))
     const jsonSha = canonicalPlanSha(PLAN)
     // a second "plugin instance" (different instance id, same live process, fresh heartbeat) owns the workflow
     const wf: Workflow = {
-      ...newWorkflow(OTHER, currentOwner(Date.now(), "inst_other_B", process.pid), "command", "add a widget"),
+      ...newWorkflow(OTHER, currentOwner(Date.now(), "inst_other_B", process.pid), "command", "add a widget", "opencode"),
       id: "wfid",
       phase: "pending_approval",
       planRef: { jsonSha, mdPath, mdSha, revision: 1 },
     }
-    writeWorkflow(wt.worktree, wf)
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf))
 
     const before = JSON.stringify(readWorkflow(wt.worktree))
     const deps = makeDeps(client, wt.worktree)
@@ -290,20 +326,20 @@ describe("6) interrupted approve (tagged tasks exist, phase still pending_approv
     mkdirSync(jsonPath.replace(/\/[^/]+$/, ""), { recursive: true })
     writeJsonAtomic(jsonPath, PLAN)
     const mdPath = planMdPath("wfid")
-    const mdSha = renderArtifact(wt.worktree, mdPath, renderPlanMd("wfid", PLAN))
+    const mdSha = withFlowTransaction(wt.worktree, flowTx => renderArtifact(flowTx, mdPath, renderPlanMd("wfid", PLAN)))
     const jsonSha = canonicalPlanSha(PLAN)
     const wf: Workflow = {
-      ...newWorkflow(S, currentOwner(), "command", "add a widget"),
+      ...newWorkflow(S, currentOwner(), "command", "add a widget", "opencode"),
       id: "wfid",
       phase: "pending_approval", // the crash happened after the ledger write but before the phase write
       planRef: { jsonSha, mdPath, mdSha, revision: 1 },
     }
-    writeWorkflow(wt.worktree, wf)
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf))
     const { ledger } = addTasks(readLedger(wt.worktree, S), validPlanArgs().steps.map((s) => ({ title: s.title })), Date.now(), { id: "wfid", planSha: jsonSha })
     writeLedger(wt.worktree, ledger)
 
     const deps = makeDeps(client, wt.worktree)
-    const r = repairOnLoad(getOpenCodeRuntime(deps))
+    const r = repairOnLoad(getOpenCodeRuntime(deps), "opencode")
     expect(r?.ok).toBe(true)
     const after = readWorkflow(wt.worktree)!
     expect(after.phase).toBe("executing")
@@ -320,16 +356,16 @@ describe("7) new plugin instance, same session, dead recorded owner -> /approve 
     mkdirSync(jsonPath.replace(/\/[^/]+$/, ""), { recursive: true })
     writeJsonAtomic(jsonPath, PLAN)
     const mdPath = planMdPath("wfid")
-    const mdSha = renderArtifact(wt.worktree, mdPath, renderPlanMd("wfid", PLAN))
+    const mdSha = withFlowTransaction(wt.worktree, flowTx => renderArtifact(flowTx, mdPath, renderPlanMd("wfid", PLAN)))
     const jsonSha = canonicalPlanSha(PLAN)
     const wf: Workflow = {
-      ...newWorkflow(S, currentOwner(), "command", "add a widget"),
+      ...newWorkflow(S, currentOwner(), "command", "add a widget", "opencode"),
       id: "wfid",
       phase: "pending_approval",
       planRef: { jsonSha, mdPath, mdSha, revision: 1 },
       owner: { instance: "inst_dead_prev_run", pid: 9_999_999, heartbeatAt: 0 },
     }
-    writeWorkflow(wt.worktree, wf)
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf))
 
     const deps = makeDeps(client, wt.worktree)
     const text = await runCommand(deps, APPROVE_COMMAND, "", APPROVE_TEMPLATE)
@@ -351,15 +387,15 @@ describe("prose '/approve' typed as plain user text never approves", () => {
     mkdirSync(jsonPath.replace(/\/[^/]+$/, ""), { recursive: true })
     writeJsonAtomic(jsonPath, PLAN)
     const mdPath = planMdPath("wfid")
-    const mdSha = renderArtifact(wt.worktree, mdPath, renderPlanMd("wfid", PLAN))
+    const mdSha = withFlowTransaction(wt.worktree, flowTx => renderArtifact(flowTx, mdPath, renderPlanMd("wfid", PLAN)))
     const jsonSha = canonicalPlanSha(PLAN)
     const wf: Workflow = {
-      ...newWorkflow(S, currentOwner(), "command", "add a widget"),
+      ...newWorkflow(S, currentOwner(), "command", "add a widget", "opencode"),
       id: "wfid",
       phase: "pending_approval",
       planRef: { jsonSha, mdPath, mdSha, revision: 1 },
     }
-    writeWorkflow(wt.worktree, wf)
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf))
 
     const deps = makeDeps(client, wt.worktree)
     const chatHook = createChatMessageHook(deps)
@@ -434,14 +470,14 @@ describe("interactive conversation mode", () => {
     mkdirSync(jsonPath.replace(/\/[^/]+$/, ""), { recursive: true })
     writeJsonAtomic(jsonPath, PLAN)
     const mdPath = planMdPath("interactive_pending")
-    const mdSha = renderArtifact(wt.worktree, mdPath, renderPlanMd("interactive_pending", PLAN))
+    const mdSha = withFlowTransaction(wt.worktree, flowTx => renderArtifact(flowTx, mdPath, renderPlanMd("interactive_pending", PLAN)))
     const jsonSha = canonicalPlanSha(PLAN)
-    writeWorkflow(wt.worktree, {
-      ...newWorkflow(S, currentOwner(), "command", "add a widget"),
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, {
+      ...newWorkflow(S, currentOwner(), "command", "add a widget", "opencode"),
       id: "interactive_pending",
       phase: "pending_approval",
       planRef: { jsonSha, mdPath, mdSha, revision: 1 },
-    })
+    }))
 
     const deps = makeDeps(client, wt.worktree)
     deps.interactive = true
@@ -513,10 +549,10 @@ describe("interactive conversation mode", () => {
   test("natural turn takes over a restarted workflow before protecting it from another session", async () => {
     const deps = makeDeps(client, wt.worktree)
     deps.interactive = true
-    const previous = writeWorkflow(wt.worktree, {
-      ...newWorkflow(S, currentOwner(), "keyword", "resume planning"),
+    const previous = withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, {
+      ...newWorkflow(S, currentOwner(), "keyword", "resume planning", "opencode"),
       owner: { instance: "inst_previous_plugin", pid: process.pid, heartbeatAt: 0 },
-    })
+    }))
 
     await runUserTurn(deps, "Continue with the requested investigation.", { id: "interactive_restart_owner" })
     const takenOver = readWorkflow(wt.worktree)!
@@ -562,23 +598,23 @@ describe("interactive conversation mode", () => {
     )).rejects.toThrow(/read-only without an owned active plan workflow/)
 
     mkdirSync(sessionDir(wt.worktree, OTHER), { recursive: true })
-    const foreign = writeWorkflow(wt.worktree, newWorkflow(OTHER, currentOwner(), "keyword", "foreign request"))
+    const foreign = withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, newWorkflow(OTHER, currentOwner(), "keyword", "foreign request", "opencode")))
     await runUserTurn(deps, "Try to start another request", { id: "interactive_foreign" })
     expect(readWorkflow(wt.worktree)?.id).toBe(foreign.id)
     await expect(write()).rejects.toThrow(/read-only without an owned active plan workflow/)
 
-    const stuck = writeWorkflow(wt.worktree, {
-      ...newWorkflow(S, currentOwner(), "keyword", "stuck request"),
+    const stuck = withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, {
+      ...newWorkflow(S, currentOwner(), "keyword", "stuck request", "opencode"),
       phase: "stuck",
       stuckCause: "tasks_failed",
-    })
+    }))
     await expect(write()).rejects.toThrow(/read-only without an owned active plan workflow/)
     expect(readWorkflow(wt.worktree)?.id).toBe(stuck.id)
 
-    writeWorkflow(wt.worktree, { ...stuck, phase: "cancelled" })
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...stuck, phase: "cancelled" }))
     await expect(write()).rejects.toThrow(/read-only without an owned active plan workflow/)
 
-    writeWorkflow(wt.worktree, newWorkflow(S, currentOwner(), "keyword", "cancel request"))
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, newWorkflow(S, currentOwner(), "keyword", "cancel request", "opencode")))
     await runCommand(deps, CANCEL_COMMAND, "", CANCEL_TEMPLATE)
     expect(readWorkflow(wt.worktree)?.phase).toBe("cancelled")
     await expect(write()).rejects.toThrow(/read-only without an owned active plan workflow/)

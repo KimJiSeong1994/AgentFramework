@@ -1,6 +1,5 @@
-// Per-plugin-instance guard state shared by tool-before / tool-after / event hooks. Keyed by the HookDeps object
-// (index.ts passes the same `deps` to every factory) so HookDeps itself stays a plain dependency bag.
-import type { HookDeps } from "../hooks/types.ts"
+// Guard state is shared by consumers of the same CoreDeps object, not by structurally equal dependency bags.
+import type { CoreDeps } from "../deps.ts"
 import { RepeatGuard } from "./repeat.ts"
 import { RepetitionDetector } from "./repetition.ts"
 
@@ -11,9 +10,9 @@ export type Guards = {
   lastContinuation: Map<string, number>
 }
 
-const registry = new WeakMap<HookDeps, Guards>()
+const registry = new WeakMap<CoreDeps, Guards>()
 
-export function getGuards(deps: HookDeps): Guards {
+export function getGuards(deps: CoreDeps): Guards {
   let g = registry.get(deps)
   if (!g) {
     g = {

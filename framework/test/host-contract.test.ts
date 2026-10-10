@@ -1,12 +1,16 @@
 import { describe, expect, it } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { PluginInput } from "@opencode-ai/plugin"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { createOpenCodeHost, openCodeMessageID } from "../src/hosts/opencode.ts"
-import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
-import type { ExecutionPolicy, ExecutionRequest } from "../src/hosts/types.ts"
+import { getOpenCodeRuntime, markOpenCodeProcessRiskForSession, policyForOpenCodeSession, processRiskForSession } from "../src/hosts/opencode-runtime.ts"
+import { assertRequiredControlStatuses } from "../src/hosts/required-controls.ts"
+import { ExecutionRunUnresolvedError } from "../src/hosts/run-state.ts"
+import { EXECUTION_ROLES, type ExecutionPolicy, type ExecutionRequest } from "../src/hosts/types.ts"
+import { executionRunDirectory } from "../src/state/store.ts"
+import { tempExecutionAuthority } from "./guards-helpers.ts"
 
 function request(): ExecutionRequest {
   return {
@@ -126,13 +130,14 @@ function completeTranscript() {
   ]
 }
 
-function recoveryHarness(options: { record?: boolean; policyID?: string; profile?: "legacy-unowned" | "linux-single-use" } = {}) {
+function recoveryHarness(options: { record?: boolean; policyID?: string; profile?: "legacy-unowned" | "linux-single-use"; engine?: string } = {}) {
   const stateHome = mkdtempSync(join(tmpdir(), "opencode-recovery-state-"))
   const worktree = mkdtempSync(join(tmpdir(), "opencode-recovery-worktree-"))
   const previousStateHome = process.env.XDG_STATE_HOME
   const previousLcaStateHome = process.env.LCA_STATE_HOME
   process.env.XDG_STATE_HOME = stateHome
   delete process.env.LCA_STATE_HOME
+  const executionAuthority = tempExecutionAuthority(worktree)
   const calls: Array<{ method: string; options: unknown }> = []
   const responses = {
     status: async (_options: unknown): Promise<unknown> => ({ data: { [VENDOR_SESSION_ID]: { type: "idle" } } }),
@@ -159,19 +164,24 @@ function recoveryHarness(options: { record?: boolean; policyID?: string; profile
       executionId: EXECUTION_ID, ownerSession: OWNER_SESSION_ID, taskId: "task", attemptId: "attempt",
       generation: claim.generation, role: "worker", cwd: worktree,
       policyID: options.policyID ?? originalRuntime.policy.resolve("worker").id,
-      kind: "host", profile: options.profile ?? "legacy-unowned",
+      kind: "host", engine: options.engine ?? "opencode", profile: options.profile ?? "legacy-unowned",
     })
     originalRuntime.runs.bindVendorRef(claim, EXECUTION_ID, JSON.stringify(reference))
   }
   // A distinct deps object forces a new host/runtime while retaining only the durable run store.
-  const runtime = getOpenCodeRuntime({ ...deps })
+  const openCodeDeps = { ...deps }
+  const runtime = getOpenCodeRuntime(openCodeDeps)
   return {
-    calls, responses, reference, claim, runtime, worktree,
+    calls, responses, reference, claim, runtime, worktree, openCodeDeps,
     cleanup() {
+      const released = executionAuthority.release({ preserve: false })
       if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME
       else process.env.XDG_STATE_HOME = previousStateHome
       if (previousLcaStateHome === undefined) delete process.env.LCA_STATE_HOME
       else process.env.LCA_STATE_HOME = previousLcaStateHome
+      if (!released.removed) {
+        throw new Error(`cannot clean OpenCode recovery fixture; execution authority retained at ${released.path}${released.reason ? ` (${released.reason})` : ""}; worktree retained at ${worktree}; stateHome retained at ${stateHome}`)
+      }
       rmSync(stateHome, { recursive: true, force: true })
       rmSync(worktree, { recursive: true, force: true })
     },
@@ -179,6 +189,21 @@ function recoveryHarness(options: { record?: boolean; policyID?: string; profile
 }
 
 describe("OpenCode execution host contract", () => {
+  it("does not admit any foreground role from the legacy hook-control preflight map", async () => {
+    const sdk = client()
+    const binding = policyBinding()
+    const host = createOpenCodeHost(sdk.value, binding.capabilities)
+    const preflight = await host.preflight("legacy-unowned")
+
+    expect(preflight.compatible).toBe(true)
+    expect(preflight.problems).toEqual([])
+    for (const role of EXECUTION_ROLES) {
+      expect(() => assertRequiredControlStatuses(preflight.controls, role)).toThrow("required control statuses unavailable")
+    }
+    expect(sdk.calls).toEqual([])
+    expect(binding.calls).toEqual([])
+  })
+
   it("creates only a session during prepare, binds its reference, then maps exact prompt fields", async () => {
     const sdk = client()
     const executionRequest = request()
@@ -236,10 +261,35 @@ describe("OpenCode execution host contract", () => {
     const original = binding.policy.bindSession
     binding.policy.bindSession = (...args) => { original(...args); throw new Error("bind unavailable") }
     await expect(createOpenCodeHost(sdk.value, binding.capabilities).prepare({
-      ...request(), onReference: (reference) => references.push(JSON.stringify(reference)),
+      ...request(), onReference: (reference) => { references.push(JSON.stringify(reference)) },
     })).rejects.toThrow("bind unavailable")
     expect(references).toEqual([JSON.stringify({ executionID: "execution", vendorSessionID: "vendor-session" })])
     expect(sdk.calls.map((call) => call.method)).toEqual(["create"])
+  })
+
+  it("refuses failed or asynchronous reference persistence before policy binding", async () => {
+    const callbacks: NonNullable<ExecutionRequest["onReference"]>[] = [
+      () => { throw new Error("private persistence error") },
+      // @ts-expect-error Async persistence cannot authorize execution.
+      async () => { throw new Error("private rejected persistence") },
+      // @ts-expect-error Even a fulfilled promise is not synchronous persistence.
+      async () => {},
+      // @ts-expect-error Every non-undefined callback result is refused.
+      () => 7,
+    ]
+    for (const onReference of callbacks) {
+      const sdk = client()
+      const binding = policyBinding()
+      let failure: unknown
+      try { await createOpenCodeHost(sdk.value, binding.capabilities).prepare({ ...request(), onReference }) }
+      catch (error) { failure = error }
+      expect(failure).toBeInstanceOf(Error)
+      expect(String(failure)).toContain("OpenCode reference persistence")
+      expect(String(failure)).not.toContain("private")
+      expect(binding.calls).toEqual([])
+      expect(binding.snapshots.size).toBe(0)
+      expect(sdk.calls.map(call => call.method)).toEqual(["create"])
+    }
   })
 
   it("refuses unsupported bindings before creating a child session", async () => {
@@ -520,17 +570,112 @@ describe("OpenCode execution host contract", () => {
       ambiguous.runtime.runs.registerIntent(claim, {
         executionId: "second-execution", ownerSession: OWNER_SESSION_ID, taskId: "task-2", attemptId: "attempt-2",
         generation: claim.generation, role: "worker", cwd: ambiguous.worktree,
-        policyID: ambiguous.runtime.policy.resolve("worker").id, kind: "host", profile: "legacy-unowned",
+        policyID: ambiguous.runtime.policy.resolve("worker").id, kind: "host", engine: "opencode", profile: "legacy-unowned",
       })
-      ambiguous.runtime.runs.bindVendorRef(claim, "second-execution", JSON.stringify({ ...ambiguous.reference, executionID: "second-execution" }))
+      const duplicateReference = { ...ambiguous.reference, executionID: "second-execution" }
+      expect(() => ambiguous.runtime.runs.bindVendorRef(claim, "second-execution", JSON.stringify(duplicateReference)))
+        .toThrow(ExecutionRunUnresolvedError)
+      const statePath = join(executionRunDirectory(ambiguous.worktree), "state.json")
+      const state = JSON.parse(readFileSync(statePath, "utf8")) as {
+        executions: Array<{ executionId: string; vendorRef?: string; boundaryRef?: unknown }>
+      }
+      const second = state.executions.find(record => record.executionId === "second-execution")!
+      second.vendorRef = JSON.stringify(duplicateReference)
+      second.boundaryRef = duplicateReference
+      writeFileSync(statePath, JSON.stringify(state))
       expect(await ambiguous.runtime.host.reconcile(ambiguous.reference)).toMatchObject({ outcome: "unknown", quiescent: false })
     } finally { ambiguous.cleanup() }
+  })
+
+  it("refuses foreign-engine recovery, policy binding, and process-risk mutation", async () => {
+    const h = recoveryHarness({ engine: "other-engine" })
+    try {
+      const statePath = join(executionRunDirectory(h.worktree), "state.json")
+      const before = readFileSync(statePath)
+      expect(await h.runtime.host.reconcile(h.reference)).toMatchObject({ outcome: "unknown", quiescent: false })
+      expect(h.calls).toEqual([])
+      expect(policyForOpenCodeSession(h.openCodeDeps, VENDOR_SESSION_ID)).toBeUndefined()
+      expect(h.runtime.policy.handlersForSession(VENDOR_SESSION_ID)).toBeUndefined()
+      expect(processRiskForSession(h.runtime.runs, VENDOR_SESSION_ID)).toBe(true)
+      expect(() => markOpenCodeProcessRiskForSession(h.openCodeDeps, VENDOR_SESSION_ID))
+        .toThrow("unique OpenCode execution owner")
+      expect(readFileSync(statePath)).toEqual(before)
+    } finally { h.cleanup() }
+  })
+
+  it("refuses policy and process-risk authority when vendorRef differs from boundaryRef", async () => {
+    const h = recoveryHarness()
+    try {
+      const statePath = join(executionRunDirectory(h.worktree), "state.json")
+      const state = JSON.parse(readFileSync(statePath, "utf8")) as {
+        executions: Array<{ executionId: string; boundaryRef?: unknown }>
+      }
+      const record = state.executions.find(execution => execution.executionId === EXECUTION_ID)!
+      record.boundaryRef = { ...h.reference, vendorSessionID: "unbound-session" }
+      writeFileSync(statePath, JSON.stringify(state))
+      const beforeRisk = readFileSync(statePath)
+
+      expect(await h.runtime.host.reconcile(h.reference)).toMatchObject({ outcome: "unknown", quiescent: false })
+      expect(h.calls).toEqual([])
+      expect(policyForOpenCodeSession(h.openCodeDeps, VENDOR_SESSION_ID)).toBeUndefined()
+      expect(h.runtime.policy.handlersForSession(VENDOR_SESSION_ID)).toBeUndefined()
+      expect(processRiskForSession(h.runtime.runs, VENDOR_SESSION_ID)).toBe(true)
+      expect(() => markOpenCodeProcessRiskForSession(h.openCodeDeps, VENDOR_SESSION_ID))
+        .toThrow("durably bound")
+      expect(readFileSync(statePath)).toEqual(beforeRisk)
+    } finally { h.cleanup() }
+  })
+
+  it("refuses duplicate persisted session, thread or turn IDs before OpenCode reconciliation", async () => {
+    for (const field of ["vendorSessionID", "vendorThreadID", "vendorTurnID"] as const) {
+      const ambiguous = recoveryHarness()
+      try {
+        const claim = ambiguous.claim!
+        ambiguous.runtime.runs.recordTerminal(claim, EXECUTION_ID, { outcome: "completed", terminalAt: 60, quiescentAt: 61 })
+        ambiguous.runtime.runs.registerIntent(claim, {
+          executionId: "second-execution", ownerSession: OWNER_SESSION_ID, taskId: "task-2", attemptId: "attempt-2",
+          generation: claim.generation, role: "worker", cwd: ambiguous.worktree,
+          policyID: ambiguous.runtime.policy.resolve("worker").id, kind: "host", engine: "opencode", profile: "legacy-unowned",
+        })
+
+        const statePath = join(executionRunDirectory(ambiguous.worktree), "state.json")
+        const state = JSON.parse(readFileSync(statePath, "utf8")) as {
+          executions: Array<{ executionId: string; vendorRef?: string; boundaryRef?: unknown }>
+        }
+        const sharedID = `duplicate-${field}`
+        const originalReference = { ...ambiguous.reference, [field]: sharedID }
+        const original = state.executions.find(record => record.executionId === EXECUTION_ID)!
+        original.vendorRef = JSON.stringify(originalReference)
+        original.boundaryRef = originalReference
+        writeFileSync(statePath, JSON.stringify(state))
+
+        const duplicateReference = {
+          executionID: "second-execution", vendorSessionID: "second-session", [field]: sharedID,
+        }
+        const beforeRejectedBind = readFileSync(statePath)
+        expect(() => ambiguous.runtime.runs.bindVendorRef(claim, "second-execution", JSON.stringify(duplicateReference)))
+          .toThrow(ExecutionRunUnresolvedError)
+        expect(readFileSync(statePath)).toEqual(beforeRejectedBind)
+
+        const injected = JSON.parse(readFileSync(statePath, "utf8")) as typeof state
+        const second = injected.executions.find(record => record.executionId === "second-execution")!
+        second.vendorRef = JSON.stringify(duplicateReference)
+        second.boundaryRef = duplicateReference
+        writeFileSync(statePath, JSON.stringify(injected))
+
+        const beforeReconcile = readFileSync(statePath)
+        expect(await ambiguous.runtime.host.reconcile(originalReference))
+          .toMatchObject({ outcome: "unknown", quiescent: false })
+        expect(ambiguous.calls).toEqual([])
+        expect(readFileSync(statePath)).toEqual(beforeReconcile)
+      } finally { ambiguous.cleanup() }
+    }
   })
 
   it("preserves shell process-risk fences, including risk added during transcript reads", async () => {
     const alreadyRisky = recoveryHarness()
     try {
-      alreadyRisky.runtime.runs.markProcessRiskBySession(VENDOR_SESSION_ID)
+      alreadyRisky.runtime.runs.markProcessRiskBySession(VENDOR_SESSION_ID, alreadyRisky.runtime.host.identity.engine)
       expect(await alreadyRisky.runtime.host.reconcile(alreadyRisky.reference)).toMatchObject({ outcome: "terminal", quiescent: false })
     } finally { alreadyRisky.cleanup() }
 
@@ -538,7 +683,7 @@ describe("OpenCode execution host contract", () => {
     try {
       duringRead.responses.messages = async () => {
         const response = { data: completeTranscript() }
-        duringRead.runtime.runs.markProcessRiskBySession(VENDOR_SESSION_ID)
+        duringRead.runtime.runs.markProcessRiskBySession(VENDOR_SESSION_ID, duringRead.runtime.host.identity.engine)
         return response
       }
       expect(await duringRead.runtime.host.reconcile(duringRead.reference)).toMatchObject({ outcome: "terminal", quiescent: false })

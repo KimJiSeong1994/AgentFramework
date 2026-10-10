@@ -107,16 +107,23 @@ below: the standalone runner talks to an already-running local service and does 
 
 ## Foreground imported-plan runner (OpenCode)
 
-The standalone runner uses the real, already-running local OpenCode service with this project's
-LCA plugin; it never starts a daemon or falls back to another engine or model. The plan must be
-canonical JSON inside the worktree (3–10 steps). For example:
+**Currently refused:** foreground `import`, `run`, and `resume` cannot pass admission with
+the existing OpenCode hook-control map. It lacks the required role-control statuses;
+connecting a server or approving a plan does not bypass that gate. Read-only `status`
+and help remain available. These commands do not yet provide a working standalone
+Claude Code/Codex execution path.
+
+The retained runner targets the real, already-running local OpenCode service with this project's
+LCA plugin; it never starts a daemon or falls back to another engine or model. Its plan contract
+requires canonical JSON inside the worktree (3–10 steps). The retained command syntax is:
 
 ```sh
 lca status --worktree /path/to/repo
+# Execution syntax only: currently refused at admission.
 lca run --plan plan.json --worktree /path/to/repo --server http://127.0.0.1:4096
 lca status --worktree /path/to/repo --json
 
-# Equivalent source-tree entry point; additional workflow commands:
+# Equivalent source-tree syntax; run/resume are also currently refused:
 bun src/hosts/cli.ts run --plan plan.json --worktree /path/to/repo --server http://127.0.0.1:4096
 bun src/hosts/cli.ts status --worktree /path/to/repo --json
 bun src/hosts/cli.ts resume --session SESSION_ID --worktree /path/to/repo --server http://127.0.0.1:4096
@@ -130,11 +137,12 @@ decisions. Standalone commands do not start a server or provide interactive chat
 chat command launches an OpenCode TUI child and is not the standalone runner. Neither path
 auto-approves plans or establishes native-host qualification.
 
-Exit codes: **0** means success or help; **1** is a redacted runtime refusal/failure; **2** is
+Exit codes: **0** means success or help; **1** is a fixed host-admission diagnostic or a
+redacted runtime refusal/failure; **2** is
 invalid command-line usage or an inaccessible worktree; **3** is a `LinuxAdmissionRefused`
 admission refusal with bounded reason codes.
 
-`run --plan` validates and advisory-reviews the saved plan, shows its canonical file/hash, and
+After successful admission, the `run --plan` contract validates and advisory-reviews the saved plan, shows its canonical file/hash, and
 requires an interactive local terminal to type `APPROVE <workflow-id> <plan-sha>` or
 `REJECT <workflow-id> <plan-sha> <reason>` before any task runs. No auto-yes or noninteractive
 approval exists. The explicit loopback `--server` must be trusted by its operator; its API
@@ -363,7 +371,28 @@ Unsupported untracked links or special files are refused, not followed or normal
 ACLs and extended attributes are outside this diagnostic digest.
 
 Native Claude and Codex coding profiles are not admitted. Choosing those engines refuses
-before connecting to the server; use OpenCode's provider integrations instead.
+before connecting to the server. The existing OpenCode entry point is not the planned
+standalone Claude Code/Codex conversation loop.
+Foreground import/run now also rejects incomplete role-control status maps; the legacy
+OpenCode hook-control map does not satisfy that gate. Passing status checks alone would
+still not establish the capability evidence below.
+
+CLI admission requires engine/version/model/profile-scoped evidence for every required
+role control, including read-only main/reviewer execution and the LCA-owned serial worker
+lease. It also requires proof of actual complete LCA-controlled input limits: **8192
+tokens for main and 5120 for worker**, including system text, tool schemas, wrappers and
+payloads. Generic estimates, UTF-8 byte counts and vendor usage do not establish these
+limits; opaque vendor additions remain unobservable.
+
+Claude Code's documented [`--safe-mode`](https://code.claude.com/docs/en/cli-reference)
+preserves authentication while disabling
+customizations, unlike `--bare`, but managed-policy hooks and commands may still run.
+It is a discovery candidate, not an admitted isolation profile. Anthropic's documented
+[token-counting endpoint](https://platform.claude.com/docs/en/build-with-claude/token-counting)
+returns an estimate and is not a CLI-only tokenizer proof.
+Neither documentation nor the offline process/reference-stream tests establish live
+adapter readiness or escaped-descendant retirement. Missing controls or token proof
+remain blockers; existing login must not be accessed or forwarded by LCA to bypass them.
 
 ## Plan workflow (harness M1) — `/plan` → `/approve` → workers
 
@@ -622,9 +651,20 @@ bash scripts/lca-e2e.sh --smoke-command status  # M0 live smoke: /status deliver
 | OpenCode project config / plugin loader | `<repo>/.opencode/opencode.json(c)`, `<repo>/.opencode/plugins/lca.ts` |
 | Extra global dir (only if `OPENCODE_CONFIG_DIR` is set, e.g. by orca) | `$OPENCODE_CONFIG_DIR/opencode.json` |
 | lca user / project config | `~/.config/lca/lca.jsonc`, `<repo>/.lca/lca.jsonc` (list only overrides) |
-| lca control-plane state (ledger, mode, abort marker, session map) | `$XDG_STATE_HOME/lca/<repo-hash>/sessions/<id>/` (default `~/.local/state/lca/…`; `LCA_STATE_HOME` overrides) |
+| lca workflow/session state (ledger, mode, abort marker, session map) | `$XDG_STATE_HOME/lca/<repo-hash>/sessions/<id>/` (default `~/.local/state/lca/…`; `LCA_STATE_HOME` overrides) |
+| lca execution claims and run records | `<OS-account-home>/.local/state/lca/<canonical-worktree-hash>/execution-runs/`; independent of `HOME`, `XDG_STATE_HOME`, and `LCA_STATE_HOME` |
 | lca handoffs (data plane) | `<repo>/.lca/handoffs/<session>/task-<n>.md` |
 | OpenCode session DB (read-only for us) | `~/.local/share/opencode/opencode.db` |
+
+Execution authority requires an existing worktree owned by the operating-system user and
+an authority path outside that worktree. Account discovery uses bounded native metadata
+queries (`id`/`dscl`/`plutil` on macOS, `getent` on Linux); unavailable or inconsistent account metadata
+refuses execution rather than trusting an environment-derived home. A distinct execution directory under the selected
+configured legacy state root is refused and preserved, even when empty; there is no automatic
+migration, deletion, or stale-owner takeover. Do not switch namespaces or erase records to
+bypass a refusal. This gives cooperating current-protocol controllers one authority regardless
+of state-directory overrides; it does not discover unselected historical namespaces or prove
+that a terminated controller's descendants have stopped.
 
 ## OMO coexistence warning
 

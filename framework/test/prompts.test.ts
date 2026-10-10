@@ -102,8 +102,8 @@ describe("AGENT_DEFS", () => {
     expect(AGENT_DEFS.worker.prompt).toBe(WORKER_PROMPT)
     for (const t of ["task", "delegate", "todowrite", "webfetch", "skill"]) expect(AGENT_DEFS.worker.denied_tools).toContain(t)
     expect(AGENT_DEFS.worker.steps).toBe(40)
-    expect((AGENT_DEFS.worker as any).tools).toBeUndefined()
-    expect((AGENT_DEFS.worker as any).maxSteps).toBeUndefined()
+    expect(Object.hasOwn(AGENT_DEFS.worker, "tools")).toBe(false)
+    expect(Object.hasOwn(AGENT_DEFS.worker, "maxSteps")).toBe(false)
   })
 
   test("reviewer cannot write or run commands", () => {
@@ -123,8 +123,8 @@ describe("AGENT_DEFS", () => {
 
   test("no def carries model or temperature (applied by the config hook)", () => {
     for (const def of Object.values(AGENT_DEFS)) {
-      expect(def.model).toBeUndefined()
-      expect(def.temperature).toBeUndefined()
+      expect(Object.hasOwn(def, "model")).toBe(false)
+      expect(Object.hasOwn(def, "temperature")).toBe(false)
     }
   })
 })

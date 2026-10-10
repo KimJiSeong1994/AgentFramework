@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto"
 import { realpathSync } from "node:fs"
 import { isAbsolute } from "node:path"
-import type { HookDeps } from "../hooks/types.ts"
-import { enabled } from "../hooks/types.ts"
+import type { CoreDeps } from "../deps.ts"
 import { containsSecret } from "../security/secrets.ts"
 import {
   admitSkillCall, recordSkillCall, recordSkillTurn, recordSkillTask, recordSkillVerification,
@@ -27,7 +26,7 @@ function observationTimes(value: unknown) {
   return { startedAt, finishedAt, durationMs: startedAt !== null && finishedAt !== null ? finishedAt - startedAt : null }
 }
 
-function warning(deps: HookDeps, code: string): void {
+function warning(deps: CoreDeps, code: string): void {
   const key = `${deps.worktree}\0${code}`
   if (warnings.has(key)) return
   warnings.add(key)
@@ -36,9 +35,9 @@ function warning(deps: HookDeps, code: string): void {
   try { console.warn(`[lca] skill observation: ${code}`) } catch { /* Observational only. */ }
 }
 
-export function skillObservationBinding(deps: HookDeps): { root: string; campaignID: string } | null {
+export function skillObservationBinding(deps: CoreDeps): { root: string; campaignID: string } | null {
   const config = record(deps.config.skill_observation)
-  if (config.enabled !== true || !enabled(deps.config, "tool.history")) return null
+  if (config.enabled !== true || deps.config.disabled_hooks.includes("tool.history")) return null
   if (!validSkillCampaignID(config.campaign_id) || (config.owner_root !== undefined && (typeof config.owner_root !== "string" || !isAbsolute(config.owner_root)))) {
     warning(deps, "invalid_config")
     return null
@@ -57,7 +56,7 @@ export function skillObservationBinding(deps: HookDeps): { root: string; campaig
   } catch { warning(deps, "binding_unavailable"); return null }
 }
 
-function observe(deps: HookDeps, action: (binding: { root: string; campaignID: string }) => unknown): void {
+function observe(deps: CoreDeps, action: (binding: { root: string; campaignID: string }) => unknown): void {
   try {
     const binding = skillObservationBinding(deps)
     if (!binding) return
@@ -67,7 +66,7 @@ function observe(deps: HookDeps, action: (binding: { root: string; campaignID: s
 }
 
 /** Maintenance never creates telemetry and remains independent from tool execution. */
-export function initializeSkillObservation(deps: HookDeps): void {
+export function initializeSkillObservation(deps: CoreDeps): void {
   try {
     const binding = skillObservationBinding(deps)
     if (!binding && deps.config.skill_observation?.enabled === true) return
@@ -96,7 +95,7 @@ export function initializeSkillObservation(deps: HookDeps): void {
   } catch { warning(deps, "maintenance_unavailable") }
 }
 
-export function observationConfigGeneration(deps: HookDeps): string | null {
+export function observationConfigGeneration(deps: CoreDeps): string | null {
   const router = deps.config.skill_router
   const allow = deps.config.skills.allow
   if (!Array.isArray(allow) || allow.length > 16) return null
@@ -106,15 +105,15 @@ export function observationConfigGeneration(deps: HookDeps): string | null {
   return createHash("sha256").update(JSON.stringify({
     basis: "lca-observation-config.v1",
     enabled: deps.config.skill_observation?.enabled === true,
-    history: enabled(deps.config, "tool.history"), routerMode: ["off", "shadow", "suggest"].includes(router.mode) ? router.mode : "invalid",
+    history: !deps.config.disabled_hooks.includes("tool.history"), routerMode: ["off", "shadow", "suggest"].includes(router.mode) ? router.mode : "invalid",
     probability: number(router.min_probability), margin: number(router.min_margin), timeoutMs: number(router.timeout_ms),
     allow: names, allowComplete: names.length === allow.length, flow: deps.config.flow?.enabled === true,
-    modeDetection: enabled(deps.config, "mode.detect"), agentConfiguration: enabled(deps.config, "config.agents"),
+    modeDetection: !deps.config.disabled_hooks.includes("mode.detect"), agentConfiguration: !deps.config.disabled_hooks.includes("config.agents"),
   })).digest("hex")
 }
 
 /** Called before existing tool refusal checks; admission is permission to observe, not permission to execute. */
-export function observeSkillAttempt(deps: HookDeps, input: { tool: string; sessionID: string; callID: string }, args: unknown): void {
+export function observeSkillAttempt(deps: CoreDeps, input: { tool: string; sessionID: string; callID: string }, args: unknown): void {
   if (input.tool !== "skill") return
   observe(deps, ({ root, campaignID }) => {
     const admitted = admitSkillCall(root, campaignID, { sessionID: input.sessionID, callID: input.callID, stage: "before" })
@@ -124,7 +123,7 @@ export function observeSkillAttempt(deps: HookDeps, input: { tool: string; sessi
 }
 
 /** Inspect/hashes content only after atomic quota admission; closed campaigns never read output bodies. */
-export function observeSkillPart(deps: HookDeps, value: unknown): void {
+export function observeSkillPart(deps: CoreDeps, value: unknown): void {
   const part = record(value)
   if (part.tool !== "skill") return
   const state = record(part.state)
@@ -154,7 +153,7 @@ export function observeSkillPart(deps: HookDeps, value: unknown): void {
   })
 }
 
-export function observeRelatedToolPart(deps: HookDeps, value: unknown): void {
+export function observeRelatedToolPart(deps: CoreDeps, value: unknown): void {
   const part = record(value)
   if (part.tool === "skill" || !identifier(part.tool) || !identifier(part.sessionID) || !identifier(part.callID)) return
   const state = record(part.state)
@@ -168,24 +167,24 @@ export function observeRelatedToolPart(deps: HookDeps, value: unknown): void {
   }))
 }
 
-export function observeSkillBoundary(deps: HookDeps, sessionID: string, reason: "compacted" | "deleted"): void {
+export function observeSkillBoundary(deps: CoreDeps, sessionID: string, reason: "compacted" | "deleted"): void {
   observe(deps, ({ root, campaignID }) => markSkillSessionBoundary(root, campaignID, sessionID, reason))
 }
 
-export function observeSkillTurn(deps: HookDeps, fact: SkillTurnFactInput): void {
+export function observeSkillTurn(deps: CoreDeps, fact: SkillTurnFactInput): void {
   observe(deps, ({ root, campaignID }) => recordSkillTurn(root, campaignID, fact))
 }
 
-export function observeSkillTask(deps: HookDeps, fact: SkillTaskFactInput): void {
+export function observeSkillTask(deps: CoreDeps, fact: SkillTaskFactInput): void {
   observe(deps, ({ root, campaignID }) => recordSkillTask(root, campaignID, fact))
 }
 
-export function observeSkillVerification(deps: HookDeps, fact: SkillVerificationFactInput): void {
+export function observeSkillVerification(deps: CoreDeps, fact: SkillVerificationFactInput): void {
   observe(deps, ({ root, campaignID }) => recordSkillVerification(root, campaignID, fact))
 }
 
 /** Parent IDs supplied by the host only. Never infer parentage from the latest user message. */
-export function observeSkillMessage(deps: HookDeps, value: unknown): void {
+export function observeSkillMessage(deps: CoreDeps, value: unknown): void {
   const info = record(value)
   if (!identifier(info.sessionID) || !identifier(info.id)) return
   const role = info.role === "user" || info.role === "assistant" ? info.role : "unknown"

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { appendFileSync, closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync } from "node:fs"
 import { join } from "node:path"
-import type { HookDeps } from "../hooks/types.ts"
+import type { CoreDeps } from "../deps.ts"
 import { containsSecret } from "../security/secrets.ts"
 import { stateRoot } from "../state/store.ts"
 
@@ -30,7 +30,7 @@ export function routingLogPath(worktree: string, sessionID: string): string {
   return join(stateRoot(worktree), "routing", `${identifier(sessionID)}.jsonl`)
 }
 
-function append(deps: HookDeps, sessionID: string, event: Record<string, unknown>): void {
+function append(deps: CoreDeps, sessionID: string, event: Record<string, unknown>): void {
   const path = routingLogPath(deps.worktree, sessionID)
   const dir = join(stateRoot(deps.worktree), "routing")
   mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -46,13 +46,13 @@ function append(deps: HookDeps, sessionID: string, event: Record<string, unknown
 }
 
 /** Logging is observational: disk errors never alter the routing result or expose payloads in warnings. */
-function bestEffort(deps: HookDeps, action: () => void): void {
+function bestEffort(deps: CoreDeps, action: () => void): void {
   try { action() } catch {
     try { deps.log("skill.router persistence failed") } catch { /* Logging cannot affect routing. */ }
   }
 }
 
-export function recordRoutingDecision(deps: HookDeps, decision: RoutingDecision): void {
+export function recordRoutingDecision(deps: CoreDeps, decision: RoutingDecision): void {
   bestEffort(deps, () => {
     const d = decision
     const scores = d.scores && {
@@ -69,7 +69,7 @@ export function recordRoutingDecision(deps: HookDeps, decision: RoutingDecision)
 }
 
 /** Emitted only after the hook actually inserts advice; recommendation is not evidence of skill execution. */
-export function recordRoutingAdvice(deps: HookDeps, sessionID: string, messageID: string, decisionID: string, skill: string): void {
+export function recordRoutingAdvice(deps: CoreDeps, sessionID: string, messageID: string, decisionID: string, skill: string): void {
   bestEffort(deps, () => append(deps, sessionID, {
     event: "advice_applied", decisionID: identifier(decisionID), sessionID: identifier(sessionID),
     messageID: identifier(messageID), skill: identifier(skill),

@@ -2,7 +2,7 @@
 // tool.execute.before. Owning session only; other sessions and no-workflow sessions are unaffected.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
-import { newWorkflow, readEvents, writeWorkflow } from "../src/flow/state.ts"
+import { newWorkflow, readEvents, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
 
@@ -21,9 +21,9 @@ const before = (tool: string, args: any, sessionID = S, callID = "c1") => ({ inp
 const callArgs = (b: ReturnType<typeof before>): [any, any] => [b.input, b.output]
 
 function putWorkflow(phase: string, patch: Record<string, unknown> = {}) {
-  let wf = newWorkflow(S, currentOwner(), "command", "do the thing")
+  let wf = newWorkflow(S, currentOwner(), "command", "do the thing", "opencode")
   wf = { ...wf, phase: phase as any, ...patch }
-  return writeWorkflow(wt.worktree, wf)
+  return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf))
 }
 
 describe("planning boundary (AC0.4)", () => {

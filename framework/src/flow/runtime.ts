@@ -7,10 +7,11 @@ import { existsSync } from "node:fs"
 import type { FlowRuntime } from "../hosts/types.ts"
 import { transition, type FlowEvent, type TransitionCtx, type Limits, DEFAULT_LIMITS, TERMINAL } from "./machine.ts"
 import {
-  activeWorkflow, appendEvents, coreOf, newWorkflow, readWorkflow, rotate, withCore, writeWorkflow,
-  type EventActor, type Workflow,
+  appendEvents, assertFlowTxWorktree, CorruptWorkflowError, coreOf, newWorkflow, readWorkflowForWrite,
+  rotate, withCore, withFlowTransaction, writeWorkflow,
+  type EventActor, type FlowTx, type Workflow, workflowEngineRefusal, FlowTransactionBusyError,
 } from "./state.ts"
-import { authorize, currentOwner, defaultLiveness, ownerLive, startHeartbeat, takeOver, type Command, type Heartbeat, type LivenessCtx } from "./owner.ts"
+import { authorize, currentOwner, defaultLiveness, INSTANCE_ID, ownerLive, startHeartbeat, takeOver, type Command, type Heartbeat, type LivenessCtx } from "./owner.ts"
 
 export type FlowResult = { ok: true; wf: Workflow; toast?: string; note?: string } | { ok: false; text: string; wf?: Workflow | null }
 
@@ -40,21 +41,37 @@ export function tally(tasks: LedgerTask[]): TaskTally {
 // ---------------------------------------------------------------- heartbeat (one per instance)
 let beat: Heartbeat | null = null
 let beatWorktree: string | null = null
+let beatEngine: unknown
 
 /** Keep the owner heartbeat of this instance's workflow fresh; stops by itself when the workflow ends or moves. */
-export function ensureHeartbeat(deps: FlowRuntime): void {
-  if (beat && beatWorktree === deps.worktree) return
+export function ensureHeartbeat(deps: FlowRuntime, engine: unknown): void {
+  if (beat && beatWorktree === deps.worktree && beatEngine === engine) return
   beat?.stop()
   beatWorktree = deps.worktree
+  beatEngine = engine
+  const expectedEngine = engine
   beat = startHeartbeat(() => {
-    const wf = readWorkflow(deps.worktree)
-    if (!wf || TERMINAL.has(wf.phase) || wf.owner.pid !== process.pid) {
-      beat = null
-      beatWorktree = null
-      return false
+    try {
+      const keep = withFlowTransaction(deps.worktree, (tx) => {
+        assertFlowTxWorktree(tx, deps.worktree)
+        const checked = readWorkflowForWrite(tx)
+        if (checked.corrupt) return true
+        const wf = checked.wf
+        if (!wf || TERMINAL.has(wf.phase) || wf.owner.pid !== process.pid || wf.owner.instance !== INSTANCE_ID) return false
+        if (workflowEngineRefusal(wf, expectedEngine)) return false
+        writeWorkflow(tx, { ...wf, owner: { ...wf.owner, heartbeatAt: Date.now() } })
+        return true
+      })
+      if (!keep) {
+        beat = null
+        beatWorktree = null
+        beatEngine = undefined
+      }
+      return keep
+    } catch (error) {
+      if (error instanceof FlowTransactionBusyError) return true
+      throw error
     }
-    writeWorkflow(deps.worktree, { ...wf, owner: { ...wf.owner, heartbeatAt: Date.now() } })
-    return true
   }, undefined, (e) => deps.log("flow heartbeat write failed; retrying", { error: (e as Error)?.message ?? String(e) }))
 }
 
@@ -63,10 +80,51 @@ export function stopHeartbeat(): void {
   beat?.stop()
   beat = null
   beatWorktree = null
+  beatEngine = undefined
 }
 
 // ---------------------------------------------------------------- transitions
 /** Apply one machine event to `wf` and persist it (workflow first, then events). */
+export function applyEventIn(
+  tx: FlowTx,
+  deps: FlowRuntime,
+  wf: Workflow,
+  event: FlowEvent,
+  actor: EventActor,
+  ctx: TransitionCtx = {},
+  patch: (wf: Workflow) => Workflow = (w) => w,
+  data?: Record<string, unknown>,
+  now = Date.now(),
+): FlowResult {
+  assertFlowTxWorktree(tx, deps.worktree)
+  // Compare-and-swap: the caller's record may be stale (e.g. lca_flow awaited a review for minutes while a /cancel
+  // or a new /plan ran). Refuse without writing when the persisted workflow is a different one, has new events, or
+  // a different phase. The transition applies to the fresh record, so a refreshed owner heartbeat is never rolled
+  // back.
+  const checked = readWorkflowForWrite(tx)
+  if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+  const fresh = checked.wf
+  const engineRefusal = fresh ? workflowEngineRefusal(fresh, wf.engine) : undefined
+  if (engineRefusal) return { ok: false, text: engineRefusal, wf: fresh }
+  if (!fresh || fresh.id !== wf.id || fresh.lastSeq !== wf.lastSeq || fresh.phase !== wf.phase) {
+    return { ok: false, text: "workflow changed meanwhile; stop and check /status", wf: fresh }
+  }
+  const base: Workflow = { ...wf, owner: fresh.owner }
+  const r = transition(coreOf(base), event, { limits: flowLimits(deps), ...ctx })
+  if ("error" in r) return { ok: false, text: r.error, wf }
+  let next: Workflow = { ...patch(withCore(base, r.core)), engine: fresh.engine }
+  const typed = typedEvent(event)
+  const events = [
+    { wf: wf.id, type: "transition", from: phaseLabel(wf), to: phaseLabel(next), actor, data: { event, row: r.row, ...(data ?? {}) } },
+    ...(typed ? [{ wf: wf.id, type: typed, actor, data }] : []),
+  ]
+  next = { ...next, lastSeq: wf.lastSeq, owner: patchOwner(next.owner, fresh.owner) }
+  next = writeWorkflow(tx, next, now)
+  const seq = appendEvents(tx, events, now)
+  next = writeWorkflow(tx, { ...next, lastSeq: seq }, now)
+  return { ok: true, wf: next, toast: r.toast }
+}
+
 export function applyEvent(
   deps: FlowRuntime,
   wf: Workflow,
@@ -77,28 +135,7 @@ export function applyEvent(
   data?: Record<string, unknown>,
   now = Date.now(),
 ): FlowResult {
-  // Compare-and-swap: the caller's record may be stale (e.g. lca_flow awaited a review for minutes while a /cancel
-  // or a new /plan ran). Refuse without writing when the persisted workflow is a different one, has new events, or
-  // a different phase. The transition applies to the fresh record, so a refreshed owner heartbeat is never rolled
-  // back.
-  const fresh = readWorkflow(deps.worktree)
-  if (!fresh || fresh.id !== wf.id || fresh.lastSeq !== wf.lastSeq || fresh.phase !== wf.phase) {
-    return { ok: false, text: "workflow changed meanwhile; stop and check /status", wf: fresh }
-  }
-  const base: Workflow = { ...wf, owner: fresh.owner }
-  const r = transition(coreOf(base), event, { limits: flowLimits(deps), ...ctx })
-  if ("error" in r) return { ok: false, text: r.error, wf }
-  let next = patch(withCore(base, r.core))
-  const typed = typedEvent(event)
-  const events = [
-    { wf: wf.id, type: "transition", from: phaseLabel(wf), to: phaseLabel(next), actor, data: { event, row: r.row, ...(data ?? {}) } },
-    ...(typed ? [{ wf: wf.id, type: typed, actor, data }] : []),
-  ]
-  next = { ...next, lastSeq: wf.lastSeq, owner: patchOwner(next.owner, fresh.owner) }
-  next = writeWorkflow(deps.worktree, next, now)
-  const seq = appendEvents(deps.worktree, events, now)
-  next = writeWorkflow(deps.worktree, { ...next, lastSeq: seq }, now)
-  return { ok: true, wf: next, toast: r.toast }
+  return withFlowTransaction(deps.worktree, (tx) => applyEventIn(tx, deps, wf, event, actor, ctx, patch, data, now))
 }
 
 /** Keep the fresher heartbeat unless the patch deliberately set a new owner (takeover). */
@@ -124,45 +161,92 @@ function phaseLabel(wf: Workflow): string {
   return wf.stuckCause ? `${wf.phase}(${wf.stuckCause})` : wf.phase
 }
 
-function event(deps: FlowRuntime, wf: Workflow, type: string, actor: EventActor, data?: Record<string, unknown>): Workflow {
-  const seq = appendEvents(deps.worktree, [{ wf: wf.id, type, actor, data }])
-  return writeWorkflow(deps.worktree, { ...wf, lastSeq: seq })
+function readWorkflowIn(tx: FlowTx, deps: FlowRuntime): Workflow | null {
+  assertFlowTxWorktree(tx, deps.worktree)
+  const checked = readWorkflowForWrite(tx)
+  if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+  return checked.wf
 }
 
-/** §5.3 owning-session takeover: owner rewritten, heartbeat started, owner_takeover emitted; phase unchanged. */
+function activeWorkflowIn(tx: FlowTx, deps: FlowRuntime): Workflow | null {
+  const wf = readWorkflowIn(tx, deps)
+  return wf && !TERMINAL.has(wf.phase) ? wf : null
+}
+
+type WorkflowSnapshotCheck = { ok: true; fresh: Workflow } | { ok: false; fresh: Workflow | null; refusal: string }
+
+function checkWorkflowSnapshotIn(tx: FlowTx, deps: FlowRuntime, wf: Workflow): WorkflowSnapshotCheck {
+  const fresh = readWorkflowIn(tx, deps)
+  if (!fresh) return { ok: false, fresh, refusal: "workflow changed meanwhile; stop and check /status" }
+  const engineRefusal = workflowEngineRefusal(fresh, wf.engine)
+  if (engineRefusal) return { ok: false, fresh, refusal: engineRefusal }
+  if (fresh.id !== wf.id || fresh.lastSeq !== wf.lastSeq || fresh.phase !== wf.phase) {
+    return { ok: false, fresh, refusal: "workflow changed meanwhile; stop and check /status" }
+  }
+  return { ok: true, fresh }
+}
+
+function refuseSnapshot(check: Extract<WorkflowSnapshotCheck, { ok: false }>): FlowResult {
+  return { ok: false, text: check.refusal, wf: check.fresh }
+}
+
+function eventIn(tx: FlowTx, deps: FlowRuntime, wf: Workflow, type: string, actor: EventActor, data?: Record<string, unknown>, now = Date.now()): Workflow {
+  const check = checkWorkflowSnapshotIn(tx, deps, wf)
+  if (!check.ok) throw new Error(check.refusal)
+  const seq = appendEvents(tx, [{ wf: check.fresh.id, type, actor, data }], now)
+  return writeWorkflow(tx, { ...check.fresh, lastSeq: seq }, now)
+}
+
+/** §5.3 owning-session takeover, with heartbeat setup deferred until after transaction release. */
+function applyTakeoverIn(tx: FlowTx, deps: FlowRuntime, wf: Workflow, now = Date.now()): Workflow {
+  const check = checkWorkflowSnapshotIn(tx, deps, wf)
+  if (!check.ok) throw new Error(check.refusal)
+  const fresh = check.fresh
+  const prev = fresh.owner
+  const taken = writeWorkflow(tx, takeOver(fresh, now), now)
+  return eventIn(tx, deps, taken, "owner_takeover", "code", { fromInstance: prev.instance, fromPid: prev.pid }, now)
+}
+
 export function applyTakeover(deps: FlowRuntime, wf: Workflow, now = Date.now()): Workflow {
-  const prev = wf.owner
-  const next = event(deps, writeWorkflow(deps.worktree, takeOver(wf, now), now), "owner_takeover", "code", {
-    fromInstance: prev.instance, fromPid: prev.pid,
-  })
-  ensureHeartbeat(deps)
+  const next = withFlowTransaction(deps.worktree, (tx) => applyTakeoverIn(tx, deps, wf, now))
+  ensureHeartbeat(deps, wf.engine)
   return next
 }
 
 /**
  * Resolve authority for a command. Returns the workflow to act on (after takeover), or a refusal, or
- * `{ wf: null }` when there is no active workflow. T20 (foreign session, dead owner) is applied here for /plan.
+ * `{ wf: null }` when there is no active workflow. T20 (foreign session, dead owner) is applied under one lock.
  */
+type AuthorityResult = { wf: Workflow | null; refuse?: string; replaced?: string; ownerDead?: boolean }
+function resolveAuthorityIn(tx: FlowTx, deps: FlowRuntime, cmd: Command, sessionID: string, expectedEngine: string, now: number): { result: AuthorityResult; heartbeat: boolean } {
+  const wf = activeWorkflowIn(tx, deps)
+  const engineRefusal = wf ? workflowEngineRefusal(wf, expectedEngine) : undefined
+  if (engineRefusal) return { result: { wf, refuse: engineRefusal }, heartbeat: false }
+  const authority = authorize(cmd, sessionID, wf, liveness(deps, now))
+  switch (authority.kind) {
+    case "none": return { result: { wf: null }, heartbeat: false }
+    case "allow": return { result: { wf, ownerDead: wf ? wf.sessionID !== sessionID && !liveOwner(deps, wf, now) : false }, heartbeat: false }
+    case "takeover": return { result: { wf: applyTakeoverIn(tx, deps, wf!, now) }, heartbeat: true }
+    case "refuse": return { result: { wf, refuse: authority.text }, heartbeat: false }
+    case "foreign_dead_cancel": {
+      const r = applyEventIn(tx, deps, wf!, "owner_dead", "code", {}, (w) => w, { bySession: sessionID }, now)
+      if (!r.ok) return { result: { wf, refuse: r.text }, heartbeat: false }
+      cancelTaggedIdleIn(tx, deps, r.wf)
+      return { result: { wf: null, replaced: wf!.id }, heartbeat: false }
+    }
+  }
+}
+
 export function resolveAuthority(
   deps: FlowRuntime,
   cmd: Command,
   sessionID: string,
+  engine: string,
   now = Date.now(),
-): { wf: Workflow | null; refuse?: string; replaced?: string; ownerDead?: boolean } {
-  const wf = activeWorkflow(deps.worktree)
-  const a = authorize(cmd, sessionID, wf, liveness(deps, now))
-  switch (a.kind) {
-    case "none": return { wf: null }
-    case "allow": return { wf, ownerDead: wf ? wf.sessionID !== sessionID && !liveOwner(deps, wf, now) : false }
-    case "takeover": return { wf: applyTakeover(deps, wf!, now) }
-    case "refuse": return { wf, refuse: a.text }
-    case "foreign_dead_cancel": {
-      const r = applyEvent(deps, wf!, "owner_dead", "code", {}, (w) => w, { bySession: sessionID }, now)
-      if (!r.ok) return { wf, refuse: r.text }
-      cancelTaggedIdle(deps, r.wf)
-      return { wf: null, replaced: wf!.id }
-    }
-  }
+): AuthorityResult {
+  const outcome = withFlowTransaction(deps.worktree, (tx) => resolveAuthorityIn(tx, deps, cmd, sessionID, engine, now))
+  if (outcome.heartbeat) ensureHeartbeat(deps, engine)
+  return outcome.result
 }
 
 function liveOwner(deps: FlowRuntime, wf: Workflow, now: number): boolean {
@@ -170,9 +254,11 @@ function liveOwner(deps: FlowRuntime, wf: Workflow, now: number): boolean {
 }
 
 /** Cancel open tasks tagged with this workflow when no queue runs (T18/T19/T20 side effect). */
-export function cancelTaggedIdle(deps: FlowRuntime, wf: Workflow, reason = `plan workflow ${wf.id} cancelled`): string[] {
-  const ledger = readLedger(deps.worktree, wf.sessionID)
-  const ids = new Set(tasksForWorkflow(ledger, wf.id).filter((t) => OPEN_STATUSES.has(t.status)).map((t) => t.id))
+function cancelTaggedIdleIn(tx: FlowTx, deps: FlowRuntime, wf: Workflow, reason = `plan workflow ${wf.id} cancelled`): string[] {
+  const check = checkWorkflowSnapshotIn(tx, deps, wf)
+  if (!check.ok) throw new Error(check.refusal)
+  const ledger = readLedger(deps.worktree, check.fresh.sessionID)
+  const ids = new Set(tasksForWorkflow(ledger, check.fresh.id).filter((t) => OPEN_STATUSES.has(t.status)).map((t) => t.id))
   if (ids.size === 0) return []
   const now = Date.now()
   const tasks = ledger.tasks.map((t) => (ids.has(t.id) ? { ...t, status: "cancelled" as const, error: reason, finishedAt: now } : t))
@@ -180,47 +266,49 @@ export function cancelTaggedIdle(deps: FlowRuntime, wf: Workflow, reason = `plan
   return [...ids]
 }
 
-/**
- * T1: start a plan workflow for `sessionID`. The caller has resolved authority first (no active workflow, or T20
- * applied). A stuck workflow of the same session is cancelled first (T18 then T1). Rotation archives a terminal one.
- */
-export function startWorkflow(deps: FlowRuntime, sessionID: string, entry: Workflow["entry"], request: string, actor: EventActor, now = Date.now()): FlowResult {
-  const cur = activeWorkflow(deps.worktree)
-  if (cur) {
-    if (cur.sessionID === sessionID && cur.phase === "stuck") {
-      const c = applyEvent(deps, cur, "cancel", actor, { queueRunning: false }, (w) => w, { reason: "restart" }, now)
-      if (!c.ok) return c
-      cancelTaggedIdle(deps, c.wf)
-    } else {
-      return { ok: false, text: `plan workflow ${cur.id} is already active; use /status or /cancel`, wf: cur }
+export function cancelTaggedIdle(deps: FlowRuntime, wf: Workflow, reason = `plan workflow ${wf.id} cancelled`): string[] {
+  return withFlowTransaction(deps.worktree, (tx) => cancelTaggedIdleIn(tx, deps, wf, reason))
+}
+
+/** T1 in one transaction: same-session stuck cancel, ledger cleanup, terminal rotation and creation. */
+function startWorkflowIn(tx: FlowTx, deps: FlowRuntime, sessionID: string, entry: Workflow["entry"], request: string, actor: EventActor, engine: string, now: number): FlowResult {
+  const existing = activeWorkflowIn(tx, deps)
+  if (existing) {
+    const refusal = workflowEngineRefusal(existing, engine)
+    if (refusal) return { ok: false, text: refusal, wf: existing }
+    if (existing.sessionID !== sessionID || existing.phase !== "stuck") {
+      return { ok: false, text: `plan workflow ${existing.id} is already active; use /status or /cancel`, wf: existing }
     }
   }
-  rotate(deps.worktree)
-  // §5.6: a running legacy mode stops appending its suffix once the workflow starts.
+  const created = newWorkflow(sessionID, currentOwner(now), entry, request, engine, now)
+  if (existing) {
+    const cancelled = applyEventIn(tx, deps, existing, "cancel", actor, { queueRunning: false }, (w) => w, { reason: "restart" }, now)
+    if (!cancelled.ok) return cancelled
+    cancelTaggedIdleIn(tx, deps, cancelled.wf)
+  }
+  rotate(tx)
   const mode = readModeState(deps.worktree, sessionID)
   if (mode.active) writeModeState(deps.worktree, sessionID, { ...EMPTY_MODE, stopReason: "workflow_started" })
-  let wf = newWorkflow(sessionID, currentOwner(now), entry, request, now)
-  wf = writeWorkflow(deps.worktree, wf, now)
-  const seq = appendEvents(deps.worktree, [
-    { wf: wf.id, type: "created", actor, data: { entry, chars: request.length } },
+  let wf = writeWorkflow(tx, created, now)
+  const seq = appendEvents(tx, [
+    { wf: wf.id, type: "created", actor, data: { entry, chars: request.length, engine } },
     { wf: wf.id, type: "transition", to: "planning", actor, data: { event: "start", row: "T1" } },
   ], now)
-  wf = writeWorkflow(deps.worktree, { ...wf, lastSeq: seq }, now)
-  ensureHeartbeat(deps)
+  wf = writeWorkflow(tx, { ...wf, lastSeq: seq }, now)
   return { ok: true, wf }
 }
 
-/**
- * T9 with the §5.5 write order: (1) one ledger write (foreign open tasks cancelled, tagged tasks appended, ids
- * marked offered) — skipped when tasks for this planSha already exist; (2) workflow -> executing; (3) events.
- */
-export function approveWorkflow(
-  deps: FlowRuntime,
-  wf: Workflow,
-  inputs: TaskInput[],
-  opts: { queueRunning: boolean; planShaOk: boolean; mdShaOk: boolean },
-  now = Date.now(),
-): FlowResult {
+export function startWorkflow(deps: FlowRuntime, sessionID: string, entry: Workflow["entry"], request: string, actor: EventActor, engine: string, now = Date.now()): FlowResult {
+  const result = withFlowTransaction(deps.worktree, (tx) => startWorkflowIn(tx, deps, sessionID, entry, request, actor, engine, now))
+  if (result.ok) ensureHeartbeat(deps, engine)
+  return result
+}
+
+/** T9: ledger approval, approve event and tasks_created event are serialized as one flow transaction. */
+function approveWorkflowIn(tx: FlowTx, deps: FlowRuntime, wf: Workflow, inputs: TaskInput[], opts: { queueRunning: boolean; planShaOk: boolean; mdShaOk: boolean }, now: number): FlowResult {
+  const check = checkWorkflowSnapshotIn(tx, deps, wf)
+  if (!check.ok) return refuseSnapshot(check)
+  wf = check.fresh
   if (wf.phase !== "pending_approval") return { ok: false, text: "no plan awaiting approval", wf }
   if (opts.queueRunning) return { ok: false, text: "a task queue is running; wait or /stop", wf }
   if (!opts.planShaOk || !wf.planRef) return { ok: false, text: "the saved plan does not match; /plan again", wf }
@@ -230,81 +318,106 @@ export function approveWorkflow(
   const r = approvePlanTasks(ledger, inputs, tag, now)
   const written: Ledger = r.added.length > 0 ? writeLedger(deps.worktree, r.ledger) : ledger
   const taskIds = tasksForWorkflow(written, wf.id).filter((t) => t.wf?.planSha === tag.planSha).map((t) => t.id)
-  const res = applyEvent(
-    deps, wf, "approve", "user_command", {},
+  const res = applyEventIn(
+    tx, deps, wf, "approve", "user_command", {},
     (w) => ({ ...w, taskIds, approval: { by: "user_command", planSha: tag.planSha, at: now } }),
     { tasks: taskIds.length, cancelledForeign: r.cancelledForeign },
     now,
   )
   if (!res.ok) return res
-  const next = event(deps, res.wf, "tasks_created", "code", { ids: taskIds })
+  const next = eventIn(tx, deps, res.wf, "tasks_created", "code", { ids: taskIds }, now)
   return { ok: true, wf: next }
 }
 
-/**
- * Settle (T15/T16 and the T18 pendingCancel completion) from the ledger tags. Runs at delegate return, session.idle
- * and plugin load. `queueRunning` keeps a pending cancel open while the queue still winds down.
- */
-export function settle(deps: FlowRuntime, wf: Workflow, queueRunning: boolean, now = Date.now()): FlowResult | null {
+export function approveWorkflow(
+  deps: FlowRuntime,
+  wf: Workflow,
+  inputs: TaskInput[],
+  opts: { queueRunning: boolean; planShaOk: boolean; mdShaOk: boolean },
+  now = Date.now(),
+): FlowResult {
+  return withFlowTransaction(deps.worktree, (tx) => approveWorkflowIn(tx, deps, wf, inputs, opts, now))
+}
+
+/** Settle ledger tags and phase in the same flow transaction. */
+function settleIn(tx: FlowTx, deps: FlowRuntime, wf: Workflow, queueRunning: boolean, now: number): FlowResult | null {
+  const check = checkWorkflowSnapshotIn(tx, deps, wf)
+  if (!check.ok) return refuseSnapshot(check)
+  wf = check.fresh
   if (wf.phase !== "executing" && !(wf.pendingCancel && !TERMINAL.has(wf.phase))) return null
   const ledger = readLedger(deps.worktree, wf.sessionID)
   const tasks = tasksForWorkflow(ledger, wf.id)
-  const t = tally(tasks)
+  const taskTally = tally(tasks)
   if (wf.pendingCancel) {
     if (queueRunning) return null
-    cancelTaggedIdle(deps, wf)
-    return applyEvent(deps, wf, "cancel_settled", "code", { queueRunning: false }, (w) => w, undefined, now)
+    cancelTaggedIdleIn(tx, deps, wf)
+    return applyEventIn(tx, deps, wf, "cancel_settled", "code", { queueRunning: false }, (w) => w, undefined, now)
   }
-  if (t.open > 0 || t.total === 0) return null
+  if (taskTally.open > 0 || taskTally.total === 0) return null
   const stopped = tasks.some((x) => x.status === "cancelled" && /user_stop/.test(x.error ?? ""))
-  if (stopped) return applyEvent(deps, wf, "user_stop", "code", {}, (w) => w, undefined, now)
-  return t.failedOrCancelled > 0
-    ? applyEvent(deps, wf, "settle_fail", "code", { tasks: t }, (w) => w, { tally: t }, now)
-    : applyEvent(deps, wf, "settle_ok", "code", { tasks: t }, (w) => w, { tally: t }, now)
+  if (stopped) return applyEventIn(tx, deps, wf, "user_stop", "code", {}, (w) => w, undefined, now)
+  return taskTally.failedOrCancelled > 0
+    ? applyEventIn(tx, deps, wf, "settle_fail", "code", { tasks: taskTally }, (w) => w, { tally: taskTally }, now)
+    : applyEventIn(tx, deps, wf, "settle_ok", "code", { tasks: taskTally }, (w) => w, { tally: taskTally }, now)
 }
 
-/** T18 cancel mirroring /stop. `abort` is called when the queue runs (the cancel completes at settle). */
-export function cancelWorkflow(deps: FlowRuntime, wf: Workflow, queueRunning: boolean, abort: () => void, actor: EventActor = "user_command"): FlowResult {
-  const r = applyEvent(deps, wf, "cancel", actor, { queueRunning })
+export function settle(deps: FlowRuntime, wf: Workflow, queueRunning: boolean, now = Date.now()): FlowResult | null {
+  return withFlowTransaction(deps.worktree, (tx) => settleIn(tx, deps, wf, queueRunning, now))
+}
+
+function cancelWorkflowIn(tx: FlowTx, deps: FlowRuntime, wf: Workflow, queueRunning: boolean, actor: EventActor): FlowResult {
+  const r = applyEventIn(tx, deps, wf, "cancel", actor, { queueRunning })
   if (!r.ok) return r
-  if (queueRunning) abort()
-  else cancelTaggedIdle(deps, r.wf)
+  if (!queueRunning) cancelTaggedIdleIn(tx, deps, r.wf)
   return r
+}
+
+/** T18 cancel. Queue abort runs only after the workflow transaction releases. */
+export function cancelWorkflow(deps: FlowRuntime, wf: Workflow, queueRunning: boolean, abort: () => void, actor: EventActor = "user_command"): FlowResult {
+  const result = withFlowTransaction(deps.worktree, (tx) => cancelWorkflowIn(tx, deps, wf, queueRunning, actor))
+  if (result.ok && queueRunning) abort()
+  return result
 }
 
 /** T19: the owning session was deleted (runs before the session dir is removed). */
-export function onSessionDeleted(deps: FlowRuntime, sessionID: string, queueRunning: boolean, abort: () => void): FlowResult | null {
-  const wf = activeWorkflow(deps.worktree)
-  if (!wf || wf.sessionID !== sessionID) return null
-  if (queueRunning) abort()
-  const r = applyEvent(deps, wf, "session_deleted", "code")
-  if (r.ok && !queueRunning) cancelTaggedIdle(deps, r.wf)
-  return r
+export function onSessionDeleted(deps: FlowRuntime, sessionID: string, engine: string, queueRunning: boolean, abort: () => void): FlowResult | null {
+  const outcome = withFlowTransaction(deps.worktree, (tx) => {
+    const wf = activeWorkflowIn(tx, deps)
+    const refusal = wf ? workflowEngineRefusal(wf, engine) : undefined
+    if (refusal) return { result: { ok: false as const, text: refusal, wf }, abort: false }
+    if (!wf || wf.sessionID !== sessionID) return { result: null, abort: false }
+    const result = applyEventIn(tx, deps, wf, "session_deleted", "code")
+    if (result.ok && !queueRunning) cancelTaggedIdleIn(tx, deps, result.wf)
+    return { result, abort: queueRunning }
+  })
+  if (outcome.abort) abort()
+  return outcome.result
 }
 
-/**
- * Plugin-load repair, authority-free only (§5.2/§5.3, ARCH-14): T8 for an orphaned `reviewing`, finishing an
- * interrupted approve (tagged tasks exist but phase still pending_approval), settle. Never T20, never takeover.
- */
-export function repairOnLoad(deps: FlowRuntime, isQueueRunning: (sessionID: string) => boolean = () => false): FlowResult | null {
-  const wf = activeWorkflow(deps.worktree)
+/** Plugin-load repair is authorized against the fresh workflow while holding the transaction. */
+function repairOnLoadIn(tx: FlowTx, deps: FlowRuntime, expectedEngine: string, isQueueRunning: (sessionID: string) => boolean): FlowResult | null {
+  const wf = activeWorkflowIn(tx, deps)
   if (!wf) return null
-  // Another live instance owns it (a second opencode process on the same repo): its review or queue may be in
-  // flight, so load-time repair must not touch it. Authority-free repair is only for dead or own owners.
+  const engineRefusal = workflowEngineRefusal(wf, expectedEngine)
+  if (engineRefusal) return { ok: false, text: engineRefusal, wf }
   const ctx = liveness(deps)
   if (wf.owner.instance !== ctx.instance && ownerLive(wf, ctx)) return null
-  if (wf.phase === "reviewing") return applyEvent(deps, wf, "review_aborted", "code", {}, (w) => ({ ...w, review: { verdict: "none", findings: [], planSha: w.planRef?.jsonSha ?? "", note: "aborted" } }), { repair: true })
+  if (wf.phase === "reviewing") return applyEventIn(tx, deps, wf, "review_aborted", "code", {}, (w) => ({ ...w, review: { verdict: "none", findings: [], planSha: w.planRef?.jsonSha ?? "", note: "aborted" } }), { repair: true })
   if (wf.phase === "pending_approval" && wf.planRef) {
     const ledger = readLedger(deps.worktree, wf.sessionID)
     const ids = tasksForWorkflow(ledger, wf.id).filter((t) => t.wf?.planSha === wf.planRef!.jsonSha).map((t) => t.id)
     if (ids.length > 0) {
-      const r = applyEvent(deps, wf, "approve", "code", {}, (w) => ({ ...w, taskIds: ids, approval: w.approval ?? { by: "user_command", planSha: wf.planRef!.jsonSha, at: Date.now() } }), { repair: true })
-      if (r.ok) return { ok: true, wf: event(deps, r.wf, "tasks_created", "code", { ids, repair: true }) }
+      const r = applyEventIn(tx, deps, wf, "approve", "code", {}, (w) => ({ ...w, taskIds: ids, approval: w.approval ?? { by: "user_command", planSha: wf.planRef!.jsonSha, at: Date.now() } }), { repair: true })
+      if (r.ok) return { ok: true, wf: eventIn(tx, deps, r.wf, "tasks_created", "code", { ids, repair: true }) }
       return r
     }
     return null
   }
-  return settle(deps, wf, isQueueRunning(wf.sessionID))
+  return settleIn(tx, deps, wf, isQueueRunning(wf.sessionID), Date.now())
+}
+
+export function repairOnLoad(deps: FlowRuntime, engine: string, isQueueRunning: (sessionID: string) => boolean = () => false): FlowResult | null {
+  return withFlowTransaction(deps.worktree, (tx) => repairOnLoadIn(tx, deps, engine, isQueueRunning))
 }
 
 export { cancelOpen, DEFAULT_LIMITS }

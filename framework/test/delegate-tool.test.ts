@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { z } from "zod"
 import { createDelegateTool, DELEGATE_DESCRIPTION, delegateArgs } from "../src/tools/delegate.ts"
 import { getQueue } from "../src/orchestration/queue.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
-import { addTasks, emptyLedger, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
+import { addTasks, emptyLedger, ledgerPath, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
+import { currentOwner } from "../src/flow/owner.ts"
+import { newWorkflow, workflowPath, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
 import { abortPath, writeJsonAtomic } from "../src/state/store.ts"
 import { estimateToolSchemaTokens } from "../src/tokens.ts"
 import { fakeClient, makeDeps, tempGitWorktree, verifyScript, waitFor, type FakeClient } from "./guards-helpers.ts"
@@ -39,6 +41,28 @@ function ctx(agent = "main", sessionID = S) {
 }
 
 describe("delegate tool", () => {
+  for (const [label, engine] of [
+    ["missing", undefined],
+    ["foreign", "other-engine"],
+    ["malformed", { engine: "opencode" }],
+  ] as const) {
+    test(`${label} workflow engine refuses delegation without superseding tasks`, async () => {
+      const workflow = withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, {
+        ...newWorkflow(S, currentOwner(), "command", "retain tasks", "opencode"), engine,
+      }))
+      const { ledger } = addTasks(emptyLedger(S), [{ title: "retain existing task" }], Date.now(), { id: workflow.id, planSha: "s" })
+      writeLedger(wt.worktree, ledger)
+      const workflowBefore = readFileSync(workflowPath(wt.worktree))
+      const ledgerBefore = readFileSync(ledgerPath(wt.worktree, S))
+      const deps = makeDeps(client, wt.worktree)
+      await expect(createDelegateTool(deps).execute({ tasks: [{ title: "must not run" }] }, ctx())).rejects.toThrow("engine identity")
+      expect(workflowBefore.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
+      expect(ledgerBefore.equals(readFileSync(ledgerPath(wt.worktree, S)))).toBe(true)
+      expect(getOpenCodeRuntime(deps).runs.status().claim).toBeUndefined()
+      expect(client.created).toEqual([])
+    })
+  }
+
   test("schema is small (prefix budget) and validates the task list shape", () => {
     const schema = z.object(delegateArgs)
     const json = z.toJSONSchema(schema)

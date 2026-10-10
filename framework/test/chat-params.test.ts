@@ -1,10 +1,15 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import type { Hooks, ProviderContext } from "@opencode-ai/plugin"
 import type { Model, UserMessage } from "@opencode-ai/sdk"
 import type { LcaConfig } from "../src/config.ts"
 import { createChatParamsHook, isGemmaOnOllama } from "../src/hooks/chat-params.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
 import { BASE_CONFIG, fakeDeps } from "./helpers.ts"
+import { tempWorktree } from "./guards-helpers.ts"
+
+let worktree: ReturnType<typeof tempWorktree>
+beforeEach(() => { worktree = tempWorktree() })
+afterEach(() => worktree.cleanup())
 
 type Input = Parameters<NonNullable<Hooks["chat.params"]>>[0]
 type Output = Parameters<NonNullable<Hooks["chat.params"]>>[1]
@@ -45,7 +50,7 @@ function output(maxOutputTokens: number | undefined = undefined): Output {
 }
 
 function deps(overrides: Partial<LcaConfig> = {}): HookDeps {
-  return fakeDeps("/tmp/x", overrides)
+  return fakeDeps(worktree.worktree, overrides)
 }
 
 describe("chat.params hook", () => {

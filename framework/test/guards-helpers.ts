@@ -1,10 +1,12 @@
 // Test helpers for the guards/loop suites (kept separate from test/helpers.ts, which other suites own): temp worktree, fake SDK client, deps bag.
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { randomBytes } from "node:crypto"
+import { closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
 import { DEFAULT_CONFIG, type LcaConfig } from "../src/config.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
+import { executionRunDirectory } from "../src/state/store.ts"
 
 export type Call = { method: string; args: unknown }
 
@@ -128,18 +130,226 @@ export function fakeClient(opts: { todoEndpoint?: boolean; promptAsync?: boolean
   return c
 }
 
-/** Temp worktree; plugin state (outside the worktree by design) is redirected to a sibling temp dir via LCA_STATE_HOME. */
-export function tempWorktree(): { worktree: string; stateHome: string; cleanup: () => void } {
-  const worktree = mkdtempSync(join(tmpdir(), "lca-test-"))
-  const stateHome = mkdtempSync(join(tmpdir(), "lca-state-"))
-  process.env.LCA_STATE_HOME = stateHome
-  return {
-    worktree,
-    stateHome,
-    cleanup: () => {
-      rmSync(worktree, { recursive: true, force: true })
-      rmSync(stateHome, { recursive: true, force: true })
-    },
+export type TempExecutionAuthorityRelease = Readonly<{ removed: boolean; path: string; reason?: string }>
+
+export type TempExecutionAuthority = Readonly<{
+  directory: string
+  keyDirectory: string
+  release: (options: { preserve: boolean }) => TempExecutionAuthorityRelease
+}>
+
+export type TempWorktree = {
+  worktree: string
+  stateHome: string
+  executionAuthority: TempExecutionAuthority
+  releaseEnvironment: () => void
+  cleanup: () => void
+}
+
+type FixtureIdentity = { uid: bigint; dev: bigint; ino: bigint }
+
+function fixtureIdentity(path: string, kind: "directory" | "file", uid: number): FixtureIdentity {
+  const stat = lstatSync(path, { bigint: true })
+  if (kind === "directory" ? !stat.isDirectory() : !stat.isFile()) {
+    throw new Error(`expected fixture ${kind} at ${path}`)
+  }
+  if (stat.uid !== BigInt(uid)) throw new Error(`fixture ${kind} at ${path} is not owned by the operating-system user`)
+  return { uid: stat.uid, dev: stat.dev, ino: stat.ino }
+}
+
+function fixtureIdentityMatches(path: string, kind: "directory" | "file", expected: FixtureIdentity): string | undefined {
+  let stat
+  try {
+    stat = lstatSync(path, { bigint: true })
+  } catch (error) {
+    return `cannot inspect captured ${kind} at ${path}: ${error instanceof Error ? error.message : String(error)}`
+  }
+  if (kind === "directory" ? !stat.isDirectory() : !stat.isFile()) return `captured ${kind} at ${path} is no longer a ${kind}`
+  if (stat.uid !== expected.uid || stat.dev !== expected.dev || stat.ino !== expected.ino) {
+    return `captured ${kind} identity changed at ${path}`
+  }
+  return undefined
+}
+
+/**
+ * Exclusively allocate a test-owned namespace at the production execution-authority path.
+ * This helper never adopts an existing worktree-key directory; release validates captured
+ * filesystem identities before removing only that key directory.
+ */
+export function tempExecutionAuthority(worktree: string): TempExecutionAuthority {
+  const directory = executionRunDirectory(worktree)
+  const keyDirectory = dirname(directory)
+  const base = dirname(keyDirectory)
+
+  let uidValue: unknown
+  try {
+    uidValue = process.geteuid?.()
+  } catch (error) {
+    throw new Error(`cannot capture the operating-system identity for execution-authority fixture: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (typeof uidValue !== "number" || !Number.isSafeInteger(uidValue) || uidValue < 0) {
+    throw new Error("cannot capture a valid effective operating-system UID for execution-authority fixture")
+  }
+  const uid = uidValue
+
+  try {
+    try {
+      const stat = lstatSync(base)
+      if (!stat.isDirectory()) throw new Error(`execution-authority fixture base is not a directory: ${base}`)
+    } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
+      mkdirSync(base, { recursive: true, mode: 0o700 })
+    }
+  } catch (error) {
+    throw new Error(`cannot prepare execution-authority fixture base; any newly created ancestors were retained at ${base}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  try {
+    mkdirSync(keyDirectory, { mode: 0o700 })
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") {
+      throw new Error(`execution-authority fixture namespace already exists and was not adopted or changed: ${keyDirectory}`)
+    }
+    throw new Error(`cannot exclusively create execution-authority fixture namespace at ${keyDirectory}; the base was retained: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  try {
+    const keyIdentity = fixtureIdentity(keyDirectory, "directory", uid)
+    mkdirSync(directory, { mode: 0o700 })
+    const directoryIdentity = fixtureIdentity(directory, "directory", uid)
+
+    const markerName = `.execution-authority-fixture-${randomBytes(32).toString("hex")}`
+    const markerPath = join(directory, markerName)
+    const markerToken = randomBytes(32)
+    let markerFD: number | undefined
+    try {
+      markerFD = openSync(markerPath, "wx", 0o600)
+      writeFileSync(markerFD, markerToken)
+    } finally {
+      if (markerFD !== undefined) closeSync(markerFD)
+    }
+    const markerIdentity = fixtureIdentity(markerPath, "file", uid)
+
+    const result = (removed: boolean, reason?: string): TempExecutionAuthorityRelease => Object.freeze({
+      removed,
+      path: keyDirectory,
+      ...(reason === undefined ? {} : { reason }),
+    })
+
+    let removed = false
+    const release = ({ preserve }: { preserve: boolean }): TempExecutionAuthorityRelease => {
+      if (removed) return result(true)
+      if (preserve) return result(false, "preserved by request")
+
+      for (const [path, kind, identity] of [
+        [keyDirectory, "directory", keyIdentity],
+        [directory, "directory", directoryIdentity],
+        [markerPath, "file", markerIdentity],
+      ] as const) {
+        const mismatch = fixtureIdentityMatches(path, kind, identity)
+        if (mismatch) return result(false, mismatch)
+      }
+
+      let currentToken: Buffer
+      try {
+        currentToken = readFileSync(markerPath)
+      } catch (error) {
+        return result(false, `cannot read captured marker at ${markerPath}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      if (!currentToken.equals(markerToken)) return result(false, `captured marker content changed at ${markerPath}`)
+
+      try {
+        rmSync(keyDirectory, { recursive: true })
+      } catch (error) {
+        return result(false, `cannot remove captured namespace at ${keyDirectory}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      removed = true
+      return result(true)
+    }
+
+    return Object.freeze({ directory, keyDirectory, release })
+  } catch (error) {
+    throw new Error(`execution-authority fixture setup failed; retained partial namespace at ${keyDirectory}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+type StateHomeSelection = {
+  selected: string
+  rootValue: string | undefined
+  previous?: StateHomeSelection
+  closed: boolean
+}
+
+const stateHomeSelections: StateHomeSelection[] = []
+
+function selectStateHome(selected: string): StateHomeSelection {
+  let previous: StateHomeSelection | undefined
+  for (let i = stateHomeSelections.length - 1; i >= 0; i--) {
+    const candidate = stateHomeSelections[i]!
+    if (!candidate.closed && candidate.selected === process.env.LCA_STATE_HOME) {
+      previous = candidate
+      break
+    }
+  }
+  const selection: StateHomeSelection = {
+    selected,
+    rootValue: previous ? previous.rootValue : process.env.LCA_STATE_HOME,
+    previous,
+    closed: false,
+  }
+  stateHomeSelections.push(selection)
+  process.env.LCA_STATE_HOME = selected
+  return selection
+}
+
+function releaseStateHome(selection: StateHomeSelection): void {
+  if (selection.closed) return
+  selection.closed = true
+  if (process.env.LCA_STATE_HOME === selection.selected) {
+    let previous = selection.previous
+    while (previous?.closed) previous = previous.previous
+    const restore = previous?.selected ?? selection.rootValue
+    if (restore === undefined) delete process.env.LCA_STATE_HOME
+    else process.env.LCA_STATE_HOME = restore
+  }
+  while (stateHomeSelections.at(-1)?.closed) stateHomeSelections.pop()
+}
+
+/** Temp worktree and separate control-state home, with an exclusively owned fixed execution authority. */
+export function tempWorktree(): TempWorktree {
+  let worktree: string | undefined
+  let stateHome: string | undefined
+  let stateHomeSelection: StateHomeSelection | undefined
+  try {
+    const worktreePath = mkdtempSync(join(tmpdir(), "lca-test-"))
+    worktree = worktreePath
+    const stateHomePath = mkdtempSync(join(tmpdir(), "lca-state-"))
+    stateHome = stateHomePath
+    stateHomeSelection = selectStateHome(stateHomePath)
+    const executionAuthority = tempExecutionAuthority(worktreePath)
+
+    return {
+      worktree: worktreePath,
+      stateHome: stateHomePath,
+      executionAuthority,
+      releaseEnvironment: () => releaseStateHome(stateHomeSelection!),
+      cleanup: () => {
+        releaseStateHome(stateHomeSelection!)
+        const released = executionAuthority.release({ preserve: false })
+        if (!released.removed) {
+          throw new Error(`cannot clean temp worktree fixture; execution authority retained at ${released.path}${released.reason ? ` (${released.reason})` : ""}; worktree retained at ${worktreePath}; stateHome retained at ${stateHomePath}`)
+        }
+        rmSync(worktreePath, { recursive: true, force: true })
+        rmSync(stateHomePath, { recursive: true, force: true })
+      },
+    }
+  } catch (error) {
+    if (stateHomeSelection) releaseStateHome(stateHomeSelection)
+    const ownedPaths = [
+      worktree ? `worktree retained at ${worktree}` : undefined,
+      stateHome ? `stateHome retained at ${stateHome}` : undefined,
+    ].filter((path): path is string => path !== undefined)
+    throw new Error(`tempWorktree setup failed${ownedPaths.length ? `; ${ownedPaths.join("; ")}` : ""}: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -171,16 +381,21 @@ export function todo(id: string, status: string, content = `task ${id}`) {
 /** Temp worktree that is also a git repo with one commit (for snapshot/diff tests). */
 export const GIT_TEST_ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TEMPLATE_DIR: "" }
 
-export function tempGitWorktree(files: Record<string, string> = { "README.md": "fixture\n" }): { worktree: string; stateHome: string; cleanup: () => void } {
+export function tempGitWorktree(files: Record<string, string> = { "README.md": "fixture\n" }): TempWorktree {
   const wt = tempWorktree()
-  const g = (...args: string[]) => execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: wt.worktree, stdio: "pipe", env: GIT_TEST_ENV })
-  g("init", "-q")
-  g("config", "user.email", "lca-test@localhost")
-  g("config", "user.name", "lca-test")
-  for (const [name, content] of Object.entries(files)) writeFileSync(join(wt.worktree, name), content)
-  g("add", "-A")
-  g("commit", "-q", "-m", "fixture")
-  return wt
+  try {
+    const g = (...args: string[]) => execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: wt.worktree, stdio: "pipe", env: GIT_TEST_ENV })
+    g("init", "-q")
+    g("config", "user.email", "lca-test@localhost")
+    g("config", "user.name", "lca-test")
+    for (const [name, content] of Object.entries(files)) writeFileSync(join(wt.worktree, name), content)
+    g("add", "-A")
+    g("commit", "-q", "-m", "fixture")
+    return wt
+  } catch (error) {
+    wt.releaseEnvironment()
+    throw new Error(`tempGitWorktree setup failed; worktree retained at ${wt.worktree}; stateHome retained at ${wt.stateHome}; execution-authority namespace retained at ${wt.executionAuthority.keyDirectory}: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 /** Poll until fn() is truthy; fails fast instead of hanging until bun's test timeout. */

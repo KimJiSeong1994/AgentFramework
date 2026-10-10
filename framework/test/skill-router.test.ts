@@ -5,6 +5,7 @@ import { join } from "node:path"
 import type { TextPart, UserMessage } from "@opencode-ai/sdk"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
+import { createOpenCodeSkillPermissionSource } from "../src/hosts/opencode-skill-source.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { createSkillRouter } from "../src/routing/router.ts"
 import { createCommandHook } from "../src/hooks/command.ts"
@@ -33,6 +34,10 @@ function part(text: string, id = "msg1", synthetic = false): TextPart {
 }
 async function turn(hook: ReturnType<typeof createChatMessageHook>, p: TextPart, agent = "main") {
   await hook({ sessionID: p.sessionID, agent }, { parts: [p], message: { id: p.messageID } as UserMessage })
+}
+
+function createRouter() {
+  return createSkillRouter(deps, createOpenCodeSkillPermissionSource(deps))
 }
 
 beforeEach(() => {
@@ -66,11 +71,11 @@ function routingEvents(sessionID = "s1") {
 
 describe("OpenJev skill router package", () => {
   test("routing history survives router restart and session deletion; duplicate attempts remain distinguishable", async () => {
-    const router = createSkillRouter(deps)
+    const router = createRouter()
     await router.recommend("s1", "m1", "Investigate")
     await router.recommend("s1", "m1", "Investigate")
     removeSessionDir(root, "s1")
-    await createSkillRouter(deps).recommend("s1", "m2", "Investigate")
+    await createRouter().recommend("s1", "m2", "Investigate")
     const events = routingEvents()
     expect(events.map((event) => event.reason)).toEqual(["recommended", "duplicate", "recommended"])
     expect(events.map((event) => event.requestSent)).toEqual([true, false, true])
@@ -79,9 +84,9 @@ describe("OpenJev skill router package", () => {
 
   test("untrusted response labels and response bodies are never persisted", async () => {
     handler = () => Response.json(answer("password=private", { plan: 0.9, none: 0.1 }))
-    await createSkillRouter(deps).recommend("s1", "m1", "Investigate")
+    await createRouter().recommend("s1", "m1", "Investigate")
     handler = () => new Response("Bearer privatecredential", { status: 503 })
-    await createSkillRouter(deps).recommend("s1", "m2", "Investigate")
+    await createRouter().recommend("s1", "m2", "Investigate")
     const events = routingEvents()
     expect(events.map((event) => event.reason)).toEqual(["invalid_distribution", "unavailable"])
     expect(events.every((event) => event.scores === null)).toBe(true)
@@ -104,7 +109,7 @@ describe("OpenJev skill router package", () => {
 
   test("path traversal session identities cannot create logs outside routing storage", async () => {
     expect(() => routingLogPath(root, "../outside")).toThrow("Invalid routing identifier")
-    const result = await createSkillRouter(deps).recommend("../outside", "m1", "Investigate")
+    const result = await createRouter().recommend("../outside", "m1", "Investigate")
     expect(result.skill).toBe("plan")
     expect(JSON.stringify(logs)).toContain("skill.router persistence failed")
   })
@@ -193,14 +198,14 @@ describe("OpenJev skill router package", () => {
 
   test("invalid router config is reported as invalid_config, never a silent off", async () => {
     deps.config.skill_router.timeout_ms = 5000
-    expect((await createSkillRouter(deps).recommend("s", "m", "Investigate")).reason).toBe("invalid_config")
+    expect((await createRouter().recommend("s", "m", "Investigate")).reason).toBe("invalid_config")
     expect(JSON.stringify(logs)).toContain("timeout_ms")
     expect(requests).toHaveLength(0)
     expect(routingEvents("s")[0]).toMatchObject({ mode: "invalid", reason: "invalid_config", requestSent: false, scores: null })
   })
 
   test("secrets and oversized input are not transmitted", async () => {
-    const router = createSkillRouter(deps)
+    const router = createRouter()
     for (const [i, text] of ["apikey_abcdefghijklmnopqrstuvwxyz", "Bearer privatecredential", "password=secretpassword", "x".repeat(2001)].entries()) {
       expect((await router.recommend("s1", String(i), text)).skill).toBeNull()
     }
@@ -213,40 +218,40 @@ describe("OpenJev skill router package", () => {
 
   test("network endpoints and redirects are refused", async () => {
     deps.config.skill_router.endpoint = "http://user:pw@192.168.0.51:8080"
-    expect((await createSkillRouter(deps).recommend("s", "m", "Investigate")).reason).toBe("invalid_endpoint")
+    expect((await createRouter().recommend("s", "m", "Investigate")).reason).toBe("invalid_endpoint")
     expect(JSON.stringify(logs)).toContain('"reason":"invalid_endpoint"')
     expect(JSON.stringify(logs)).not.toContain("192.168.0.51")
     expect(JSON.stringify(logs)).not.toContain("pw@")
     expect(requests).toHaveLength(0)
     deps.config.skill_router.endpoint = `http://127.0.0.1:${server.port}`
     handler = () => Response.redirect("http://example.com")
-    expect((await createSkillRouter(deps).recommend("s", "m2", "Investigate")).skill).toBeNull()
+    expect((await createRouter().recommend("s", "m2", "Investigate")).skill).toBeNull()
     expect(requests).toHaveLength(1)
   })
 
   test("latest permissions deny, ask and unsupported rules cannot widen access", async () => {
     for (const action of ["deny", "ask"]) {
       rules.push({ permission: "skill", pattern: "plan", action })
-      expect((await createSkillRouter(deps).recommend("s", action, "Investigate")).reason).toBe("no_candidates")
+      expect((await createRouter().recommend("s", action, "Investigate")).reason).toBe("no_candidates")
     }
     expect(requests).toHaveLength(0)
   })
 
   test("global permission revocation wins while unrelated bash patterns do not hide skills", async () => {
     rules.unshift({ permission: "bash", pattern: "git *", action: "ask" })
-    expect((await createSkillRouter(deps).recommend("s", "first", "Investigate")).skill).toBe("plan")
+    expect((await createRouter().recommend("s", "first", "Investigate")).skill).toBe("plan")
     rules.push({ permission: "*", pattern: "*", action: "deny" })
-    expect((await createSkillRouter(deps).recommend("s", "second", "Investigate")).reason).toBe("no_candidates")
+    expect((await createRouter().recommend("s", "second", "Investigate")).reason).toBe("no_candidates")
   })
 
   test("missing, mismatched and escaping skill files are excluded", async () => {
     rmSync(join(root, ".opencode", "skills", "plan"), { recursive: true })
-    expect((await createSkillRouter(deps).recommend("s", "a", "Investigate")).reason).toBe("no_candidates")
+    expect((await createRouter().recommend("s", "a", "Investigate")).reason).toBe("no_candidates")
     const external = mkdtempSync(join(tmpdir(), "lca-external-"))
     try {
       writeFileSync(join(external, "SKILL.md"), "---\nname: plan\ndescription: External\n---\n")
       symlinkSync(external, join(root, ".opencode", "skills", "plan"))
-      expect((await createSkillRouter(deps).recommend("s", "b", "Investigate")).reason).toBe("no_candidates")
+      expect((await createRouter().recommend("s", "b", "Investigate")).reason).toBe("no_candidates")
     } finally { rmSync(external, { recursive: true, force: true }) }
     expect(requests).toHaveLength(0)
   })
@@ -259,14 +264,14 @@ describe("OpenJev skill router package", () => {
     ]
     for (const [i, value] of bad.entries()) {
       handler = () => Response.json(value)
-      expect((await createSkillRouter(deps).recommend("s", String(i), "Investigate")).skill).toBeNull()
+      expect((await createRouter().recommend("s", String(i), "Investigate")).skill).toBeNull()
     }
   })
 
   test("none and low margins are abstentions, not forced winners", async () => {
     for (const value of [answer("none", { plan: 0.01, none: 0.99 }), answer("plan", { plan: 0.51, none: 0.49 })]) {
       handler = () => Response.json(value)
-      expect((await createSkillRouter(deps).recommend("s", "m", "Investigate")).reason).toBe("abstained")
+      expect((await createRouter().recommend("s", "m", "Investigate")).reason).toBe("abstained")
     }
     const events = routingEvents("s")
     expect(events.map((event) => event.reason)).toEqual(["abstained", "abstained"])
@@ -276,13 +281,13 @@ describe("OpenJev skill router package", () => {
 
   test("permission changes during inference suppress a previously allowed winner", async () => {
     handler = () => { rules.push({ permission: "skill", pattern: "plan", action: "deny" }); return Response.json(answer()) }
-    expect((await createSkillRouter(deps).recommend("s", "m", "Investigate")).reason).toBe("candidate_changed")
+    expect((await createRouter().recommend("s", "m", "Investigate")).reason).toBe("candidate_changed")
   })
 
   test("503, 529, invalid JSON and oversized responses do not retry", async () => {
     for (const response of [new Response("down", { status: 503 }), new Response("busy", { status: 529 }), new Response("not-json"), new Response("x".repeat(65537))]) {
       handler = () => response
-      expect((await createSkillRouter(deps).recommend("s", "m", "Investigate")).skill).toBeNull()
+      expect((await createRouter().recommend("s", "m", "Investigate")).skill).toBeNull()
     }
     expect(requests).toHaveLength(4)
   })
@@ -291,7 +296,7 @@ describe("OpenJev skill router package", () => {
     deps.config.skill_router.timeout_ms = 50
     agentLookup = () => new Promise(() => {})
     const start = performance.now()
-    expect((await createSkillRouter(deps).recommend("s", "m", "Investigate")).reason).toBe("aborted")
+    expect((await createRouter().recommend("s", "m", "Investigate")).reason).toBe("aborted")
     expect(performance.now() - start).toBeLessThan(500)
     expect(requests).toHaveLength(0)
     expect(routingEvents("s")[0]).toMatchObject({ reason: "aborted", requestSent: false, scores: null })
@@ -303,7 +308,7 @@ describe("OpenJev skill router package", () => {
       start(controller) { controller.enqueue(new TextEncoder().encode('{"answers":')) },
     }))
     const start = performance.now()
-    expect((await createSkillRouter(deps).recommend("s", "m", "Investigate")).reason).toBe("aborted")
+    expect((await createRouter().recommend("s", "m", "Investigate")).reason).toBe("aborted")
     expect(performance.now() - start).toBeLessThan(500)
     expect(requests).toHaveLength(1)
   })
@@ -315,20 +320,20 @@ describe("OpenJev skill router package", () => {
       [{ name: "worker", permission: rules }],
     ]) {
       agentLookup = async () => ({ data })
-      expect((await createSkillRouter(deps).recommend("s", "m", "Investigate")).reason).toBe("no_candidates")
+      expect((await createRouter().recommend("s", "m", "Investigate")).reason).toBe("no_candidates")
     }
     expect(requests).toHaveLength(0)
   })
 
   test("unsupported skill patterns, oversized catalogs and mismatched metadata abstain", async () => {
     rules.push({ permission: "skill", pattern: "[p]*", action: "allow" })
-    expect((await createSkillRouter(deps).recommend("s", "a", "Investigate")).reason).toBe("no_candidates")
+    expect((await createRouter().recommend("s", "a", "Investigate")).reason).toBe("no_candidates")
     rules.pop()
     deps.config.skills.allow = Array.from({ length: 17 }, (_, i) => `skill${i}`)
-    expect((await createSkillRouter(deps).recommend("s", "b", "Investigate")).reason).toBe("no_candidates")
+    expect((await createRouter().recommend("s", "b", "Investigate")).reason).toBe("no_candidates")
     deps.config.skills.allow = ["plan"]
     writeFileSync(join(root, ".opencode", "skills", "plan", "SKILL.md"), "---\nname: ulw\ndescription: Do work\n---\n")
-    expect((await createSkillRouter(deps).recommend("s", "c", "Investigate")).reason).toBe("no_candidates")
+    expect((await createRouter().recommend("s", "c", "Investigate")).reason).toBe("no_candidates")
     expect(requests).toHaveLength(0)
   })
 
@@ -360,12 +365,12 @@ describe("OpenJev skill router package", () => {
   test("a skill defined only under .agents/skills is found", async () => {
     rmSync(join(root, ".opencode", "skills", "plan"), { recursive: true })
     skill("plan", "Read-only investigation and numbered implementation plan.", ".agents")
-    expect((await createSkillRouter(deps).recommend("s", "a", "Investigate")).skill).toBe("plan")
+    expect((await createRouter().recommend("s", "a", "Investigate")).skill).toBe("plan")
   })
 
   test("a name defined in both .opencode/skills and .agents/skills is excluded as ambiguous", async () => {
     skill("plan", "Read-only investigation and numbered implementation plan.", ".agents")
-    expect((await createSkillRouter(deps).recommend("s", "a", "Investigate")).reason).toBe("no_candidates")
+    expect((await createRouter().recommend("s", "a", "Investigate")).reason).toBe("no_candidates")
   })
 
   test("an escaping symlink under .agents/skills is excluded like under .opencode/skills", async () => {
@@ -375,7 +380,7 @@ describe("OpenJev skill router package", () => {
       writeFileSync(join(external, "SKILL.md"), "---\nname: plan\ndescription: External\n---\n")
       mkdirSync(join(root, ".agents", "skills"), { recursive: true })
       symlinkSync(external, join(root, ".agents", "skills", "plan"))
-      expect((await createSkillRouter(deps).recommend("s", "b", "Investigate")).reason).toBe("no_candidates")
+      expect((await createRouter().recommend("s", "b", "Investigate")).reason).toBe("no_candidates")
     } finally { rmSync(external, { recursive: true, force: true }) }
     expect(requests).toHaveLength(0)
   })

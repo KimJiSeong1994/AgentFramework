@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdirSync } from "node:fs"
 import { addTasks, approvePlanTasks, emptyLedger, readLedger, tasksForWorkflow, updateTask, writeLedger, type TaskInput } from "../src/state/ledger.ts"
-import { newWorkflow, writeWorkflow } from "../src/flow/state.ts"
+import { newWorkflow, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { approveWorkflow } from "../src/flow/runtime.ts"
 import { sessionDir } from "../src/state/store.ts"
@@ -87,8 +87,8 @@ describe("approvePlanTasks (pure)", () => {
 
 describe("runtime.approveWorkflow preconditions (refuse without writes)", () => {
   function putWorkflow(patch: Record<string, unknown> = {}) {
-    const wf = { ...newWorkflow(S, currentOwner(), "command", "req"), phase: "pending_approval" as const, ...patch }
-    return writeWorkflow(wt.worktree, wf as any)
+    const wf = { ...newWorkflow(S, currentOwner(), "command", "req", "opencode"), phase: "pending_approval" as const, ...patch }
+    return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf as any))
   }
 
   test("wrong phase refuses without writing the ledger", () => {

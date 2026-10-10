@@ -34,7 +34,7 @@ import { scanDiff } from "./gaming.ts"
 import { DEFAULT_SUITE, extractAnswer, formatCheckRun, sampleRows, type CheckRun } from "../data/check.ts"
 import type { LcaAgentName } from "../agents/prompts.ts"
 import type { SkillTaskFactInput, SkillVerificationFactInput } from "../telemetry/skills.ts"
-import { settled, strictQuiescent, type ExecutionClaim } from "../hosts/run-state.ts"
+import { assertPreparedHostReference, hostReferenceHasVendorID, persistedHostReference, settled, strictQuiescent, type ExecutionClaim } from "../hosts/run-state.ts"
 import { authenticateLinuxVerification } from "../hosts/linux-domain.ts"
 import { beginExecutionActivity } from "../hosts/runtime.ts"
 import { LinuxAdmissionRefused, type LinuxAdmissionRefusal, type ExecutionHandle, type ExecutionReconciliation,
@@ -46,6 +46,8 @@ import { readWorkflow } from "../flow/state.ts"
 import { copyFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { handoffDir } from "../state/ledger.ts"
+
+const HOST_ENGINE_MISMATCH = "host engine identity mismatch; recovery refused"
 
 export type QueueRun = {
   /** ids the run started with (pending at entry) */
@@ -76,6 +78,8 @@ export type Queue = {
   /** run every pending task serially; resolves when the queue is empty, aborted or already owned */
   run(sessionID: string, origin?: QueueOrigin): Promise<QueueRun>
   isRunning(sessionID: string): boolean
+  /** Observe the current owned runner without launching or replaying queue work. */
+  completion(sessionID: string): Promise<QueueRun> | undefined
   /** stop after the current step: abort the child session / kill the verify command, cancel the rest.
    *  `discard`: the session was deleted — write nothing more to its state dir. */
   abort(sessionID: string, reason?: string, opts?: { discard?: boolean }): Promise<void>
@@ -305,7 +309,10 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     } catch (error) {
       deps.log("workflow cancellation watch unavailable", { sessionID, error: String(error) })
     }
-    const entry: Active = { aborted: false, startedAt: Date.now(), promise: Promise.resolve() as unknown as Promise<QueueRun> }
+    const completion = Promise.withResolvers<QueueRun>()
+    // A caller may observe completion only after deletion/abort has made the queue result irrelevant.
+    completion.promise.catch(() => {})
+    const entry: Active = { aborted: false, startedAt: Date.now(), promise: completion.promise }
     entry.workflowID = workflowID
     active.set(sessionID, entry)
     let workflowCancelTimer: ReturnType<typeof setInterval> | undefined
@@ -317,7 +324,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
       observe()
       if (!entry.workflowCancellationObserved) workflowCancelTimer = setInterval(observe, 50)
     }
-    entry.promise = runLoop(sessionID, entry, origin)
+    const ownedRun = runLoop(sessionID, entry, origin)
       .catch((e: unknown) => {
         if (e instanceof LinuxAdmissionRefused) {
           if (e.phase === "epoch") throw e
@@ -369,6 +376,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
           releaseActivity()
         }
       })
+    void ownedRun.then(completion.resolve, completion.reject)
     return entry.promise
   }
 
@@ -452,6 +460,9 @@ export function createQueue(deps: ExecutionRuntime): Queue {
 
   async function runLoop(sessionID: string, entry: Active, origin?: QueueOrigin): Promise<QueueRun> {
     const result: QueueRun = { taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: false }
+    // Discard intentionally leaves the durable ledger untouched; track returned outcomes so its stale running task
+    // is not counted again when the remaining open ledger tasks are cancelled.
+    const accountedTaskIDs = new Set<string>()
     entry.recoveryBlocked = true
     deps.linuxAdmission?.assertBootEpoch()
     entry.claim = deps.runs.claim(sessionID, deps.instance, process.pid)
@@ -488,9 +499,20 @@ export function createQueue(deps: ExecutionRuntime): Queue {
         continue
       }
       if (strictQuiescent(execution)) continue
-      let reconciliation: ExecutionReconciliation = { outcome: "unknown", quiescent: false, evidence: "no persisted vendor reference" }
-      if (execution.vendorRef) {
-        try { reconciliation = await beforeDeadline(deps.host.reconcile(JSON.parse(execution.vendorRef) as ExecutionReference), Date.now() + 2000, "host restart reconciliation") }
+      let reconciliation: ExecutionReconciliation = {
+        outcome: "unknown", quiescent: false,
+        evidence: "host recovery proof unavailable (absent, malformed, uncorroborated, or timed out)",
+      }
+      if (execution.kind === "host" && execution.engine !== deps.host.identity.engine) {
+        deps.runs.fence(entry.claim, execution.executionId, HOST_ENGINE_MISMATCH)
+        deps.runs.reconcile(entry.claim, execution.executionId, {
+          outcome: "unknown", quiescent: false, evidence: HOST_ENGINE_MISMATCH,
+        })
+        continue
+      }
+      const recoveryReference = execution.kind === "host" ? persistedHostReference(execution) : undefined
+      if (recoveryReference) {
+        try { reconciliation = await beforeDeadline(deps.host.reconcile(recoveryReference), Date.now() + 2000, "host restart reconciliation") }
         catch (error) {
           deps.runs.fence(entry.claim, execution.executionId, `host recovery failed: ${String(error).slice(0, 200)}`)
           entry.unresolved = true
@@ -545,10 +567,14 @@ export function createQueue(deps: ExecutionRuntime): Queue {
         entry.reason = why
         const c = cancelOpen(ledger, why)
         if (!entry.discard) writeLedger(deps.worktree, c.ledger)
-        result.cancelled += c.ids.length
+        const newlyCancelled = c.ids.filter(id => !accountedTaskIDs.has(id))
+        for (const id of newlyCancelled) accountedTaskIDs.add(id)
+        result.cancelled += newlyCancelled.length
         break
       }
       const finished = await runTask(sessionID, entry, task, result, origin, reopenedWorktrees.get(task.id))
+      if (accountedTaskIDs.has(finished.id)) throw new Error(`task ${finished.id} received multiple queue outcomes`)
+      accountedTaskIDs.add(finished.id)
       if (finished.status === "done") result.done++
       else if (finished.status === "failed") result.failed++
       else if (finished.status === "cancelled") result.cancelled++
@@ -1124,7 +1150,8 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     return { ...parseVerdict(r.text ?? ""), sessionID: r.sessionID }
   }
 
-  return { add, cancelOpen: cancelOpenTasks, run, isRunning: (id) => active.has(id), abort }
+  return { add, cancelOpen: cancelOpenTasks, run, isRunning: (id) => active.has(id),
+    completion: (id) => active.get(id)?.promise, abort }
 }
 
 // ------------------------------------------------------------------ prompts (dynamic user messages, not prefix)
@@ -1239,13 +1266,13 @@ async function runChild(
   }
   const fullRequest = {
     ...request, handlers: deps.policy.handlers(request),
-    onReference: (reference: ExecutionReference) => deps.runs.bindVendorRef(claim, executionID, JSON.stringify(reference)),
+    onReference: (reference: ExecutionReference): undefined => { deps.runs.bindVendorRef(claim, executionID, JSON.stringify(reference)) },
   }
   if (deps.linuxAdmission) await deps.linuxAdmission.admitNewExecution()
   deps.runs.registerIntent(claim, {
     executionId: executionID, ownerSession: parentID, taskId: request.taskID,
     attemptId: attemptID, generation: claim.generation, role: agent, cwd: request.cwd, policyID: policy.id,
-    kind: "host", profile: "legacy-unowned",
+    kind: "host", engine: deps.host.identity.engine, profile: "legacy-unowned",
   })
   entry.preparingExecutionID = executionID
   let handle: ExecutionHandle
@@ -1258,7 +1285,11 @@ async function runChild(
     ])
     if (prepared === "aborted" || prepared === "timeout") throw new Error(`child preparation ${prepared} without terminal quiescence`)
     handle = prepared
-    deps.runs.bindVendorRef(claim, executionID, JSON.stringify(handle.reference))
+    const reference: unknown = handle.reference
+    assertPreparedHostReference(reference, executionID)
+    if (hostReferenceHasVendorID(reference)) {
+      deps.runs.bindVendorRef(claim, executionID, JSON.stringify(reference))
+    }
   } catch (error) {
     deps.runs.fence(claim, executionID, "prepare failed without proof of quiescence")
     entry.unresolved = true
@@ -1283,9 +1314,18 @@ async function runChild(
     entry.unresolved = true
     throw error
   }
-  // The prepared handle is inert. Cancellation before dispatch is recorded as quiescent.
+  // Abort may already be cancelling this child from its onCreated callback. Join that
+  // existing cancellation instead of racing a second request against it.
   if (entry.aborted) {
-    deps.runs.recordTerminal(claim, executionID, { outcome: "cancelled", terminalAt: Date.now(), quiescentAt: Date.now() })
+    try {
+      if (entry.abortWork) await entry.abortWork
+      else await cancelChild(deps, { id: executionID, handle, claim }, "child aborted before dispatch")
+      deps.runs.assertQuiescent(claim)
+    } catch {
+      entry.unresolved = true
+      deps.runs.fence(claim, executionID, "prepared child cancellation ended without terminal quiescence")
+      throw new Error("prepared child cancellation ended without terminal quiescence; queue fenced")
+    }
     entry.child = undefined
     if (sessionID) deps.policy.unbindSession(sessionID)
     return complete({ status: "aborted", sessionID })
@@ -1298,6 +1338,12 @@ async function runChild(
     entry.cancelWaiter = () => resolve("cancelled")
   })
   try {
+    try { deps.runs.markHostDispatched(claim, executionID) }
+    catch (error) {
+      entry.unresolved = true
+      deps.runs.fence(claim, executionID, "host dispatch boundary could not be persisted")
+      throw error
+    }
     const raced = await Promise.race([handle.run(), timeout, cancelled])
     if (raced === "cancelled") {
       try { deps.runs.assertQuiescent(claim) }

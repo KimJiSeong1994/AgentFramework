@@ -1,11 +1,19 @@
 // M1: the lca_flow tool — schema budget, op:"status", op:"plan" gating (T2/T3/T4) and the review it runs inline.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync, symlinkSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
 import { z } from "zod"
 import { createLcaFlowTool, LCA_FLOW_DESCRIPTION, lcaFlowArgs } from "../src/tools/lca-flow.ts"
+import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
 import { estimateToolSchemaTokens } from "../src/tokens.ts"
-import { newWorkflow, readWorkflow, sha256, writeWorkflow } from "../src/flow/state.ts"
+import {
+  FlowTransactionBusyError, flowDir, newWorkflow, planJsonPath, readEvents, readWorkflow, sha256, workflowPath,
+  writeWorkflow, withFlowTransaction,
+} from "../src/flow/state.ts"
+import { planMdPath } from "../src/flow/plan.ts"
+import { cancelWorkflow } from "../src/flow/runtime.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
+import { ledgerPath } from "../src/state/ledger.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { fakeClient, makeDeps, tempGitWorktree, type FakeClient } from "./guards-helpers.ts"
 
@@ -21,8 +29,8 @@ beforeEach(() => {
 afterEach(() => wt.cleanup())
 
 function putWorkflow(patch: Record<string, unknown> = {}) {
-  const wf = { ...newWorkflow(S, currentOwner(), "command", "do the thing"), ...patch }
-  return writeWorkflow(wt.worktree, wf as any)
+  const wf = { ...newWorkflow(S, currentOwner(), "command", "do the thing", "opencode"), ...patch }
+  return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf as any))
 }
 
 function ctx(sessionID = S, agent = "main") {
@@ -68,6 +76,25 @@ describe('op:"status"', () => {
 })
 
 describe('op:"plan" authority and phase gates', () => {
+  for (const [label, engine] of [
+    ["missing", undefined],
+    ["foreign", "other-engine"],
+    ["malformed", { engine: "opencode" }],
+  ] as const) {
+    test(`${label} workflow engine refuses plan mutation but remains observable`, async () => {
+      putWorkflow({ engine })
+      const before = readFileSync(workflowPath(wt.worktree))
+      const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+      const result = await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx())
+      expect(result).toMatchObject({ output: expect.stringContaining("engine identity") })
+      expect(client.created).toEqual([])
+      expect(existsSync(ledgerPath(wt.worktree, S))).toBe(false)
+      expect(before.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
+      expect(await tool.execute({ op: "status" }, ctx())).toMatchObject({ output: expect.stringContaining("[lca status]") })
+      expect(before.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
+    })
+  }
+
   test("a non-owning session is refused (no workflow mutation, no reviewer child)", async () => {
     putWorkflow({ phase: "planning" })
     const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
@@ -90,6 +117,59 @@ describe('op:"plan" authority and phase gates', () => {
     const res = (await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any)) as { output: string }
     expect(res.output).toContain("not awaiting a plan")
     expect(client.created.length).toBe(0)
+  })
+})
+
+describe("flow transaction consumers", () => {
+  test("lca_flow refuses while the flow transaction is busy without writing artifacts or events", async () => {
+    const workflow = putWorkflow({ phase: "planning" })
+    const workflowBefore = readFileSync(workflowPath(wt.worktree))
+    const eventsBefore = readEvents(wt.worktree, workflow.id)
+    const lock = join(flowDir(wt.worktree), "workflow.lock")
+    symlinkSync("held-by-another-process", lock)
+    try {
+      const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+      await expect(tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any)).rejects.toBeInstanceOf(FlowTransactionBusyError)
+      expect(readFileSync(workflowPath(wt.worktree)).equals(workflowBefore)).toBe(true)
+      expect(readEvents(wt.worktree, workflow.id)).toEqual(eventsBefore)
+      expect(existsSync(planJsonPath(wt.worktree, workflow.id))).toBe(false)
+      expect(existsSync(join(wt.worktree, planMdPath(workflow.id)))).toBe(false)
+      expect(client.created).toEqual([])
+    } finally {
+      unlinkSync(lock)
+    }
+  })
+
+  test("boundary denial stays fail-closed while busy and does not append an unauthenticated audit event", async () => {
+    const workflow = putWorkflow({ phase: "planning" })
+    const deps = makeDeps(client, wt.worktree)
+    deps.interactive = true
+    const hook = createToolBeforeHook(deps)
+    const lock = join(flowDir(wt.worktree), "workflow.lock")
+    symlinkSync("held-by-another-process", lock)
+    try {
+      await expect(hook(
+        { tool: "write", sessionID: S, callID: "write-1" } as any,
+        { args: { filePath: "new-file.ts" } } as any,
+      )).rejects.toBeInstanceOf(FlowTransactionBusyError)
+      expect(readEvents(wt.worktree, workflow.id).filter((event) => event.type === "boundary_denied")).toEqual([])
+    } finally {
+      unlinkSync(lock)
+    }
+  })
+
+  test("boundary audit does not append for a foreign-engine workflow", async () => {
+    const workflow = putWorkflow({ phase: "planning", engine: "foreign-engine" })
+    const before = readFileSync(workflowPath(wt.worktree))
+    const deps = makeDeps(client, wt.worktree)
+    deps.interactive = true
+    const hook = createToolBeforeHook(deps)
+    await expect(hook(
+      { tool: "write", sessionID: S, callID: "write-foreign" } as any,
+      { args: { filePath: "new-file.ts" } } as any,
+    )).rejects.toThrow(/interactive mode is read-only/)
+    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
+    expect(readEvents(wt.worktree, workflow.id).filter((event) => event.type === "boundary_denied")).toEqual([])
   })
 })
 
@@ -120,6 +200,38 @@ describe('op:"plan" invalid plans (T2/T3)', () => {
 })
 
 describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () => {
+  test("same-engine cancellation during review returns changed without writing stale review artifacts", async () => {
+    const initial = putWorkflow({ phase: "planning" })
+    let cancellationSnapshot: { workflow: Buffer; eventsSeq: number; planJson: Buffer; planMd: Buffer } | undefined
+    const deps = makeDeps(client, wt.worktree)
+    client.replies.reviewer = {
+      text: "VERDICT: OKAY",
+      run() {
+        const current = readWorkflow(wt.worktree)!
+        const cancelled = cancelWorkflow(getOpenCodeRuntime(deps), current, false, () => {})
+        expect(cancelled.ok).toBe(true)
+        const events = readEvents(wt.worktree, initial.id)
+        cancellationSnapshot = {
+          workflow: readFileSync(workflowPath(wt.worktree)),
+          eventsSeq: Math.max(0, ...events.map((event) => event.seq)),
+          planJson: readFileSync(planJsonPath(wt.worktree, initial.id)),
+          planMd: readFileSync(join(wt.worktree, planMdPath(initial.id))),
+        }
+      },
+    }
+    const tool = createLcaFlowTool(deps)
+    const result = await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any) as { title: string; output: string }
+    expect(result.title).toBe("lca_flow: workflow changed")
+    expect(cancellationSnapshot).toBeDefined()
+    const snapshot = cancellationSnapshot!
+    expect(readFileSync(workflowPath(wt.worktree)).equals(snapshot.workflow)).toBe(true)
+    expect(readFileSync(planJsonPath(wt.worktree, initial.id)).equals(snapshot.planJson)).toBe(true)
+    expect(readFileSync(join(wt.worktree, planMdPath(initial.id))).equals(snapshot.planMd)).toBe(true)
+    expect(snapshot.planMd.toString("utf8")).not.toContain("verdict:")
+    const laterEvents = readEvents(wt.worktree, initial.id).filter((event) => event.seq > snapshot.eventsSeq)
+    expect(laterEvents).toEqual([])
+  })
+
   test("valid plan + OKAY review: md exists, planRef shas match the files, phase pending_approval", async () => {
     putWorkflow({ phase: "planning" })
     client.replies.reviewer = { text: "- looks solid\nVERDICT: OKAY" }

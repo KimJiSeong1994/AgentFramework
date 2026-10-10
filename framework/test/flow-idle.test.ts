@@ -2,14 +2,16 @@
 // notice-only during a workflow, no CONTINUE_PROMPT/offerResume in any workflow phase, settle runs even with
 // loop.idle disabled), settle at delegate return (tool-after) and session.deleted -> cancelled (event hook).
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 import { createEventHook } from "../src/hooks/event.ts"
 import { createToolAfterHook } from "../src/hooks/tool-after.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { createIdleLoop, CONTINUE_PROMPT, EXECUTING_RESUME_PROMPT, NUDGE_PROMPT } from "../src/loop/idle.ts"
 import { currentOwner } from "../src/flow/owner.ts"
-import { newWorkflow, readWorkflow, writeWorkflow, type Workflow } from "../src/flow/state.ts"
+import { newWorkflow, readWorkflow, workflowPath, writeWorkflow, type Workflow, withFlowTransaction } from "../src/flow/state.ts"
 import { startWorkflow } from "../src/flow/runtime.ts"
-import { addTasks, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
+import { addTasks, ledgerPath, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
 import { EMPTY_MODE, readModeState, writeModeState, type ModeState } from "../src/state/store.ts"
 import { hasFlowSuffix, hasModeSuffix } from "../src/modes/instructions.ts"
 import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
@@ -25,13 +27,50 @@ beforeEach(() => {
 afterEach(() => wt.cleanup())
 
 function putWorkflow(patch: Record<string, unknown> = {}): Workflow {
-  const wf = { ...newWorkflow(S, currentOwner(), "command", "do the thing"), ...patch }
-  return writeWorkflow(wt.worktree, wf as Workflow)
+  const wf = { ...newWorkflow(S, currentOwner(), "command", "do the thing", "opencode"), ...patch }
+  return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf as Workflow))
 }
 
 const idleEvent = (sessionID = S) => ({ event: { type: "session.idle", properties: { sessionID } } as any })
 const prompts = () => client.calls.filter((c) => c.method === "promptAsync" || c.method === "prompt")
 const promptTexts = () => prompts().map((c) => (c.args as any).body.parts[0].text)
+
+function deletedEvent(sessionID = S) {
+  return {
+    event: {
+      type: "session.deleted" as const,
+      properties: { info: {
+        id: sessionID, slug: "engine-refusal", projectID: "fixture", directory: wt.worktree,
+        title: "engine refusal", version: "fixture", time: { created: 0, updated: 0 },
+      } },
+    },
+  }
+}
+
+for (const [label, engine] of [
+  ["missing", undefined],
+  ["foreign", "other-engine"],
+  ["malformed", { engine: "opencode" }],
+] as const) {
+  test(`${label} workflow engine prevents idle settlement and session deletion`, async () => {
+    const wf = putWorkflow({ engine, phase: "executing", taskIds: ["t1"] })
+    const { ledger } = addTasks(readLedger(wt.worktree, S), [{ title: "a" }], Date.now(), { id: wf.id, planSha: "s" })
+    writeLedger(wt.worktree, { ...ledger, tasks: ledger.tasks.map(task => ({ ...task, status: "done" as const })) })
+    const workflowBefore = readFileSync(workflowPath(wt.worktree))
+    const ledgerBefore = readFileSync(ledgerPath(wt.worktree, S))
+    const deps = makeDeps(client, wt.worktree)
+    await createIdleLoop(deps)(S)
+    await createToolAfterHook(deps)(
+      { tool: "delegate", sessionID: S, callID: "c1", args: {} },
+      { title: "delegate", output: "ok", metadata: {} },
+    )
+    await createEventHook(deps)(deletedEvent())
+    expect(workflowBefore.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
+    expect(ledgerBefore.equals(readFileSync(ledgerPath(wt.worktree, S)))).toBe(true)
+    expect(prompts()).toEqual([])
+    expect(client.created).toEqual([])
+  })
+}
 
 function ulw(patch: Partial<ModeState> = {}): ModeState {
   const now = Date.now()
@@ -73,7 +112,7 @@ describe("AC0.11 — nudge / stuck / question / reset", () => {
     expect(wf.counters.nudges).toBe(0)
 
     // also true at the exhausted boundary: a trailing question suppresses nudge_exhausted too
-    writeWorkflow(wt.worktree, { ...wf, counters: { ...wf.counters, nudges: 1 } })
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...wf, counters: { ...wf.counters, nudges: 1 } }))
     const r2 = await idle(S)
     expect(r2).toEqual({ action: "workflow", wfId: expect.any(String) })
     expect(readWorkflow(wt.worktree)!.phase).toBe("planning")
@@ -116,7 +155,7 @@ describe("AC0.12 — precedence", () => {
   test("T1 (start) clears an active ulw mode", async () => {
     writeModeState(wt.worktree, S, ulw())
     const deps = makeDeps(client, wt.worktree)
-    const r = startWorkflow(deps, S, "command", "do it", "user_command")
+    const r = startWorkflow(deps, S, "command", "do it", "user_command", "opencode")
     expect(r.ok).toBe(true)
     const mode = readModeState(wt.worktree, S)
     expect(mode.active).toBe(false)
@@ -220,7 +259,7 @@ describe("executing: at most one resume prompt per task-id set", () => {
     await idle(S)
     expect(promptTexts()).toEqual([EXECUTING_RESUME_PROMPT])
 
-    writeWorkflow(wt.worktree, { ...readWorkflow(wt.worktree)!, taskIds: ["t1", "t2"] })
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...readWorkflow(wt.worktree)!, taskIds: ["t1", "t2"] }))
     ;({ ledger } = addTasks(readLedger(wt.worktree, S), [{ title: "b" }], Date.now(), { id: wf.id, planSha: "s" }))
     writeLedger(wt.worktree, ledger)
     await idle(S)
@@ -279,6 +318,36 @@ describe("settle via idle", () => {
 })
 
 describe("session.deleted -> cancelled (before removeSessionDir)", () => {
+  test("a held workflow transaction prevents session-directory cleanup", async () => {
+    putWorkflow()
+    writeLedger(wt.worktree, readLedger(wt.worktree, S))
+    const workflowBefore = readFileSync(workflowPath(wt.worktree))
+    const ledgerBefore = readFileSync(ledgerPath(wt.worktree, S))
+    const hook = createEventHook(makeDeps(client, wt.worktree))
+    let pending: ReturnType<typeof hook> | undefined
+    withFlowTransaction(wt.worktree, () => {
+      pending = hook(deletedEvent())
+    })
+    expect(pending).toBeDefined()
+    await pending
+    expect(workflowBefore.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
+    expect(ledgerBefore.equals(readFileSync(ledgerPath(wt.worktree, S)))).toBe(true)
+  })
+
+  test("session deletion preserves an unreleased execution claim and session-directory data", async () => {
+    putWorkflow()
+    writeLedger(wt.worktree, readLedger(wt.worktree, S))
+    const ledgerBefore = readFileSync(ledgerPath(wt.worktree, S))
+    const deps = makeDeps(client, wt.worktree)
+    const runtime = getOpenCodeRuntime(deps)
+    runtime.runs.claim(S, runtime.instance, process.pid)
+    await createEventHook(deps)(deletedEvent())
+    expect(readWorkflow(wt.worktree)?.phase).toBe("cancelled")
+    expect(runtime.runs.status().claim).toBeDefined()
+    expect(ledgerBefore.equals(readFileSync(ledgerPath(wt.worktree, S)))).toBe(true)
+    expect(client.calls.filter(call => call.method === "abort")).toEqual([])
+  })
+
   test("deleting the owning session cancels its non-terminal workflow", async () => {
     const wf = putWorkflow({ phase: "planning" })
     const deps = makeDeps(client, wt.worktree)

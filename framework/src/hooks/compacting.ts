@@ -4,7 +4,8 @@ import type { Hooks } from "@opencode-ai/plugin"
 import { join } from "node:path"
 import type { HookDeps } from "./types.ts"
 import { readModeState, readSessionInfo, sessionDir, writeJsonAtomic, type ModeState } from "../state/store.ts"
-import { fetchTodos, incompleteTodos, type Todo } from "../guards/todos.ts"
+import { incompleteTodos, type Todo } from "../guards/todos.ts"
+import { fetchOpenCodeTodos } from "../hosts/opencode-todos.ts"
 import { openTasks, readLedger, type Ledger } from "../state/ledger.ts"
 
 export const CHECKPOINT_MAX_CHARS = 600
@@ -50,7 +51,7 @@ export function createCompactingHook(deps: HookDeps): NonNullable<Hooks["experim
       const agent = readSessionInfo(deps.worktree, input.sessionID)?.agent
       if (agent && agent !== "main") return // worker/reviewer compaction: nothing of ours to preserve
       const state = readModeState(deps.worktree, input.sessionID)
-      const todos = await fetchTodos(deps.client, input.sessionID, deps.log)
+      const todos = await fetchOpenCodeTodos(deps.client, input.sessionID, deps.log)
       const incomplete = incompleteTodos(todos)
       const ledger = readLedger(deps.worktree, input.sessionID)
       const text = buildCheckpoint(state, incomplete, ledger)

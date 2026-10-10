@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdirSync, readFileSync } from "node:fs"
 import { authorize, currentOwner, ownerLive, startHeartbeat, STALE_MS, type LivenessCtx } from "../src/flow/owner.ts"
-import { newWorkflow, readWorkflow, writeWorkflow, workflowPath, readEvents, type Workflow } from "../src/flow/state.ts"
+import { newWorkflow, readWorkflow, writeWorkflow, workflowPath, readEvents, type Workflow, withFlowTransaction } from "../src/flow/state.ts"
 import { resolveAuthority, repairOnLoad, onSessionDeleted, stopHeartbeat } from "../src/flow/runtime.ts"
 import { sessionDir } from "../src/state/store.ts"
 import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
@@ -25,8 +25,8 @@ afterEach(() => {
 })
 
 function putWorkflow(patch: Record<string, unknown> = {}): Workflow {
-  const wf = { ...newWorkflow(S, currentOwner(1000, "inst_dead", 999999), "command", "do it"), ...patch }
-  return writeWorkflow(wt.worktree, wf as Workflow, 1000)
+  const wf = { ...newWorkflow(S, currentOwner(1000, "inst_dead", 999999), "command", "do it", "opencode"), ...patch }
+  return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf as Workflow, 1000))
 }
 
 const liveCtx = (opts: Partial<LivenessCtx> = {}): LivenessCtx => ({
@@ -132,7 +132,7 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     const wf = putWorkflow({ sessionID: S, owner: currentOwner(Date.now(), "inst_x", process.pid) })
     const deps = makeDeps(client, wt.worktree)
     const before = bytes()
-    const r = resolveAuthority(deps, "status", S)
+    const r = resolveAuthority(deps, "status", S, "opencode")
     expect(r.wf?.id).toBe(wf.id)
     expect(r.refuse).toBeUndefined()
     expect(bytes()).toBe(before)
@@ -141,7 +141,7 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
   test("owning session, owner dead -> takeover: owner rewritten, owner_takeover emitted, phase unchanged", () => {
     const wf = putWorkflow({ sessionID: S, owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 }, phase: "planning" })
     const deps = makeDeps(client, wt.worktree)
-    const r = resolveAuthority(deps, "status", S)
+    const r = resolveAuthority(deps, "status", S, "opencode")
     expect(r.wf).not.toBeNull()
     expect(r.wf!.phase).toBe("planning")
     expect(r.wf!.owner.instance).not.toBe("inst_dead")
@@ -155,7 +155,7 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     const wf = putWorkflow({ sessionID: S, owner: currentOwner(Date.now(), "inst_x", process.pid) })
     const deps = makeDeps(client, wt.worktree)
     const before = bytes()
-    const r = resolveAuthority(deps, "approve", OTHER)
+    const r = resolveAuthority(deps, "approve", OTHER, "opencode")
     expect(r.refuse).toContain(`owned by session ${S}`)
     expect(bytes()).toBe(before)
   })
@@ -164,7 +164,7 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     putWorkflow({ sessionID: S, owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 } })
     const deps = makeDeps(client, wt.worktree)
     const before = bytes()
-    const r = resolveAuthority(deps, "status", OTHER)
+    const r = resolveAuthority(deps, "status", OTHER, "opencode")
     expect(r.refuse).toBeUndefined()
     expect(r.ownerDead).toBe(true)
     expect(bytes()).toBe(before)
@@ -175,7 +175,7 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     const deps = makeDeps(client, wt.worktree)
     const before = bytes()
     for (const cmd of ["approve", "reject", "cancel"] as const) {
-      const r = resolveAuthority(deps, cmd, OTHER)
+      const r = resolveAuthority(deps, cmd, OTHER, "opencode")
       expect(r.refuse).toContain("owner dead")
       expect(bytes()).toBe(before)
     }
@@ -184,7 +184,7 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
   test("other session, owner dead -> /plan applies T20 then the workflow is cancelled", () => {
     const wf = putWorkflow({ sessionID: S, owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 } })
     const deps = makeDeps(client, wt.worktree)
-    const r = resolveAuthority(deps, "plan", OTHER)
+    const r = resolveAuthority(deps, "plan", OTHER, "opencode")
     expect(r.wf).toBeNull()
     expect(r.replaced).toBe(wf.id)
     // resolveAuthority only applies T20 (owner_dead -> cancelled); rotation into archive/ is the caller's job (startWorkflow)
@@ -194,7 +194,7 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
   test("repairOnLoad with a dead owner changes neither phase nor owner", () => {
     const wf = putWorkflow({ sessionID: S, owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 }, phase: "reviewing" })
     const deps = makeDeps(client, wt.worktree)
-    const r = repairOnLoad(deps)
+    const r = repairOnLoad(deps, "opencode")
     expect(r?.ok).toBe(true)
     if (r?.ok) {
       expect(r.wf.phase).toBe("pending_approval") // T8, authority-free
@@ -206,7 +206,7 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
   test("session.deleted of the owner -> cancelled before the dir is removed", () => {
     const wf = putWorkflow({ sessionID: S, owner: currentOwner(Date.now(), "inst_x", process.pid), phase: "planning" })
     const deps = makeDeps(client, wt.worktree)
-    const r = onSessionDeleted(deps, S, false, () => {})
+    const r = onSessionDeleted(deps, S, "opencode", false, () => {})
     expect(r?.ok).toBe(true)
     if (r?.ok) expect(r.wf.phase).toBe("cancelled")
   })
@@ -215,7 +215,7 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     const wf = putWorkflow({ sessionID: S, owner: currentOwner(Date.now(), "inst_x", process.pid), phase: "executing" })
     const deps = makeDeps(client, wt.worktree)
     const before = bytes()
-    const r = resolveAuthority(deps, "status", S)
+    const r = resolveAuthority(deps, "status", S, "opencode")
     expect(r.wf!.phase).toBe("executing")
     expect(bytes()).toBe(before)
   })
@@ -245,7 +245,7 @@ describe("owner heartbeat timer", () => {
     const hb = startHeartbeat(() => {
       const cur = readWorkflow(wt.worktree)!
       last = Date.now()
-      writeWorkflow(wt.worktree, { ...cur, owner: { ...cur.owner, heartbeatAt: last } })
+      withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...cur, owner: { ...cur.owner, heartbeatAt: last } }))
       return true
     }, 10)
     await new Promise((r) => setTimeout(r, 60))

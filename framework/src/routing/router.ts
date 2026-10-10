@@ -1,9 +1,9 @@
 import { z } from "zod"
 import { randomUUID } from "node:crypto"
-import type { HookDeps } from "../hooks/types.ts"
+import type { CoreDeps } from "../deps.ts"
 import { containsSecret } from "../security/secrets.ts"
 import { recordRoutingDecision, type RoutingDecision } from "../telemetry/routing.ts"
-import { availableCandidates } from "./catalog.ts"
+import { availableCandidates, type SkillPermissionSource } from "./catalog.ts"
 
 const settingsSchema = z.object({
   mode: z.enum(["off", "shadow", "suggest"]),
@@ -45,8 +45,8 @@ async function boundedJson(response: Response): Promise<unknown> {
   return JSON.parse(new TextDecoder().decode(bytes))
 }
 
-/** One in-flight request per plugin, no queue/retries. Predictions never mutate mode or permission state. */
-export function createSkillRouter(deps: HookDeps) {
+/** One in-flight request per router instance, no queue/retries. Predictions never mutate mode or permission state. */
+export function createSkillRouter(deps: CoreDeps, source: SkillPermissionSource) {
   let active: { sessionID: string; controller: AbortController } | undefined
   const seen = new Set<string>()
   return {
@@ -99,7 +99,7 @@ export function createSkillRouter(deps: HookDeps) {
           timer = setTimeout(() => controller.abort(), config.timeout_ms)
         })
         const evaluate = async (): Promise<Recommendation> => {
-          const candidates = await availableCandidates(deps, controller.signal)
+          const candidates = await availableCandidates(deps, source, controller.signal)
           if (controller.signal.aborted || candidates.length === 0) return { skill: null, reason: "no_candidates" }
           observation.candidates = candidates.map((candidate) => candidate.name)
           const criteria = Object.fromEntries(candidates.map((s) => [s.name, s.description]))
@@ -133,7 +133,7 @@ export function createSkillRouter(deps: HookDeps) {
           if (winner <= runnerUp) return { skill: null, reason: "invalid_winner" }
           if (answer.choice === "none" || winner < config.min_probability || winner - runnerUp < config.min_margin) return { skill: null, reason: "abstained" }
           // Recheck effective permissions after inference; revocation during the request must win.
-          const current = await availableCandidates(deps, controller.signal)
+          const current = await availableCandidates(deps, source, controller.signal)
           if (current.length !== candidates.length || current.some((c) => c.description !== criteria[c.name])) return { skill: null, reason: "candidate_changed" }
           return { skill: answer.choice, reason: "recommended" }
         }

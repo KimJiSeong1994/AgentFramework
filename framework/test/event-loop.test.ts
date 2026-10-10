@@ -5,7 +5,8 @@ import { createEventHook } from "../src/hooks/event.ts"
 import { createCompactingHook, checkpointPath } from "../src/hooks/compacting.ts"
 import { createIdleLoop, CONTINUE_PROMPT, abortPath } from "../src/loop/idle.ts"
 import { readModeState, writeModeState, writeJsonAtomic, sessionDir, EMPTY_MODE, type ModeState } from "../src/state/store.ts"
-import { fetchTodos, todoFingerprint } from "../src/guards/todos.ts"
+import { todoFingerprint, type Todo } from "../src/guards/todos.ts"
+import { fetchOpenCodeTodos } from "../src/hosts/opencode-todos.ts"
 import { fakeClient, makeDeps, tempWorktree, todo, type FakeClient } from "./guards-helpers.ts"
 
 const S = "ses_1"
@@ -40,7 +41,7 @@ describe("loop.idle", () => {
     expect(st.iterations).toBe(1)
     expect(st.stagnation).toBe(0)
     expect(st.active).toBe(true)
-    expect(st.lastFingerprint).toBe(todoFingerprint(client.todos as any))
+    expect(st.lastFingerprint).toBe(todoFingerprint(client.todos as Todo[]))
   })
 
   test("falls back to session.prompt when promptAsync is unavailable", async () => {
@@ -181,10 +182,10 @@ describe("loop.idle", () => {
   })
 })
 
-describe("fetchTodos", () => {
+describe("fetchOpenCodeTodos", () => {
   test("uses client.session.todo when present", async () => {
     client.todos = [todo("1", "pending")]
-    const t = await fetchTodos(client as any, S)
+    const t = await fetchOpenCodeTodos(client, S)
     expect(t.map((x) => x.id)).toEqual(["1"])
     expect(client.calls.map((c) => c.method)).toEqual(["todo"])
   })
@@ -194,14 +195,83 @@ describe("fetchTodos", () => {
       { info: { id: "m1" }, parts: [{ type: "tool", tool: "todowrite", state: { status: "completed", input: { todos: [todo("old", "pending")] }, metadata: {} } }] },
       { info: { id: "m2" }, parts: [{ type: "tool", tool: "todowrite", state: { status: "completed", input: {}, metadata: { todos: [todo("new", "in_progress")] } } }] },
     ]
-    const t = await fetchTodos(client as any, S)
+    const t = await fetchOpenCodeTodos(client, S)
     expect(t.map((x) => x.id)).toEqual(["new"])
+    expect(client.calls.map((c) => c.method)).toEqual(["messages"])
+  })
+  test("an empty endpoint array is authoritative and does not fetch messages", async () => {
+    client.todos = []
+    client.messages = [{ parts: [{ type: "tool", tool: "todowrite", state: { status: "completed", input: { todos: [todo("fallback", "pending")] } } }] }]
+    expect(await fetchOpenCodeTodos(client, S)).toEqual([])
+    expect(client.calls.map((c) => c.method)).toEqual(["todo"])
+  })
+  test("accepts an enveloped endpoint response without losing the session receiver", async () => {
+    const expected = [todo("enveloped", "in_progress")]
+    const session = {
+      async todo(options: { path: { id: string } }) {
+        expect(this).toBe(session)
+        expect(options.path.id).toBe(S)
+        return { data: expected }
+      },
+      async messages() { throw new Error("authoritative endpoint must prevent fallback") },
+    }
+    expect(await fetchOpenCodeTodos({ session }, S)).toEqual(expected)
+  })
+  test.each([null, undefined])("nullish metadata %s falls back to input in enveloped messages", async (todos) => {
+    const expected = [todo("input", "pending")]
+    const session = {
+      async messages(options: { path: { id: string } }) {
+        expect(this).toBe(session)
+        expect(options.path.id).toBe(S)
+        return { data: [{ parts: [{ type: "tool", tool: "todowrite", state: {
+          status: "completed", metadata: { todos }, input: { todos: expected },
+        } }] }] }
+      },
+    }
+    expect(await fetchOpenCodeTodos({ session }, S)).toEqual(expected)
+  })
+  test("falls back when the todo endpoint response is malformed", async () => {
+    client.session.todo = async (options) => {
+      client.calls.push({ method: "todo", args: options })
+      return { data: { malformed: true } }
+    }
+    client.messages = [{ parts: [{ type: "tool", tool: "todowrite", state: { status: "completed", input: { todos: [todo("fallback", "pending")] } } }] }]
+    expect(await fetchOpenCodeTodos(client, S)).toEqual([todo("fallback", "pending")])
+    expect(client.calls.map((c) => c.method)).toEqual(["todo", "messages"])
+  })
+  test("selects the newest completed todowrite while skipping incomplete and unrelated tools", async () => {
+    client = fakeClient({ todoEndpoint: false })
+    client.messages = [
+      { parts: [{ type: "tool", tool: "todowrite", state: { status: "completed", input: { todos: [todo("selected", "pending")] } } }] },
+      { parts: [
+        { type: "tool", tool: "todowrite", state: { status: "running", input: { todos: [todo("running", "pending")] } } },
+        { type: "tool", tool: "other", state: { status: "completed", input: { todos: [todo("wrong", "pending")] } } },
+      ] },
+    ]
+    expect(await fetchOpenCodeTodos(client, S)).toEqual([todo("selected", "pending")])
+  })
+  test("prefers metadata todos and applies normalization defaults", async () => {
+    client = fakeClient({ todoEndpoint: false })
+    client.messages = [{ parts: [{ type: "tool", tool: "todowrite", state: {
+      status: "completed",
+      input: { todos: [{ id: "input", content: "not selected" }] },
+      metadata: { todos: [{ content: 7 }] },
+    } }] }]
+    expect(await fetchOpenCodeTodos(client, S)).toEqual([{ id: "0", content: "7", status: "pending", priority: "medium" }])
+  })
+  test("logs a fixed category for non-Error endpoint rejection and falls back", async () => {
+    const logs: Array<{ message: string; extra?: Record<string, unknown> }> = []
+    client.session.todo = async () => { throw "private response detail" }
+    client.messages = []
+    expect(await fetchOpenCodeTodos(client, S, (message, extra) => logs.push({ message, extra }))).toEqual([])
+    expect(logs).toEqual([{ message: "todo endpoint threw, falling back to messages()", extra: { error: "non-Error rejection" } }])
+    expect(logs[0]?.extra).not.toHaveProperty("private response detail")
     expect(client.calls.map((c) => c.method)).toEqual(["messages"])
   })
   test("falls back when the todo endpoint errors", async () => {
     client.todos = undefined
     client.messages = []
-    expect(await fetchTodos(client as any, S)).toEqual([])
+    expect(await fetchOpenCodeTodos(client, S)).toEqual([])
     expect(client.calls.map((c) => c.method)).toEqual(["todo", "messages"])
   })
 })

@@ -1,8 +1,7 @@
-// System prompts + AgentConfig fragments for the three stage-1 agents.
+// System prompts + agent definition values for the three stage-1 agents.
 // Target model: Gemma 4 26B MoE (weak instruction following). Short, concrete, numbered rules.
 // Budgets are asserted in test/prompts.test.ts: MAIN <= 1500, WORKER <= 800, REVIEWER <= 600 est. tokens.
 // The prompt is part of the static prefix: never change it mid-session (see report section 3).
-import type { AgentConfig } from "@opencode-ai/sdk"
 import type { ExecutionRole } from "../hosts/types.ts"
 
 const CODING_CONVENTIONS = `Coding conventions:
@@ -142,7 +141,7 @@ export type LcaAgentName = ExecutionRole
 export const DATA_AGENT_NAMES: LcaAgentName[] = ["data-analyst", "data-verifier", "ontology-evolver", "answer-judge"]
 
 /**
- * Agent definitions injected by the config hook (`model`, `temperature`, skill allowlist applied there).
+ * Core-owned agent definition values injected by the config hook (`model`, `temperature`, skill allowlist applied there).
  *
  * Tool visibility is expressed ONLY through `permission` (a tool whose permission is `deny` for pattern "*" is
  * removed from the schema the model sees). The plugin `config` hook receives the config AFTER schema decoding, and
@@ -151,7 +150,12 @@ export const DATA_AGENT_NAMES: LcaAgentName[] = ["data-analyst", "data-verifier"
  * task/todowrite/delegate were all still on). `steps` is the decoded name of maxSteps.
  * `task` is denied everywhere: orchestration is done by code through the plugin's `delegate` tool (main only).
  */
-export type LcaAgentDef = AgentConfig & {
+export type LcaAgentDef = {
+  mode: "subagent" | "primary" | "all"
+  description: string
+  prompt: string
+  color: string
+  permission: Record<string, "ask" | "allow" | "deny">
   steps?: number
   /** tools hidden from this agent (converted to permission "deny" by the config hook; listed here for doctor/tests) */
   denied_tools: string[]
