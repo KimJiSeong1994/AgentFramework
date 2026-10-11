@@ -10,7 +10,7 @@ not granted by model output. Native CLI budget and containment limits are descri
 | Layer | Files | Scope |
 | --- | --- | --- |
 | Shared runtime | `src/hosts/{types,runtime,tool-policy,run-state}.ts` | Host contracts, fixed role policy, execution ownership and durable recovery state. |
-| Common CLI host | `src/hosts/{interactive,model-catalog,cli-runtime,cli-host,cli-transport,cli-tools,codex-profile,plan-conversation}.ts` | Engine/model discovery and selection, conversation and controlled native CLI inference. |
+| Common CLI host | `src/hosts/{interactive,cli-progress,model-catalog,cli-runtime,cli-host,cli-transport,cli-tools,codex-profile,plan-conversation}.ts` | Engine/model discovery and selection, scrolling progress, conversation and controlled native CLI inference. |
 | OpenCode adapter | `src/hosts/{opencode,opencode-runtime}.ts` | Retained plugin and imported-plan host integration. |
 | Workflow entry points | `src/hosts/{cli,controller}.ts`, `src/flow/`, `src/hooks/`, `src/tools/` | Import, approval, delegation, review, cancellation and status. |
 | Task execution | `src/orchestration/{queue,snapshot,worktree,git-boundary,shell,verifier,legacy-verifier}.ts` | Serial tasks, snapshots, verification and accepted changes. The default verifier remains `legacy-unowned`. |
@@ -105,6 +105,19 @@ the current selection intact. Native host preflight must pass before a candidate
 replaces the current selection. These commands do not run model inference.
 The terminal still exits after the plan's approval/execution or rejection; model
 switching does not turn recovery into a different-model replay.
+
+The conversation remains a scrolling terminal, not a full-screen TUI. Progress
+output separates model waiting, task lifecycle, tool activity, verification and
+review from model replies, approval and the final result. It reports observed
+activity rather than estimated completion percentages or OS-process health.
+Repeated progress is suppressed or bounded; tool arguments, raw tool output and
+model response fragments are not progress messages. Model replies still appear
+after the turn completes rather than as a token stream.
+
+Progress is observational: it cannot approve work, acquire execution ownership or
+change cancellation semantics. It is suspended while the human approval reader
+owns the terminal. A cancellation request is not proof that a process has exited;
+the existing execution settlement and recovery rules still apply.
 
 Model names are native identifiers and examples, not a promise of account availability.
 Models must follow LCA's JSON tool protocol and produce valid plans; malformed replies

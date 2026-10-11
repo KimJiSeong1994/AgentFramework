@@ -25,6 +25,7 @@ import type {
 } from "./types.ts"
 import { EXECUTION_ROLES } from "./types.ts"
 import type { ExecutionRunStore } from "./run-state.ts"
+import type { CliHostActivity } from "./cli-progress.ts"
 
 const CONTROL_PROFILE = "estimated-input-reactive-output-v1" as const
 const MAIN_INPUT_LIMIT = 8192
@@ -39,6 +40,7 @@ const OMITTED_HISTORY = "[earlier tool exchanges omitted to fit the estimated in
 const SCRATCH_CLEANUP_ERROR = "scratch cleanup failed"
 const RESPONSE_ENVELOPE = 'Required transport format: respond with one LCA tool envelope or {"type":"final","text":"your final answer as a JSON string"}. Output-format instructions in the task or role apply to the CONTENTS of text, not to this outer envelope. If the final answer is plan JSON or reviewer JSON, JSON-encode it inside the text string. Never return a bare plan, verdict, or prose outside the envelope.'
 const CODEX_PROFILE_REFUSAL = "Codex native profile preflight is unavailable or mismatched; host admission is refused."
+let cliHostActivitySequence = 0
 
 const BUDGET_EVIDENCE: BudgetEvidence = Object.freeze({
   input: "estimated",
@@ -70,6 +72,8 @@ export type CliHostOptions = {
   model: string
   policy: ExecutionPolicy
   runs: ExecutionRunStore
+  /** Best-effort, content-free lifecycle events for a read-only host observer. */
+  observeActivity?: (activity: CliHostActivity) => void
   /** A transport factory keeps native inference replaceable in deterministic host fixtures. */
   createTransport?: CliTransportFactory
 }
@@ -223,6 +227,11 @@ function safeError(outcome: ExecutionOutcome): ExecutionOutcome {
   return outcome
 }
 
+function nextCliHostActivitySequence(): number {
+  cliHostActivitySequence = cliHostActivitySequence >= Number.MAX_SAFE_INTEGER ? 1 : cliHostActivitySequence + 1
+  return cliHostActivitySequence
+}
+
 function toolResultText(output: CliToolOutput, transformed: { result?: unknown; error?: unknown }): { ok: boolean; text: string } {
   const value = transformed.error !== undefined ? transformed.error : transformed.result
   if (typeof value === "string") {
@@ -257,7 +266,14 @@ function checkRequestShape(request: ExecutionRequest): void {
 export function createCliHost(options: CliHostOptions): ExecutionHost {
   if (!options || !["local", "codex", "claude"].includes(options.engine) ||
       typeof options.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/.test(options.model) ||
-      !options.policy || !options.runs) throw new TypeError("invalid CLI host options")
+      !options.policy || !options.runs ||
+      (options.observeActivity !== undefined && typeof options.observeActivity !== "function")) {
+    throw new TypeError("invalid CLI host options")
+  }
+
+  const observeActivity = (activity: CliHostActivity): void => {
+    try { options.observeActivity?.(activity) } catch { /* Progress observers never affect host outcomes. */ }
+  }
 
   let codexProfile: ReturnType<typeof createCodexProfile> | undefined
   if (options.engine === "codex") {
@@ -407,6 +423,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
         throw new Error("unresolved Codex preflight process; model dispatch refused")
       }
       checkRequestShape(rawRequest)
+      const activityExecution = nextCliHostActivitySequence()
       const request: ExecutionRequest = Object.freeze({
         ...rawRequest,
         handlers: Object.freeze({ ...rawRequest.handlers }),
@@ -626,8 +643,14 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               assertFixedPolicy(request)
             }
             let native: Awaited<ReturnType<CliTransportHandle["run"]>> | undefined
+            observeActivity({ kind: "model-started", role: request.role, execution: activityExecution })
             try { native = await transport.run() }
             catch { native = undefined }
+            const modelStatus = !native ? (cancelled ? "cancelled" : "unresolved") :
+              !native.quiescent ? "unresolved" : native.status
+            observeActivity({
+              kind: "model-returned", role: request.role, execution: activityExecution, status: modelStatus,
+            })
             if (!native) {
               let reconciliation: ExecutionReconciliation | undefined
               try { reconciliation = await transport.reconcile() }
@@ -711,8 +734,13 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             assertFixedPolicy(request)
 
             let output: CliToolOutput
+            observeActivity({ kind: "tool-started", role: request.role, execution: activityExecution, tool: name })
             try { output = tools.execute(name, envelope.input) }
-            catch { return setFinal({ status: "failed", error: "LCA tool input or implementation failed closed" }) }
+            catch {
+              observeActivity({ kind: "tool-finished", role: request.role, execution: activityExecution, tool: name, ok: false })
+              return setFinal({ status: "failed", error: "LCA tool input or implementation failed closed" })
+            }
+            observeActivity({ kind: "tool-finished", role: request.role, execution: activityExecution, tool: name, ok: output.ok })
             const resultEvent = {
               type: "tool-result" as const,
               sessionID: callSession,

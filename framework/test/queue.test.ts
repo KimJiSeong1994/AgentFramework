@@ -789,6 +789,37 @@ describe("neutral execution queue", () => {
     expect(f.runtime.runs.status().claim).toBeUndefined()
   })
 
+  test("verifier start progress follows dispatch and a failing observer cannot stop verification", async () => {
+    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    f.replies.set("worker", () => ({ status: "completed", text: "done" }))
+    const verifier = f.runtime.verifier
+    let runCalled = false
+    f.runtime.verifier = { ...verifier, async prepare(request) {
+      const handle = await verifier.prepare(request)
+      return { ...handle, run() {
+        runCalled = true
+        return handle.run()
+      } }
+    } }
+    const observed: Array<{ fields: unknown; runCalled: boolean; dispatch: unknown; terminal: unknown }> = []
+    f.runtime.log = (message, fields) => {
+      if (message !== "task verify started") return
+      const execution = f.runtime.runs.status().executions.find(record => record.kind === "verifier")
+      observed.push({ fields, runCalled, dispatch: execution?.verifierDispatch, terminal: execution?.terminal })
+      throw new Error("fixture progress writer failed")
+    }
+    const q = createQueue(f.runtime)
+    const [task] = q.add(S, [{ title: "observable verification", verify: verify("check_progress.sh", "test -f README.md") }])
+    expect(await q.run(S)).toMatchObject({ done: 1, failed: 0 })
+    expect(observed).toEqual([{
+      fields: { sessionID: S, task: task!.id, attempt: 1 },
+      runCalled: true,
+      dispatch: "started",
+      terminal: undefined,
+    }])
+    expect(f.runtime.runs.status().claim).toBeUndefined()
+  })
+
   test("unsupported Linux profile refuses before any verifier spawn or intent", async () => {
     const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
     f.runtime.verificationProfile = "linux-single-use"
