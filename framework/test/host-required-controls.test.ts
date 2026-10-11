@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test"
 import { assertHostAdmission, assertRequiredControlStatuses } from "../src/hosts/required-controls.ts"
 import { EXECUTION_ROLES, type ExecutionHost, type ExecutionRole } from "../src/hosts/types.ts"
 
-const common = [
-  "boundedInput",
-  "boundedOutput",
+const budgetControls = ["boundedInput", "boundedOutput"] as const
+const estimatedBudgetControls = ["estimatedInput", "reactiveOutput"] as const
+const nonBudgetControls = [
   "preExecutionToolPolicy",
   "headlessPermissionRefusal",
   "ownedCancellation",
@@ -12,18 +12,41 @@ const common = [
   "identityBinding",
   "noReplayRecovery",
 ] as const
+const common = [...budgetControls, ...nonBudgetControls] as const
+const BUDGET_EVIDENCE = {
+  input: "estimated",
+  output: "reactive",
+  vendorContext: "unobserved",
+  mainLimit: 8192,
+  workerLimit: 5120,
+} as const
+const commonProfile = "estimated-input-reactive-output-v1" as const
 
-function statuses(role: ExecutionRole): Record<string, unknown> {
-  const controls: Record<string, unknown> = Object.fromEntries(common.map(key => [key, "supported"]))
+function statuses(role: ExecutionRole): Preflight["controls"] {
+  const controls: Preflight["controls"] = Object.fromEntries(common.map(key => [key, "supported" as const]))
   if (role === "worker") controls.serialWorkerLease = "supported"
   if (role === "main" || role === "reviewer") controls.readOnlyWorktree = "supported"
   return controls
 }
 
+function estimatedStatuses(role: ExecutionRole): Preflight["controls"] {
+  const controls = statuses(role)
+  delete controls.boundedInput
+  delete controls.boundedOutput
+  controls.estimatedInput = "supported"
+  controls.reactiveOutput = "supported"
+  return controls
+}
+
 type Preflight = Awaited<ReturnType<ExecutionHost["preflight"]>>
 
-function preflight(controls: Preflight["controls"], compatible = true, problems: string[] = []): Preflight {
-  return { compatible, controls, problems }
+function preflight(
+  controls: Preflight["controls"],
+  compatible = true,
+  problems: string[] = [],
+  budgetEvidence?: Preflight["budgetEvidence"],
+): Preflight {
+  return { compatible, controls, problems, ...(budgetEvidence === undefined ? {} : { budgetEvidence }) }
 }
 
 describe("required control status checks", () => {
@@ -72,6 +95,96 @@ describe("required control status checks", () => {
     expect(() => assertRequiredControlStatuses({ ...statuses("main"), diagnostics: "supported", readOnlyWorktree: undefined }, "main")).toThrow("required control statuses unavailable")
     expect(() => assertRequiredControlStatuses(statuses("worker"), "main")).toThrow("required control statuses unavailable")
     expect(() => assertRequiredControlStatuses(statuses("main"), "worker")).toThrow("required control statuses unavailable")
+  })
+
+  test("estimated and reactive budget statuses are refused by the strict default profile", () => {
+    const controls = estimatedStatuses("main")
+    expect(() => assertRequiredControlStatuses(controls, "main")).toThrow("required control statuses unavailable")
+    expect(() => assertHostAdmission(preflight(controls))).toThrow("required control statuses unavailable")
+  })
+
+  test("explicit estimated-input/reactive-output profile keeps nonbudget and role controls required", () => {
+    for (const role of EXECUTION_ROLES) {
+      expect(() => assertRequiredControlStatuses(estimatedStatuses(role), role, commonProfile)).not.toThrow()
+      const required = [
+        ...estimatedBudgetControls,
+        ...nonBudgetControls,
+        ...(role === "worker" ? ["serialWorkerLease"] : []),
+        ...(role === "main" || role === "reviewer" ? ["readOnlyWorktree"] : []),
+      ]
+      for (const key of required) {
+        const missing = estimatedStatuses(role)
+        delete missing[key]
+        expect(() => assertRequiredControlStatuses(missing, role, commonProfile))
+          .toThrow("required control statuses unavailable")
+        expect(() => assertRequiredControlStatuses({ ...estimatedStatuses(role), [key]: "unsupported" }, role, commonProfile))
+          .toThrow("required control statuses unavailable")
+      }
+    }
+  })
+
+  test("unknown control profiles refuse instead of selecting permissive requirements", () => {
+    for (const profile of ["unknown", "legacy-unowned", null, false, {}]) {
+      expect(() => Reflect.apply(assertRequiredControlStatuses, undefined, [statuses("main"), "main", profile]))
+        .toThrow("required control statuses unavailable")
+      expect(() => Reflect.apply(assertHostAdmission, undefined, [preflight(statuses("main")), profile]))
+        .toThrow("host incompatible")
+    }
+  })
+
+  test("alternate statuses still require own data properties and do not invoke getters", () => {
+    expect(() => assertRequiredControlStatuses(Object.create(estimatedStatuses("main")), "main", commonProfile))
+      .toThrow("required control statuses unavailable")
+
+    let invoked = false
+    const controls = estimatedStatuses("worker")
+    Object.defineProperty(controls, "estimatedInput", { get() { invoked = true; return "supported" } })
+    expect(() => assertRequiredControlStatuses(controls, "worker", commonProfile))
+      .toThrow("required control statuses unavailable")
+    expect(invoked).toBe(false)
+  })
+
+  test("common profile admission requires exact own-property budget evidence", () => {
+    const controls = Object.fromEntries(
+      [...estimatedBudgetControls, ...nonBudgetControls, "serialWorkerLease", "readOnlyWorktree"]
+        .map(key => [key, "supported" as const]),
+    ) as Preflight["controls"]
+    controls.boundedInput = "unsupported"
+    controls.boundedOutput = "unsupported"
+    expect(() => assertHostAdmission(preflight(controls), commonProfile)).toThrow("host incompatible")
+    expect(() => assertHostAdmission(preflight(controls, true, [], BUDGET_EVIDENCE), commonProfile)).not.toThrow()
+
+    const missing: Record<string, unknown> = { ...BUDGET_EVIDENCE }
+    delete missing.workerLimit
+    const extra = { ...BUDGET_EVIDENCE, exact: true }
+    const wrongValue = { ...BUDGET_EVIDENCE, mainLimit: 8191 }
+    let invoked = false
+    const getter = { ...BUDGET_EVIDENCE }
+    Object.defineProperty(getter, "mainLimit", { get() { invoked = true; return 8192 } })
+    const inherited = Object.create(BUDGET_EVIDENCE)
+    for (const evidence of [missing, extra, wrongValue, getter, inherited]) {
+      expect(() => assertHostAdmission(preflight(controls, true, [], evidence as Preflight["budgetEvidence"]), commonProfile))
+        .toThrow("host incompatible")
+    }
+
+    const inheritedPreflight = Object.assign(Object.create({ budgetEvidence: BUDGET_EVIDENCE }), {
+      compatible: true, controls, problems: [],
+    })
+    expect(() => assertHostAdmission(inheritedPreflight, commonProfile)).toThrow("host incompatible")
+    const getterPreflight = preflight(controls)
+    Object.defineProperty(getterPreflight, "budgetEvidence", { get() { invoked = true; return BUDGET_EVIDENCE } })
+    expect(() => assertHostAdmission(getterPreflight, commonProfile)).toThrow("host incompatible")
+    expect(invoked).toBe(false)
+  })
+
+  test("legacy hook-control maps remain inadmissible under either profile", () => {
+    const legacyHookMap: Preflight["controls"] = {
+      session: "supported", model: "supported", system: "supported", tools: "supported",
+      outputLimit: "supported", thinking: "supported", toolPolicyHandlers: "supported",
+      assistantTextHandler: "supported",
+    }
+    expect(() => assertHostAdmission(preflight(legacyHookMap))).toThrow("required control statuses unavailable")
+    expect(() => assertHostAdmission(preflight(legacyHookMap), commonProfile)).toThrow("host incompatible")
   })
 
   test("shared host admission assertion rejects incompatibility, preflight problems, and missing role controls", () => {

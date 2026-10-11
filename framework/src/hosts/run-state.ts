@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve } from "node:path"
 import { isDeepStrictEqual } from "node:util"
 import { executionRunDirectory } from "../state/store.ts"
 import type { VerificationProfile, VerificationReference, VerificationResult } from "../orchestration/verifier.ts"
-import { EXECUTION_ROLES, type ExecutionReference, type ExecutionRole } from "./types.ts"
+import { EXECUTION_ROLES, type ControlProfile, type ExecutionReference, type ExecutionRole } from "./types.ts"
 import { authenticateLinuxVerification } from "./linux-domain.ts"
 
 export type ExecutionClaim = { ownerSession: string; instance: string; pid: number; generation: number; token: string }
@@ -13,6 +13,7 @@ export type ExecutionIntent = {
   kind?: "host" | "verifier"
   engine?: string
   profile?: VerificationProfile
+  controlProfile?: ControlProfile
   inputSnapshotID?: string
   inputDigest?: string
   deadlineAt?: number
@@ -192,6 +193,7 @@ const recordShape = (value: unknown): value is ExecutionRecord => {
   if (!object(value) || !text(value.executionId) || !text(value.ownerSession) || !text(value.taskId) || !text(value.attemptId) || !integer(value.generation) || !text(value.role) || !text(value.cwd) || !text(value.policyID)) return false
   if (("kind" in value || "profile" in value) &&
     ((value.kind !== "host" && value.kind !== "verifier") || !profileShape(value.profile))) return false
+  if ("controlProfile" in value && (value.kind !== "host" || value.controlProfile !== "estimated-input-reactive-output-v1")) return false
   if (value.kind === "host" && !text(value.engine)) return false
   if (value.kind === "verifier" && "engine" in value) return false
   if (value.kind === "verifier" && (!text(value.inputSnapshotID) || typeof value.inputDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.inputDigest) ||

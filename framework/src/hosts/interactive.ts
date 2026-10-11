@@ -1,20 +1,57 @@
-import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process"
-import {
-  accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  realpathSync, rmSync, statSync, writeFileSync,
-} from "node:fs"
-import { homedir, tmpdir } from "node:os"
-import { delimiter, isAbsolute, join, resolve } from "node:path"
-import { fileURLToPath, pathToFileURL } from "node:url"
-import { parseTree, type Node } from "jsonc-parser"
-import { loadConfig, parseJsonc, parseModelSelection, type LcaConfig } from "../config.ts"
+import { randomUUID } from "node:crypto"
+import { spawnSync } from "node:child_process"
+import { accessSync, constants, realpathSync, statSync } from "node:fs"
+import { isAbsolute, resolve } from "node:path"
+import { createInterface } from "node:readline"
+import { activeWorkflow } from "../flow/state.ts"
+import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
+import { createPlanConversation } from "./plan-conversation.ts"
+import { createForegroundController, type ForegroundController } from "./controller.ts"
+import { humanDecision } from "./operator.ts"
+import type { OperatorDecision } from "./operator.ts"
+import { AdmissionRefusal } from "./required-controls.ts"
+import { LinuxAdmissionRefused, type ExecutionRuntime } from "./types.ts"
 
-const REQUIRED_HOOKS = ["config.agents", "chat.params", "tool.delegate", "guard.plan_boundary", "flow"]
-export const CHAT_INSTRUCTIONS = "lca chat: isolated LCA-only profile; non-LCA plugins are disabled. Describe a request; inspect its plan before /approve, use /reject to decline, /status if enabled, and /cancel to stop."
-const PROJECT_LCA_BRIDGE = [
-  "// Project-local loader for the lca plugin during development. OpenCode auto-loads .opencode/plugins/*.ts.",
-  'export { LcaPlugin } from "../../framework/src/index.ts"',
-].join("\n") + "\n"
+export type CliEngine = CliRuntimeOptions["engine"]
+export type InteractiveArgs = { worktree: string; engine?: CliEngine; model?: string }
+export type InteractiveExit = { code: number }
+
+export type Terminal = {
+  stdinIsTTY: boolean
+  stderrIsTTY: boolean
+  readLine: (prompt: string, signal?: AbortSignal) => Promise<string | undefined>
+  write: (text: string) => void
+  close: () => void
+}
+
+type PlanConversation = {
+  turn: (text: string, signal?: AbortSignal) => Promise<{ text: string; plan?: unknown }>
+}
+
+type SignalName = "SIGINT" | "SIGTERM"
+type SignalSource = {
+  on: (signal: SignalName, listener: () => void) => unknown
+  off: (signal: SignalName, listener: () => void) => unknown
+}
+
+type RuntimeOptions = CliRuntimeOptions
+
+export type InteractiveDependencies = {
+  cwd: string
+  terminal: Terminal
+  gitTopLevel: (directory: string) => string | undefined
+  createRuntime: (options: RuntimeOptions) => ExecutionRuntime
+  createConversation: (runtime: ExecutionRuntime, sessionID: string) => PlanConversation
+  createController: (runtime: ExecutionRuntime) => ForegroundController
+  humanDecision: typeof humanDecision
+  randomUUID: () => string
+  signals: SignalSource
+}
+
+function terminalSafeText(value: string): string {
+  return value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u206f]/g, (character) =>
+    `\\u${character.codePointAt(0)!.toString(16).padStart(4, "0")}`)
+}
 
 export class InteractiveLaunchError extends Error {
   constructor(message: string) {
@@ -23,100 +60,109 @@ export class InteractiveLaunchError extends Error {
   }
 }
 
-export type InteractiveArgs = { worktree: string }
-export type InteractiveExit = { code: number | null; signal: NodeJS.Signals | null }
-
-type TerminalState = { stdin: boolean; stdout: boolean }
-type SpawnedChild = Pick<ChildProcess, "once" | "kill">
-type RuntimeProfile = { configHome: string; cleanup: () => void }
-export type OpenCodeConfig = Record<string, unknown>
-export type InteractiveDependencies = {
-  env: NodeJS.ProcessEnv
-  cwd: string
-  terminal: TerminalState
-  findExecutable: (name: string, pathValue: string | undefined) => string | undefined
-  gitTopLevel: (directory: string, env: NodeJS.ProcessEnv) => string | undefined
-  readConfig: (worktree: string) => LcaConfig
-  createRuntimeProfile: (config: OpenCodeConfig, lcaConfigPath?: string) => RuntimeProfile
-  spawn: (command: string, args: string[], options: SpawnOptions) => SpawnedChild
-  printInstructions: (text: string) => void
+export function validModelID(value: string): boolean {
+  return value.length > 0 && value.length <= 256 && !value.startsWith("-") && value.trim() === value &&
+    !/[\\\s\u0000-\u001f\u007f]/u.test(value)
 }
 
 export function parseInteractiveArgs(argv: string[], cwd = process.cwd()): InteractiveArgs {
-  let worktree: string | undefined
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i]!
-    if (flag !== "--worktree") throw new InteractiveLaunchError("unknown chat option; use only --worktree PATH")
-    if (worktree !== undefined) throw new InteractiveLaunchError("duplicate --worktree option")
-    const value = argv[++i]
-    if (!value || value.startsWith("--")) throw new InteractiveLaunchError("missing value for --worktree")
-    worktree = value
+  const fields: Record<string, string> = {}
+  const allowed = new Set(["--worktree", "--engine", "--model"])
+  for (let index = 0; index < argv.length; index++) {
+    const flag = argv[index]!
+    if (!allowed.has(flag)) throw new InteractiveLaunchError("unknown chat option; use --worktree, --engine, or --model")
+    if (Object.hasOwn(fields, flag)) throw new InteractiveLaunchError(`duplicate ${flag} option`)
+    const value = argv[index + 1]
+    if (value === undefined || value === "" || value.startsWith("--")) {
+      throw new InteractiveLaunchError(`missing value for ${flag}`)
+    }
+    fields[flag] = value
+    index++
   }
-  return { worktree: worktree ?? cwd }
+  const engine = fields["--engine"]
+  if (engine !== undefined && engine !== "local" && engine !== "codex" && engine !== "claude") {
+    throw new InteractiveLaunchError("invalid --engine; choose local, codex, or claude")
+  }
+  const model = fields["--model"]
+  if (model !== undefined && !validModelID(model)) {
+    throw new InteractiveLaunchError("invalid --model; enter a native model ID without whitespace")
+  }
+  return {
+    worktree: fields["--worktree"] ?? cwd,
+    ...(engine ? { engine } : {}),
+    ...(model ? { model } : {}),
+  }
 }
 
-function defaultFindExecutable(name: string, pathValue: string | undefined): string | undefined {
-  if (!pathValue) return undefined
-  for (const directory of pathValue.split(delimiter)) {
-    if (!directory) continue
-    const candidate = join(directory, name)
-    try {
-      accessSync(candidate, constants.X_OK)
-      if (statSync(candidate).isFile()) return realpathSync(candidate)
-    } catch { /* try the next PATH entry */ }
-  }
-  return undefined
-}
-
-function defaultGitTopLevel(directory: string, env: NodeJS.ProcessEnv): string | undefined {
-  const gitEnv: NodeJS.ProcessEnv = { ...env, GIT_OPTIONAL_LOCKS: "0" }
+function defaultGitTopLevel(directory: string): string | undefined {
+  const gitEnv: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: "0" }
   delete gitEnv.GIT_DIR
   delete gitEnv.GIT_WORK_TREE
   delete gitEnv.GIT_COMMON_DIR
   const result = spawnSync("git", ["-C", directory, "rev-parse", "--show-toplevel"], {
-    encoding: "utf8",
-    env: gitEnv,
-    stdio: ["ignore", "pipe", "ignore"],
+    encoding: "utf8", env: gitEnv, stdio: ["ignore", "pipe", "ignore"],
   })
-  if (result.error || result.status !== 0 || !result.stdout.trim()) return undefined
-  try { return realpathSync(result.stdout.trim()) } catch { return undefined }
+  if (result.error || result.status !== 0) return undefined
+  const topLevel = result.stdout.trim()
+  if (!topLevel) return undefined
+  try { return realpathSync(topLevel) } catch { return undefined }
 }
 
-function createRuntimeProfile(config: OpenCodeConfig, lcaConfigPath?: string): RuntimeProfile {
-  let profileHome: string | undefined
-  try {
-    profileHome = mkdtempSync(join(tmpdir(), "lca-opencode-profile-"))
-    chmodSync(profileHome, 0o700)
-    const configDirectory = join(profileHome, "opencode")
-    mkdirSync(configDirectory, { mode: 0o700 })
-    chmodSync(configDirectory, 0o700)
-    writeFileSync(join(configDirectory, "opencode.json"), JSON.stringify(config), { mode: 0o600, flag: "wx" })
-    if (lcaConfigPath && existsSync(lcaConfigPath)) {
-      const lcaDirectory = join(profileHome, "lca")
-      mkdirSync(lcaDirectory, { mode: 0o700 })
-      chmodSync(lcaDirectory, 0o700)
-      const source = realpathSync(lcaConfigPath)
-      if (!statSync(source).isFile()) throw new Error()
-      writeFileSync(join(lcaDirectory, "lca.jsonc"), readFileSync(source), { mode: 0o600, flag: "wx" })
-    }
-    return { configHome: profileHome, cleanup: () => rmSync(profileHome!, { recursive: true, force: true }) }
-  } catch {
-    if (profileHome) rmSync(profileHome, { recursive: true, force: true })
-    throw new InteractiveLaunchError("could not create a private temporary OpenCode profile")
+function createTerminal(): Terminal {
+  let reader: ReturnType<typeof createInterface> | undefined
+  const terminal: Terminal = {
+    stdinIsTTY: process.stdin.isTTY === true,
+    stderrIsTTY: process.stderr.isTTY === true,
+    readLine(prompt, signal) {
+      if (signal?.aborted) return Promise.resolve(undefined)
+      reader ??= createInterface({ input: process.stdin, output: process.stderr, terminal: process.stderr.isTTY === true })
+      return new Promise((resolveLine) => {
+        let settled = false
+        const finish = (line: string | undefined) => {
+          if (settled) return
+          settled = true
+          reader?.off("line", onLine)
+          reader?.off("close", onClose)
+          reader?.off("SIGINT", onReadlineInterrupt)
+          signal?.removeEventListener("abort", onAbort)
+          resolveLine(line)
+        }
+        const onLine = (line: string) => finish(line)
+        const onClose = () => finish(undefined)
+        const onReadlineInterrupt = () => finish(undefined)
+        const onAbort = () => finish(undefined)
+        reader!.once("line", onLine)
+        reader!.once("close", onClose)
+        reader!.once("SIGINT", onReadlineInterrupt)
+        signal?.addEventListener("abort", onAbort, { once: true })
+        if (signal?.aborted) return finish(undefined)
+        reader!.setPrompt(prompt)
+        reader!.prompt()
+      })
+    },
+    write: (text) => { process.stderr.write(text) },
+    close: () => {
+      reader?.close()
+      reader = undefined
+    },
   }
+  return terminal
 }
 
 function defaultDependencies(): InteractiveDependencies {
   return {
-    env: process.env,
     cwd: process.cwd(),
-    terminal: { stdin: process.stdin.isTTY === true, stdout: process.stdout.isTTY === true },
-    findExecutable: defaultFindExecutable,
+    terminal: createTerminal(),
     gitTopLevel: defaultGitTopLevel,
-    readConfig: loadConfig,
-    createRuntimeProfile,
-    spawn: (command, args, options) => spawn(command, args, options),
-    printInstructions: (text) => console.error(text),
+    createRuntime: ({ worktree, engine, model }) => createCliRuntime({ worktree, engine, model }),
+    createConversation: (runtime, sessionID) => createPlanConversation(runtime, sessionID),
+    createController: createForegroundController,
+    humanDecision,
+    randomUUID,
+    signals: {
+      on: (signal, listener) => { process.on(signal, listener) },
+      off: (signal, listener) => { process.off(signal, listener) },
+    },
   }
 }
 
@@ -129,352 +175,72 @@ function canonicalWorktree(requested: string, deps: InteractiveDependencies): st
   } catch {
     throw new InteractiveLaunchError("chat requires an accessible Git worktree")
   }
-  const topLevel = deps.gitTopLevel(directory, deps.env)
+  const topLevel = deps.gitTopLevel(directory)
   if (!topLevel || !isAbsolute(topLevel)) throw new InteractiveLaunchError("chat requires a canonical Git worktree")
   try {
     const canonical = realpathSync(topLevel)
     if (!statSync(canonical).isDirectory()) throw new Error()
+    accessSync(canonical, constants.R_OK | constants.X_OK)
     return canonical
   } catch {
     throw new InteractiveLaunchError("chat requires a canonical Git worktree")
   }
 }
 
-function validateLcaConfig(config: LcaConfig): void {
-  if (config.flow?.enabled !== true) {
-    throw new InteractiveLaunchError("chat requires flow.enabled=true in the LCA configuration")
-  }
-  if (!Array.isArray(config.disabled_hooks) || config.disabled_hooks.some((hook) => typeof hook !== "string")) {
-    throw new InteractiveLaunchError("chat requires a valid LCA disabled_hooks configuration")
-  }
-  const disabled = new Set<string>(config.disabled_hooks)
-  const missing = REQUIRED_HOOKS.filter((hook) => disabled.has(hook))
-  if (missing.length) {
-    throw new InteractiveLaunchError(`chat requires enabled LCA safety hooks: ${missing.join(", ")}`)
-  }
+function signalExit(signal: SignalName | undefined): InteractiveExit {
+  return { code: signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 0 }
 }
 
-function assertNoProjectOpenCodeConfig(root: string): void {
-  const paths = [
-    join(root, "opencode.json"), join(root, "opencode.jsonc"),
-    join(root, ".opencode", "opencode.json"), join(root, ".opencode", "opencode.jsonc"),
-  ]
-  if (paths.some(existsSync)) {
-    throw new InteractiveLaunchError("chat refuses project OpenCode config files; move model selection to global OpenCode or LCA config")
+async function chooseEngine(terminal: Terminal, signal: AbortSignal): Promise<CliEngine | undefined> {
+  const menu = "Choose an execution engine:\n  1) local  — Ollama CLI\n  2) codex  — Codex CLI\n  3) claude — Claude CLI\n"
+  while (!signal.aborted) {
+    const answer = await terminal.readLine(`${menu}Engine [1-3]: `, signal)
+    if (answer === undefined || signal.aborted) return undefined
+    const normalized = answer.trim().toLowerCase()
+    if (normalized === "1" || normalized === "local") return "local"
+    if (normalized === "2" || normalized === "codex") return "codex"
+    if (normalized === "3" || normalized === "claude") return "claude"
+    terminal.write("Choose local, codex, or claude (1, 2, or 3).\n")
   }
-  for (const name of ["agent", "agents", "command", "commands"]) {
-    const folder = join(root, ".opencode", name)
-    let entries
-    try { entries = readdirSync(folder, { withFileTypes: true }) }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
-      throw new InteractiveLaunchError("chat could not safely inspect project OpenCode profiles")
-    }
-    if (entries.some((entry) => entry.isFile() || entry.isSymbolicLink())) {
-      throw new InteractiveLaunchError("chat refuses project OpenCode agents or commands that could override the LCA profile")
-    }
-  }
+  return undefined
 }
 
-function assertNoLegacyHomeOpenCodeInputs(root: string, env: NodeJS.ProcessEnv): void {
-  const home = resolve(env.HOME || homedir())
-  const legacy = join(home, ".opencode")
-  if (legacy === root) return
-  const configs = ["config.json", "opencode.json", "opencode.jsonc"].map((name) => join(legacy, name))
-  if (configs.some(existsSync)) {
-    throw new InteractiveLaunchError("chat refuses legacy ~/.opencode config; migrate supported model settings to the standard OpenCode config")
+async function chooseModel(terminal: Terminal, signal: AbortSignal): Promise<string | undefined> {
+  terminal.write("Enter a native model ID; no provider/model prefix or default model is selected.\n")
+  while (!signal.aborted) {
+    const answer = await terminal.readLine("Model ID: ", signal)
+    if (answer === undefined || signal.aborted) return undefined
+    if (validModelID(answer)) return answer
+    terminal.write("Invalid model ID; use a non-empty name without whitespace.\n")
   }
-  for (const name of ["plugin", "plugins", "agent", "agents", "command", "commands"]) {
-    const folder = join(legacy, name)
-    let entries
-    try { entries = readdirSync(folder, { withFileTypes: true }) }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
-      throw new InteractiveLaunchError("chat could not safely inspect legacy ~/.opencode plugins")
-    }
-    if (entries.some((entry) => entry.isFile() || entry.isSymbolicLink())) {
-      throw new InteractiveLaunchError("chat refuses legacy ~/.opencode profiles or plugins; migrate supported settings to standard config")
-    }
-  }
+  return undefined
 }
 
-function knownBridge(root: string): { path: string } | undefined {
-  const matches: Array<{ path: string }> = []
-  for (const folder of [join(root, ".opencode", "plugins"), join(root, ".opencode", "plugin")]) {
-    let entries
-    try { entries = readdirSync(folder, { withFileTypes: true }) }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
-      throw new InteractiveLaunchError("chat could not safely inspect project OpenCode plugins")
-    }
-    for (const entry of entries) {
-      if (!entry.isFile() && !entry.isSymbolicLink()) continue
-      if (!/\.(?:ts|js)$/.test(entry.name)) continue
-      const path = join(folder, entry.name)
-      if (entry.name.toLowerCase() === "lca.js") {
-        throw new InteractiveLaunchError("chat found a conflicting project LCA plugin; use the exact project bridge")
-      }
-      if (entry.name !== "lca.ts") {
-        throw new InteractiveLaunchError("chat refuses conflicting project OpenCode plugins; only the exact LCA bridge is supported")
-      }
-      try {
-        if (entry.isSymbolicLink() || realpathSync(path) !== resolve(path)) throw new Error()
-        const source = readFileSync(path, "utf8").replace(/\r\n/g, "\n")
-        if (source !== PROJECT_LCA_BRIDGE) throw new Error()
-        const target = resolve(folder, "../../framework/src/index.ts")
-        if (!statSync(target).isFile()) throw new Error()
-      } catch {
-        throw new InteractiveLaunchError("chat found a conflicting project LCA plugin; use the exact project bridge")
-      }
-      matches.push({ path })
-    }
-  }
-  if (matches.length > 1) throw new InteractiveLaunchError("chat found duplicate project LCA plugin bridges")
-  return matches[0]
+function defaultSessionID(uuid: string): string {
+  return `lca-${uuid}`
 }
 
-function defaultPluginUrl(): string {
-  const path = resolve(import.meta.dir, "../index.ts")
-  try {
-    if (!statSync(path).isFile()) throw new Error()
-    return pathToFileURL(realpathSync(path)).href
-  } catch {
-    throw new InteractiveLaunchError("chat cannot locate the bundled LCA plugin")
+function planForImport(value: unknown, worktree: string): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new InteractiveLaunchError("conversation did not return a valid plan")
   }
+  const existing = activeWorkflow(worktree)
+  const revision = existing
+    ? 1 + existing.counters.code_invalid + existing.counters.review_iterations + existing.counters.user_rejections
+    : 1
+  const parsed = { ...(value as Record<string, unknown>) }
+  delete parsed.revision
+  return { ...parsed, revision }
 }
 
-function configObject(raw: string, source: string): Record<string, unknown> {
-  let parsed: unknown
-  try { parsed = parseJsonc<unknown>(raw) } catch {
-    throw new InteractiveLaunchError(`${source} must contain valid JSONC`)
-  }
-  const tree = parseTree(raw, [], { allowTrailingComma: true })
-  if (!tree || hasDuplicateKeys(tree)) {
-    throw new InteractiveLaunchError(`${source} must not contain duplicate keys`)
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new InteractiveLaunchError(`${source} must contain a JSONC object`)
-  }
-  return parsed as Record<string, unknown>
-}
-
-function hasDuplicateKeys(node: Node): boolean {
-  if (node.type === "object") {
-    const names = new Set<string>()
-    for (const property of node.children ?? []) {
-      const key = property.children?.[0]?.value
-      if (typeof key !== "string" || names.has(key)) return true
-      names.add(key)
-      const value = property.children?.[1]
-      if (value && hasDuplicateKeys(value)) return true
-    }
-    return false
-  }
-  return (node.children ?? []).some((child) => hasDuplicateKeys(child))
-}
-
-type PluginEntry = string | [string, Record<string, unknown>]
-function pluginEntries(config: Record<string, unknown>, source: string): PluginEntry[] {
-  if (!Object.hasOwn(config, "plugin")) return []
-  if (!Array.isArray(config.plugin)) throw new InteractiveLaunchError(`${source} plugin setting must be an array`)
-  return config.plugin.map((entry) => {
-    if (typeof entry === "string" && entry.length > 0) return entry
-    if (Array.isArray(entry) && entry.length === 2 && typeof entry[0] === "string" && entry[0].length > 0 &&
-      entry[1] && typeof entry[1] === "object" && !Array.isArray(entry[1])) return [entry[0], entry[1] as Record<string, unknown>]
-    throw new InteractiveLaunchError(`${source} contains an invalid plugin entry`)
-  })
-}
-
-function pluginName(entry: PluginEntry): string {
-  return typeof entry === "string" ? entry : entry[0]
-}
-
-function resolvedPluginPath(spec: string, root: string): string | undefined {
-  try {
-    const candidate = spec.startsWith("file:") ? fileURLToPath(spec) : isAbsolute(spec) ? spec : resolve(root, spec)
-    return realpathSync(candidate)
-  } catch { return undefined }
-}
-
-function validatePluginOverrides(
-  config: Record<string, unknown>, source: string, root: string,
-  bridge: { path: string } | undefined,
-): void {
-  const plugins = pluginEntries(config, source)
-  const fallbackUrl = defaultPluginUrl()
-  const fallbackPath = fileURLToPath(fallbackUrl)
-  const projectPath = bridge?.path
-  if (plugins.length > 1) throw new InteractiveLaunchError(`${source} contains duplicate LCA plugin entries`)
-  for (const entry of plugins) {
-    const name = pluginName(entry)
-    if (typeof entry !== "string" && Object.keys(entry[1]).length > 0) {
-      throw new InteractiveLaunchError(`${source} LCA plugin options are not supported in the isolated chat profile`)
-    }
-    const resolved = resolvedPluginPath(name, root)
-    if (projectPath !== undefined && resolved === projectPath) {
-      throw new InteractiveLaunchError(`${source} duplicates the auto-loaded project LCA plugin`)
-    }
-    if (!bridge && resolved === fallbackPath) continue
-    if (/(^|\/)lca(?:\.ts|\.js)?$/i.test(name)) {
-      throw new InteractiveLaunchError(`${source} references a conflicting LCA plugin source`)
-    }
-    if (name.toLowerCase().startsWith("oh-my-openagent")) {
-      throw new InteractiveLaunchError(`${source} requests an unsupported conflicting plugin`)
-    }
-    throw new InteractiveLaunchError(`${source} requests a plugin outside the isolated LCA-only profile`)
-  }
-}
-
-function validateOverrideKeys(config: Record<string, unknown>, source: string): void {
-  const allowed = new Set(["model", "small_model", "provider", "plugin"])
-  if (Object.keys(config).some((key) => !allowed.has(key))) {
-    throw new InteractiveLaunchError(`${source} contains settings unsupported by the isolated LCA-only chat profile`)
-  }
-}
-
-function validateSelectedConfig(config: Record<string, unknown>, source: string, strict: boolean): void {
-  if (strict) validateOverrideKeys(config, source)
-  for (const key of ["model", "small_model"] as const) {
-    if (Object.hasOwn(config, key)) {
-      try {
-        if (typeof config[key] !== "string") throw new Error()
-        parseModelSelection(config[key] as string)
-      } catch {
-        throw new InteractiveLaunchError(`${source} ${key} must be a valid provider/model selection`)
-      }
-    }
-  }
-  if (Object.hasOwn(config, "provider") &&
-    (!config.provider || typeof config.provider !== "object" || Array.isArray(config.provider))) {
-    throw new InteractiveLaunchError(`${source} provider setting must be an object`)
-  }
-  if (config.provider && typeof config.provider === "object") {
-    if (Object.values(config.provider).some((provider) => !provider || typeof provider !== "object" || Array.isArray(provider))) {
-      throw new InteractiveLaunchError(`${source} provider entries must be objects`)
-    }
-  }
-}
-
-function mergeObjects(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
-  const result = { ...base }
-  for (const [key, value] of Object.entries(patch)) {
-    const existing = result[key]
-    result[key] = value && typeof value === "object" && !Array.isArray(value) &&
-      existing && typeof existing === "object" && !Array.isArray(existing)
-      ? mergeObjects(existing as Record<string, unknown>, value as Record<string, unknown>)
-      : value
-  }
-  return result
-}
-
-function mergeSelectedConfig(
-  target: OpenCodeConfig, patch: Record<string, unknown>,
-): OpenCodeConfig {
-  for (const key of ["model", "small_model"] as const) {
-    if (Object.hasOwn(patch, key)) target[key] = patch[key]
-  }
-  if (patch.provider) {
-    target.provider = mergeObjects(
-      (target.provider as Record<string, unknown> | undefined) ?? {},
-      patch.provider as Record<string, unknown>,
-    )
-  }
-  return target
-}
-
-function readGlobalOpenCodeConfig(env: NodeJS.ProcessEnv): OpenCodeConfig {
-  const configHome = resolve(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), ".config"))
-  const directory = join(configHome, "opencode")
-  let selected: OpenCodeConfig = {}
-  for (const name of ["config.json", "opencode.json", "opencode.jsonc"]) {
-    const path = join(directory, name)
-    if (!existsSync(path)) continue
-    let parsed: Record<string, unknown>
-    try { parsed = configObject(readFileSync(path, "utf8"), "global OpenCode configuration") }
-    catch (error) {
-      if (error instanceof InteractiveLaunchError) throw error
-      throw new InteractiveLaunchError("could not read global OpenCode model configuration")
-    }
-    validateSelectedConfig(parsed, "global OpenCode configuration", false)
-    selected = mergeSelectedConfig(selected, parsed)
-  }
-  return selected
-}
-
-function readCustomConfig(path: string): Record<string, unknown> {
-  let parsed: Record<string, unknown>
-  try { parsed = configObject(readFileSync(path, "utf8"), "OPENCODE_CONFIG") }
-  catch (error) {
-    if (error instanceof InteractiveLaunchError) throw error
-    throw new InteractiveLaunchError("could not read the explicit OPENCODE_CONFIG override")
-  }
-  validateSelectedConfig(parsed, "OPENCODE_CONFIG", true)
-  return parsed
-}
-
-function readContentConfig(raw: string | undefined): Record<string, unknown> {
-  if (!raw?.trim()) return {}
-  const parsed = configObject(raw, "OPENCODE_CONFIG_CONTENT")
-  validateSelectedConfig(parsed, "OPENCODE_CONFIG_CONTENT", true)
-  return parsed
-}
-
-function buildChildConfigContent(
-  rawConfigs: Record<string, unknown>[], root: string, bridge: { path: string } | undefined,
-): string {
-  const configuredPlugins: PluginEntry[] = []
-  for (const config of rawConfigs) {
-    validatePluginOverrides(config, "OpenCode override", root, bridge)
-    configuredPlugins.push(...pluginEntries(config, "OpenCode override"))
-  }
-  if (configuredPlugins.length > 1) throw new InteractiveLaunchError("chat refuses duplicate LCA plugin entries across explicit overrides")
-  if (bridge) return JSON.stringify({ plugin: [pathToFileURL(bridge.path).href] })
-  const fallbackUrl = defaultPluginUrl()
-  return JSON.stringify({ plugin: configuredPlugins.length ? configuredPlugins : [fallbackUrl] })
-}
-
-function childEnvironment(
-  env: NodeJS.ProcessEnv,
-  worktree: string,
-  configHome: string,
-  configContent: string,
-): NodeJS.ProcessEnv {
-  const child = { ...env }
-  for (const name of [
-    "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT", "OPENCODE_PERMISSION",
-    "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_TUI_CONFIG", "OPENCODE_PLUGIN_META_FILE",
-    "OPENCODE_MODELS_URL", "OPENCODE_MODELS_PATH", "OPENCODE_PURE", "OPENCODE_TEST_HOME",
-  ]) delete child[name]
-  return {
-    ...child,
-    XDG_CONFIG_HOME: configHome,
-    OPENCODE_DISABLE_PROJECT_CONFIG: "true",
-    LCA_INTERACTIVE_WORKTREE: worktree,
-    OPENCODE_CONFIG_CONTENT: configContent,
-  }
-}
-
-function assertNoUnsupportedEnvironmentOverrides(env: NodeJS.ProcessEnv): void {
-  for (const name of [
-    "OPENCODE_CONFIG_DIR", "OPENCODE_PERMISSION", "OPENCODE_TUI_CONFIG", "OPENCODE_PLUGIN_META_FILE",
-    "OPENCODE_MODELS_URL", "OPENCODE_MODELS_PATH", "OPENCODE_TEST_HOME",
-  ]) {
-    if (env[name]) throw new InteractiveLaunchError(`${name} is unsupported in the isolated LCA-only chat profile`)
-  }
-  if (env.OPENCODE_PURE && /^(?:true|1)$/i.test(env.OPENCODE_PURE)) {
-    throw new InteractiveLaunchError("OPENCODE_PURE cannot be enabled for LCA chat")
-  }
-}
-
-function waitForChild(child: SpawnedChild): Promise<InteractiveExit> {
-  return new Promise((resolveExit, reject) => {
-    let spawnFailed = false
-    child.once("error", () => { spawnFailed = true })
-    child.once("close", (code, signal) => {
-      if (spawnFailed) reject(new InteractiveLaunchError("could not start the installed OpenCode host"))
-      else resolveExit({ code, signal })
-    })
-  })
+function planValidationFeedback(error: unknown): string | undefined {
+  if (!(error instanceof Error) || !error.message.startsWith("invalid plan:")) return undefined
+  const detail = terminalSafeText(error.message.slice("invalid plan:".length))
+    .replace(/[ \t\n]+/g, " ")
+    .trim()
+  const limit = 240
+  const bounded = detail.length > limit ? `${detail.slice(0, limit - 3)}...` : detail
+  return `Plan rejected by LCA validation${bounded ? `: ${bounded}` : ""}. Revise the plan or enter /quit.\n`
 }
 
 export async function launchInteractive(
@@ -482,94 +248,127 @@ export async function launchInteractive(
   overrides: Partial<InteractiveDependencies> = {},
 ): Promise<InteractiveExit> {
   const deps = { ...defaultDependencies(), ...overrides }
-  if (!deps.terminal.stdin || !deps.terminal.stdout) {
-    throw new InteractiveLaunchError("chat requires an interactive terminal on stdin and stdout")
+  const terminal = deps.terminal
+  if (!terminal.stdinIsTTY || !terminal.stderrIsTTY) {
+    terminal.close()
+    throw new InteractiveLaunchError("chat requires an interactive terminal on stdin and stderr")
   }
-  const worktree = canonicalWorktree(args.worktree, deps)
-  let config: LcaConfig
-  try { config = deps.readConfig(worktree) } catch {
-    throw new InteractiveLaunchError("chat could not validate the LCA configuration")
-  }
-  validateLcaConfig(config)
-  assertNoUnsupportedEnvironmentOverrides(deps.env)
-  assertNoProjectOpenCodeConfig(worktree)
-  assertNoLegacyHomeOpenCodeInputs(worktree, deps.env)
-  const host = deps.findExecutable("opencode", deps.env.PATH)
-  if (!host) throw new InteractiveLaunchError("chat requires the installed opencode host on PATH")
-  const bridge = knownBridge(worktree)
-  let selectedConfig = readGlobalOpenCodeConfig(deps.env)
-  const configOverrides: Record<string, unknown>[] = []
-  if (deps.env.OPENCODE_CONFIG) {
-    const custom = readCustomConfig(resolve(deps.cwd, deps.env.OPENCODE_CONFIG))
-    validatePluginOverrides(custom, "OPENCODE_CONFIG", worktree, bridge)
-    configOverrides.push(custom)
-    selectedConfig = mergeSelectedConfig(selectedConfig, custom)
-  }
-  const contentConfig = readContentConfig(deps.env.OPENCODE_CONFIG_CONTENT)
-  validatePluginOverrides(contentConfig, "OPENCODE_CONFIG_CONTENT", worktree, bridge)
-  configOverrides.push(contentConfig)
-  selectedConfig = mergeSelectedConfig(selectedConfig, contentConfig)
-  if (!selectedConfig.model && typeof config.models.main === "string" && config.models.main.trim()) {
-    try { parseModelSelection(config.models.main) }
-    catch { throw new InteractiveLaunchError("LCA models.main must be a valid provider/model selection") }
-    selectedConfig.model = config.models.main
-  }
-  if (typeof selectedConfig.model !== "string" || !selectedConfig.model.trim()) {
-    throw new InteractiveLaunchError("chat requires an explicitly configured OpenCode model or LCA models.main; no model fallback is selected")
-  }
-  try { parseModelSelection(selectedConfig.model) }
-  catch { throw new InteractiveLaunchError("chat requires a valid explicitly configured provider/model selection") }
-  const configContent = buildChildConfigContent(configOverrides, worktree, bridge)
-  deps.printInstructions(CHAT_INSTRUCTIONS)
-  const lcaConfigPath = join(
-    deps.env.XDG_CONFIG_HOME || join(deps.env.HOME || homedir(), ".config"),
-    "lca", "lca.jsonc",
-  )
-  const profile = deps.createRuntimeProfile(selectedConfig, lcaConfigPath)
-  const childEnv = childEnvironment(deps.env, worktree, profile.configHome, configContent)
-  const childArgs = [worktree, "--agent", "main"]
-  let child: SpawnedChild
-  try {
-    child = deps.spawn(host, childArgs, { cwd: worktree, env: childEnv, stdio: "inherit" })
-  } catch {
-    profile.cleanup()
-    throw new InteractiveLaunchError("could not start the installed OpenCode host")
-  }
-  let parentSignal: NodeJS.Signals | undefined
-  const forwardSignal = (signal: NodeJS.Signals) => {
-    parentSignal ??= signal
-    try {
-      if (!child.kill(signal)) {
-        deps.printInstructions("lca: host signal was not delivered; waiting for its actual exit")
-      }
-    } catch {
-      deps.printInstructions("lca: host signal failed; waiting for its actual exit")
-    }
-  }
-  const onSigint = () => forwardSignal("SIGINT")
-  const onSigterm = () => forwardSignal("SIGTERM")
-  process.on("SIGINT", onSigint)
-  process.on("SIGTERM", onSigterm)
-  try {
-    const exit = await waitForChild(child)
-    return parentSignal && !exit.signal ? { code: null, signal: parentSignal } : exit
-  } finally {
-    process.off("SIGINT", onSigint)
-    process.off("SIGTERM", onSigterm)
-    profile.cleanup()
-  }
-}
 
-export function propagateInteractiveExit(
-  exit: InteractiveExit,
-  handlers: { setExitCode: (code: number) => void; reRaise: (signal: NodeJS.Signals) => void } = {
-    setExitCode: (code) => { process.exitCode = code },
-    reRaise: (signal) => { process.kill(process.pid, signal) },
-  },
-): void {
-  if (exit.signal) {
-    handlers.reRaise(exit.signal)
-    return
+  const abort = new AbortController()
+  let receivedSignal: SignalName | undefined
+  const onSigint = () => { receivedSignal ??= "SIGINT"; abort.abort() }
+  const onSigterm = () => { receivedSignal ??= "SIGTERM"; abort.abort() }
+  let sigintRegistered = false
+  let sigtermRegistered = false
+  try {
+    deps.signals.on("SIGINT", onSigint)
+    sigintRegistered = true
+    deps.signals.on("SIGTERM", onSigterm)
+    sigtermRegistered = true
+    const worktree = canonicalWorktree(args.worktree, deps)
+    const engine = args.engine ?? await chooseEngine(terminal, abort.signal)
+    if (!engine || abort.signal.aborted) return signalExit(receivedSignal)
+    const model = args.model ?? await chooseModel(terminal, abort.signal)
+    if (!model || abort.signal.aborted) return signalExit(receivedSignal)
+    if (!validModelID(model)) throw new InteractiveLaunchError("invalid model ID; enter a native model name without whitespace")
+
+    terminal.write("\nNative CLI limitations: input size is estimated and output limits are reactive; these are not strict guarantees. No process or filesystem containment is claimed.\n\n")
+    const sessionID = defaultSessionID(deps.randomUUID())
+    const runtime = deps.createRuntime({ worktree, engine, model })
+    runtime.linuxAdmission?.assertBootEpoch()
+    const controller = deps.createController(runtime)
+    const conversation = deps.createConversation(runtime, sessionID)
+
+    while (!abort.signal.aborted) {
+      const text = await terminal.readLine("You> ", abort.signal)
+      if (abort.signal.aborted) return signalExit(receivedSignal)
+      if (text === undefined) return { code: 0 }
+      const message = text.trim()
+      if (!message) continue
+      if (message === "/quit" || message === "/exit") return { code: 0 }
+      if (message === "/cancel") {
+        abort.abort()
+        return { code: 0 }
+      }
+
+      const turn = await conversation.turn(message, abort.signal)
+      if (abort.signal.aborted) return signalExit(receivedSignal)
+      if (turn.text) terminal.write(terminalSafeText(`\n${turn.text}\n`))
+      if (turn.plan === undefined) continue
+
+      const parsedPlan = planForImport(turn.plan, worktree)
+      try {
+        controller.validateImportedPlan(parsedPlan, sessionID)
+      } catch (error) {
+        const feedback = planValidationFeedback(error)
+        if (feedback === undefined) throw error
+        terminal.write(terminalSafeText(feedback))
+        continue
+      }
+      if (abort.signal.aborted) return signalExit(receivedSignal)
+      const submitted = await controller.importPlan(sessionID, "", abort.signal, parsedPlan)
+      if (abort.signal.aborted) return signalExit(receivedSignal)
+      if (!submitted.result.ok) {
+        terminal.write(terminalSafeText(`Plan was not approved for execution: ${submitted.result.text}\n`))
+        return { code: 1 }
+      }
+      if (submitted.result.wf.phase !== "pending_approval") {
+        terminal.write(terminalSafeText(`Plan did not reach pending approval (workflow ${submitted.result.wf.phase}); no execution was started.\n`))
+        return { code: 1 }
+      }
+      if (!submitted.renderedPlan) {
+        terminal.write("Canonical plan rendering is unavailable; no execution was started.\n")
+        return { code: 1 }
+      }
+
+      const workflow = submitted.result.wf
+      terminal.write(terminalSafeText(
+        `\nCanonical plan (${workflow.planRef?.mdPath ?? "saved plan"}):\n${submitted.renderedPlan}\nPlan SHA: ${submitted.planSha}\n`,
+      ))
+      terminal.close()
+      if (abort.signal.aborted) return signalExit(receivedSignal)
+      // The real operator reader owns process.stdin while it waits for a decision.
+      // Do not swallow process signals with this session's abort listeners during that prompt.
+      if (sigintRegistered) {
+        deps.signals.off("SIGINT", onSigint)
+        sigintRegistered = false
+      }
+      if (sigtermRegistered) {
+        deps.signals.off("SIGTERM", onSigterm)
+        sigtermRegistered = false
+      }
+      const decision: OperatorDecision = await deps.humanDecision("choose", workflow.id, submitted.planSha)
+      if (!abort.signal.aborted) {
+        deps.signals.on("SIGINT", onSigint)
+        sigintRegistered = true
+        deps.signals.on("SIGTERM", onSigterm)
+        sigtermRegistered = true
+      }
+      if (abort.signal.aborted) return signalExit(receivedSignal)
+      const decided = controller.decide(decision)
+      if (!decided.ok) throw new InteractiveLaunchError("local plan decision could not be applied; inspect read-only status")
+      if (decision.action === "reject") {
+        terminal.write(terminalSafeText(`Workflow ${workflow.id} rejected; execution was not started.\n`))
+        return { code: 0 }
+      }
+      if (decision.action !== "approve") return { code: 1 }
+      if (abort.signal.aborted) return signalExit(receivedSignal)
+      const result = await controller.run(sessionID, abort.signal)
+      terminal.write(terminalSafeText(
+        `Workflow ${result.workflow.id} ${result.workflow.phase}; done ${result.run.done}, failed ${result.run.failed}, cancelled ${result.run.cancelled}${result.run.skipped ? `; ${result.run.skipped}` : ""}\n`,
+      ))
+      if (receivedSignal) return signalExit(receivedSignal)
+      return { code: result.workflow.phase === "done" && result.run.failed === 0 && result.run.cancelled === 0 ? 0 : 1 }
+    }
+    return signalExit(receivedSignal)
+  } catch (error) {
+    if (abort.signal.aborted && !(error instanceof AdmissionRefusal) && !(error instanceof LinuxAdmissionRefused)) {
+      return signalExit(receivedSignal)
+    }
+    throw error
+  } finally {
+    terminal.close()
+    if (sigintRegistered) deps.signals.off("SIGINT", onSigint)
+    if (sigtermRegistered) deps.signals.off("SIGTERM", onSigterm)
   }
-  handlers.setExitCode(exit.code ?? 1)
 }

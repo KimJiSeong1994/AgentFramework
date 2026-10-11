@@ -9,7 +9,7 @@ import { activeWorkflow, readWorkflow, workflowEngineRefusal, type Workflow } fr
 import { getQueue, type QueueRun } from "../orchestration/queue.ts"
 import { readLedger, OPEN_STATUSES } from "../state/ledger.ts"
 import { sessionDir, stateRoot } from "../state/store.ts"
-import { LinuxAdmissionRefused, type ExecutionReconciliation, type ExecutionRuntime, type FlowRuntime } from "./types.ts"
+import { EXECUTION_ROLES, LinuxAdmissionRefused, type ExecutionReconciliation, type ExecutionRole, type ExecutionRuntime, type FlowRuntime } from "./types.ts"
 import { persistedHostReference, settled } from "./run-state.ts"
 import type { VerificationReference } from "../orchestration/verifier.ts"
 import { authenticateLinuxVerification } from "./linux-domain.ts"
@@ -17,6 +17,8 @@ import { consumeOperatorDecision, type OperatorDecision } from "./operator.ts"
 import { assertHostAdmission } from "./required-controls.ts"
 
 const HOST_ENGINE_MISMATCH = "host engine identity mismatch; recovery refused"
+const HOST_POLICY_MISMATCH = "host policy identity evidence is absent or mismatched; recovery refused"
+const COMMON_ENGINES = new Set(["local", "codex", "claude"])
 
 export type ForegroundController = ReturnType<typeof createForegroundController>
 
@@ -60,6 +62,48 @@ export function createForegroundController(runtime: ExecutionRuntime) {
     if (phase && wf.phase !== phase) throw new Error(`workflow is ${wf.phase}, expected ${phase}`)
     // Unlike the plugin command path, a live foreign instance must not be taken over by a new CLI process.
     if (wf.owner.instance !== INSTANCE_ID && pidAlive(wf.owner.pid)) throw new Error("a live foreign workflow owner must finish first")
+    return wf
+  }
+
+  function assertRecoveryIdentity(sessionID: string, workflowID?: string, planSha?: string, allowLocalActivity = false): Workflow {
+    const wf = activeWorkflowForHost()
+    if (!wf || wf.sessionID !== sessionID) throw new Error("no workflow owned by this session")
+    if ((workflowID !== undefined && wf.id !== workflowID) ||
+      (planSha !== undefined && wf.planRef?.jsonSha !== planSha)) {
+      throw new Error("decision workflow ID or plan hash does not match")
+    }
+    // OpenCode and synthetic controller hosts retain their established recovery/error ordering.
+    // The explicit common CLI runtimes need their model-bound intent evidence before recovery.
+    if (!COMMON_ENGINES.has(runtime.host.identity.engine)) return wf
+    const status = runtime.runs.status()
+    const hostExecutions = status.executions.filter(execution => execution.ownerSession === sessionID && execution.kind === "host")
+    if (hostExecutions.length === 0) throw new Error(HOST_POLICY_MISMATCH)
+    for (const execution of hostExecutions) {
+      if (execution.engine !== runtime.host.identity.engine) throw new Error(HOST_ENGINE_MISMATCH)
+      const role = EXECUTION_ROLES.find(candidate => candidate === execution.role) as ExecutionRole | undefined
+      if (!role || !execution.policyID || execution.policyID !== runtime.policy.resolve(role).id) {
+        throw new Error(HOST_POLICY_MISMATCH)
+      }
+    }
+    const localActivity = allowLocalActivity && (queue.isRunning(sessionID) ||
+      (reviewActivity?.sessionID === sessionID && reviewActivity.workflowID === wf.id))
+    if (allowLocalActivity) {
+      const unsettledOwnerExecution = status.executions.some(execution =>
+        execution.ownerSession === sessionID && !settled(execution))
+      const liveClaimOwner = status.claim?.ownerSession === sessionID && pidAlive(status.claim.pid)
+      const liveOwner = pidAlive(wf.owner.pid) || liveClaimOwner
+      // Cancellation is a durable request, not authority to take another process's lease or signal it.
+      // Keep it available while the owner is alive, but do not turn a dead owner's unknown execution
+      // into a cancellation that could later be mistaken for safe retirement.
+      if (unsettledOwnerExecution && !localActivity && !liveOwner) {
+        throw new Error("execution unresolved; recovery refused without changing durable state")
+      }
+      return wf
+    }
+    if (status.claim) throw new Error("execution run is owned by another operation")
+    if (status.executions.some(execution => !settled(execution))) {
+      throw new Error("execution unresolved; recovery refused without changing durable state")
+    }
     return wf
   }
 
@@ -109,7 +153,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
     // A valid source and host must be established before creating any workflow or model execution.
     const preflight = await runtime.host.preflight(runtime.host.identity.profile)
     assertWorkflowUnchanged(existing, sessionID)
-    assertHostAdmission(preflight)
+    assertHostAdmission(preflight, runtime.host.identity.controlProfile)
     await reconcile(sessionID, existing)
     assertWorkflowUnchanged(existing, sessionID)
     const admission = await runtime.linuxAdmission?.admitPlanSubmission(sessionID)
@@ -142,12 +186,14 @@ export function createForegroundController(runtime: ExecutionRuntime) {
     }
   }
 
-  function decide(receipt: OperatorDecision): FlowResult {
+  function decide(receipt: OperatorDecision, expectedSessionID?: string): FlowResult {
     const decision = consumeOperatorDecision(receipt)
     runtime.linuxAdmission?.assertBootEpoch()
-    const wf = readWorkflow(root)
-    if (wf) assertWorkflowEngine(wf)
-    if (!wf || wf.id !== decision.workflowID || !wf.planRef || wf.planRef.jsonSha !== decision.planSha) throw new Error("decision workflow ID or plan hash does not match")
+    const persisted = readWorkflow(root)
+    if (persisted) assertWorkflowEngine(persisted)
+    if (!persisted) throw new Error("decision workflow ID or plan hash does not match")
+    const sessionID = expectedSessionID ?? persisted.sessionID
+    const wf = assertRecoveryIdentity(sessionID, decision.workflowID, decision.planSha)
     workflow(wf.sessionID)
     const authority = resolveAuthority(runtime, decision.action, wf.sessionID, runtime.host.identity.engine)
     if (authority.wf) assertWorkflowEngine(authority.wf)
@@ -247,7 +293,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
     if (!wf.planRef || wf.approval?.planSha !== wf.planRef.jsonSha || !savedPlan(runtime, wf)) throw new Error("approved plan or rendered file changed")
     const preflight = await runtime.host.preflight(runtime.host.identity.profile)
     assertWorkflowUnchanged(wf, sessionID)
-    assertHostAdmission(preflight)
+    assertHostAdmission(preflight, runtime.host.identity.controlProfile)
     const ledger = readLedger(root, sessionID)
     if (ledger.tasks.some(t => OPEN_STATUSES.has(t.status) && (t.wf?.id !== wf.id || t.wf.planSha !== wf.planRef!.jsonSha))) {
       throw new Error("unrelated open tasks cannot run in a foreground workflow")
@@ -306,9 +352,13 @@ export function createForegroundController(runtime: ExecutionRuntime) {
 
   async function resume(sessionID: string, signal?: AbortSignal) {
     runtime.linuxAdmission?.assertBootEpoch()
-    const wf = activeWorkflowForHost()
-    if (!wf) throw new Error("no active workflow to resume")
-    if (wf.sessionID !== sessionID) throw new Error("no workflow owned by this session")
+    if (COMMON_ENGINES.has(runtime.host.identity.engine)) {
+      assertRecoveryIdentity(sessionID)
+    } else {
+      const wf = activeWorkflowForHost()
+      if (!wf) throw new Error("no active workflow to resume")
+      if (wf.sessionID !== sessionID) throw new Error("no workflow owned by this session")
+    }
     workflow(sessionID, "executing")
     return runInternal(sessionID, signal, true)
   }
@@ -318,9 +368,8 @@ export function createForegroundController(runtime: ExecutionRuntime) {
   }
 
   function cancel(sessionID: string): FlowResult {
-    const wf = activeWorkflowForHost()
-    if (!wf || wf.sessionID !== sessionID) throw new Error("no workflow owned by this session")
     runtime.linuxAdmission?.assertBootEpoch()
+    const wf = assertRecoveryIdentity(sessionID, undefined, undefined, true)
     const status = runtime.runs.status()
     const running = queue.isRunning(sessionID)
     const active = running || !!status.claim ||
@@ -341,7 +390,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
     return result
   }
 
-  return { validateImportedPlan, importPlan, decide, run, resume, status, cancel }
+  return { validateImportedPlan, importPlan, decide, run, resume, status, cancel, assertRecoveryIdentity }
 }
 
 /** CLI status can call this with a FlowRuntime only: no host, SDK, policy, credential, claim or model construction. */

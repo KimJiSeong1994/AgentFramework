@@ -9,12 +9,15 @@ import type { HookDeps } from "../hooks/types.ts"
 import { getOpenCodeRuntime } from "./opencode-runtime.ts"
 import { createForegroundController, readForegroundStatus } from "./controller.ts"
 import { humanDecision } from "./operator.ts"
+import { createCliRuntime } from "./cli-runtime.ts"
+import type { CliEngine } from "./cli-transport.ts"
 import { AdmissionRefusal, assertHostAdmission } from "./required-controls.ts"
 import { LinuxAdmissionRefused } from "./types.ts"
-import { InteractiveLaunchError, launchInteractive, parseInteractiveArgs, propagateInteractiveExit } from "./interactive.ts"
+import { InteractiveLaunchError, launchInteractive, parseInteractiveArgs } from "./interactive.ts"
 
 const COMMANDS = new Set(["status", "import", "approve", "reject", "run", "resume", "cancel"])
-type CliArgs = { command: string; worktree: string; server?: string; session?: string; plan?: string; workflow?: string; sha?: string; engine: "opencode" | "claude" | "codex"; json: boolean }
+const COMMON_RECOVERY_COMMANDS = new Set(["approve", "reject", "resume", "cancel"])
+type CliArgs = { command: string; worktree: string; server?: string; session?: string; plan?: string; workflow?: string; sha?: string; engine: "opencode" | CliEngine; model?: string; json: boolean }
 
 export class CliUsageError extends Error {
   constructor(message: string) {
@@ -24,16 +27,17 @@ export class CliUsageError extends Error {
 }
 
 const CLI_USAGE = `Usage:
-  lca [chat] [--worktree PATH]
+  lca [chat] [--worktree PATH] [--engine local|codex|claude] [--model ID]
   lca <command> --worktree PATH [options]
 
 Interactive chat:
   lca
-  lca chat [--worktree PATH]
+  lca chat [--worktree PATH] [--engine local|codex|claude] [--model ID]
 
-Bare 'lca' and 'lca chat' start the installed OpenCode TUI in the current Git worktree,
-or in the canonical worktree selected by --worktree. The TUI uses the existing configured
-model and the LCA plan/approval flow; it does not auto-approve permissions or start Ollama.
+Bare 'lca' and 'lca chat' start LCA's interactive terminal in the current Git worktree,
+or in the canonical worktree selected by --worktree. Choose an engine from the menu, or
+specify --engine. Enter a native model ID or supply --model; local selects the Ollama CLI,
+not OpenCode. Plans require a separate local human approval.
 
 Commands:
   status   --worktree PATH [--session ID] [--json]
@@ -44,20 +48,30 @@ Commands:
   resume   --worktree PATH --server URL --session ID
   cancel   --worktree PATH --server URL --session ID
 
-Status reads local workflow state; all other commands require the local OpenCode service.
+Common-engine workflow recovery (no server; exact original engine, model and session required):
+  approve  --worktree PATH --engine local|codex|claude --model ID --session ID --workflow ID --sha SHA
+  reject   --worktree PATH --engine local|codex|claude --model ID --session ID --workflow ID --sha SHA
+  resume   --worktree PATH --engine local|codex|claude --model ID --session ID
+  cancel   --worktree PATH --engine local|codex|claude --model ID --session ID
+
+Status reads local workflow state without an engine or server. OpenCode mutations still require the local service.
 
 Examples:
   lca status --worktree /path/to/repo
   lca status --worktree /path/to/repo --json
   lca run --plan plan.json --worktree /path/to/repo --server http://127.0.0.1:4096
+  lca resume --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID
 
 Prerequisites and safety:
-  The --worktree path must name an accessible directory. Mutating commands require an already-running,
-  trusted local OpenCode service and the project's LCA plugin. run --plan, approve and reject require
-  a local interactive terminal for explicit human decisions. Standalone commands do not start a server;
-  interactive chat owns a separate OpenCode TUI child process. Neither path auto-approves plans or
-  performs native-host qualification. Host admission refuses when required control evidence is unavailable;
-  the CLI does not expose raw vendor preflight diagnostics.
+  The --worktree path must name an accessible directory. OpenCode mutations require an already-running,
+  trusted local service and the project's LCA plugin. Common-engine recovery requires the exact original
+  engine, model and session; unresolved execution ownership is refused without replay or forced release.
+  Common-engine approve and reject require a local interactive terminal for explicit human decisions.
+  Standalone commands do not start a server.
+  Interactive chat requires a terminal on stdin and stderr; EOF or interruption never approves a plan.
+  Native CLI input limits are estimated and output limits are reactive, not strict guarantees; no process
+  or filesystem containment is claimed. Plans are never auto-approved. Host admission refuses when
+  required control evidence is unavailable; the CLI does not expose raw vendor preflight diagnostics.
 
 Run 'lca --help' for this usage. Exit codes: 0 success/help, 1 runtime refusal or failure,
 2 invalid arguments or inaccessible worktree, 3 Linux admission refusal.`
@@ -68,7 +82,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
   if (!COMMANDS.has(command)) throw new CliUsageError("unknown command; see 'lca --help' for supported commands")
   const fields: Record<string, string> = {}
   let json = false
-  const allowed = new Set(["--worktree", "--server", "--session", "--plan", "--workflow", "--sha", "--engine"])
+  const allowed = new Set(["--worktree", "--server", "--session", "--plan", "--workflow", "--sha", "--engine", "--model"])
   for (let index = 0; index < rest.length; index++) {
     const flag = rest[index]!
     if (flag === "--json") {
@@ -86,10 +100,21 @@ export function parseCliArgs(argv: string[]): CliArgs {
   if (!fields["--worktree"]) throw new CliUsageError("--worktree is required")
   if (json && command !== "status") throw new CliUsageError("--json is only available for read-only status")
   const engine = fields["--engine"] ?? "opencode"
-  if (!["opencode", "claude", "codex"].includes(engine)) {
-    throw new CliUsageError("invalid --engine; choose opencode, claude, or codex")
+  if (!["opencode", "local", "claude", "codex"].includes(engine)) {
+    throw new CliUsageError("invalid --engine; choose opencode, local, codex, or claude")
   }
-  if (command !== "status" && !fields["--server"]) {
+  const commonRecovery = engine !== "opencode" && COMMON_RECOVERY_COMMANDS.has(command)
+  if (COMMON_RECOVERY_COMMANDS.has(command) && !fields["--server"] && !fields["--engine"]) {
+    throw new CliUsageError("common-engine recovery requires explicit --engine, --model, and --session")
+  }
+  if (commonRecovery) {
+    if (fields["--server"]) throw new CliUsageError("common-engine recovery does not accept --server")
+    if (!fields["--model"]) throw new CliUsageError("common-engine recovery requires --model")
+    if (!fields["--session"]) throw new CliUsageError("common-engine recovery requires --session")
+  } else if (fields["--model"]) {
+    throw new CliUsageError("--model is only available for common-engine recovery commands")
+  }
+  if (command !== "status" && !commonRecovery && !fields["--server"]) {
     throw new CliUsageError("--server must name an already-running local OpenCode service")
   }
   if (command === "import" && (!fields["--session"] || !fields["--plan"])) {
@@ -98,8 +123,8 @@ export function parseCliArgs(argv: string[]): CliArgs {
   if ((command === "approve" || command === "reject") && (!fields["--workflow"] || !fields["--sha"])) {
     throw new CliUsageError("approve and reject require --workflow and --sha")
   }
-  if (command === "cancel" && !fields["--session"]) throw new CliUsageError("cancel requires --session")
-  if (command === "resume" && !fields["--session"]) throw new CliUsageError("resume requires --session")
+  if (!commonRecovery && command === "cancel" && !fields["--session"]) throw new CliUsageError("cancel requires --session")
+  if (!commonRecovery && command === "resume" && !fields["--session"]) throw new CliUsageError("resume requires --session")
   if (command === "run" && !fields["--session"] && !fields["--plan"]) {
     throw new CliUsageError("run requires --plan or --session")
   }
@@ -117,7 +142,8 @@ export function parseCliArgs(argv: string[]): CliArgs {
     ...(fields["--plan"] ? { plan: fields["--plan"] } : {}),
     ...(fields["--workflow"] ? { workflow: fields["--workflow"] } : {}),
     ...(fields["--sha"] ? { sha: fields["--sha"] } : {}),
-    engine: engine as CliArgs["engine"], json }
+    engine: engine as CliArgs["engine"],
+    ...(fields["--model"] ? { model: fields["--model"] } : {}), json }
 }
 
 function localServer(address: string): string {
@@ -177,14 +203,58 @@ async function checkedClient(server: string, root: string): Promise<OpencodeClie
   return client
 }
 
-/** Status never constructs an SDK client or loads an auth source. All other commands require an explicit local service. */
-export async function runCli(args: CliArgs): Promise<string> {
+/** Status is engine-free; OpenCode uses its local service, while common recovery uses the selected CLI runtime. */
+export async function runCli(
+  args: CliArgs,
+  cliRuntimeFactory: typeof createCliRuntime = createCliRuntime,
+): Promise<string> {
   const root = args.worktree
   if (args.command === "status") {
     const sessionID = args.session ?? "no-session"
     const flow = { worktree: root, config: loadConfig(root), log: () => {} }
     const status = readForegroundStatus(flow, sessionID, args.json)
     return typeof status === "string" ? status : JSON.stringify(status)
+  }
+  if (args.engine !== "opencode" && COMMON_RECOVERY_COMMANDS.has(args.command)) {
+    if (args.server !== undefined) throw new CliUsageError("common-engine recovery does not accept --server")
+    if (!args.model || !args.session) throw new CliUsageError("common-engine recovery requires explicit --model and --session")
+    if ((args.command === "approve" || args.command === "reject") &&
+      (!args.workflow || !args.sha)) throw new CliUsageError("approve and reject require --workflow and --sha")
+    if ((args.command === "approve" || args.command === "reject") &&
+      (!process.stdin.isTTY || !process.stderr.isTTY)) {
+      throw new Error("local human approval or rejection requires an interactive terminal")
+    }
+    const runtime = cliRuntimeFactory({ worktree: root, engine: args.engine, model: args.model })
+    const controller = createForegroundController(runtime)
+    if (args.command === "approve" || args.command === "reject") {
+      const workflowID = args.workflow!
+      const planSha = args.sha!
+      controller.assertRecoveryIdentity(args.session, workflowID, planSha)
+      const decision = await humanDecision(args.command, workflowID, planSha)
+      const result = controller.decide(decision, args.session)
+      if (!result.ok) throw new Error(result.text)
+      return `workflow ${result.wf.id} ${result.wf.phase}`
+    }
+    if (args.command === "cancel") {
+      const result = controller.cancel(args.session)
+      if (!result.ok) throw new Error(result.text)
+      return `workflow ${result.wf.id} ${result.wf.phase}${result.wf.pendingCancel ? "; cancellation requested; execution retirement pending" : ""}`
+    }
+    const abort = new AbortController()
+    const stop = () => abort.abort()
+    process.on("SIGINT", stop)
+    process.on("SIGTERM", stop)
+    try {
+      const result = await controller.resume(args.session, abort.signal)
+      if (result.workflow.phase !== "done" || result.run.failed > 0 || result.run.cancelled > 0 ||
+        result.run.aborted || result.run.refused || result.run.skipped || result.run.noSnapshot) {
+        throw new Error("common-engine resume incomplete; inspect read-only status")
+      }
+      return `workflow ${result.workflow.id} ${result.workflow.phase}; done ${result.run.done}, failed ${result.run.failed}, cancelled ${result.run.cancelled}${result.run.skipped ? `; ${result.run.skipped}` : ""}`
+    } finally {
+      process.off("SIGINT", stop)
+      process.off("SIGTERM", stop)
+    }
   }
   const server = localServer(args.server!)
   if (args.engine !== "opencode") throw new Error("native coding profile is not admitted for this engine")
@@ -288,7 +358,8 @@ function failCli(error: unknown): void {
 }
 
 function main(argv: string[]): void {
-  const interactiveRequested = argv.length === 0 || argv[0] === "chat" || argv[0] === "--worktree"
+  const interactiveRequested = argv.length === 0 || argv[0] === "chat" ||
+    ["--worktree", "--engine", "--model"].includes(argv[0]!)
   if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h") ||
     interactiveRequested && argv.some((arg) => arg === "--help" || arg === "-h")) {
     console.log(CLI_USAGE)
@@ -297,7 +368,7 @@ function main(argv: string[]): void {
   if (interactiveRequested) {
     try {
       const args = parseInteractiveArgs(argv[0] === "chat" ? argv.slice(1) : argv)
-      launchInteractive(args).then(propagateInteractiveExit).catch(failCli)
+      launchInteractive(args).then(({ code }) => { process.exitCode = code }).catch(failCli)
     } catch (error) {
       if (error instanceof InteractiveLaunchError) failCli(new CliUsageError(error.message))
       else failCli(error)

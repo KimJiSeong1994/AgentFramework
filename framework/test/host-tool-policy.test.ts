@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { mainPrompt } from "../src/agents/prompts.ts"
 import { DEFAULT_CONFIG, type LcaConfig } from "../src/config.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
 import type { ExecutionRequest } from "../src/hosts/types.ts"
@@ -16,7 +17,7 @@ const config = (patch: Partial<LcaConfig> = {}): LcaConfig => ({
   disabled_hooks: patch.disabled_hooks ?? [],
 })
 
-function request(policy: ReturnType<typeof createExecutionPolicy>, role: "worker" | "reviewer" = "worker"): ExecutionRequest {
+function request(policy: ReturnType<typeof createExecutionPolicy>, role: "main" | "worker" | "reviewer" = "worker"): ExecutionRequest {
   return {
     executionID: "exec", supervisorSessionID: "parent", taskID: "task", attemptID: "attempt", generation: 1,
     role, title: "task", cwd: "/repo", text: "dynamic task", deadlineAt: Date.now() + 1000,
@@ -35,6 +36,58 @@ describe("host-neutral execution tool policy", () => {
     expect(first.maxOutputTokens).toBe(4096)
     expect(first.thinking).toBe("disabled")
     expect(p.resolve("main").thinking).toBe("inherit")
+  })
+
+  test("planning-only main has a fixed read-only tool and prompt snapshot", () => {
+    const p = createExecutionPolicy(config(), { planningOnlyMain: true })
+    const main = p.resolve("main")
+    expect(Object.isFrozen(main)).toBe(true)
+    expect(Object.isFrozen(main.tools)).toBe(true)
+    expect(Object.isFrozen(main.tools.allowed)).toBe(true)
+    expect(Object.isFrozen(main.tools.denied)).toBe(true)
+    expect(Object.isFrozen(main.system)).toBe(true)
+    expect(main.tools.allowed).toEqual(["read", "list", "glob", "grep"])
+    expect(main.tools.denied).toEqual(expect.arrayContaining([
+      "write", "edit", "patch", "apply_patch", "multiedit", "bash", "delegate", "lca_flow",
+      "webfetch", "skill", "todowrite", "todoread", "db_query", "schema_lookup", "task",
+    ]))
+    expect(main.system.join("\n")).toContain("Discuss the request, inspect files with read-only tools, and create a concrete plan")
+    expect(main.system.join("\n")).toContain("Never modify files, run commands, execute or approve plans, or delegate work")
+    expect(main.system.join("\n")).not.toMatch(/do it yourself|after changing code|run existing tests|call the delegate tool|submit plans only with lca_flow/i)
+    expect(main.id).not.toBe(createExecutionPolicy(config()).resolve("main").id)
+    const handlers = p.handlers(request(p, "main"))
+    expect(handlers.beforeTool({ type: "tool-before", sessionID: "main", callID: "read", toolID: "t", name: "read", input: {} })).toEqual({ allow: true })
+    expect(handlers.beforeTool({ type: "tool-before", sessionID: "main", callID: "bash", toolID: "t", name: "bash", input: {} })).toMatchObject({ allow: false })
+  })
+
+  test("planning-only selection leaves legacy main and worker/reviewer policies unchanged by default", () => {
+    const ordinary = createExecutionPolicy(config())
+    const planning = createExecutionPolicy(config(), { planningOnlyMain: true })
+    expect(ordinary.resolve("main").system).toEqual([mainPrompt(
+      !config().disabled_hooks.includes("tool.delegate"),
+      config().data.backend !== "none" && !config().disabled_hooks.includes("tool.data"),
+      config().flow.enabled && !config().disabled_hooks.includes("flow"),
+    )])
+    expect(planning.resolve("worker")).toEqual(ordinary.resolve("worker"))
+    expect(planning.resolve("reviewer")).toEqual(ordinary.resolve("reviewer"))
+  })
+
+  test("native context is copied, frozen and included in the resolved policy identity", () => {
+    const input = { identity: "catalog-a", instructions: "Follow the native profile." }
+    const withNativeContext = createExecutionPolicy(config(), { nativeContext: input })
+    const snapshot = withNativeContext.resolve("main")
+    expect(snapshot.nativeContext).toEqual(input)
+    expect(Object.isFrozen(snapshot.nativeContext)).toBe(true)
+    input.identity = "mutated"
+    input.instructions = "Mutated after policy construction."
+    expect(snapshot.nativeContext).toEqual({ identity: "catalog-a", instructions: "Follow the native profile." })
+    expect(snapshot.system.join("\n")).not.toContain("Follow the native profile.")
+    expect(snapshot.id).not.toBe(createExecutionPolicy(config()).resolve("main").id)
+    expect(snapshot.id).not.toBe(createExecutionPolicy(config(), {
+      nativeContext: { identity: "catalog-a", instructions: "Different instructions." },
+    }).resolve("main").id)
+    expect(() => createExecutionPolicy(config(), { nativeContext: { identity: "", instructions: "valid" } })).toThrow("invalid native execution context")
+    expect(() => createExecutionPolicy(config(), { nativeContext: null as never })).toThrow("invalid native execution context")
   })
 
   test("fails closed for unknown worker tools and denies reviewer mutations", () => {

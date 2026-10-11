@@ -1,14 +1,17 @@
 import { expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { delimiter, join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { checkManifest } from "../../scripts/lca-soak-manifest.ts"
 import {
   FAMILY_TABLE,
   acquireLock,
   appendEvent,
   classify,
   createSupervisorBinding,
+  expectedSnapshotPath,
   initializeManifest,
   materializeArgv,
   releaseLock,
@@ -381,6 +384,41 @@ function seededRestartEvidence(fixture: ReturnType<typeof integrationFixture>, o
   return evidenceDir
 }
 
+function seededKilledInvocationEvidence(fixture: ReturnType<typeof integrationFixture>, errorNames: string[]): string {
+  const evidenceDir = seededRestartEvidence(fixture)
+  appendEvent(evidenceDir, "provision-start", { vm: "vm-c" })
+  appendEvent(evidenceDir, "provision-end", { vm: "vm-c", outcome: "ok", errorKind: null })
+  const spec = fixture.binding.fixtures.lineages[0]!
+  const invocation = spec.invocations[0]!
+  appendEvent(evidenceDir, "lineage-start", {
+    lineage: spec.lineage,
+    family: spec.family,
+    repetition: spec.repetition,
+    fixtureID: spec.fixtureID,
+    fixtureTree: spec.fixtureTree,
+  })
+  const argv = materializeArgv(invocation, null)
+  appendEvent(evidenceDir, "invocation-start", {
+    lineage: spec.lineage,
+    invocationIndex: 1,
+    scenario: invocation.scenario,
+    parentSessionID: null,
+    argvSha256: createHash("sha256").update(JSON.stringify(argv)).digest("hex"),
+  })
+  appendEvent(evidenceDir, "invocation-end", {
+    lineage: spec.lineage,
+    invocationIndex: 1,
+    exit: { code: null, signal: "SIGKILL" },
+    snapshotPath: expectedSnapshotPath(spec.lineage, 1),
+    snapshotSha256: null,
+    outcome: "killed",
+    expectedInjection: invocation.expectedInjection,
+    errorNames,
+    orderedTermination: false,
+  })
+  return evidenceDir
+}
+
 function evidenceBytes(evidenceDir: string): Map<string, Buffer> {
   const files = new Map<string, Buffer>()
   for (const entry of readdirSync(evidenceDir).sort()) {
@@ -518,6 +556,7 @@ function appendCompleteGrammar(evidenceDir: string) {
             : "pass",
           expectedInjection: invocationIndex === 1 ? FAMILY_TABLE[family].expectedInjection : null,
           errorNames: [],
+          orderedTermination: false,
         })
       }
       appendEvent(evidenceDir, "lineage-end", { lineage, outcome: "pass" })
@@ -617,6 +656,44 @@ test("JSONL appends are chained and only a single valid line ahead of the indepe
     writeFileSync(manifestPath, contents.subarray(0, lastNewline + 1))
     expect(verifyTail(fixture.evidenceDir).ok).toBe(false)
   } finally { fixture.cleanup() }
+})
+
+test("invocation-end requires explicit driver termination evidence and refuses incomplete legacy schemas without migration", () => {
+  for (const damage of ["missing", "malformed", "legacy"] as const) {
+    const fixture = evidenceFixture()
+    try {
+      appendProvisionedStart(fixture.evidenceDir)
+      appendEvent(fixture.evidenceDir, "lineage-start", {
+        lineage: "success-r1", family: "success", repetition: 1, fixtureID: "fixture-success-r1", fixtureTree: "b".repeat(40),
+      })
+      appendEvent(fixture.evidenceDir, "invocation-start", {
+        lineage: "success-r1", invocationIndex: 1, scenario: "success", parentSessionID: null, argvSha256: "c".repeat(64),
+      })
+      appendEvent(fixture.evidenceDir, "invocation-end", {
+        lineage: "success-r1", invocationIndex: 1, exit: { code: null, signal: "SIGKILL" },
+        snapshotPath: "snapshots/success-r1/1.receipt.json", snapshotSha256: null, outcome: "killed",
+        expectedInjection: null, errorNames: [], orderedTermination: false,
+      })
+      const manifestPath = join(fixture.evidenceDir, "soak-manifest.jsonl")
+      const parsedLines = readFileSync(manifestPath, "utf8").trimEnd().split("\n").map(line => JSON.parse(line) as Record<string, unknown>)
+      const end = parsedLines.at(-1)!
+      if (damage === "missing") delete end.orderedTermination
+      else if (damage === "malformed") end.orderedTermination = "false"
+      else {
+        for (const line of parsedLines) line.schema = "lca.soak-manifest.v1"
+        delete end.orderedTermination
+      }
+      const damagedBytes = Buffer.from(`${parsedLines.map(line => JSON.stringify(line)).join("\n")}\n`)
+      writeFileSync(manifestPath, damagedBytes)
+      const anchor = readFileSync(join(fixture.evidenceDir, "soak-manifest.anchor"))
+
+      const verification = verifyTail(fixture.evidenceDir)
+      expect(verification.ok, damage).toBe(false)
+      expect(verification.problems[0], damage).toContain(damage === "legacy" ? "without migration" : "driver-owned orderedTermination must be explicit")
+      expect(readFileSync(manifestPath), damage).toEqual(damagedBytes)
+      expect(readFileSync(join(fixture.evidenceDir, "soak-manifest.anchor")), damage).toEqual(anchor)
+    } finally { fixture.cleanup() }
+  }
 })
 
 test("two chained lines ahead of the independent anchor are never recoverable", () => {
@@ -725,6 +802,14 @@ test("only pinned self-interruption snapshots qualify; external SIGKILL, unplann
     scenario: "success",
     nativeAcceptance: { done: 1, reviewerVerdict: "accept", verifierExitCodes: [0] },
   })
+  expect(classify({
+    family: "success", invocationIndex: 1, scenario: "success", exit: { code: null, signal: "SIGTERM" }, receipt: null,
+    expectedInjection: null, errorNames: ["SupervisorTimeoutError"], orderedTermination: true,
+  })).toBe("snapshot-missing")
+  expect(classify({
+    family: "success", invocationIndex: 1, scenario: "success", exit: { code: null, signal: "SIGTERM" }, receipt: null,
+    expectedInjection: null, errorNames: ["SupervisorTimeoutError"], orderedTermination: false,
+  })).toBe("killed")
   expect(classify({ family: "success", invocationIndex: 1, scenario: "success", exit: { code: 137, signal: null }, receipt: successReceipt, expectedInjection: null })).toBe("killed")
   expect(classify({ family: "success", invocationIndex: 1, scenario: "success", exit: { code: 0, signal: null }, receipt: null, expectedInjection: null })).toBe("snapshot-missing")
   expect(classify({
@@ -945,6 +1030,27 @@ test("missing or tampered immutable run binding refuses restart without changing
   }
 })
 
+test("restart refuses and preserves incomplete legacy invocation evidence instead of migrating it", async () => {
+  const fixture = integrationFixture()
+  try {
+    const evidenceDir = seededKilledInvocationEvidence(fixture, [])
+    const manifestPath = join(evidenceDir, "soak-manifest.jsonl")
+    const lines = readFileSync(manifestPath, "utf8").trimEnd().split("\n").map(line => JSON.parse(line) as Record<string, unknown>)
+    for (const line of lines) line.schema = "lca.soak-manifest.v1"
+    delete lines.at(-1)!.orderedTermination
+    writeFileSync(manifestPath, `${lines.map(line => JSON.stringify(line)).join("\n")}\n`)
+    const before = evidenceBytes(evidenceDir)
+
+    const result = await restartCli(fixture, evidenceDir)
+    expect(result.code).toBe(2)
+    expect(result.stderr).toContain("without migration")
+    expect(evidenceBytes(evidenceDir)).toEqual(before)
+    expect(existsSync(fixture.provisionLog)).toBe(false)
+    expect(existsSync(fixture.driverLog)).toBe(false)
+    expect(existsSync(fixture.sshLog)).toBe(false)
+  } finally { fixture.cleanup() }
+})
+
 test("unchanged restart validates the binding before one-line-ahead recovery and resumes from the original specs", async () => {
   const fixture = integrationFixture()
   try {
@@ -961,8 +1067,36 @@ test("unchanged restart validates the binding before one-line-ahead recovery and
   } finally { fixture.cleanup() }
 })
 
-test("an unexpected local transport SIGKILL remains a signal and is never interpreted as remote exit 137", async () => {
-  const fixture = integrationFixture({ killFirstSuccess: true })
+test("receipt-only timeout, overflow, and termination errors never override driver termination on check or restart", async () => {
+  const fixture = integrationFixture()
+  try {
+    const receiptErrors = ["SupervisorTimeoutError", "ReceiptTooLargeError", "SupervisorTerminationError"]
+    const evidenceDir = seededKilledInvocationEvidence(fixture, receiptErrors)
+    const invocationEnd = readFileSync(join(evidenceDir, "soak-manifest.jsonl"), "utf8")
+      .trimEnd().split("\n").map(line => JSON.parse(line)).find(line => line.event === "invocation-end")!
+    expect(invocationEnd).toMatchObject({
+      exit: { code: null, signal: "SIGKILL" }, outcome: "killed", orderedTermination: false, errorNames: receiptErrors,
+    })
+
+    const checkedPrefix = checkManifest(evidenceDir)
+    expect(checkedPrefix.problems.filter(problem => problem.includes("recorded outcome disagrees"))).toEqual([])
+
+    const restarted = await restartCli(fixture, evidenceDir)
+    expect(restarted.code).toBe(3)
+    expect(restarted.stderr).not.toContain("existing invocation outcome does not match")
+    const lines = readFileSync(join(evidenceDir, "soak-manifest.jsonl"), "utf8").trimEnd().split("\n").map(line => JSON.parse(line))
+    expect(lines.some(line => line.event === "supervisor-restart")).toBe(true)
+    expect(lines.filter(line => line.event === "invocation-start" && line.lineage === "success-r1")).toHaveLength(1)
+    expect(lines.find(line => line.event === "invocation-end" && line.lineage === "success-r1")).toMatchObject({
+      outcome: "killed", orderedTermination: false,
+    })
+    const checkedRestart = checkManifest(evidenceDir)
+    expect(checkedRestart.problems.filter(problem => problem.includes("recorded outcome disagrees"))).toEqual([])
+  } finally { fixture.cleanup() }
+})
+
+test("an unplanned driver SIGKILL plus receipt overflow remains killed in persisted and checker classifications", async () => {
+  const fixture = integrationFixture({ killFirstSuccess: true, sshMode: "overflow" })
   try {
     const run = await runCli([
       fixture.supervisorPath,
@@ -974,8 +1108,9 @@ test("an unexpected local transport SIGKILL remains a signal and is never interp
     const evidenceDir = onlyEvidenceDirectory(fixture.hostEvidence)
     const lines = readFileSync(join(evidenceDir, "soak-manifest.jsonl"), "utf8").trimEnd().split("\n").map(line => JSON.parse(line))
     expect(lines.find(line => line.event === "invocation-end" && line.lineage === "success-r1")).toMatchObject({
-      exit: { code: null, signal: "SIGKILL" }, outcome: "killed",
+      exit: { code: null, signal: "SIGKILL" }, outcome: "killed", orderedTermination: false,
     })
+    expect(lines.find(line => line.event === "invocation-end" && line.lineage === "success-r1").errorNames).toContain("ReceiptTooLargeError")
     expect(readFileSync(fixture.driverLog, "utf8").split("\n").filter(line => line === "success 1")).toHaveLength(2)
     expect(lines.find(line => line.event === "lineage-end" && line.lineage === "success-r1")?.outcome).toBe("unexpected")
     const checked = await runCli([fixture.checkerPath, "--check", evidenceDir], fixture.root, fixture.env)
@@ -1012,6 +1147,8 @@ test("invocation timeout terminates the owned transport handle and records the t
     const lines = readFileSync(join(evidenceDir, "soak-manifest.jsonl"), "utf8").trimEnd().split("\n").map(line => JSON.parse(line))
     const end = lines.find(line => line.event === "invocation-end" && line.lineage === "success-r1")
     expect(end.errorNames).toContain("SupervisorTimeoutError")
+    expect(end).toMatchObject({ outcome: "unexpected-failure", orderedTermination: true })
+    expect(end.snapshotSha256).toMatch(/^[a-f0-9]{64}$/)
   } finally { fixture.cleanup() }
 })
 
@@ -1138,4 +1275,4 @@ test("direct child exit before receipt-pipe close is bounded without signaling i
     await waitForText(fixture.descendantMarker, "expired", 7_000)
     expect(readFileSync(fixture.descendantMarker, "utf8")).toContain("expired")
   } finally { fixture.cleanup() }
-})
+}, 20_000)

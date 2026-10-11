@@ -6,12 +6,21 @@ import type { VerificationExecutor, VerificationProfile } from "../orchestration
 
 export const EXECUTION_ROLES = ["main", "worker", "reviewer", "data-analyst", "data-verifier", "ontology-evolver", "answer-judge"] as const
 export type ExecutionRole = (typeof EXECUTION_ROLES)[number]
+export type ControlProfile = "estimated-input-reactive-output-v1"
+export type BudgetEvidence = {
+  input: "estimated"
+  output: "reactive"
+  vendorContext: "unobserved"
+  mainLimit: 8192
+  workerLimit: 5120
+}
 export type HostIdentity = {
   engine: string
   candidateVersion?: string
   actualVersion?: string
   schemaVersion?: string
   profile: string
+  controlProfile?: ControlProfile
 }
 
 export type ExecutionToolPolicy = { allowed: readonly string[]; denied: readonly string[] }
@@ -22,6 +31,8 @@ export type ExecutionPolicySnapshot = {
   maxOutputTokens: number
   tools: ExecutionToolPolicy
   system: readonly string[]
+  /** LCA-authored native input outside the JSON prompt; included in policy identity and input estimates. */
+  nativeContext?: Readonly<{ identity: string; instructions: string }>
   thinking: "inherit" | "enabled" | "disabled"
 }
 
@@ -98,7 +109,12 @@ export interface ExecutionHandle {
 
 export interface ExecutionHost {
   readonly identity: HostIdentity
-  preflight(profile: string): Promise<{ compatible: boolean; controls: Record<string, "supported" | "unsupported" | "unknown">; problems: string[] }>
+  preflight(profile: string): Promise<{
+    compatible: boolean
+    controls: Record<string, "supported" | "unsupported" | "unknown">
+    problems: string[]
+    budgetEvidence?: BudgetEvidence
+  }>
   /**
    * Must prepare an inert handle; runtime persists the execution intent before calling handle.run().
    * Until an engine recovery ID is known, handle.reference may contain only executionID. Any later

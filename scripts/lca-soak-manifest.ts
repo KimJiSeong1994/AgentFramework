@@ -246,8 +246,8 @@ function inspectManifest(evidenceDir: string): ManifestCheck {
         } catch { /* No snapshot is the recorded snapshot-missing case. */ }
       }
       receipts.set(index, receipt)
-      const errorNames = Array.isArray(end.errorNames) ? end.errorNames.filter((name): name is string => typeof name === "string") : []
-      const orderedTermination = errorNames.some(name => ["SupervisorTimeoutError", "SupervisorTerminationError", "ReceiptTooLargeError"].includes(name))
+      const errorNames = end.errorNames as string[]
+      const orderedTermination = end.orderedTermination as boolean
       const recomputed = classify({
         family,
         invocationIndex: index,

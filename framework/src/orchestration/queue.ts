@@ -1273,6 +1273,7 @@ async function runChild(
     executionId: executionID, ownerSession: parentID, taskId: request.taskID,
     attemptId: attemptID, generation: claim.generation, role: agent, cwd: request.cwd, policyID: policy.id,
     kind: "host", engine: deps.host.identity.engine, profile: "legacy-unowned",
+    ...(deps.host.identity.controlProfile ? { controlProfile: deps.host.identity.controlProfile } : {}),
   })
   entry.preparingExecutionID = executionID
   let handle: ExecutionHandle

@@ -206,7 +206,8 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
     }
     runs.registerIntent(claim, { executionId: executionID, ownerSession: wf.sessionID, taskId: wf.id,
       attemptId: base.attemptID, generation: claim.generation, role: "reviewer", cwd: runtime.directory, policyID: policy.id,
-      kind: "host", engine: runtime.host.identity.engine, profile: "legacy-unowned" })
+      kind: "host", engine: runtime.host.identity.engine, profile: "legacy-unowned",
+      ...(runtime.host.identity.controlProfile ? { controlProfile: runtime.host.identity.controlProfile } : {}) })
     registered = true
     let prepareTimer: ReturnType<typeof setTimeout> | undefined
     let onPrepareAbort: (() => void) | undefined

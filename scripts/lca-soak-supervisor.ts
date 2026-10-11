@@ -26,7 +26,8 @@ const ANCHOR_NAME = "soak-manifest.anchor"
 const LOCK_NAME = "soak.lock"
 const BINDING_NAME = "soak-binding.json"
 const SNAPSHOTS_NAME = "snapshots"
-const MANIFEST_SCHEMA = "lca.soak-manifest.v1"
+const MANIFEST_SCHEMA = "lca.soak-manifest.v2"
+const LEGACY_MANIFEST_SCHEMA = "lca.soak-manifest.v1"
 const FIXTURE_SCHEMA = "lca.soak-fixtures.v1"
 const BINDING_SCHEMA = "lca.soak-binding.v1"
 const ZERO_SHA256 = "0".repeat(64)
@@ -367,7 +368,7 @@ function validateManifestLine(value: unknown): value is ManifestLine {
     case "provision-end": fields = ["vm", "outcome", "errorKind"]; break
     case "lineage-start": fields = ["lineage", "family", "repetition", "fixtureID", "fixtureTree"]; break
     case "invocation-start": fields = ["lineage", "invocationIndex", "scenario", "parentSessionID", "argvSha256"]; break
-    case "invocation-end": fields = ["lineage", "invocationIndex", "exit", "snapshotPath", "snapshotSha256", "outcome", "expectedInjection", "errorNames"]; break
+    case "invocation-end": fields = ["lineage", "invocationIndex", "exit", "snapshotPath", "snapshotSha256", "outcome", "expectedInjection", "errorNames", "orderedTermination"]; break
     case "lineage-end": fields = ["lineage", "outcome"]; break
     case "supervisor-end": fields = ["lineages", "unexpected"]; break
     default: return false
@@ -403,6 +404,7 @@ function validateManifestLine(value: unknown): value is ManifestLine {
       typeof value.snapshotPath === "string" && (value.snapshotSha256 === null || validHash(value.snapshotSha256)) &&
       ["pass", "expected-fail-closed", "unexpected-failure", "killed", "snapshot-missing"].includes(String(value.outcome)) &&
       (value.expectedInjection === null || (typeof value.expectedInjection === "string" && /^[a-z0-9-]{1,80}$/.test(value.expectedInjection))) &&
+      typeof value.orderedTermination === "boolean" &&
       Array.isArray(value.errorNames) && value.errorNames.length <= 32 && value.errorNames.every(name => typeof name === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,100}$/.test(name))
   }
   if (event === "lineage-end") return typeof value.lineage === "string" && (value.outcome === "pass" || value.outcome === "unexpected")
@@ -476,7 +478,15 @@ export function verifyTail(evidenceDir: string, options: { allowOneLineAhead?: b
       if (!rawLine) fail(`manifest line ${index + 1} is empty`)
       let parsed: unknown
       try { parsed = JSON.parse(rawLine) } catch { fail(`manifest line ${index + 1} is invalid JSON`) }
-      if (!validateManifestLine(parsed)) fail(`manifest line ${index + 1} has an invalid schema`)
+      if (isRecord(parsed) && parsed.schema === LEGACY_MANIFEST_SCHEMA) {
+        fail(`manifest line ${index + 1} uses the incomplete legacy v1 schema; refusing historical evidence without migration because invocation-end lacks explicit driver-owned orderedTermination`)
+      }
+      if (!validateManifestLine(parsed)) {
+        if (isRecord(parsed) && parsed.event === "invocation-end" && typeof parsed.orderedTermination !== "boolean") {
+          fail(`manifest line ${index + 1} has an incomplete invocation-end schema; refusing it without migration because driver-owned orderedTermination must be explicit`)
+        }
+        fail(`manifest line ${index + 1} has an invalid schema`)
+      }
       if (JSON.stringify(parsed) !== rawLine) fail(`manifest line ${index + 1} is not canonical JSON`)
       if (parsed.seq !== index + 1 || parsed.prevSha256 !== previous) fail(`manifest hash chain breaks at line ${index + 1}`)
       const lineBytes = Buffer.from(rawLine)
@@ -1333,8 +1343,8 @@ function validateExistingPrefix(
         if (!bytes || sha256(bytes) !== end.snapshotSha256) fail("existing immutable receipt snapshot does not match its event digest")
         receipt = readJsonReceipt(bytes) ?? {}
       }
-      const errorNames = Array.isArray(end.errorNames) ? end.errorNames as string[] : []
-      const orderedTermination = errorNames.some(name => ["SupervisorTimeoutError", "SupervisorTerminationError", "ReceiptTooLargeError"].includes(name))
+      const errorNames = end.errorNames as string[]
+      const orderedTermination = end.orderedTermination as boolean
       const outcome = classify({
         family: spec.family,
         invocationIndex: index,
@@ -1438,6 +1448,7 @@ async function runLineage(evidenceDir: string, target: string, spec: LineageSpec
       outcome,
       expectedInjection: invocation.expectedInjection,
       errorNames,
+      orderedTermination: child.orderedTermination,
     })
     if (isOutcomeUnexpected(outcome)) {
       lineageUnexpected = true

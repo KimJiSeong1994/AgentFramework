@@ -175,6 +175,64 @@ test("host engine identity is required at registration and forbidden on verifier
   } finally { f.cleanup() }
 })
 
+test("host control profile persists separately from the containment profile", () => {
+  const f = fixture()
+  try {
+    const claim = f.store.claim("owner", "instance", process.pid)
+    const path = join(f.executionDirectory, "state.json")
+    const before = readFileSync(path)
+    const valid = { ...intent(claim, "host"), controlProfile: "estimated-input-reactive-output-v1" as const }
+
+    for (const controlProfile of ["unknown", "legacy-unowned", null, undefined]) {
+      expect(() => f.store.registerIntent(claim, { ...valid, controlProfile } as any)).toThrow(TypeError)
+      expect(readFileSync(path)).toEqual(before)
+    }
+    expect(() => f.store.registerIntent(claim, {
+      ...verifierIntent(claim, "verify"), controlProfile: "estimated-input-reactive-output-v1",
+    } as any)).toThrow(TypeError)
+    expect(readFileSync(path)).toEqual(before)
+
+    f.store.registerIntent(claim, valid)
+    expect(f.store.status().executions[0]).toMatchObject({
+      kind: "host", profile: "legacy-unowned", controlProfile: "estimated-input-reactive-output-v1",
+    })
+    const persisted = JSON.parse(readFileSync(path, "utf8")) as { executions: Array<Record<string, unknown>> }
+    expect(persisted.executions[0]).toMatchObject({
+      kind: "host", profile: "legacy-unowned", controlProfile: "estimated-input-reactive-output-v1",
+    })
+  } finally { f.cleanup() }
+})
+
+test("persisted control profiles are rejected on verifier and legacy shapeless records", () => {
+  const verifierFixture = fixture()
+  try {
+    const claim = verifierFixture.store.claim("owner", "instance", process.pid)
+    const path = join(verifierFixture.executionDirectory, "state.json")
+    verifierFixture.store.registerIntent(claim, verifierIntent(claim, "verify"))
+    const state = JSON.parse(readFileSync(path, "utf8")) as { executions: Array<Record<string, unknown>> }
+    state.executions[0]!.controlProfile = "estimated-input-reactive-output-v1"
+    writeFileSync(path, JSON.stringify(state))
+    const before = readFileSync(path)
+    expect(() => verifierFixture.store.status()).toThrow(ExecutionRunCorruptError)
+    expect(readFileSync(path)).toEqual(before)
+  } finally { verifierFixture.cleanup() }
+
+  const legacyFixture = fixture()
+  try {
+    const claim = legacyFixture.store.claim("owner", "instance", process.pid)
+    const path = join(legacyFixture.executionDirectory, "state.json")
+    legacyFixture.store.registerIntent(claim, intent(claim, "host"))
+    const state = JSON.parse(readFileSync(path, "utf8")) as { executions: Array<Record<string, unknown>> }
+    delete state.executions[0]!.kind
+    delete state.executions[0]!.profile
+    state.executions[0]!.controlProfile = "estimated-input-reactive-output-v1"
+    writeFileSync(path, JSON.stringify(state))
+    const before = readFileSync(path)
+    expect(() => legacyFixture.store.status()).toThrow(ExecutionRunCorruptError)
+    expect(readFileSync(path)).toEqual(before)
+  } finally { legacyFixture.cleanup() }
+})
+
 test("old and malformed host engine identities are rejected on disk without rewriting the store", () => {
   const f = fixture()
   try {

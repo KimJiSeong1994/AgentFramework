@@ -4,7 +4,8 @@ import { isAbsolute } from "node:path"
 import type { Readable } from "node:stream"
 import type { ExecutionCancelResult, ExecutionReconciliation } from "./types.ts"
 
-const ENV_ALLOWLIST = ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TERM"] as const
+// Native keychain lookup needs the non-secret account names; authentication tokens are never forwarded.
+const ENV_ALLOWLIST = ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TERM"] as const
 const POSIX_PLATFORMS = new Set(["aix", "darwin", "dragonfly", "freebsd", "linux", "netbsd", "openbsd", "sunos"])
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 const MAX_STDIN_BYTES = 1024 * 1024

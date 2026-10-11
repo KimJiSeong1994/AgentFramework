@@ -8,7 +8,7 @@ import { createLinuxVerifierExecutor } from "../orchestration/linux-verifier.ts"
 import { realpathSync, statSync } from "node:fs"
 import { stateRoot } from "../state/store.ts"
 import { createExecutionRunStore, type ExecutionRunStore } from "./run-state.ts"
-import { createExecutionPolicy } from "./tool-policy.ts"
+import { createExecutionPolicy, type ExecutionPolicyOptions } from "./tool-policy.ts"
 import { inspectLinuxVerifierProfile, linuxBootEpochMatches } from "./linux-domain.ts"
 import {
   LinuxAdmissionRefused,
@@ -75,13 +75,19 @@ export function createLinuxAdmission({ qualification = false }: { qualification?
 export function createExecutionRuntime(
   deps: CoreDeps,
   hostFactory: (parts: { policy: ExecutionPolicy; runs: ExecutionRunStore }) => ExecutionHost,
+  options: Pick<ExecutionPolicyOptions, "planningOnlyMain" | "nativeContext"> = {},
 ): ExecutionRuntime {
   const verificationProfile = deps.config.delegate.verifier
   if (verificationProfile !== "legacy-unowned" && verificationProfile !== "linux-single-use") {
     throw new TypeError("invalid verifier selection")
   }
 
-  const policy = createExecutionPolicy(deps.config, { directory: deps.directory, worktree: deps.worktree })
+  const policy = createExecutionPolicy(deps.config, {
+    directory: deps.directory,
+    worktree: deps.worktree,
+    planningOnlyMain: options.planningOnlyMain,
+    nativeContext: options.nativeContext,
+  })
   const runs = createExecutionRunStore(deps.worktree)
   const host = hostFactory({ policy, runs })
   return {

@@ -238,6 +238,7 @@ function buildManifest(evidenceDir: string, options: { failedProvision?: boolean
           outcome,
           expectedInjection,
           errorNames,
+          orderedTermination: false,
         })
         if (lineageUnexpected) break
       }
@@ -341,7 +342,7 @@ test("tail deletion of lineage-start, failed provision-end, or invocation-end is
           appendEvent(fixture.evidenceDir, "invocation-end", {
             lineage: "success-r1", invocationIndex: 1, exit: { code: 0, signal: null },
             snapshotPath: "snapshots/success-r1/1.receipt.json", snapshotSha256: null,
-            outcome: "snapshot-missing", expectedInjection: null, errorNames: [],
+            outcome: "snapshot-missing", expectedInjection: null, errorNames: [], orderedTermination: false,
           })
         }
       }
