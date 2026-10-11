@@ -10,7 +10,7 @@ not granted by model output. Native CLI budget and containment limits are descri
 | Layer | Files | Scope |
 | --- | --- | --- |
 | Shared runtime | `src/hosts/{types,runtime,tool-policy,run-state}.ts` | Host contracts, fixed role policy, execution ownership and durable recovery state. |
-| Common CLI host | `src/hosts/{interactive,cli-runtime,cli-host,cli-transport,cli-tools,codex-profile,plan-conversation}.ts` | Engine/model selection, conversation and controlled native CLI inference. |
+| Common CLI host | `src/hosts/{interactive,model-catalog,cli-runtime,cli-host,cli-transport,cli-tools,codex-profile,plan-conversation}.ts` | Engine/model discovery and selection, conversation and controlled native CLI inference. |
 | OpenCode adapter | `src/hosts/{opencode,opencode-runtime}.ts` | Retained plugin and imported-plan host integration. |
 | Workflow entry points | `src/hosts/{cli,controller}.ts`, `src/flow/`, `src/hooks/`, `src/tools/` | Import, approval, delegation, review, cancellation and status. |
 | Task execution | `src/orchestration/{queue,snapshot,worktree,git-boundary,shell,verifier,legacy-verifier}.ts` | Serial tasks, snapshots, verification and accepted changes. The default verifier remains `legacy-unowned`. |
@@ -74,6 +74,9 @@ This is a request bound, not evidence that a remote provider enforces it or stop
 
 Bare `lca` and `lca chat` open LCA's engine/model selection, not the OpenCode TUI.
 Select **local** (the installed Ollama CLI), **Codex**, or **Claude Code**.
+The default path runs natively in the current environment with `legacy-unowned`
+verification; it requires no VM. Linux verifier qualification remains a separate,
+explicitly selected facility, not a prerequisite for ordinary CLI use.
 Selections can also be supplied explicitly:
 
 ```sh
@@ -82,13 +85,36 @@ lca chat --engine codex --model gpt-5.6-sol
 lca chat --engine claude --model sonnet
 ```
 
+Without an explicit model, the terminal offers numbered choices or native model ID
+entry. Ollama choices come from a bounded, read-only `ollama list` probe in the same
+subprocess environment as inference; unavailable or empty discovery is reported
+without starting a service or downloading a model. Codex choices are the bundled,
+version-pinned supported slugs, not an account entitlement query. Claude choices are
+native aliases, not a fetched account catalogue. Explicit `--model` skips discovery.
+
+During idle conversation, `/model` displays the current selection and opens that
+engine's model picker; `/model claude sonnet` switches engines/models directly.
+`/help` lists local commands. Empty input or `/cancel` in the model picker cancels
+selection without changing the current conversation.
+An actual switch starts a fresh conversation/session: prior conversation context is
+not transferred, and no approval is reused. Selecting the same engine/model keeps
+the current session. Switching is refused while a workflow is active, workflow
+state is corrupt, or execution ownership is unresolved; recover with the original
+engine/model/session instead. Cancelling the picker or a failed selection leaves
+the current selection intact. Native host preflight must pass before a candidate
+replaces the current selection. These commands do not run model inference.
+The terminal still exits after the plan's approval/execution or rejection; model
+switching does not turn recovery into a different-model replay.
+
 Model names are native identifiers and examples, not a promise of account availability.
 Models must follow LCA's JSON tool protocol and produce valid plans; malformed replies
 are refused, never executed through a fallback. Selecting an installed local model does
 not establish that it can complete the planning/execution workflow.
 The worktree defaults to the current Git worktree; `--worktree PATH` selects another.
-The terminal requires a TTY and uses existing vendor authentication. It does not start
-Ollama, inspect credentials, install a model, or rewrite global configuration.
+The terminal requires a TTY and uses existing vendor authentication. Model discovery
+does not start Ollama, inspect credentials, install a model, or rewrite global
+configuration. A manually entered local ID is not proof of installation; subsequent
+inference uses the installed Ollama CLI's native `run` behavior.
 The subprocess allowlist retains non-secret `USER`/`LOGNAME` for native keychain lookup,
 but does not forward API-key/token environment variables. These names do not establish
 execution authority. Vendor account quotas still apply.

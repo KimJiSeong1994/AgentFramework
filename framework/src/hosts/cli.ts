@@ -37,7 +37,10 @@ Interactive chat:
 Bare 'lca' and 'lca chat' start LCA's interactive terminal in the current Git worktree,
 or in the canonical worktree selected by --worktree. Choose an engine from the menu, or
 specify --engine. Enter a native model ID or supply --model; local selects the Ollama CLI,
-not OpenCode. Plans require a separate local human approval.
+not OpenCode. The model picker lists bounded native choices when available; explicit IDs are
+also accepted. In chat, /model shows the current selection and picker, /model <engine> <native-id>
+switches directly, and /help lists local commands. A switch requires no active workflow, valid
+workflow state and settled execution ownership, and starts a new conversation context. Plans require a separate local human approval.
 
 Commands:
   status   --worktree PATH [--session ID] [--json]

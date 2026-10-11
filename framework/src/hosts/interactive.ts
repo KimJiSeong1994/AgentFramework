@@ -3,13 +3,16 @@ import { spawnSync } from "node:child_process"
 import { accessSync, constants, realpathSync, statSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
 import { createInterface } from "node:readline"
-import { activeWorkflow } from "../flow/state.ts"
+import { activeWorkflow, readWorkflowChecked } from "../flow/state.ts"
 import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
 import { createPlanConversation } from "./plan-conversation.ts"
 import { createForegroundController, type ForegroundController } from "./controller.ts"
+import { discoverModels as discoverModelCatalog, type ModelCatalog } from "./model-catalog.ts"
 import { humanDecision } from "./operator.ts"
 import type { OperatorDecision } from "./operator.ts"
-import { AdmissionRefusal } from "./required-controls.ts"
+import { AdmissionRefusal, assertHostAdmission } from "./required-controls.ts"
+import { beginExecutionActivity } from "./runtime.ts"
+import { settled } from "./run-state.ts"
 import { LinuxAdmissionRefused, type ExecutionRuntime } from "./types.ts"
 
 export type CliEngine = CliRuntimeOptions["engine"]
@@ -41,8 +44,10 @@ export type InteractiveDependencies = {
   terminal: Terminal
   gitTopLevel: (directory: string) => string | undefined
   createRuntime: (options: RuntimeOptions) => ExecutionRuntime
+  admitRuntime: (runtime: ExecutionRuntime) => Promise<void>
   createConversation: (runtime: ExecutionRuntime, sessionID: string) => PlanConversation
   createController: (runtime: ExecutionRuntime) => ForegroundController
+  discoverModels: (engine: CliEngine, worktree: string, signal?: AbortSignal) => Promise<ModelCatalog>
   humanDecision: typeof humanDecision
   randomUUID: () => string
   signals: SignalSource
@@ -155,8 +160,12 @@ function defaultDependencies(): InteractiveDependencies {
     terminal: createTerminal(),
     gitTopLevel: defaultGitTopLevel,
     createRuntime: ({ worktree, engine, model }) => createCliRuntime({ worktree, engine, model }),
+    admitRuntime: async (runtime) => {
+      assertHostAdmission(await runtime.host.preflight(runtime.host.identity.profile), runtime.host.identity.controlProfile)
+    },
     createConversation: (runtime, sessionID) => createPlanConversation(runtime, sessionID),
     createController: createForegroundController,
+    discoverModels: discoverModelCatalog,
     humanDecision,
     randomUUID,
     signals: {
@@ -205,15 +214,57 @@ async function chooseEngine(terminal: Terminal, signal: AbortSignal): Promise<Cl
   return undefined
 }
 
-async function chooseModel(terminal: Terminal, signal: AbortSignal): Promise<string | undefined> {
-  terminal.write("Enter a native model ID; no provider/model prefix or default model is selected.\n")
+async function chooseModel(
+  terminal: Terminal,
+  engine: CliEngine,
+  worktree: string,
+  signal: AbortSignal,
+  discoverModels: InteractiveDependencies["discoverModels"],
+): Promise<string | null | undefined> {
+  let catalog: ModelCatalog
+  try {
+    catalog = await discoverModels(engine, worktree, signal)
+  } catch {
+    if (signal.aborted) return undefined
+    catalog = { models: [], notice: "Model discovery was unavailable." }
+  }
+  if (signal.aborted) return undefined
+  const models = Array.isArray(catalog?.models)
+    ? catalog.models.filter(model => !!model && validModelID(model.id) && typeof model.label === "string")
+    : []
+  const notice = typeof catalog?.notice === "string" ? catalog.notice : ""
+  const choices = models.map((model, index) => `  ${index + 1}) ${model.label} — ${model.id}`).join("\n")
+  terminal.write(terminalSafeText(
+    `${choices ? `Model choices for ${engine}:\n${choices}\n` : `No model choices were discovered for ${engine}.\n`}` +
+      `${notice ? `${notice}\n` : ""}Select a number or enter a native model ID (use id:<ID> for numeric IDs). Empty input or /cancel cancels selection. No default is selected.\n`,
+  ))
   while (!signal.aborted) {
-    const answer = await terminal.readLine("Model ID: ", signal)
+    const prompt = models.length ? `Model [1-${models.length} or native ID]: ` : "Model [native ID]: "
+    const answer = await terminal.readLine(prompt, signal)
     if (answer === undefined || signal.aborted) return undefined
-    if (validModelID(answer)) return answer
-    terminal.write("Invalid model ID; use a non-empty name without whitespace.\n")
+    if (answer.trim() === "" || answer.trim() === "/cancel") return null
+    if (/^[0-9]+$/u.test(answer)) {
+      const index = Number(answer)
+      if (index >= 1 && index <= models.length) return models[index - 1]!.id
+      terminal.write("Invalid model choice; select a listed number or enter a native model ID.\n")
+      continue
+    }
+    const nativeID = answer.startsWith("id:") ? answer.slice(3) : answer
+    if (validModelID(nativeID)) return nativeID
+    terminal.write("Invalid model ID; use a non-empty native name without whitespace.\n")
   }
   return undefined
+}
+
+function selectionBanner(worktree: string, engine: CliEngine, model: string, reset = false): string {
+  return terminalSafeText(
+    `\nNative execution selection:\n  Engine: ${engine}\n  Model: ${model}\n  Worktree: ${worktree}\n` +
+      `${reset ? "  Conversation context reset after model switch.\n" : ""}\n`,
+  )
+}
+
+function helpText(): string {
+  return "Local commands: /help, /model, /model <engine> <native-id>, /cancel, /quit, /exit. /plan remains a planning prompt.\n"
 }
 
 function defaultSessionID(uuid: string): string {
@@ -268,16 +319,88 @@ export async function launchInteractive(
     const worktree = canonicalWorktree(args.worktree, deps)
     const engine = args.engine ?? await chooseEngine(terminal, abort.signal)
     if (!engine || abort.signal.aborted) return signalExit(receivedSignal)
-    const model = args.model ?? await chooseModel(terminal, abort.signal)
+    const model = args.model ?? await chooseModel(terminal, engine, worktree, abort.signal, deps.discoverModels)
     if (!model || abort.signal.aborted) return signalExit(receivedSignal)
     if (!validModelID(model)) throw new InteractiveLaunchError("invalid model ID; enter a native model name without whitespace")
 
     terminal.write("\nNative CLI limitations: input size is estimated and output limits are reactive; these are not strict guarantees. No process or filesystem containment is claimed.\n\n")
-    const sessionID = defaultSessionID(deps.randomUUID())
-    const runtime = deps.createRuntime({ worktree, engine, model })
-    runtime.linuxAdmission?.assertBootEpoch()
-    const controller = deps.createController(runtime)
-    const conversation = deps.createConversation(runtime, sessionID)
+    const initialSessionID = defaultSessionID(deps.randomUUID())
+    const initialRuntime = deps.createRuntime({ worktree, engine, model })
+    initialRuntime.linuxAdmission?.assertBootEpoch()
+    await deps.admitRuntime(initialRuntime)
+    if (abort.signal.aborted) return signalExit(receivedSignal)
+    let selection = {
+      engine,
+      model,
+      sessionID: initialSessionID,
+      runtime: initialRuntime,
+      controller: deps.createController(initialRuntime),
+      conversation: deps.createConversation(initialRuntime, initialSessionID),
+    }
+    const usedSessionIDs = new Set([initialSessionID])
+    terminal.write(selectionBanner(worktree, selection.engine, selection.model))
+
+    function acquireSwitchGuard(): { release?: () => void; refusal?: string } {
+      const release = beginExecutionActivity(selection.runtime, selection.sessionID, "review")
+      if (!release) return { refusal: "Model switch refused: another local execution is still active.\n" }
+      try {
+        const workflowState = readWorkflowChecked(worktree)
+        if (workflowState.corrupt) {
+          release()
+          return { refusal: "Model switch refused: workflow state is corrupt and must be inspected first.\n" }
+        }
+        if (activeWorkflow(worktree)) {
+          release()
+          return { refusal: "Model switch refused: resolve the active workflow first.\n" }
+        }
+        const status = selection.runtime.runs.status()
+        if (status.claim) {
+          release()
+          return { refusal: "Model switch refused: execution ownership is unresolved; use recovery first.\n" }
+        }
+        if (status.executions.some(execution => !settled(execution))) {
+          release()
+          return { refusal: "Model switch refused: execution ownership is unresolved; use recovery first.\n" }
+        }
+        return { release }
+      } catch {
+        release()
+        return { refusal: "Model switch refused: workflow or execution ownership state could not be verified.\n" }
+      }
+    }
+
+    async function switchSelection(nextEngine: CliEngine, nextModel: string): Promise<boolean> {
+      if (nextEngine === selection.engine && nextModel === selection.model) {
+        terminal.write("Already using that engine and model; conversation context is unchanged.\n")
+        return true
+      }
+      const guard = acquireSwitchGuard()
+      if (!guard.release) {
+        terminal.write(guard.refusal ?? "Model switch refused; current selection is unchanged.\n")
+        return true
+      }
+      try {
+        const sessionID = defaultSessionID(deps.randomUUID())
+        if (usedSessionIDs.has(sessionID)) throw new Error("new conversation identity was not unique")
+        const runtime = deps.createRuntime({ worktree, engine: nextEngine, model: nextModel })
+        runtime.linuxAdmission?.assertBootEpoch()
+        await deps.admitRuntime(runtime)
+        if (abort.signal.aborted) return false
+        const controller = deps.createController(runtime)
+        const conversation = deps.createConversation(runtime, sessionID)
+        if (abort.signal.aborted) return false
+        selection = { engine: nextEngine, model: nextModel, sessionID, runtime, controller, conversation }
+        usedSessionIDs.add(sessionID)
+        terminal.write(selectionBanner(worktree, selection.engine, selection.model, true))
+      } catch (error) {
+        if (!(error instanceof AdmissionRefusal) && !(error instanceof TypeError)) throw error
+        if (abort.signal.aborted) return false
+        terminal.write("Model switch failed; the current selection and conversation are unchanged.\n")
+      } finally {
+        guard.release()
+      }
+      return true
+    }
 
     while (!abort.signal.aborted) {
       const text = await terminal.readLine("You> ", abort.signal)
@@ -291,14 +414,48 @@ export async function launchInteractive(
         return { code: 0 }
       }
 
-      const turn = await conversation.turn(message, abort.signal)
+      const [command, ...commandArgs] = message.split(/\s+/u)
+      if (command === "/help" && commandArgs.length === 0) {
+        terminal.write(helpText())
+        continue
+      }
+      if (command === "/model") {
+        if (commandArgs.length === 0) {
+          terminal.write(terminalSafeText(`Current selection: ${selection.engine} ${selection.model}\n`))
+          const guard = acquireSwitchGuard()
+          if (!guard.release) {
+            terminal.write(guard.refusal ?? "Model switch refused; current selection is unchanged.\n")
+            continue
+          }
+          guard.release()
+          const nextModel = await chooseModel(terminal, selection.engine, worktree, abort.signal, deps.discoverModels)
+          if (abort.signal.aborted) return signalExit(receivedSignal)
+          if (nextModel === undefined) return { code: 0 }
+          if (nextModel === null) continue
+          if (!await switchSelection(selection.engine, nextModel)) return signalExit(receivedSignal)
+          continue
+        }
+        if (commandArgs.length !== 2 || !["local", "codex", "claude"].includes(commandArgs[0]!) ||
+            !validModelID(commandArgs[1]!)) {
+          terminal.write("Usage: /model <local|codex|claude> <native-id>\n")
+          continue
+        }
+        if (!await switchSelection(commandArgs[0] as CliEngine, commandArgs[1]!)) return signalExit(receivedSignal)
+        continue
+      }
+      if (message.startsWith("/") && command !== "/plan") {
+        terminal.write("Unknown local command. Enter /help for usage.\n")
+        continue
+      }
+
+      const turn = await selection.conversation.turn(message, abort.signal)
       if (abort.signal.aborted) return signalExit(receivedSignal)
       if (turn.text) terminal.write(terminalSafeText(`\n${turn.text}\n`))
       if (turn.plan === undefined) continue
 
       const parsedPlan = planForImport(turn.plan, worktree)
       try {
-        controller.validateImportedPlan(parsedPlan, sessionID)
+        selection.controller.validateImportedPlan(parsedPlan, selection.sessionID)
       } catch (error) {
         const feedback = planValidationFeedback(error)
         if (feedback === undefined) throw error
@@ -306,7 +463,7 @@ export async function launchInteractive(
         continue
       }
       if (abort.signal.aborted) return signalExit(receivedSignal)
-      const submitted = await controller.importPlan(sessionID, "", abort.signal, parsedPlan)
+      const submitted = await selection.controller.importPlan(selection.sessionID, "", abort.signal, parsedPlan)
       if (abort.signal.aborted) return signalExit(receivedSignal)
       if (!submitted.result.ok) {
         terminal.write(terminalSafeText(`Plan was not approved for execution: ${submitted.result.text}\n`))
@@ -345,7 +502,7 @@ export async function launchInteractive(
         sigtermRegistered = true
       }
       if (abort.signal.aborted) return signalExit(receivedSignal)
-      const decided = controller.decide(decision)
+      const decided = selection.controller.decide(decision)
       if (!decided.ok) throw new InteractiveLaunchError("local plan decision could not be applied; inspect read-only status")
       if (decision.action === "reject") {
         terminal.write(terminalSafeText(`Workflow ${workflow.id} rejected; execution was not started.\n`))
@@ -353,7 +510,7 @@ export async function launchInteractive(
       }
       if (decision.action !== "approve") return { code: 1 }
       if (abort.signal.aborted) return signalExit(receivedSignal)
-      const result = await controller.run(sessionID, abort.signal)
+      const result = await selection.controller.run(selection.sessionID, abort.signal)
       terminal.write(terminalSafeText(
         `Workflow ${result.workflow.id} ${result.workflow.phase}; done ${result.run.done}, failed ${result.run.failed}, cancelled ${result.run.cancelled}${result.run.skipped ? `; ${result.run.skipped}` : ""}\n`,
       ))

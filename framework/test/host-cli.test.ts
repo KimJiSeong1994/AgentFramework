@@ -66,6 +66,8 @@ describe("foreground CLI", () => {
       expect(result.stdout).toContain("--engine local|codex|claude --model ID --session ID")
       expect(result.stdout).toContain("Standalone commands do not start a server")
       expect(result.stdout).toContain("--engine local|codex|claude")
+      expect(result.stdout).toContain("/model <engine> <native-id>")
+      expect(result.stdout).toContain("/help lists local commands")
       expect(result.stdout).toContain("input limits are estimated and output limits are reactive")
       expect(result.stdout).toContain("Interactive chat requires a terminal on stdin and stderr")
       expect(result.stdout).not.toContain("OpenCode TUI")
