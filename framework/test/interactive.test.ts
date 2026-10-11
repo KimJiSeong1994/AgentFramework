@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, realpathSync } from "node:fs"
-import { join } from "node:path"
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { launchInteractive, parseInteractiveArgs, validModelID, type InteractiveDependencies, type Terminal } from "../src/hosts/interactive.ts"
+import type { ModelCatalog } from "../src/hosts/model-catalog.ts"
+import { workflowPath } from "../src/flow/state.ts"
+import { AdmissionRefusal } from "../src/hosts/required-controls.ts"
 import type { ForegroundController } from "../src/hosts/controller.ts"
 import type { ExecutionRuntime } from "../src/hosts/types.ts"
 import { humanDecision, type OperatorDecision } from "../src/hosts/operator.ts"
@@ -26,6 +29,11 @@ type HarnessOptions = {
   renderedPlan?: string
   planSha?: string
   importResult?: { ok: boolean; text?: string; phase?: string }
+  catalog?: ModelCatalog
+  executionStatus?: { generation: number; claim?: { ownerSession: string; instance: string; pid: number; generation: number }; executions: Array<Record<string, unknown>> }
+  executionStatusError?: boolean
+  failRuntimeFor?: (engine: string, model: string) => boolean
+  failConversationFor?: (engine: string, model: string) => boolean
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -35,6 +43,10 @@ function harness(options: HarnessOptions = {}) {
     output: string[]
     events: string[]
     runtime?: { worktree: string; engine: string; model: string }
+    runtimes: Array<{ worktree: string; engine: string; model: string }>
+    sessionIDs: string[]
+    turnBindings: Array<{ engine: string; model: string; sessionID: string; text: string }>
+    discoveries: Array<{ engine: string; worktree: string }>
     turns: string[]
     sessionID?: string
     validated?: unknown
@@ -44,7 +56,7 @@ function harness(options: HarnessOptions = {}) {
     approvalRequest?: { action: Parameters<typeof humanDecision>[0]; workflowID: string; planSha: string }
     runCount: number
     signalListeners: Map<string, Set<() => void>>
-  } = { prompts: [], output: [], events: [], turns: [], validationAttempts: [], runCount: 0, signalListeners: new Map() }
+  } = { prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, signalListeners: new Map() }
 
   const terminal: Terminal = {
     stdinIsTTY: options.tty?.stdin ?? true,
@@ -58,7 +70,6 @@ function harness(options: HarnessOptions = {}) {
     write: (text) => { calls.output.push(text); options.beforeWrite?.(text) },
     close: () => { calls.events.push("terminal.close") },
   }
-  const fakeRuntime = {} as ExecutionRuntime
   const controller = {
     validateImportedPlan(plan: unknown) {
       calls.events.push("validate")
@@ -109,17 +120,38 @@ function harness(options: HarnessOptions = {}) {
     gitTopLevel: () => Object.hasOwn(options, "gitTopLevel") ? options.gitTopLevel : wt.worktree,
     createRuntime: ({ worktree, engine, model }) => {
       calls.events.push("runtime")
-      calls.runtime = { worktree, engine, model }
-      return fakeRuntime
+      if (options.failRuntimeFor?.(engine, model)) throw new TypeError("fixture runtime setup failed")
+      const selected = { worktree, engine, model }
+      calls.runtime = selected
+      calls.runtimes.push(selected)
+      return {
+        worktree,
+        selectedEngine: engine,
+        selectedModel: model,
+        runs: {
+          status() {
+            calls.events.push("execution.status")
+            if (options.executionStatusError) throw new Error("fixture execution state unavailable")
+            return options.executionStatus ?? { generation: 0, executions: [] }
+          },
+        },
+      } as unknown as ExecutionRuntime
     },
-    createConversation: (_runtime, sessionID) => {
+    admitRuntime: async () => {},
+    createConversation: (runtime, sessionID) => {
       calls.events.push("conversation")
       calls.sessionID = sessionID
+      calls.sessionIDs.push(sessionID)
+      const selectedRuntime = runtime as ExecutionRuntime & { selectedEngine: string; selectedModel: string }
+      if (options.failConversationFor?.(selectedRuntime.selectedEngine, selectedRuntime.selectedModel)) {
+        throw new Error("fixture conversation setup failed")
+      }
       const turns = [...(options.turns ?? [])]
       return {
         turn: async (text) => {
           calls.events.push("turn")
           calls.turns.push(text)
+          calls.turnBindings.push({ engine: selectedRuntime.selectedEngine, model: selectedRuntime.selectedModel, sessionID, text })
           return turns.shift() ?? { text: "Acknowledged." }
         },
       }
@@ -130,7 +162,20 @@ function harness(options: HarnessOptions = {}) {
       calls.approvalRequest = { action, workflowID, planSha }
       return { action: options.decision ?? "approve", workflowID, planSha } as unknown as OperatorDecision
     },
-    randomUUID: () => "fixture-session",
+    discoverModels: async (engine, worktree) => {
+      calls.discoveries.push({ engine, worktree })
+      return options.catalog ?? {
+        models: [
+          { id: engine === "local" ? "llama3.2" : engine === "codex" ? "gpt-5-codex" : "claude-sonnet-4-5", label: "Primary model" },
+          { id: "native-secondary", label: "Secondary model" },
+        ],
+        notice: "Fixture catalog notice",
+      }
+    },
+    randomUUID: (() => {
+      let sequence = 0
+      return () => sequence++ === 0 ? "fixture-session" : `fixture-session-${sequence}`
+    })(),
     signals: {
       on: (signal, listener) => {
         let listeners = calls.signalListeners.get(signal)
@@ -201,18 +246,32 @@ describe("interactive terminal", () => {
     const result = await launchInteractive({ worktree: wt.worktree }, h.deps)
     expect(result.code).toBe(0)
     expect(h.calls.prompts[0]).toContain("Choose an execution engine")
-    expect(h.calls.prompts[1]).toBe("Model ID: ")
+    expect(h.calls.prompts[1]).toBe("Model [1-2 or native ID]: ")
     expect(h.calls.runtime).toEqual({ worktree: realpathSync(wt.worktree), engine: "codex", model: "gpt-5-codex" })
+    expect(h.calls.discoveries).toEqual([{ engine: "codex", worktree: realpathSync(wt.worktree) }])
     expect(h.calls.output.join(" ")).toContain("estimated")
     expect(h.calls.output.join(" ")).toContain("reactive")
     expect(h.calls.output.join(" ")).toContain("No process or filesystem containment is claimed")
+  })
+
+  test("startup picker displays numbered native models and the selected execution banner", async () => {
+    const h = harness({ lines: ["1", "2", "/quit"] })
+    const result = await launchInteractive({ worktree: wt.worktree }, h.deps)
+    const output = h.calls.output.join("")
+    expect(result.code).toBe(0)
+    expect(h.calls.runtime).toEqual({ worktree: realpathSync(wt.worktree), engine: "local", model: "native-secondary" })
+    expect(output).toContain("1) Primary model — llama3.2")
+    expect(output).toContain("2) Secondary model — native-secondary")
+    expect(output).toContain("Fixture catalog notice")
+    expect(output).toContain(`Engine: local\n  Model: native-secondary\n  Worktree: ${realpathSync(wt.worktree)}`)
+    expect(h.calls.discoveries).toHaveLength(1)
   })
 
   test("engine and model flags skip only the corresponding prompt; local maps to Ollama runtime", async () => {
     const h = harness({ lines: ["gpt-oss:20b", "/quit"] })
     const result = await launchInteractive({ worktree: wt.worktree, engine: "local" }, h.deps)
     expect(result.code).toBe(0)
-    expect(h.calls.prompts).toEqual(["Model ID: ", "You> "])
+    expect(h.calls.prompts).toEqual(["Model [1-2 or native ID]: ", "You> "])
     expect(h.calls.runtime?.engine).toBe("local")
     expect(h.calls.runtime?.model).toBe("gpt-oss:20b")
 
@@ -221,6 +280,15 @@ describe("interactive terminal", () => {
     expect(explicit.calls.prompts).toEqual(["You> "])
     expect(explicit.calls.runtime?.engine).toBe("claude")
     expect(explicit.calls.runtime?.model).toBe("claude-sonnet-4-5")
+    expect(explicit.calls.discoveries).toEqual([])
+
+    const modelOnly = harness({ lines: ["2", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, model: "manual-native-id" }, modelOnly.deps)
+    expect(modelOnly.calls.prompts[0]).toContain("Choose an execution engine")
+    expect(modelOnly.calls.prompts[1]).toBe("You> ")
+    expect(modelOnly.calls.runtime?.engine).toBe("codex")
+    expect(modelOnly.calls.runtime?.model).toBe("manual-native-id")
+    expect(modelOnly.calls.discoveries).toEqual([])
   })
 
   test("invalid engine and model choices are retried without choosing an implicit default", async () => {
@@ -229,8 +297,8 @@ describe("interactive terminal", () => {
     expect(result.code).toBe(0)
     expect(h.calls.prompts[0]).toContain("Choose an execution engine")
     expect(h.calls.prompts[1]).toContain("Choose an execution engine")
-    expect(h.calls.prompts[2]).toBe("Model ID: ")
-    expect(h.calls.prompts[3]).toBe("Model ID: ")
+    expect(h.calls.prompts[2]).toBe("Model [1-2 or native ID]: ")
+    expect(h.calls.prompts[3]).toBe("Model [1-2 or native ID]: ")
     expect(h.calls.runtime?.engine).toBe("claude")
     expect(h.calls.runtime?.model).toBe("claude-sonnet-4-5")
     expect(h.calls.output.join(" ")).toContain("Invalid model ID")
@@ -251,6 +319,194 @@ describe("interactive terminal", () => {
     expect(h.calls.runCount).toBe(0)
     expect(h.calls.turns).toEqual(["hello"])
     expect([...h.calls.signalListeners.values()].every(listeners => listeners.size === 0)).toBe(true)
+  })
+
+  test("local help, picker and unknown slash commands never reach inference; /plan stays a prompt", async () => {
+    const h = harness({ lines: ["/help", "/unknown", "/model", "2", "hello", "/plan", "/quit"] })
+    const result = await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(result.code).toBe(0)
+    expect(h.calls.turns).toEqual(["hello", "/plan"])
+    expect(h.calls.turnBindings).toEqual([
+      { engine: "codex", model: "native-secondary", sessionID: "lca-fixture-session-2", text: "hello" },
+      { engine: "codex", model: "native-secondary", sessionID: "lca-fixture-session-2", text: "/plan" },
+    ])
+    expect(h.calls.runtimes).toEqual([
+      { worktree: realpathSync(wt.worktree), engine: "codex", model: "gpt-5-codex" },
+      { worktree: realpathSync(wt.worktree), engine: "codex", model: "native-secondary" },
+    ])
+    expect(h.calls.sessionIDs).toEqual(["lca-fixture-session", "lca-fixture-session-2"])
+    expect(h.calls.discoveries).toEqual([{ engine: "codex", worktree: realpathSync(wt.worktree) }])
+    expect(h.calls.output.join("")).toContain("Local commands: /help, /model")
+    expect(h.calls.output.join("")).toContain("Conversation context reset after model switch.")
+  })
+
+  test("direct model switch uses the new runtime and session on the next turn without discovery", async () => {
+    const h = harness({ lines: ["/model local qwen3:8b", "hello", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.runtimes).toEqual([
+      { worktree: realpathSync(wt.worktree), engine: "codex", model: "gpt-5-codex" },
+      { worktree: realpathSync(wt.worktree), engine: "local", model: "qwen3:8b" },
+    ])
+    expect(h.calls.sessionIDs).toEqual(["lca-fixture-session", "lca-fixture-session-2"])
+    expect(h.calls.turnBindings).toEqual([
+      { engine: "local", model: "qwen3:8b", sessionID: "lca-fixture-session-2", text: "hello" },
+    ])
+    expect(h.calls.discoveries).toEqual([])
+  })
+
+  test("same engine and model is a no-op and does not reset conversation context", async () => {
+    const h = harness({ lines: ["/model codex gpt-5-codex", "hello", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.sessionIDs).toEqual(["lca-fixture-session"])
+    expect(h.calls.turnBindings[0]).toEqual({
+      engine: "codex", model: "gpt-5-codex", sessionID: "lca-fixture-session", text: "hello",
+    })
+    expect(h.calls.output.join("")).toContain("conversation context is unchanged")
+  })
+
+  test("invalid picker entries preserve the old runtime and conversation", async () => {
+    const h = harness({ lines: ["/model", "0", "bad model", "gpt-5-codex", "hello", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.sessionIDs).toEqual(["lca-fixture-session"])
+    expect(h.calls.turnBindings[0]).toEqual({
+      engine: "codex", model: "gpt-5-codex", sessionID: "lca-fixture-session", text: "hello",
+    })
+    expect(h.calls.output.join("")).toContain("Invalid model choice")
+    expect(h.calls.output.join("")).toContain("Invalid model ID")
+  })
+
+  test("candidate setup failure preserves the old selection and session", async () => {
+    const h = harness({
+      lines: ["/model local qwen3:8b", "hello", "/quit"],
+      failRuntimeFor: engine => engine === "local",
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.sessionIDs).toEqual(["lca-fixture-session"])
+    expect(h.calls.turnBindings[0]).toEqual({
+      engine: "codex", model: "gpt-5-codex", sessionID: "lca-fixture-session", text: "hello",
+    })
+    expect(h.calls.output.join("")).toContain("current selection and conversation are unchanged")
+  })
+
+  test.each(["", "/cancel"])("picker cancellation %j keeps the current conversation usable", async (cancel) => {
+    const h = harness({ lines: ["/model", cancel, "hello", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.turnBindings).toEqual([
+      { engine: "codex", model: "gpt-5-codex", sessionID: "lca-fixture-session", text: "hello" },
+    ])
+  })
+
+  test("candidate preflight refusal preserves the old session before creating a conversation", async () => {
+    const h = harness({ lines: ["/model local qwen3:8b", "hello", "/quit"] })
+    let admissions = 0
+    h.deps.admitRuntime = async () => {
+      if (++admissions === 2) throw AdmissionRefusal.hostIncompatible()
+    }
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(admissions).toBe(2)
+    expect(h.calls.sessionIDs).toEqual(["lca-fixture-session"])
+    expect(h.calls.turnBindings[0]?.engine).toBe("codex")
+    expect(h.calls.output.join("")).toContain("current selection and conversation are unchanged")
+  })
+
+  test("default startup admission rejects an incompatible native host before conversation", async () => {
+    const h = harness({ lines: ["/quit"] })
+    const factory = h.deps.createRuntime!
+    h.deps.createRuntime = options => Object.assign(factory(options), {
+      host: {
+        identity: { engine: "local", profile: "legacy-unowned" },
+        preflight: async () => ({ compatible: false, controls: {}, problems: ["missing CLI"] }),
+      },
+    }) as unknown as ExecutionRuntime
+    delete h.deps.admitRuntime
+    await expect(launchInteractive({ worktree: wt.worktree, engine: "local", model: "model" }, h.deps))
+      .rejects.toBeInstanceOf(AdmissionRefusal)
+    expect(h.calls.sessionIDs).toEqual([])
+  })
+
+  test("unexpected candidate setup errors propagate rather than hiding state defects", async () => {
+    const h = harness({
+      lines: ["/model local qwen3:8b", "hello", "/quit"],
+      failConversationFor: engine => engine === "local",
+    })
+    await expect(launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps))
+      .rejects.toThrow("fixture conversation setup failed")
+    expect(h.calls.turns).toEqual([])
+    expect([...h.calls.signalListeners.values()].every(listeners => listeners.size === 0)).toBe(true)
+  })
+
+  test("active workflow and corrupt workflow state refuse model switching", async () => {
+    const path = workflowPath(wt.worktree)
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, JSON.stringify({ version: 1, id: "wf_active", phase: "planning", sessionID: "another-session" }))
+    const active = harness({ lines: ["/model local qwen3:8b", "hello", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, active.deps)
+    expect(active.calls.runtimes).toHaveLength(1)
+    expect(active.calls.turnBindings[0]?.engine).toBe("codex")
+    expect(active.calls.output.join("")).toContain("resolve the active workflow first")
+
+    writeFileSync(path, "{")
+    const corrupt = harness({ lines: ["/model local qwen3:8b", "hello", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, corrupt.deps)
+    expect(corrupt.calls.runtimes).toHaveLength(1)
+    expect(corrupt.calls.turnBindings[0]?.engine).toBe("codex")
+    expect(corrupt.calls.output.join("")).toContain("workflow state is corrupt")
+  })
+
+  test("unresolved execution claims or intents refuse switching", async () => {
+    const cases = [
+      {
+        generation: 1,
+        claim: { ownerSession: "another-session", instance: "other-instance", pid: 1, generation: 1 },
+        executions: [],
+      },
+      {
+        generation: 1,
+        executions: [{ executionId: "unfinished", kind: "host", profile: "legacy-unowned" }],
+      },
+    ]
+    for (const executionStatus of cases) {
+      const h = harness({
+        lines: ["/model local qwen3:8b", "hello", "/quit"],
+        executionStatus,
+      })
+      await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+      expect(h.calls.runtimes).toHaveLength(1)
+      expect(h.calls.turnBindings[0]?.engine).toBe("codex")
+      expect(h.calls.output.join("")).toContain("execution ownership is unresolved")
+    }
+  })
+
+  test("EOF and signals in the model picker preserve the current runtime and clean listeners", async () => {
+    const eof = harness({ lines: ["/model", undefined] })
+    expect((await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, eof.deps)).code).toBe(0)
+    expect(eof.calls.runtimes).toHaveLength(1)
+    expect([...eof.calls.signalListeners.values()].every(listeners => listeners.size === 0)).toBe(true)
+
+    let interrupted: ReturnType<typeof harness>
+    interrupted = harness({
+      lines: ["/model"],
+      beforeRead: prompt => { if (prompt.startsWith("Model [")) interrupted.emitSignal("SIGTERM") },
+    })
+    expect((await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, interrupted.deps)).code).toBe(143)
+    expect(interrupted.calls.runtimes).toHaveLength(1)
+    expect([...interrupted.calls.signalListeners.values()].every(listeners => listeners.size === 0)).toBe(true)
+  })
+
+  test("discovered labels and notices are terminal-safe", async () => {
+    const h = harness({
+      lines: ["1", "/quit"],
+      catalog: { models: [{ id: "native-safe", label: "Label\u001b[2J" }], notice: "Notice\u202eunsafe" },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex" }, h.deps)
+    const output = h.calls.output.join("")
+    expect(output).toContain("Label\\u001b[2J")
+    expect(output).toContain("Notice\\u202eunsafe")
+    expect(unsafeTerminalControls.test(output)).toBe(false)
   })
 
   test("EOF at the chat prompt exits without execution", async () => {

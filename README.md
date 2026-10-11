@@ -1,4 +1,4 @@
-# AgentFramework — local coding agent (OpenCode + Ollama Gemma 4)
+# AgentFramework — local-first coding agent
 
 > **lca (자체 에이전트 프레임워크)**: `framework/README.md` (사용법·설정), 설계 `docs/agent-framework-review-2026-09-22.md`,
 > 구현 결과 `docs/lca-stage1-2026-09-22.md`, `docs/lca-stage2-2026-09-23.md`, `docs/lca-stage3-2026-09-23.md`(데이터 레이어), `docs/lca-stage4-2026-09-23.md`(온톨로지 진화 배치), `docs/lca-stage5-2026-09-23.md`(모델 비교). 아래는 OpenCode/Ollama 환경 설정 문서입니다.
@@ -7,10 +7,23 @@
 
 `lca`는 OpenCode를 자동으로 열지 않고 로컬(Ollama CLI)·Codex·Claude 엔진과 모델을 선택합니다.
 `lca chat --engine codex --model gpt-5.6-sol`처럼 직접 지정할 수도 있습니다.
+현재 실행한 환경의 Git 작업 디렉터리에서 동작하며, 기본 사용에는 VM이 필요하지 않습니다.
+모델 선택 화면은 Ollama의 설치 모델, Codex의 고정 지원 목록, Claude의 모델 별칭을 구분해 표시합니다.
+목록 번호 또는 네이티브 모델 ID로 선택할 수 있으며, 목록이 계정별 사용 권한이나 모델의 작업 성공을 보장하지는 않습니다.
+대화 중 `/model`로 다시 선택하거나 `/model claude sonnet`처럼 전환하고, `/help`로 명령을 확인합니다.
+실제 전환은 새 대화 세션을 만들며 이전 대화 문맥은 이어받지 않습니다. 진행 중인 워크플로·손상된 상태·미해결 실행이 있으면 전환하지 않습니다.
 대화·계획·명시적 사용자 승인·직렬 실행은 공통 LCA 컨트롤러가 담당합니다.
 입력 추정치와 출력 사후 중단을 사용하는 별도 프로필이며, 정확한 토큰 상한이나 OS 격리를 보장하지 않습니다.
 기존 로그인은 각 CLI가 사용하고, Ollama 서비스나 전역 설정은 자동 변경하지 않습니다.
+Linux 검증기 qualification은 별도 선택 기능이며, 일반 로컬 사용의 선행조건이 아닙니다.
 자세한 제약과 기존 OpenCode 명령의 차이는 `framework/README.md`를 참고하세요.
+
+`lca` 실행 명령이 설치되지 않은 경우 저장소 루트에서 직접 실행할 수 있습니다.
+
+```sh
+bun framework/src/hosts/cli.ts
+bun framework/src/hosts/cli.ts chat --engine local --model llama3.2:3b
+```
 
 ## 기존 OpenCode/Ollama 환경
 
