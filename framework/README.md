@@ -1,16 +1,17 @@
-# lca — local coding agent (OpenCode plugin)
+# lca — controlled coding agent
 
-Local-first agent framework for OpenCode, defaulting to Ollama/Gemma while retaining OpenCode's
-native Anthropic/OpenAI provider integrations when explicitly selected. It is the
-"opposite premise" of OMC/OMO/OMX (see `docs/agent-framework-review-2026-09-22.md`): the static
-prefix (system prompt + tool list + thinking toggle) is fixed at session start and small; repeat
-blocking, output trimming and orchestration are done in code, not by the model.
+Common terminal for installed Ollama, Codex and Claude Code CLIs, with a retained
+OpenCode plugin and imported-plan runner. LCA fixes its role policy at session start;
+approval, tool restrictions, output trimming and orchestration are enforced in code,
+not granted by model output. Native CLI budget and containment limits are described below.
 
 ## Core and qualification boundaries
 
 | Layer | Files | Scope |
 | --- | --- | --- |
-| OpenCode runtime | `src/hosts/{opencode,opencode-runtime,types,runtime,tool-policy,run-state}.ts` | Host execution, fixed role policy, execution ownership and durable recovery state. |
+| Shared runtime | `src/hosts/{types,runtime,tool-policy,run-state}.ts` | Host contracts, fixed role policy, execution ownership and durable recovery state. |
+| Common CLI host | `src/hosts/{interactive,cli-runtime,cli-host,cli-transport,cli-tools,codex-profile,plan-conversation}.ts` | Engine/model selection, conversation and controlled native CLI inference. |
+| OpenCode adapter | `src/hosts/{opencode,opencode-runtime}.ts` | Retained plugin and imported-plan host integration. |
 | Workflow entry points | `src/hosts/{cli,controller}.ts`, `src/flow/`, `src/hooks/`, `src/tools/` | Import, approval, delegation, review, cancellation and status. |
 | Task execution | `src/orchestration/{queue,snapshot,worktree,git-boundary,shell,verifier,legacy-verifier}.ts` | Serial tasks, snapshots, verification and accepted changes. The default verifier remains `legacy-unowned`. |
 | Owned-verifier qualification | `src/hosts/linux-domain.ts`, `src/orchestration/linux-verifier.ts`, `scripts/linux-verifier/`, `scripts/lca-linux-verifier-{e2.py,queue.ts}` | Opt-in Linux/systemd verifier boundary; not default admission or worker/reviewer containment. |
@@ -18,16 +19,17 @@ blocking, output trimming and orchestration are done in code, not by the model.
 Review the runtime, queue, workflow callers and their tests as one integration change:
 committing the queue without its new host contracts leaves unresolved imports. Native-host
 and Seatbelt qualification results are a separate review scope, not proof that the core
-is safe for untrusted workloads. Native Claude/Codex adapters, their SDK dependencies
-and macOS Seatbelt experiments are not included in this core. Linux support here is
-verifier-only and requires its own platform qualification.
+is safe for untrusted workloads. The common terminal uses installed vendor CLIs, not
+provider SDK adapters. Earlier macOS Seatbelt experiments do not qualify this runtime.
+Linux verifier admission requires its own platform qualification.
 Core changes still require regression tests and type checking. Native containment claims
 additionally require the corresponding platform qualification, not just passing unit tests.
 
-The plugin and foreground CLI assemble execution through `getOpenCodeRuntime`; they do not
-maintain separate policy or verifier factories. Disabling `config.agents` or `chat.params`
-therefore refuses execution admission in either entry point, before a plan-review child is
-created. Configured data checks and task observation also follow the shared runtime.
+The plugin and OpenCode imported-plan CLI assemble execution through `getOpenCodeRuntime`;
+the common terminal uses `createCliRuntime`. Both reuse `createExecutionRuntime` rather
+than maintaining separate policy or verifier factories. Disabling `config.agents` or
+`chat.params` refuses OpenCode admission before a plan-review child is created.
+Configured data checks and task observation also follow the shared runtime.
 Read-only CLI `status` bypasses runtime construction.
 
 The shared process-risk fence also applies to plugin `delegate`, not only the foreground
@@ -68,42 +70,91 @@ The framework's per-role output ceiling is further limited by a lower OpenCode r
 the selected model's declared positive finite output limit. Invalid explicit limits are rejected.
 This is a request bound, not evidence that a remote provider enforces it or stops billing.
 
-## Interactive OpenCode chat
+## Common LCA terminal
 
-Bare `lca` and `lca chat [--worktree PATH]` launch the installed OpenCode TUI as a directly owned
-child process (`--agent main`, inherited terminal I/O, no `--auto`).
-The worktree defaults to the current directory and is canonicalized to its Git worktree root. Chat
-requires a TTY, an installed `opencode`, `flow.enabled: true`, and the plugin-required
-`config.agents`, `chat.params`, `tool.delegate`, and `guard.plan_boundary` hooks. It references this
-project's exact `.opencode/plugins/lca.ts` bridge when present; otherwise it injects the bundled
-LCA plugin URL through child-only `OPENCODE_CONFIG_CONTENT`. Project config discovery is disabled,
-so the project bridge is loaded explicitly rather than by autoload.
+Bare `lca` and `lca chat` open LCA's engine/model selection, not the OpenCode TUI.
+Select **local** (the installed Ollama CLI), **Codex**, or **Claude Code**.
+Selections can also be supplied explicitly:
 
-Chat creates a private, temporary `XDG_CONFIG_HOME` profile (0700 directory, 0600 config) containing
-only the configured OpenCode `provider`, `model`, and `small_model` selections, then removes it after
-the child exits. Durable `XDG_DATA_HOME`, `XDG_STATE_HOME`, and LCA state paths are preserved. The
-existing global LCA config is copied with private permissions into the temporary profile so the
-plugin retains the same LCA policy; its source file is not modified. The
-profile excludes global plugins and disables project config discovery; the only loaded plugin is
-the project bridge or bundled LCA plugin. Project OpenCode configs, competing project
-plugins/agent/command files, legacy
-`~/.opencode` configs/plugins/profiles, custom config directories, and permission/TUI/model-registry
-environment overrides are refused. `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT` are accepted only
-when they contain supported model/provider/plugin fields; model/provider values are validated and
-copied into the temporary profile, and only the LCA plugin is injected into child config. Chat
-requires an explicitly configured model in OpenCode or LCA `models.main`, with no implicit
-provider/model fallback. It never starts or
-installs Ollama and makes no project/global configuration writes.
+```sh
+lca chat --engine local --model llama3.2:3b
+lca chat --engine codex --model gpt-5.6-sol
+lca chat --engine claude --model sonnet
+```
 
-The same OpenCode TUI owns the conversation and session lifecycle; `lca` does not create a second
-chat client or orchestration loop. Describe a request, inspect the generated plan, then type
-`/approve` or `/reject`; `/status` reports the workflow when enabled and `/cancel` ends it. Plan-phase
-writes are blocked until approval. The launcher prints a concise notice that the LCA-only profile
-excludes non-LCA global/project plugins and settings. Chat exit codes are the child's exit codes,
-and child signals are re-raised by `lca`.
+Model names are native identifiers and examples, not a promise of account availability.
+Models must follow LCA's JSON tool protocol and produce valid plans; malformed replies
+are refused, never executed through a fallback. Selecting an installed local model does
+not establish that it can complete the planning/execution workflow.
+The worktree defaults to the current Git worktree; `--worktree PATH` selects another.
+The terminal requires a TTY and uses existing vendor authentication. It does not start
+Ollama, inspect credentials, install a model, or rewrite global configuration.
+The subprocess allowlist retains non-secret `USER`/`LOGNAME` for native keychain lookup,
+but does not forward API-key/token environment variables. These names do not establish
+execution authority. Vendor account quotas still apply.
 
-This chat lifecycle is separate from the standalone `lca run --server ...` imported-plan runner
-below: the standalone runner talks to an already-running local service and does not launch a TUI.
+All three engines use the same conversation → canonical plan → local human decision →
+serial execution controller. Main/reviewer file tools are read-only. LCA owns the JSON
+file-tool loop; native inference runs in a separate empty scratch directory rather than
+the source worktree. Codex admission is currently Darwin-only and pinned to CLI 0.159.3
+and an exact bundled model slug. An LCA-owned, hash-bound catalogue removes native patch,
+shell and code-mode tools; a named permission profile restricts residual filesystem
+reads to the empty scratch workdir. The legacy `--sandbox` override is not used.
+Version and catalogue checks precede inference; unknown models or drift refuse without
+fallback. Unexpected native tool activity is an error. Workers do not receive a shell
+tool; the existing queue owns verification.
+Model output and previous approvals never approve a new plan.
+
+File tools enforce application-level path policy, not OS filesystem containment.
+Directory enumeration on macOS remains path-based: a concurrent local writer swapping
+directories can expose filenames. It is not a defence against a hostile local process.
+
+The terminal explicitly uses `estimated-input-reactive-output-v1`, separate from the
+unchanged `legacy-unowned` containment profile. Input cutoffs are **estimated** at 8192
+for main and 5120 for workers, including LCA's serialized instructions/tool schemas
+and the separate LCA-authored Codex native instruction template.
+Vendor-added context is unobserved. Output capture/cancellation is reactive, not a
+native generation-token or billing ceiling. Neither assertion satisfies the strict
+exact-token profile. Process-group quiescence is not escaped-descendant containment.
+
+Conversation turns and worker runs record execution intents before dispatch, reuse
+the existing execution lease, and retain unresolved ownership after failures instead
+of replaying a completed or unknown process. The separate OpenCode imported-plan
+commands below retain their own admission requirements.
+
+### Recovering a common-engine workflow from a new process
+
+Read the active workflow and original session without constructing an engine runtime:
+
+```sh
+lca status --worktree /path/to/repo --json
+```
+
+Use the workflow ID and `sessionID` from that status. For approval or rejection, use the
+`planRef.jsonSha` from the active workflow record (the canonical plan hash, not the rendered
+Markdown hash); the original approval prompt also prints this value. If it was not retained,
+the record is `workflow/workflow.json` under LCA's external control-plane state root. Specify the
+original engine and exact model explicitly; LCA refuses missing or
+mismatched engine/model/session evidence and never falls back to another selection:
+
+```sh
+lca cancel --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID
+lca approve --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID \
+  --workflow WORKFLOW_ID --sha PLAN_SHA
+lca reject --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID \
+  --workflow WORKFLOW_ID --sha PLAN_SHA
+lca resume --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID
+```
+
+Approval and rejection still prompt the local operator for the exact workflow ID and plan SHA;
+there is no automatic approval. The controller verifies persisted owner-session host intents against
+the selected role policy before decisions or recovery. A settled resume retains completed tasks and
+dispatches only open work. If any prior execution is unsettled, ownership proof is missing, or the
+owner session/engine/model does not match, recovery refuses before changing durable workflow or
+ledger state. It does not signal persisted PIDs, adopt or forcibly release an owner, delete state,
+or replay an unknown execution. Cross-process cancellation can settle a pending approval once all
+existing executions are settled; unresolved cancellation refuses without changing its existing
+unknown/fence evidence.
 
 ## Foreground imported-plan runner (OpenCode)
 
@@ -134,7 +185,7 @@ or server. Bare `lca` launches interactive chat as described above. The supplied
 commands require an already-running, trusted local OpenCode service and this project's LCA plugin;
 `run --plan`, `approve` and `reject` also require an interactive local terminal for explicit human
 decisions. Standalone commands do not start a server or provide interactive chat; the separate
-chat command launches an OpenCode TUI child and is not the standalone runner. Neither path
+chat command uses the common LCA terminal above. Neither path
 auto-approves plans or establishes native-host qualification.
 
 Exit codes: **0** means success or help; **1** is a fixed host-admission diagnostic or a
@@ -336,6 +387,13 @@ and retained outcomes. This detects incomplete runs and accidental truncation,
 not deliberate edits by the host owner; neither manifest nor anchor is native
 retirement evidence.
 
+Manifest events use `lca.soak-manifest.v2`. Each `invocation-end` records the driver's
+own boolean `orderedTermination`; receipt-channel timeout or overflow errors cannot
+establish that the driver was deliberately stopped. Restart and the checker use this
+recorded flag, not merged diagnostic error names. Legacy v1 or incomplete events are
+refused without migration. Preserve those historical directories unchanged; never
+rewrite or rebaseline them to satisfy the new schema.
+
 Each evidence directory also retains a private, immutable `soak-binding.json`:
 `{schema:"lca.soak-binding.v1",vmC:"<SSH target>",fixtures:<normalized lca.soak-fixtures.v1>}`.
 The normalized fixture object includes every provisioning and invocation argv,
@@ -370,14 +428,15 @@ untracked regular files. Ignored files are not covered.
 Unsupported untracked links or special files are refused, not followed or normalized;
 ACLs and extended attributes are outside this diagnostic digest.
 
-Native Claude and Codex coding profiles are not admitted. Choosing those engines refuses
-before connecting to the server. The existing OpenCode entry point is not the planned
-standalone Claude Code/Codex conversation loop.
+The strict exact-token Claude and Codex coding profiles are not admitted. Choosing those
+engines in the OpenCode imported-plan command path refuses before connecting to the server.
+The common terminal instead declares its separate estimated/reactive control profile;
+this does not qualify the strict profile or the held Linux VM profile.
 Foreground import/run now also rejects incomplete role-control status maps; the legacy
 OpenCode hook-control map does not satisfy that gate. Passing status checks alone would
 still not establish the capability evidence below.
 
-CLI admission requires engine/version/model/profile-scoped evidence for every required
+Strict CLI admission requires engine/version/model/profile-scoped evidence for every required
 role control, including read-only main/reviewer execution and the LCA-owned serial worker
 lease. It also requires proof of actual complete LCA-controlled input limits: **8192
 tokens for main and 5120 for worker**, including system text, tool schemas, wrappers and

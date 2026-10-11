@@ -1,8 +1,9 @@
-import { EXECUTION_ROLES, type ExecutionHost, type ExecutionRole } from "./types.ts"
+import { EXECUTION_ROLES, type ControlProfile, type ExecutionHost, type ExecutionRole } from "./types.ts"
+
+const LEGACY_BUDGET_CONTROLS = ["boundedInput", "boundedOutput"] as const
+const ESTIMATED_REACTIVE_BUDGET_CONTROLS = ["estimatedInput", "reactiveOutput"] as const
 
 const COMMON_REQUIRED_CONTROLS = [
-  "boundedInput",
-  "boundedOutput",
   "preExecutionToolPolicy",
   "headlessPermissionRefusal",
   "ownedCancellation",
@@ -18,6 +19,45 @@ const ADMISSION_REFUSAL_MESSAGES = {
   requiredControls: "required control statuses unavailable",
   hostIncompatible: "host incompatible: required control statuses unavailable",
 } as const
+
+const isControlProfile = (value: unknown): value is ControlProfile => value === "estimated-input-reactive-output-v1"
+const isObject = (value: unknown): value is object => {
+  if (value === null || typeof value !== "object") return false
+  try { return !Array.isArray(value) }
+  catch { return false }
+}
+
+function ownDataValue(value: object, key: string): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    return descriptor && "value" in descriptor ? descriptor.value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function validBudgetEvidence(value: unknown): boolean {
+  if (!isObject(value)) return false
+  const expected = {
+    input: "estimated",
+    output: "reactive",
+    vendorContext: "unobserved",
+    mainLimit: 8192,
+    workerLimit: 5120,
+  } as const
+  try {
+    const keys = Reflect.ownKeys(value)
+    const expectedKeys = Object.keys(expected)
+    if (keys.length !== expectedKeys.length || keys.some(key => typeof key !== "string" || !expectedKeys.includes(key))) return false
+    for (const [key, expectedValue] of Object.entries(expected)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (!descriptor || !("value" in descriptor) || descriptor.value !== expectedValue) return false
+    }
+    return true
+  } catch {
+    return false
+  }
+}
 
 export class AdmissionRefusal extends Error {
   private constructor(message: keyof typeof ADMISSION_REFUSAL_MESSAGES) {
@@ -35,19 +75,23 @@ export class AdmissionRefusal extends Error {
 }
 
 // These statuses are necessary checks only, not engine/version/model/profile evidence, token proof, an authenticated LCA lease, or live admission.
-export function assertRequiredControlStatuses(controls: unknown, role: ExecutionRole): void {
+export function assertRequiredControlStatuses(controls: unknown, role: ExecutionRole, controlProfile?: ControlProfile): void {
   if (!(EXECUTION_ROLES as readonly unknown[]).includes(role)) {
     throw new Error("unrecognized execution role")
   }
-  if (controls === null || typeof controls !== "object" || Array.isArray(controls)) {
+  if (controlProfile !== undefined && !isControlProfile(controlProfile)) {
+    throw AdmissionRefusal.requiredControlsUnavailable()
+  }
+  if (!isObject(controls)) {
     throw AdmissionRefusal.requiredControlsUnavailable()
   }
 
+  const budgetControls = controlProfile === undefined ? LEGACY_BUDGET_CONTROLS : ESTIMATED_REACTIVE_BUDGET_CONTROLS
   const required: readonly string[] = role === "worker"
-    ? [...COMMON_REQUIRED_CONTROLS, ...WORKER_CONTROLS]
+    ? [...budgetControls, ...COMMON_REQUIRED_CONTROLS, ...WORKER_CONTROLS]
     : role === "main" || role === "reviewer"
-      ? [...COMMON_REQUIRED_CONTROLS, ...MAIN_REVIEWER_CONTROLS]
-      : COMMON_REQUIRED_CONTROLS
+      ? [...budgetControls, ...COMMON_REQUIRED_CONTROLS, ...MAIN_REVIEWER_CONTROLS]
+      : [...budgetControls, ...COMMON_REQUIRED_CONTROLS]
 
   for (const key of required) {
     let descriptor: PropertyDescriptor | undefined
@@ -63,10 +107,28 @@ export function assertRequiredControlStatuses(controls: unknown, role: Execution
 }
 
 /** Apply necessary compatibility/control-status checks, not capability or live admission proof. */
-export function assertHostAdmission(preflight: Awaited<ReturnType<ExecutionHost["preflight"]>>): void {
-  if (!preflight || typeof preflight !== "object" || Array.isArray(preflight)
-    || preflight.compatible !== true || !Array.isArray(preflight.problems) || preflight.problems.length !== 0) {
+export function assertHostAdmission(
+  preflight: Awaited<ReturnType<ExecutionHost["preflight"]>>,
+  controlProfile?: ControlProfile,
+): void {
+  if (controlProfile !== undefined && !isControlProfile(controlProfile)) {
     throw AdmissionRefusal.hostIncompatible()
   }
-  for (const role of EXECUTION_ROLES) assertRequiredControlStatuses(preflight.controls, role)
+  if (!isObject(preflight)) {
+    throw AdmissionRefusal.hostIncompatible()
+  }
+  const compatible = ownDataValue(preflight, "compatible")
+  const controls = ownDataValue(preflight, "controls")
+  const problems = ownDataValue(preflight, "problems")
+  let noProblems = false
+  try { noProblems = Array.isArray(problems) && problems.length === 0 }
+  catch { /* Refuse malformed preflight values without exposing vendor diagnostics. */ }
+  if (compatible !== true || !noProblems) {
+    throw AdmissionRefusal.hostIncompatible()
+  }
+  if (controlProfile !== undefined) {
+    const evidence = ownDataValue(preflight, "budgetEvidence")
+    if (!validBudgetEvidence(evidence)) throw AdmissionRefusal.hostIncompatible()
+  }
+  for (const role of EXECUTION_ROLES) assertRequiredControlStatuses(controls, role, controlProfile)
 }

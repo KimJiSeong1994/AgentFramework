@@ -19,6 +19,7 @@ export function flowOn(config: LcaConfig): boolean {
 export type StatusJson = {
   workflow: null | {
     id: string; phase: string; stuckCause?: string; sessionID: string; ownerLive: boolean
+    engine?: string; planSha?: string
     plan?: string; review?: string; tasks?: { total: number; done: number; open: number; failed: number }
     counters: Workflow["counters"]; pendingCancel: boolean
   }
@@ -93,6 +94,9 @@ export function statusJson(deps: FlowRuntime, sessionID: string, queueRunning: b
       phase: wf.phase,
       ...(wf.stuckCause ? { stuckCause: wf.stuckCause } : {}),
       sessionID: wf.sessionID,
+      ...(typeof wf.engine === "string" ? { engine: wf.engine } : {}),
+      ...(typeof wf.planRef?.jsonSha === "string" && /^[a-f0-9]{64}$/.test(wf.planRef.jsonSha)
+        ? { planSha: wf.planRef.jsonSha } : {}),
       ownerLive: live,
       ...(wf.planRef ? { plan: wf.planRef.mdPath } : {}),
       ...(wf.review ? { review: `${wf.review.verdict}${wf.review.note ? ` (${wf.review.note})` : ""}` } : {}),

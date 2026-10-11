@@ -12,7 +12,7 @@ import { tempGitWorktree } from "./guards-helpers.ts"
 
 const FIXTURE = join(import.meta.dir, "fixtures/vendor-process-child.ts")
 const ROOT = resolve(import.meta.dir, "../..")
-const ENV_ALLOWLIST = ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TERM"]
+const ENV_ALLOWLIST = ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TERM"]
 const tempDirectories: string[] = []
 const executionFixtureCleanups: Array<() => void> = []
 

@@ -62,14 +62,25 @@ describe("foreground CLI", () => {
       expect(result.stdout).toContain("Usage:")
       expect(result.stdout).toContain("lca status --worktree")
       expect(result.stdout).toContain("lca run --plan")
+      expect(result.stdout).toContain("Common-engine workflow recovery")
+      expect(result.stdout).toContain("--engine local|codex|claude --model ID --session ID")
       expect(result.stdout).toContain("Standalone commands do not start a server")
+      expect(result.stdout).toContain("--engine local|codex|claude")
+      expect(result.stdout).toContain("input limits are estimated and output limits are reactive")
+      expect(result.stdout).toContain("Interactive chat requires a terminal on stdin and stderr")
+      expect(result.stdout).not.toContain("OpenCode TUI")
       expect(result.stderr).toBe("")
       expect(existsSync(stateRoot(wt.worktree))).toBe(false)
     }
   })
 
-  test("bare invocation and explicit chat refuse non-TTY input before host lookup", async () => {
-    for (const argv of [[], ["chat", "--worktree", wt.worktree]]) {
+  test("bare chat and bare selection flags refuse non-TTY input before runtime construction", async () => {
+    for (const argv of [
+      [],
+      ["chat", "--worktree", wt.worktree],
+      ["--engine", "codex", "--model", "gpt-5-codex"],
+      ["--model", "gpt-5-codex"],
+    ]) {
       const result = await invokeCli(argv)
       expect(result.exitCode).toBe(1)
       expect(result.stdout).toBe("")
@@ -361,6 +372,14 @@ describe("foreground CLI", () => {
   test("mutations need an explicit local server, while options reject duplicates", () => {
     expect(() => parseCliArgs(["import", "--worktree", wt.worktree, "--session", "s", "--plan", "plan.json"])).toThrow(CliUsageError)
     expect(() => parseCliArgs(["import", "--worktree", wt.worktree, "--session", "s", "--plan", "plan.json"])).toThrow("--server")
+    expect(() => parseCliArgs(["resume", "--worktree", wt.worktree])).toThrow("explicit --engine, --model, and --session")
+    expect(() => parseCliArgs(["resume", "--worktree", wt.worktree, "--engine", "local", "--session", "s"])).toThrow("--model")
+    expect(() => parseCliArgs(["approve", "--worktree", wt.worktree, "--engine", "local", "--model", "m", "--workflow", "w", "--sha", "h"])).toThrow("--session")
+    expect(() => parseCliArgs(["cancel", "--worktree", wt.worktree, "--engine", "local", "--model", "m", "--session", "s", "--server", "http://127.0.0.1:4096"])).toThrow("does not accept --server")
+    const common = parseCliArgs(["resume", "--worktree", wt.worktree, "--engine", "local", "--model", "llama3.2:3b", "--session", "s"])
+    expect(common).toMatchObject({ command: "resume", engine: "local", model: "llama3.2:3b", session: "s" })
+    const opencode = parseCliArgs(["resume", "--worktree", wt.worktree, "--server", "http://127.0.0.1:4096", "--session", "s"])
+    expect(opencode).toMatchObject({ engine: "opencode", server: "http://127.0.0.1:4096", session: "s" })
     expect(() => parseCliArgs(["resume", "--worktree", wt.worktree, "--server", "http://127.0.0.1:4096"])).toThrow("--session")
     expect(() => parseCliArgs(["status", "--worktree", wt.worktree, "--worktree", wt.worktree])).toThrow("duplicate")
     expect(() => parseCliArgs(["status", "--worktree", wt.worktree, "--json", "--json"])).toThrow("duplicate")

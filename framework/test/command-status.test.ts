@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs"
 import { createCommandHook, STATUS_COMMAND, STATUS_DESCRIPTION, STATUS_TEMPLATE, STOP_COMMAND } from "../src/hooks/command.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { createConfigHook } from "../src/hooks/config.ts"
-import { STATUS_MARKER } from "../src/flow/status.ts"
+import { STATUS_MARKER, statusJson } from "../src/flow/status.ts"
 import { eventsPath, newWorkflow, workflowPath, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
@@ -41,6 +41,24 @@ async function runStatus(deps = makeDeps(client, wt.worktree), sessionID = S) {
 }
 
 describe("/status", () => {
+  test("JSON status exposes original recovery identifiers without taking over the workflow", () => {
+    const planSha = "a".repeat(64)
+    const wf = putWorkflow({
+      engine: "codex",
+      phase: "pending_approval",
+      owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 },
+      planRef: { jsonSha: planSha, mdPath: ".lca/plans/fixture.md", mdSha: "b".repeat(64), revision: 1 },
+    })
+    const before = readFileSync(workflowPath(wt.worktree))
+    const runs = createExecutionRunStore(wt.worktree)
+    const runsBefore = runs.status()
+    const status = statusJson(makeDeps(client, wt.worktree), OTHER, false)
+    expect(status.workflow).toMatchObject({ id: wf.id, sessionID: S, engine: "codex", planSha })
+    expect(status.session.id).toBe(OTHER)
+    expect(readFileSync(workflowPath(wt.worktree))).toEqual(before)
+    expect(runs.status()).toEqual(runsBefore)
+  })
+
   test("no workflow: marker, mode none, ledger, queue lines", async () => {
     const text = await runStatus()
     expect(text.startsWith(STATUS_MARKER)).toBe(true)

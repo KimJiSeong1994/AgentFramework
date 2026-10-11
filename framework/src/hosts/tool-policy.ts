@@ -22,28 +22,59 @@ export function isErrorOutput(output: string): boolean { return ERROR_OUTPUT.tes
 
 const KNOWN_TOOLS = ["read", "glob", "grep", "list", "bash", "write", "edit", "patch", "apply_patch", "multiedit", "webfetch", "skill", "todowrite", "todoread", "delegate", "lca_flow", "db_query", "schema_lookup", "task"]
 const REVIEW_TOOLS = ["read", "glob", "grep", "list"]
+const PLANNING_MAIN_TOOLS: readonly string[] = Object.freeze(["read", "list", "glob", "grep"])
+const PLANNING_MAIN_PROMPT = "You are the planning role of the common LCA terminal. Discuss the request, inspect files with read-only tools, and create a concrete plan when asked. Never modify files, run commands, execute or approve plans, or delegate work. Do not imply work was executed."
 const SYSTEM: Record<ExecutionRole, string> = {
   main: "", worker: WORKER_PROMPT, reviewer: REVIEWER_PROMPT,
   "data-analyst": DATA_ANALYST_PROMPT, "data-verifier": DATA_VERIFIER_PROMPT,
   "ontology-evolver": AGENT_DEFS["ontology-evolver"].prompt!, "answer-judge": AGENT_DEFS["answer-judge"].prompt!,
 }
 
-export type ExecutionPolicyOptions = { directory?: string; worktree?: string }
+export type ExecutionPolicyOptions = {
+  directory?: string
+  worktree?: string
+  planningOnlyMain?: boolean
+  nativeContext?: Readonly<{ identity: string; instructions: string }>
+}
 
 export function createExecutionPolicy(config: Readonly<LcaConfig>, options: ExecutionPolicyOptions = {}): ExecutionPolicy {
+  const planningOnlyMain = options.planningOnlyMain === true
+  const nativeContext = options.nativeContext === undefined
+    ? undefined
+    : (() => {
+      const supplied = options.nativeContext
+      if (!supplied || typeof supplied !== "object" || Array.isArray(supplied) ||
+          typeof supplied.identity !== "string" || !supplied.identity.trim() ||
+          typeof supplied.instructions !== "string" || !supplied.instructions.trim()) {
+        throw new TypeError("invalid native execution context")
+      }
+      return Object.freeze({ identity: supplied.identity, instructions: supplied.instructions })
+    })()
   const snapshots = new Map<ExecutionRole, ExecutionPolicySnapshot>()
   const sessions = new Map<string, ExecutionPolicyHandlers>()
   const sessionSnapshots = new Map<string, ExecutionPolicySnapshot>()
   for (const role of Object.keys(SYSTEM) as ExecutionRole[]) {
     const agent = AGENT_DEFS[role]
     const denied = new Set(agent.denied_tools)
-    const allowed = (role === "reviewer" ? REVIEW_TOOLS : KNOWN_TOOLS.filter((tool) => !denied.has(tool)))
+    const planningMain = role === "main" && planningOnlyMain
+    if (planningMain) {
+      for (const tool of KNOWN_TOOLS) if (!PLANNING_MAIN_TOOLS.includes(tool)) denied.add(tool)
+    }
+    const allowed = planningMain
+      ? [...PLANNING_MAIN_TOOLS]
+      : role === "reviewer" ? REVIEW_TOOLS : KNOWN_TOOLS.filter((tool) => !denied.has(tool))
     const model = config.models[role] ? parseModelSelection(config.models[role]!) : undefined
+    const system = role !== "main"
+      ? SYSTEM[role]
+      : planningMain
+        ? PLANNING_MAIN_PROMPT
+        : mainPrompt(!config.disabled_hooks.includes("tool.delegate"), config.data.backend !== "none" && !config.disabled_hooks.includes("tool.data"), config.flow.enabled && !config.disabled_hooks.includes("flow"))
     const resolved: Omit<ExecutionPolicySnapshot, "id"> = {
       role, ...(model ? { model: Object.freeze(model) } : {}),
       maxOutputTokens: config.max_output[role] ?? config.max_output.worker,
       tools: Object.freeze({ allowed: Object.freeze([...allowed]), denied: Object.freeze([...new Set([...denied, ...(role === "reviewer" ? KNOWN_TOOLS.filter((t) => !REVIEW_TOOLS.includes(t)) : [])])]) }),
-      system: Object.freeze([role === "main" ? mainPrompt(!config.disabled_hooks.includes("tool.delegate"), config.data.backend !== "none" && !config.disabled_hooks.includes("tool.data"), config.flow.enabled && !config.disabled_hooks.includes("flow")) : SYSTEM[role]]),
+      system: Object.freeze([system]),
+      ...(nativeContext ? { nativeContext } : {}),
       thinking: role !== "main" && model && /ollama|:11434/i.test(model.providerID) ? "disabled" : "inherit",
     }
     const id = `lca:${role}:${createHash("sha256").update(JSON.stringify({ resolved, config })).digest("hex")}`
@@ -73,6 +104,7 @@ export function createExecutionPolicy(config: Readonly<LcaConfig>, options: Exec
           callInputs.set(key, event.input)
           while (callInputs.size > 1000) callInputs.delete(callInputs.keys().next().value!)
           if (request.role === "reviewer" && !REVIEW_TOOLS.includes(event.name)) return { allow: false, reason: `lca: reviewer tool ${event.name} is not read-only` }
+          if (planningOnlyMain && request.role === "main" && !policy.tools.allowed.includes(event.name)) return { allow: false, reason: `lca: tool ${event.name} is not allowed for planning-only main` }
           if ((request.role === "worker" || request.role === "reviewer") && !policy.tools.allowed.includes(event.name)) return { allow: false, reason: `lca: tool ${event.name} is not allowed for ${request.role}` }
           if (!config.disabled_hooks.includes("guard.repeat")) {
             const check = repeat.check(event.sessionID, event.name, event.input, event.callID)
