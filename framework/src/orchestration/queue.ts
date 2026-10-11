@@ -790,6 +790,9 @@ export function createQueue(deps: ExecutionRuntime): Queue {
                 // Persist the possible launch before invoking the handle; do not await between these calls.
                 deps.runs.markVerifierDispatched(claim, id)
                 current.run = handle.run()
+                try {
+                  deps.log("task verify started", { sessionID, task: task.id, attempt: task.attempts })
+                } catch { /* Progress observation must not change verifier execution. */ }
                 const result = await Promise.race([current.run, interrupted])
                 if (result === "interrupted") {
                   if (!current.cancelled) {

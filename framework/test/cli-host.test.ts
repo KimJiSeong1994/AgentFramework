@@ -6,6 +6,7 @@ import { createCliHost } from "../src/hosts/cli-host.ts"
 import type { CliTransportHandle, CliTransportOptions } from "../src/hosts/cli-transport.ts"
 import type { ExecutionPolicy, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole } from "../src/hosts/types.ts"
 import type { ExecutionRunStore, ExecutionRunStatus } from "../src/hosts/run-state.ts"
+import type { CliHostActivity } from "../src/hosts/cli-progress.ts"
 import { estimateTokens } from "../src/tokens.ts"
 import { CODEX_INSTRUCTIONS, createCodexProfile } from "../src/hosts/codex-profile.ts"
 
@@ -54,6 +55,7 @@ type HarnessOptions = {
   cancelRequestDelayMs?: number
   deferTransportRun?: boolean
   beforeOutput?: () => void
+  observeActivity?: (activity: CliHostActivity) => void
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -217,7 +219,7 @@ function harness(options: HarnessOptions = {}) {
     }
     return transport
   }
-  const host = createCliHost({ engine, model, policy, runs, createTransport })
+  const host = createCliHost({ engine, model, policy, runs, createTransport, observeActivity: options.observeActivity })
   const request: ExecutionRequest = {
     executionID,
     supervisorSessionID: OWNER,
@@ -265,6 +267,68 @@ describe("common CLI execution host", () => {
     const handle = await subject.host.prepare(subject.request)
     expect(await handle.run()).toEqual({ status: "completed", text: "still available" })
     expect(subject.controls[1]?.runCalls).toBe(1)
+  })
+
+  test("host progress reports bounded model and allowed-tool activity without content", async () => {
+    const allowedPath = "allowed-private-path.txt"
+    const toolPath = "missing-private-path.txt"
+    const toolContent = "TOOL_OUTPUT_SECRET_5c21"
+    const modelContent = "MODEL_RESPONSE_SECRET_7b4e"
+    writeFileSync(join(root, allowedPath), toolContent)
+    const activities: CliHostActivity[] = []
+    const subject = harness({
+      role: "reviewer",
+      responses: [
+        JSON.stringify({ type: "tool", name: "read", input: { path: allowedPath } }),
+        JSON.stringify({ type: "tool", name: "read", input: { path: toolPath } }),
+        JSON.stringify({ type: "final", text: modelContent }),
+      ],
+      observeActivity: activity => activities.push(activity),
+    })
+    const handle = await subject.host.prepare(subject.request)
+
+    expect(await handle.run()).toEqual({ status: "completed", text: modelContent })
+    const execution = activities[0]!.execution
+    expect(Number.isSafeInteger(execution)).toBe(true)
+    expect(execution).toBeGreaterThan(0)
+    expect(execution).toBeLessThanOrEqual(1_000_000)
+    expect(activities).toEqual([
+      { kind: "model-started", role: "reviewer", execution },
+      { kind: "model-returned", role: "reviewer", execution, status: "completed" },
+      { kind: "tool-started", role: "reviewer", execution, tool: "read" },
+      { kind: "tool-finished", role: "reviewer", execution, tool: "read", ok: true },
+      { kind: "model-started", role: "reviewer", execution },
+      { kind: "model-returned", role: "reviewer", execution, status: "completed" },
+      { kind: "tool-started", role: "reviewer", execution, tool: "read" },
+      { kind: "tool-finished", role: "reviewer", execution, tool: "read", ok: false },
+      { kind: "model-started", role: "reviewer", execution },
+      { kind: "model-returned", role: "reviewer", execution, status: "completed" },
+    ])
+    const progress = JSON.stringify(activities)
+    expect(progress).not.toContain(allowedPath)
+    expect(progress).not.toContain(toolPath)
+    expect(progress).not.toContain(toolContent)
+    expect(progress).not.toContain(modelContent)
+    expect(progress).not.toContain("ENOENT")
+    expect(progress).not.toContain("path")
+  })
+
+  test("throwing activity observers cannot change allowed tool execution or completion", async () => {
+    const toolPath = "observer-throw.txt"
+    const content = "tool input content must remain private"
+    let observerCalls = 0
+    const subject = harness({
+      responses: [toolWrite(toolPath, content), JSON.stringify({ type: "final", text: "completed despite observer failure" })],
+      observeActivity() {
+        observerCalls++
+        throw new Error("observer failure must not escape")
+      },
+    })
+    const handle = await subject.host.prepare(subject.request)
+
+    expect(await handle.run()).toEqual({ status: "completed", text: "completed despite observer failure" })
+    expect(readFileSync(join(root, toolPath), "utf8")).toBe(content)
+    expect(observerCalls).toBe(6)
   })
 
   test("Codex admission requires an exact transport profile probe and carries native instructions outside the prompt", async () => {

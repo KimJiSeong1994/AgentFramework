@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto"
 import { spawnSync } from "node:child_process"
-import { accessSync, constants, realpathSync, statSync } from "node:fs"
+import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
 import { createInterface } from "node:readline"
 import { activeWorkflow, readWorkflowChecked } from "../flow/state.ts"
+import { ledgerPath } from "../state/ledger.ts"
 import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
+import { createCliProgressPresenter, type CliProgressTask, type CliTaskStatus } from "./cli-progress.ts"
 import { createPlanConversation } from "./plan-conversation.ts"
 import { createForegroundController, type ForegroundController } from "./controller.ts"
 import { discoverModels as discoverModelCatalog, type ModelCatalog } from "./model-catalog.ts"
@@ -56,6 +58,55 @@ export type InteractiveDependencies = {
 function terminalSafeText(value: string): string {
   return value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u206f]/g, (character) =>
     `\\u${character.codePointAt(0)!.toString(16).padStart(4, "0")}`)
+}
+
+function approvedTaskIDs(value: unknown): { ids: string[]; total: number } {
+  if (!Array.isArray(value)) return { ids: [], total: 0 }
+  const ids = new Set<string>()
+  for (let index = 0; index < Math.min(value.length, 1024); index++) {
+    const id = value[index]
+    if (typeof id === "string" && /^t\d{1,8}$/u.test(id)) ids.add(id)
+  }
+  return { ids: [...ids], total: value.length }
+}
+
+function approvedPlanTitles(value: unknown): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !Array.isArray((value as Record<string, unknown>).steps)) return []
+  const steps = (value as { steps: unknown[] }).steps
+  return steps.slice(0, 1024).map(step => {
+    if (!step || typeof step !== "object" || Array.isArray(step)) return ""
+    const title = (step as Record<string, unknown>).title
+    return typeof title === "string" ? title : ""
+  })
+}
+
+function boundedTerminalDiagnostic(value: string, limit = 240): string {
+  const safe = terminalSafeText(value).replace(/\s+/gu, " ").trim()
+  return safe.length > limit ? `${safe.slice(0, limit - 3)}...` : safe
+}
+
+function readProgressTasks(worktree: string, sessionID: string, taskIDs: readonly string[]): CliProgressTask[] | undefined {
+  try {
+    const path = ledgerPath(worktree, sessionID)
+    if (statSync(path).size > 1024 * 1024) return undefined
+    const ledger: unknown = JSON.parse(readFileSync(path, "utf8"))
+    if (!ledger || typeof ledger !== "object" || Array.isArray(ledger)) return undefined
+    const value = ledger as Record<string, unknown>
+    if (value.version !== 1 || value.sessionID !== sessionID || !Array.isArray(value.tasks)) return undefined
+    const statuses = new Set<CliTaskStatus>(["pending", "running", "done", "failed", "cancelled"])
+    const observed = new Map<string, CliTaskStatus>()
+    for (const task of value.tasks) {
+      if (!task || typeof task !== "object" || Array.isArray(task)) continue
+      const record = task as Record<string, unknown>
+      if (typeof record.id !== "string" || !taskIDs.includes(record.id) ||
+          typeof record.status !== "string" || !statuses.has(record.status as CliTaskStatus)) continue
+      observed.set(record.id, record.status as CliTaskStatus)
+    }
+    if (taskIDs.some(id => !observed.has(id))) return undefined
+    return taskIDs.map(id => ({ id, status: observed.get(id)! }))
+  } catch {
+    return undefined
+  }
 }
 
 export class InteractiveLaunchError extends Error {
@@ -159,7 +210,7 @@ function defaultDependencies(): InteractiveDependencies {
     cwd: process.cwd(),
     terminal: createTerminal(),
     gitTopLevel: defaultGitTopLevel,
-    createRuntime: ({ worktree, engine, model }) => createCliRuntime({ worktree, engine, model }),
+    createRuntime: (options) => createCliRuntime(options),
     admitRuntime: async (runtime) => {
       assertHostAdmission(await runtime.host.preflight(runtime.host.identity.profile), runtime.host.identity.controlProfile)
     },
@@ -306,9 +357,16 @@ export async function launchInteractive(
   }
 
   const abort = new AbortController()
+  const progress = createCliProgressPresenter(text => terminal.write(text))
+  let observedTasks: { worktree: string; sessionID: string; ids: string[] } | undefined
   let receivedSignal: SignalName | undefined
-  const onSigint = () => { receivedSignal ??= "SIGINT"; abort.abort() }
-  const onSigterm = () => { receivedSignal ??= "SIGTERM"; abort.abort() }
+  const onSigint = () => { receivedSignal ??= "SIGINT"; progress.cancelRequested(); abort.abort() }
+  const onSigterm = () => { receivedSignal ??= "SIGTERM"; progress.cancelRequested(); abort.abort() }
+  async function withProgressSuspended<T>(operation: () => Promise<T>): Promise<T> {
+    progress.suspend()
+    try { return await operation() }
+    finally { progress.resume() }
+  }
   let sigintRegistered = false
   let sigtermRegistered = false
   try {
@@ -317,15 +375,15 @@ export async function launchInteractive(
     deps.signals.on("SIGTERM", onSigterm)
     sigtermRegistered = true
     const worktree = canonicalWorktree(args.worktree, deps)
-    const engine = args.engine ?? await chooseEngine(terminal, abort.signal)
+    const engine = args.engine ?? await withProgressSuspended(() => chooseEngine(terminal, abort.signal))
     if (!engine || abort.signal.aborted) return signalExit(receivedSignal)
-    const model = args.model ?? await chooseModel(terminal, engine, worktree, abort.signal, deps.discoverModels)
+    const model = args.model ?? await withProgressSuspended(() => chooseModel(terminal, engine, worktree, abort.signal, deps.discoverModels))
     if (!model || abort.signal.aborted) return signalExit(receivedSignal)
     if (!validModelID(model)) throw new InteractiveLaunchError("invalid model ID; enter a native model name without whitespace")
 
     terminal.write("\nNative CLI limitations: input size is estimated and output limits are reactive; these are not strict guarantees. No process or filesystem containment is claimed.\n\n")
     const initialSessionID = defaultSessionID(deps.randomUUID())
-    const initialRuntime = deps.createRuntime({ worktree, engine, model })
+    const initialRuntime = deps.createRuntime({ worktree, engine, model, progress })
     initialRuntime.linuxAdmission?.assertBootEpoch()
     await deps.admitRuntime(initialRuntime)
     if (abort.signal.aborted) return signalExit(receivedSignal)
@@ -382,7 +440,7 @@ export async function launchInteractive(
       try {
         const sessionID = defaultSessionID(deps.randomUUID())
         if (usedSessionIDs.has(sessionID)) throw new Error("new conversation identity was not unique")
-        const runtime = deps.createRuntime({ worktree, engine: nextEngine, model: nextModel })
+        const runtime = deps.createRuntime({ worktree, engine: nextEngine, model: nextModel, progress })
         runtime.linuxAdmission?.assertBootEpoch()
         await deps.admitRuntime(runtime)
         if (abort.signal.aborted) return false
@@ -403,13 +461,14 @@ export async function launchInteractive(
     }
 
     while (!abort.signal.aborted) {
-      const text = await terminal.readLine("You> ", abort.signal)
+      const text = await withProgressSuspended(() => terminal.readLine("You> ", abort.signal))
       if (abort.signal.aborted) return signalExit(receivedSignal)
       if (text === undefined) return { code: 0 }
       const message = text.trim()
       if (!message) continue
       if (message === "/quit" || message === "/exit") return { code: 0 }
       if (message === "/cancel") {
+        progress.cancelRequested()
         abort.abort()
         return { code: 0 }
       }
@@ -428,7 +487,7 @@ export async function launchInteractive(
             continue
           }
           guard.release()
-          const nextModel = await chooseModel(terminal, selection.engine, worktree, abort.signal, deps.discoverModels)
+          const nextModel = await withProgressSuspended(() => chooseModel(terminal, selection.engine, worktree, abort.signal, deps.discoverModels))
           if (abort.signal.aborted) return signalExit(receivedSignal)
           if (nextModel === undefined) return { code: 0 }
           if (nextModel === null) continue
@@ -448,9 +507,11 @@ export async function launchInteractive(
         continue
       }
 
+      progress.waiting()
       const turn = await selection.conversation.turn(message, abort.signal)
+      progress.responseReceived()
       if (abort.signal.aborted) return signalExit(receivedSignal)
-      if (turn.text) terminal.write(terminalSafeText(`\n${turn.text}\n`))
+      if (turn.text) terminal.write(terminalSafeText(`\nConversation:\n${turn.text}\n`))
       if (turn.plan === undefined) continue
 
       const parsedPlan = planForImport(turn.plan, worktree)
@@ -459,29 +520,31 @@ export async function launchInteractive(
       } catch (error) {
         const feedback = planValidationFeedback(error)
         if (feedback === undefined) throw error
-        terminal.write(terminalSafeText(feedback))
+        terminal.write(terminalSafeText(`[error] ${feedback}`))
         continue
       }
       if (abort.signal.aborted) return signalExit(receivedSignal)
       const submitted = await selection.controller.importPlan(selection.sessionID, "", abort.signal, parsedPlan)
       if (abort.signal.aborted) return signalExit(receivedSignal)
       if (!submitted.result.ok) {
-        terminal.write(terminalSafeText(`Plan was not approved for execution: ${submitted.result.text}\n`))
+        const diagnostic = boundedTerminalDiagnostic(submitted.result.text)
+        terminal.write(`[error] Plan submission failed${diagnostic ? `: ${diagnostic}` : ""}; no execution was started.\n`)
         return { code: 1 }
       }
       if (submitted.result.wf.phase !== "pending_approval") {
-        terminal.write(terminalSafeText(`Plan did not reach pending approval (workflow ${submitted.result.wf.phase}); no execution was started.\n`))
+        terminal.write("[error] Plan did not reach pending approval; no execution was started.\n")
         return { code: 1 }
       }
       if (!submitted.renderedPlan) {
-        terminal.write("Canonical plan rendering is unavailable; no execution was started.\n")
+        terminal.write("[error] Canonical plan rendering is unavailable; no execution was started.\n")
         return { code: 1 }
       }
 
       const workflow = submitted.result.wf
       terminal.write(terminalSafeText(
-        `\nCanonical plan (${workflow.planRef?.mdPath ?? "saved plan"}):\n${submitted.renderedPlan}\nPlan SHA: ${submitted.planSha}\n`,
+        `\n[approval] Inspect the canonical plan below before deciding.\n\nCanonical plan (${workflow.planRef?.mdPath ?? "saved plan"}):\n${submitted.renderedPlan}\nPlan SHA: ${submitted.planSha}\n`,
       ))
+      progress.suspend()
       terminal.close()
       if (abort.signal.aborted) return signalExit(receivedSignal)
       // The real operator reader owns process.stdin while it waits for a decision.
@@ -495,6 +558,7 @@ export async function launchInteractive(
         sigtermRegistered = false
       }
       const decision: OperatorDecision = await deps.humanDecision("choose", workflow.id, submitted.planSha)
+      progress.resume()
       if (!abort.signal.aborted) {
         deps.signals.on("SIGINT", onSigint)
         sigintRegistered = true
@@ -510,18 +574,37 @@ export async function launchInteractive(
       }
       if (decision.action !== "approve") return { code: 1 }
       if (abort.signal.aborted) return signalExit(receivedSignal)
+      const approvedTasks = approvedTaskIDs(decided.wf.taskIds)
+      const taskIDs = approvedTasks.ids
+      const taskTitles = approvedPlanTitles(parsedPlan)
+      observedTasks = { worktree, sessionID: selection.sessionID, ids: taskIDs }
+      const currentTasks = readProgressTasks(worktree, selection.sessionID, taskIDs) ??
+        taskIDs.map(id => ({ id, status: "pending" as const }))
+      progress.tasks(currentTasks.map((task, index) => ({ ...task, title: taskTitles[index] ?? "" })), approvedTasks.total)
       const result = await selection.controller.run(selection.sessionID, abort.signal)
-      terminal.write(terminalSafeText(
-        `Workflow ${result.workflow.id} ${result.workflow.phase}; done ${result.run.done}, failed ${result.run.failed}, cancelled ${result.run.cancelled}${result.run.skipped ? `; ${result.run.skipped}` : ""}\n`,
-      ))
+      const finalTasks = readProgressTasks(worktree, selection.sessionID, taskIDs)
+      if (finalTasks) progress.taskSnapshot(finalTasks)
+      progress.final({
+        workflowID: result.workflow.id,
+        phase: result.workflow.phase,
+        done: result.run.done,
+        failed: result.run.failed,
+        cancelled: result.run.cancelled,
+        ...(result.run.skipped ? { skipped: result.run.skipped } : {}),
+      })
       if (receivedSignal) return signalExit(receivedSignal)
       return { code: result.workflow.phase === "done" && result.run.failed === 0 && result.run.cancelled === 0 ? 0 : 1 }
     }
     return signalExit(receivedSignal)
   } catch (error) {
+    if (observedTasks) {
+      const finalTasks = readProgressTasks(observedTasks.worktree, observedTasks.sessionID, observedTasks.ids)
+      if (finalTasks) progress.taskSnapshot(finalTasks)
+    }
     if (abort.signal.aborted && !(error instanceof AdmissionRefusal) && !(error instanceof LinuxAdmissionRefused)) {
       return signalExit(receivedSignal)
     }
+    progress.error()
     throw error
   } finally {
     terminal.close()
