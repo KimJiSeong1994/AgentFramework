@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import { closeSync, constants, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { isAbsolute, join, resolve } from "node:path"
 import { isDeepStrictEqual } from "node:util"
-import { executionRunDirectory } from "../state/store.ts"
+import { executionRunDirectory, readBoundedJson } from "../state/store.ts"
 import type { VerificationProfile, VerificationReference, VerificationResult } from "../orchestration/verifier.ts"
 import { EXECUTION_ROLES, type ControlProfile, type ExecutionReference, type ExecutionRole } from "./types.ts"
 import { authenticateLinuxVerification } from "./linux-domain.ts"
@@ -63,6 +63,7 @@ export interface ExecutionRunStore {
   assertQuiescent(claim: ExecutionClaim): void
   release(claim: ExecutionClaim): void
   status(): ExecutionRunStatus
+  statusBounded(maxBytes: number): { status: ExecutionRunStatus; bytesRead: number }
 }
 
 type State = ExecutionRunStatus & { claim?: ExecutionClaim }
@@ -123,6 +124,15 @@ const text = (value: unknown): value is string => typeof value === "string" && v
 const integer = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) > 0
 const timestamp = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0
 const optional = (value: Record<string, unknown>, key: string, check: (value: unknown) => boolean) => !(key in value) || check(value[key])
+const errorBytesRead = (error: unknown, fallback: number): number => {
+  if (!error || typeof error !== "object" || !("bytesRead" in error)) return fallback
+  const bytesRead = error.bytesRead
+  return Number.isSafeInteger(bytesRead) && (bytesRead as number) >= 0 ? bytesRead as number : fallback
+}
+const withBytesRead = <T extends Error>(error: T, bytesRead: number): T => {
+  Object.defineProperty(error, "bytesRead", { value: bytesRead, configurable: true, writable: true })
+  return error
+}
 const profileShape = (value: unknown): value is VerificationProfile => value === "legacy-unowned" || value === "linux-single-use"
 const hostReferenceIDs = ["vendorSessionID", "vendorThreadID", "vendorTurnID"] as const
 const preparedHostReferenceKeys = new Set(["executionID", ...hostReferenceIDs])
@@ -225,6 +235,13 @@ const recordShape = (value: unknown): value is ExecutionRecord => {
     (!x.quiescent || value.kind !== "verifier" || (verificationShape(x.verification) && verifiedBoundary(value as ExecutionRecord, x.verification))))
 }
 
+/** Claim-specific pid liveness semantics, shared with read-only status projection. */
+const alive = (pid: number): boolean => {
+  try { process.kill(pid, 0); return true }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH" }
+}
+export const claimPidAlive = alive
+
 export function hostRecoveryContext(
   state: ExecutionRunStatus,
   reference: ExecutionReference,
@@ -316,6 +333,17 @@ export function createExecutionRunStore(worktree: string): ExecutionRunStore {
       finally { closeSync(directory) }
     } finally { rmSync(temporary, { force: true }) }
   }
+  const validateState = (value: unknown): State => {
+    if (!object(value) || typeof value.generation !== "number" || !Number.isSafeInteger(value.generation) || value.generation < 0) {
+      throw new ExecutionRunCorruptError("execution run state has invalid shape")
+    }
+    const generation = value.generation
+    if (!Array.isArray(value.executions) ||
+      ("claim" in value && (!claimShape(value.claim) || value.claim.generation !== value.generation)) ||
+      !value.executions.every(recordShape) || value.executions.some(e => e.generation > generation) ||
+      new Set(value.executions.map(e => e.executionId)).size !== value.executions.length) throw new ExecutionRunCorruptError("execution run state has invalid shape")
+    return value as State
+  }
   const read = (): State => {
     let file: number
     try { file = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK) }
@@ -330,11 +358,7 @@ export function createExecutionRunStore(worktree: string): ExecutionRunStore {
     }
     catch { throw new ExecutionRunCorruptError("execution run state is corrupt") }
     finally { closeSync(file) }
-    if (!object(value) || !Number.isSafeInteger(value.generation) || value.generation < 0 || !Array.isArray(value.executions) ||
-      ("claim" in value && (!claimShape(value.claim) || value.claim.generation !== value.generation)) ||
-      !value.executions.every(recordShape) || value.executions.some(e => e.generation > value.generation) ||
-      new Set(value.executions.map(e => e.executionId)).size !== value.executions.length) throw new ExecutionRunCorruptError("execution run state has invalid shape")
-    return value
+    return validateState(value)
   }
   const mutate = <T>(fn: (state: State) => T, shouldPersist: (result: T) => boolean = () => true): T => {
     mkdirSync(dir, { recursive: true })
@@ -500,5 +524,26 @@ export function createExecutionRunStore(worktree: string): ExecutionRunStore {
     assertQuiescent(claim) { const s = read(); validate(s, claim); if (s.executions.some(x => !settled(x))) throw new ExecutionRunUnresolvedError("executions are not quiescent or settled") },
     release(claim) { mutate(s => { validate(s, claim); if (s.executions.some(x => !settled(x))) throw new ExecutionRunUnresolvedError("executions are not quiescent or settled"); delete s.claim }) },
     status() { const s = read(); const { claim, ...visible } = s; return { ...visible, claim: claim && { ownerSession: claim.ownerSession, instance: claim.instance, pid: claim.pid, generation: claim.generation } } },
+    statusBounded(maxBytes) {
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new TypeError("invalid execution run state read limit")
+      let bytesRead = 0
+      try {
+        const result = readBoundedJson(path, maxBytes)
+        bytesRead = result.bytesRead
+        const state = result.value === undefined ? empty() : validateState(result.value)
+        const { claim, ...visible } = state
+        return {
+          status: { ...visible, claim: claim && { ownerSession: claim.ownerSession, instance: claim.instance, pid: claim.pid, generation: claim.generation } },
+          bytesRead,
+        }
+      } catch (error) {
+        const consumed = errorBytesRead(error, bytesRead)
+        if ((error as NodeJS.ErrnoException).code === "oversize" || error instanceof ExecutionRunCorruptError) {
+          throw withBytesRead(error as Error, consumed)
+        }
+        if (error instanceof SyntaxError) throw withBytesRead(new ExecutionRunCorruptError("execution run state is corrupt"), consumed)
+        throw withBytesRead(error instanceof Error ? error : new Error("execution run state is unreadable"), consumed)
+      }
+    },
   }
 }

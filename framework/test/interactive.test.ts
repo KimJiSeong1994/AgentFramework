@@ -3,7 +3,7 @@ import { mkdirSync, realpathSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { launchInteractive, parseInteractiveArgs, validModelID, type InteractiveDependencies, type Terminal } from "../src/hosts/interactive.ts"
 import type { ModelCatalog } from "../src/hosts/model-catalog.ts"
-import { workflowPath } from "../src/flow/state.ts"
+import { newWorkflow, workflowPath } from "../src/flow/state.ts"
 import { AdmissionRefusal } from "../src/hosts/required-controls.ts"
 import type { ForegroundController } from "../src/hosts/controller.ts"
 import type { ExecutionRuntime } from "../src/hosts/types.ts"
@@ -510,7 +510,8 @@ describe("interactive terminal", () => {
   test("active workflow and corrupt workflow state refuse model switching", async () => {
     const path = workflowPath(wt.worktree)
     mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, JSON.stringify({ version: 1, id: "wf_active", phase: "planning", sessionID: "another-session" }))
+    writeFileSync(path, JSON.stringify(newWorkflow("another-session",
+      { instance: "fixture", pid: process.pid, heartbeatAt: Date.now() }, "command", "active plan", "codex")))
     const active = harness({ lines: ["/model local qwen3:8b", "hello", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, active.deps)
     expect(active.calls.runtimes).toHaveLength(1)

@@ -7,13 +7,14 @@ import { createLcaFlowTool, LCA_FLOW_DESCRIPTION, lcaFlowArgs } from "../src/too
 import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
 import { estimateToolSchemaTokens } from "../src/tokens.ts"
 import {
-  FlowTransactionBusyError, flowDir, newWorkflow, planJsonPath, readEvents, readWorkflow, sha256, workflowPath,
+  FlowTransactionBusyError, eventsPath, flowDir, newWorkflow, planJsonPath, readEvents, readWorkflow, sha256, workflowPath,
   writeWorkflow, withFlowTransaction,
 } from "../src/flow/state.ts"
 import { planMdPath } from "../src/flow/plan.ts"
 import { cancelWorkflow } from "../src/flow/runtime.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
-import { ledgerPath } from "../src/state/ledger.ts"
+import { addTasks, emptyLedger, ledgerPath, updateTask, writeLedger } from "../src/state/ledger.ts"
+import { executionRunDirectory, modeStatePath } from "../src/state/store.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { fakeClient, makeDeps, tempGitWorktree, type FakeClient } from "./guards-helpers.ts"
 
@@ -50,6 +51,42 @@ function validPlanArgs() {
   }
 }
 
+const SECRET_MARKERS = [
+  "workflow-request-secret", "workflow-counter-secret", "task-detail-secret", "task-report-secret", "task-sql-secret",
+  "task-answer-secret", "task-handoff-secret", "task-error-secret", "task-blocked-secret", "task-verify-command-secret",
+  "task-verify-output-secret", "task-review-reason-secret", "task-review-session-secret",
+]
+
+function plantStatusSecrets() {
+  const wf = putWorkflow({
+    phase: "executing",
+    request: "workflow-request-secret",
+    counters: { code_invalid: 0, review_iterations: 0, user_rejections: 0, nudges: 0, private: "workflow-counter-secret" },
+  })
+  const created = addTasks(emptyLedger(S), [{ title: "Benign approved task", kind: "data", wf: { id: wf.id, planSha: "safe-plan-sha" } }])
+  const task = created.added[0]!
+  writeLedger(wt.worktree, updateTask(created.ledger, task.id, {
+    status: "failed", attempts: 1, startedAt: 10, finishedAt: 20,
+    detail: "task-detail-secret", report: "task-report-secret", sql: "task-sql-secret", answer: "task-answer-secret",
+    handoff: "task-handoff-secret", error: "task-error-secret", blocked: "task-blocked-secret",
+    verify: "task-verify-command-secret", verify_result: {
+      command: "task-verify-command-secret", ok: false, exitCode: 1, timedOut: false, output: "task-verify-output-secret",
+    },
+    review: { verdict: "reject", reason: "task-review-reason-secret", sessionID: "task-review-session-secret", aborted: false },
+    filesChanged: ["src/safe.ts"],
+  }))
+}
+
+function readIfPresent(path: string) {
+  try { return readFileSync(path) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error }
+}
+
+function statusInputSnapshot() {
+  return [workflowPath(wt.worktree), ledgerPath(wt.worktree, S), modeStatePath(wt.worktree, S), eventsPath(wt.worktree),
+    join(executionRunDirectory(wt.worktree), "state.json")].map(path => [path, readIfPresent(path)])
+}
+
 describe("lca_flow schema budget", () => {
   test("description + schema <= 300 est. tokens", () => {
     const schema = z.object(lcaFlowArgs)
@@ -72,6 +109,31 @@ describe('op:"status"', () => {
     const res = (await tool.execute({ op: "status" }, ctx() as any)) as { output: string }
     expect(res.output).toContain("[lca status]")
     expect(res.output).toContain("workflow:")
+  })
+
+  test("valid workflow and task secrets remain absent from model-facing status output", async () => {
+    plantStatusSecrets()
+    const before = statusInputSnapshot()
+    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const res = (await tool.execute({ op: "status" }, ctx() as any)) as { output: string }
+    for (const secret of SECRET_MARKERS) expect(res.output).not.toContain(secret)
+    expect(res.output.split("\n").length).toBeLessThanOrEqual(25)
+    expect(res.output).not.toContain('"sessions"')
+    expect(res.output).not.toContain('"history"')
+    expect(res.output).not.toContain('"detail"')
+    expect(res.output).not.toContain('"filesChangedCount"')
+    expect(statusInputSnapshot()).toEqual(before)
+  })
+
+  test("renders typed status failures without exposing state contents", async () => {
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, {
+      version: 1, id: "wf_bad", kind: "plan", phase: "planning", sessionID: S, secret: "must-not-leak",
+    } as any))
+    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const res = (await tool.execute({ op: "status" }, ctx() as any)) as { title: string; output: string }
+    expect(res.title).toBe("lca_flow: status unavailable")
+    expect(res.output).toContain("status unavailable: workflow invalid_state")
+    expect(res.output).not.toContain("must-not-leak")
   })
 })
 

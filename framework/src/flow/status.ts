@@ -1,14 +1,13 @@
-// `/status` (M0) and the future `lca status` CLI: derived only from workflow.json/archive + events + ledger + mode.
+// Shared read model for `/status`, `lca_flow status`, and the SDK-free CLI.
 import type { FlowRuntime } from "../hosts/types.ts"
 import type { LcaConfig } from "../config.ts"
-import { readFileSync } from "node:fs"
-import { counts, emptyLedger, ledgerPath, tasksForWorkflow, type Ledger } from "../state/ledger.ts"
-import { EMPTY_MODE, modeStatePath, type ModeState } from "../state/store.ts"
-import { authorize } from "./owner.ts"
-import { liveness } from "./runtime.ts"
-import { PHASES } from "./machine.ts"
-import { readEvents, workflowPath, type Workflow } from "./state.ts"
-import { createExecutionRunStore, settled } from "../hosts/run-state.ts"
+import { existsSync, statSync } from "node:fs"
+import { join } from "node:path"
+import { claimPidAlive, createExecutionRunStore, settled, ExecutionRunCorruptError, type ExecutionRecord } from "../hosts/run-state.ts"
+import { counts, emptyLedger, ledgerPath, openTasks, parseLedger, tasksForWorkflow, type Ledger, type LedgerTask } from "../state/ledger.ts"
+import { EMPTY_MODE, modeStatePath, parseModeState, readBoundedJson, readDirectoryBounded, sessionDir, stateRoot, type ModeState } from "../state/store.ts"
+import { INSTANCE_ID, ownerLive as workflowOwnerLive, pidAlive } from "./owner.ts"
+import { flowDir, parseWorkflow, readEventsTail, workflowPath, type Workflow } from "./state.ts"
 
 export const STATUS_MARKER = "[lca status]"
 
@@ -16,139 +15,521 @@ export function flowOn(config: LcaConfig): boolean {
   return config.flow.enabled && !config.disabled_hooks.includes("flow")
 }
 
+export type StatusSource = "workflow" | "ledger" | "mode" | "execution" | "events" | "detail"
+export type StatusErrorCode = "invalid_state" | "unreadable" | "oversize" | "takeover_failed"
+export class StatusReadError extends Error {
+  constructor(readonly source: StatusSource, readonly code: StatusErrorCode, readonly bytesRead = 0) {
+    super(`status unavailable: ${source} ${code}`)
+    this.name = "StatusReadError"
+  }
+}
+
+export type QueueState = "running_here" | "running_elsewhere" | "stale" | "blocked" | "idle" | "unknown"
+type QueueInput = {
+  sessionID?: string
+  inProcess?: boolean
+  running?: Ledger["running"]
+  taskStatus?: LedgerTask["status"]
+  openTaskCount: number
+  claim?: { ownerSession: string; pid: number }
+  claimLive: boolean
+  sameProcess: boolean
+  executions: ExecutionRecord[]
+  workflowPhase?: string
+  workflowSessionID?: string
+  now: number
+}
+export type QueueProjection = {
+  state: QueueState
+  evidence: string
+  flag: "true" | "false" | "absent"
+  taskId?: string
+  since?: number
+  ageMs?: number
+  hint?: string
+}
+
+/** Pure classifier; uncertainty and fenced work are never presented as idle or proven progress. */
+export function classifyQueue(input: QueueInput): QueueProjection {
+  const flag = input.inProcess === undefined ? "absent" : input.inProcess ? "true" : "false"
+  const sessionID = input.sessionID
+  const running = input.running
+  const ownerClaim = !!sessionID && input.claim?.ownerSession === sessionID ? input.claim : undefined
+  const pidLive = !!ownerClaim && input.claimLive
+  const here = !!ownerClaim && input.sameProcess
+  const owned = input.executions.filter(e => e.ownerSession === sessionID)
+  const unresolved = owned.filter(e => !settled(e))
+  const fenced = unresolved.some(e => !!e.fence || !!e.reconciliation)
+  const cancelledOnly = unresolved.some(e => !!e.cancel && !e.fence && !e.reconciliation)
+  const taskId = running?.taskId
+  const since = running?.since
+  const ageMs = since === undefined ? undefined : Math.max(0, input.now - since)
+  const withRunning = (state: QueueState, evidence: string, hint?: string): QueueProjection => ({
+    state, evidence, flag, ...(taskId ? { taskId: safeDisplay(taskId, 80) } : {}), ...(since !== undefined ? { since, ageMs } : {}), ...(hint ? { hint } : {}),
+  })
+  if (!sessionID) return withRunning("unknown", "no_session", "pass --session")
+  if (input.inProcess === true) return withRunning("running_here", "in_process_flag")
+  if (ownerClaim && fenced) return withRunning("blocked", "claim_retained_unresolved", "resume re-attempts reconciliation; it refuses if quiescence cannot be proven")
+  if (ownerClaim && !pidLive && unresolved.length) return withRunning("blocked", "dead_owner_unresolved", "resume re-attempts reconciliation; it refuses if quiescence cannot be proven")
+  if (running && ownerClaim && pidLive && !here && input.taskStatus === "running") {
+    return withRunning("running_elsewhere", `claim_pid_alive${cancelledOnly ? "+cancel_requested" : ""}`)
+  }
+  if (running && ownerClaim && pidLive && here) {
+    const noOpenTasks = input.taskStatus !== "running" && input.openTaskCount === 0
+    return withRunning("stale", `claim_retained_here_inactive${noOpenTasks ? "+no_open_tasks" : ""}`, noOpenTasks ? undefined : "resume")
+  }
+  if (running && ownerClaim && pidLive && input.taskStatus !== "running") {
+    const noOpenTasks = input.openTaskCount === 0
+    return withRunning("stale", `running_pointer_orphaned${noOpenTasks ? "+no_open_tasks" : ""}`, noOpenTasks ? undefined : "resume runs the pending work; the pointer is replaced at the next task start")
+  }
+  if (running && ownerClaim && !pidLive) {
+    const noOpenTasks = input.taskStatus !== "running" && input.openTaskCount === 0
+    return withRunning("stale", `claim_pid_dead${noOpenTasks ? "+no_open_tasks" : ""}`, noOpenTasks ? undefined : "resume")
+  }
+  if (running && !ownerClaim) {
+    const noOpenTasks = input.taskStatus !== "running" && input.openTaskCount === 0
+    return withRunning("stale", `running_without_matching_claim${noOpenTasks ? "+no_open_tasks" : ""}`,
+      input.openTaskCount > 0 ? "resume runs the pending work; the pointer is replaced at the next task start" : undefined)
+  }
+  if (!running && ownerClaim && pidLive) return withRunning("unknown", `claim_alive_no_task${cancelledOnly ? "+cancel_requested" : ""}${input.workflowSessionID === sessionID && input.workflowPhase === "reviewing" ? "+phase_reviewing" : ""}`)
+  const evidence = input.claim && input.claim.ownerSession !== sessionID ? "claim_other_session" : ownerClaim ? "claim_pid_dead" : "no_running"
+  return withRunning("idle", evidence)
+}
+
 export type StatusJson = {
+  schemaVersion: 1
+  generatedAt: number
   workflow: null | {
     id: string; phase: string; stuckCause?: string; sessionID: string; ownerLive: boolean
     engine?: string; planSha?: string
     plan?: string; review?: string; tasks?: { total: number; done: number; open: number; failed: number }
     counters: Workflow["counters"]; pendingCancel: boolean
   }
-  session: { id: string; mode: string; modeActive: boolean; queueRunning: boolean; ledger: Record<string, number> }
-  execution: { generation: number; ownerSessionID?: string; unresolved: number; cancelledAcknowledged: number; usage: "unknown"; verification?: string }
+  session: { id: string; source: "arg" | "workflow" | "none"; mode: string; modeActive: boolean; queueRunning: boolean; queue: QueueProjection; ledger: Record<string, number> }
+  execution: { generation: number; ownerSessionID?: string; unresolved: number; cancelledAcknowledged: number; usage: "unknown"; verification?: string; claim?: { ownerSessionID: string; sameSession: boolean; pid: number; pidAlive: boolean; sameProcess: boolean } }
+  freshness: { workflowUpdatedAt?: number; ledgerUpdatedAt?: number; ownerHeartbeatAgeMs?: number; staleAfterMs: 90000; eventsWindowTruncated: boolean }
   events: Array<{ seq: number; type: string; to?: string }>
+  detail?: { tasks: Array<Record<string, unknown>>; sessions: Array<Record<string, unknown>>; history: Array<Record<string, unknown>>; events: Array<Record<string, unknown>>; truncated: Record<string, number>; truncatedTasks?: number; sessionsScanTruncated?: boolean; archivesScanTruncated?: boolean; budgetExhausted?: boolean }
 }
 
-function object(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
+export type StatusLiveness = { instance?: string; ownerPidAlive?: (pid: number) => boolean; claimPidAlive?: (pid: number) => boolean; sessionExists?: (sessionID: string) => boolean }
+export type StatusOptions = { queueRunning?: boolean; sessionSource?: "arg" | "workflow" | "none"; detail?: boolean; now?: number; liveness?: StatusLiveness }
+
+const STATUS_INTERNAL = Symbol("status-internal")
+type StatusInternal = { worktree: string; queue: QueueInput; workflow?: Workflow; liveness: StatusLiveness; bytesRead: number }
+
+export function statusBytesRead(status: StatusJson): number {
+  return (status as StatusJson & { [STATUS_INTERNAL]?: StatusInternal })[STATUS_INTERNAL]?.bytesRead ?? 0
 }
 
-function readStatusJson(path: string): unknown {
-  try { return JSON.parse(readFileSync(path, "utf8")) as unknown }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error }
+export const STATUS_LIMITS = {
+  workflow: 256 * 1024,
+  mode: 64 * 1024,
+  ledger: 4 * 1024 * 1024,
+  execution: 4 * 1024 * 1024,
+  events: 64 * 1024,
+  extraLedger: 1024 * 1024,
+  archive: 256 * 1024,
+  detailOutput: 64 * 1024,
+  detailInput: 8 * 1024 * 1024,
+  sessionsEntries: 500,
+  sessionsCount: 20,
+  taskCount: 50,
+  historyCount: 10,
+  archiveEntries: 1000,
+} as const
+
+function safeDisplay(value: string, max = 160): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max)
 }
 
-function statusWorkflow(worktree: string): Workflow | null {
-  const value = readStatusJson(workflowPath(worktree))
-  if (value === undefined) return null
-  if (!object(value) || value.version !== 1 || value.kind !== "plan" || typeof value.id !== "string" || !value.id ||
-    typeof value.sessionID !== "string" || !value.sessionID || !PHASES.includes(value.phase as Workflow["phase"]) ||
-    !["command", "keyword"].includes(value.entry as string) || typeof value.request !== "string" ||
-    !Number.isSafeInteger(value.lastSeq) || !Number.isFinite(value.createdAt) || !Number.isFinite(value.updatedAt) ||
-    !object(value.owner) || typeof value.owner.instance !== "string" || !Number.isSafeInteger(value.owner.pid) ||
-    !Number.isFinite(value.owner.heartbeatAt) || !object(value.counters) ||
-    !["code_invalid", "review_iterations", "user_rejections", "nudges"].every(key => Number.isSafeInteger((value.counters as Record<string, unknown>)[key])) ||
-    (value.planRef !== undefined && (!object(value.planRef) || typeof value.planRef.mdPath !== "string")) ||
-    (value.review !== undefined && (!object(value.review) || typeof value.review.verdict !== "string" ||
-      (value.review.note !== undefined && typeof value.review.note !== "string")))) throw new Error("invalid workflow state")
-  return value as Workflow
+function nativeFsError(error: unknown): error is NodeJS.ErrnoException & Error {
+  if (!(error instanceof Error)) return false
+  const fsError = error as NodeJS.ErrnoException
+  return typeof fsError.errno === "number" && typeof fsError.syscall === "string" && typeof fsError.code === "string"
 }
 
-function statusLedger(worktree: string, sessionID: string): Ledger {
-  const value = readStatusJson(ledgerPath(worktree, sessionID))
-  if (value === undefined) return emptyLedger(sessionID)
-  if (!object(value) || value.version !== 1 || value.sessionID !== sessionID ||
-    !Number.isFinite(value.createdAt) || !Number.isFinite(value.updatedAt) || !Array.isArray(value.tasks) ||
-    !value.tasks.every(task => object(task) && typeof task.id === "string" &&
-      ["pending", "running", "done", "failed", "cancelled"].includes(task.status as string) &&
-      (task.wf === undefined || (object(task.wf) && typeof task.wf.id === "string")))) throw new Error("invalid ledger state")
-  return value as Ledger
+function missingFsError(error: unknown): boolean {
+  return nativeFsError(error) && error.code === "ENOENT"
 }
 
-function statusMode(worktree: string, sessionID: string): ModeState {
-  const value = readStatusJson(modeStatePath(worktree, sessionID))
-  if (value === undefined) return EMPTY_MODE
-  if (!object(value) || !["none", "ulw", "plan", "data"].includes(value.mode as string) || typeof value.active !== "boolean" ||
-    !["startedAt", "updatedAt", "iterations", "stagnation", "failures"].every(key => Number.isFinite(value[key]))) {
-    throw new Error("invalid mode state")
+function oversizeError(error: unknown): boolean {
+  return error instanceof Error && (error as NodeJS.ErrnoException).code === "oversize"
+}
+
+function unreadableSentinel(error: unknown): boolean {
+  return error instanceof Error && error.message === "unreadable" && (error as NodeJS.ErrnoException).code === "unreadable"
+}
+
+function errorBytesRead(error: unknown): number {
+  if (!(error instanceof Error)) return 0
+  const bytesRead = (error as Error & { bytesRead?: unknown }).bytesRead
+  return typeof bytesRead === "number" && Number.isSafeInteger(bytesRead) && bytesRead >= 0 ? bytesRead : 0
+}
+
+function invalidStateError(error: unknown, message: string): boolean {
+  return error instanceof Error && error.message === message
+}
+
+function readValue(path: string, source: StatusSource, maxBytes: number): { value: unknown | undefined; bytesRead: number } {
+  try { return readBoundedJson(path, maxBytes) }
+  catch (error) {
+    if (oversizeError(error)) throw new StatusReadError(source, "oversize", errorBytesRead(error))
+    if (error instanceof SyntaxError) throw new StatusReadError(source, "invalid_state", errorBytesRead(error))
+    if (nativeFsError(error) || unreadableSentinel(error)) throw new StatusReadError(source, "unreadable", errorBytesRead(error))
+    throw error
   }
-  return value as ModeState
 }
 
-export function statusJson(deps: FlowRuntime, sessionID: string, queueRunning: boolean, now = Date.now()): StatusJson {
-  const run = createExecutionRunStore(deps.worktree).status()
-  const unresolved = run.executions.filter((execution) => !settled(execution))
-  const wf = statusWorkflow(deps.worktree)
-  const mode = statusMode(deps.worktree, sessionID)
-  const ledger = statusLedger(deps.worktree, sessionID)
-  const passedLegacy = run.executions.findLast(execution => execution.ownerSession === sessionID &&
-    execution.kind === "verifier" && execution.profile === "legacy-unowned" &&
-    execution.descendantRisk === "unproven" && execution.terminal?.outcome === "ok" &&
-    execution.terminal.verification?.integrity === "unchanged" &&
-    ledger.tasks.some(task => task.id === execution.taskId && task.status === "done"))
-  let workflow: StatusJson["workflow"] = null
-  if (wf) {
-    const live = authorize("status", wf.sessionID, wf, liveness(deps, now)).kind === "allow"
-    const tagged = tasksForWorkflow(wf.sessionID === sessionID ? ledger : statusLedger(deps.worktree, wf.sessionID), wf.id)
-    workflow = {
-      id: wf.id,
-      phase: wf.phase,
-      ...(wf.stuckCause ? { stuckCause: wf.stuckCause } : {}),
-      sessionID: wf.sessionID,
-      ...(typeof wf.engine === "string" ? { engine: wf.engine } : {}),
-      ...(typeof wf.planRef?.jsonSha === "string" && /^[a-f0-9]{64}$/.test(wf.planRef.jsonSha)
-        ? { planSha: wf.planRef.jsonSha } : {}),
-      ownerLive: live,
-      ...(wf.planRef ? { plan: wf.planRef.mdPath } : {}),
-      ...(wf.review ? { review: `${wf.review.verdict}${wf.review.note ? ` (${wf.review.note})` : ""}` } : {}),
-      ...(tagged.length
-        ? { tasks: {
-            total: tagged.length,
-            done: tagged.filter((t) => t.status === "done").length,
-            open: tagged.filter((t) => t.status === "pending" || t.status === "running").length,
-            failed: tagged.filter((t) => t.status === "failed" || t.status === "cancelled").length,
-          } }
-        : {}),
-      counters: wf.counters,
-      pendingCancel: !!wf.pendingCancel,
+function workflowAt(worktree: string): { workflow: Workflow | null; bytesRead: number } {
+  const { value, bytesRead } = readValue(workflowPath(worktree), "workflow", STATUS_LIMITS.workflow)
+  if (value === undefined) return { workflow: null, bytesRead }
+  try { return { workflow: parseWorkflow(value), bytesRead } }
+  catch (error) {
+    if (invalidStateError(error, "invalid workflow state")) throw new StatusReadError("workflow", "invalid_state", bytesRead)
+    throw error
+  }
+}
+
+function statusLedger(worktree: string, sessionID: string): { ledger: Ledger; bytesRead: number } {
+  const { value, bytesRead } = readValue(ledgerPath(worktree, sessionID), "ledger", STATUS_LIMITS.ledger)
+  if (value === undefined) return { ledger: emptyLedger(sessionID), bytesRead }
+  try { return { ledger: parseLedger(value, sessionID), bytesRead } }
+  catch (error) {
+    if (invalidStateError(error, "invalid ledger state")) throw new StatusReadError("ledger", "invalid_state", bytesRead)
+    throw error
+  }
+}
+
+function statusMode(worktree: string, sessionID: string): { mode: ModeState; bytesRead: number } {
+  const { value, bytesRead } = readValue(modeStatePath(worktree, sessionID), "mode", STATUS_LIMITS.mode)
+  if (value === undefined) return { mode: EMPTY_MODE, bytesRead }
+  try { return { mode: parseModeState(value), bytesRead } }
+  catch (error) {
+    if (invalidStateError(error, "invalid mode state")) throw new StatusReadError("mode", "invalid_state", bytesRead)
+    throw error
+  }
+}
+
+function detailTask(task: LedgerTask): Record<string, unknown> {
+  const verify = task.verify_result
+  const verdict = task.review?.verdict
+  const outcome = task.blocked !== undefined ? "blocked" : verify?.timedOut ? "verify_timeout" : verify?.ok === false ? "verify_failed" :
+    verdict === "reject" ? "review_rejected" : verdict === "error" ? "review_error" : task.status === "cancelled" ? "cancelled" : task.status === "failed" ? "failed_other" : undefined
+  return {
+    id: safeDisplay(task.id, 80), n: task.n, batch: task.batch, status: task.status, attempts: task.attempts, kind: task.kind ?? "code",
+    ...(task.wf ? { wfId: safeDisplay(task.wf.id, 80) } : {}), title: task.wf ? safeDisplay(task.title ?? "", 80) : "unapproved task", createdAt: task.createdAt,
+    ...(task.startedAt !== undefined ? { startedAt: task.startedAt } : {}), ...(task.finishedAt !== undefined ? { finishedAt: task.finishedAt } : {}),
+    ...(verify ? { verify: { ok: verify.ok, exitCode: verify.exitCode, timedOut: verify.timedOut } } : {}),
+    ...(task.review ? { review: { verdict: task.review.verdict } } : {}), ...(outcome ? { outcome } : {}),
+    ...(task.filesChanged ? { filesChangedCount: task.filesChanged.length } : {}), blocked: task.blocked !== undefined,
+  }
+}
+
+function detailView(worktree: string, sessionID: string, ownerSessionID: string | undefined, ledger: Ledger, events: ReturnType<typeof readEventsTail>["events"]): { detail: NonNullable<StatusJson["detail"]>; bytesRead: number } {
+  const truncated: Record<string, number> = {}
+  const tasks = ledger.tasks.slice(-STATUS_LIMITS.taskCount).map(detailTask)
+  const truncatedTasks = Math.max(0, ledger.tasks.length - tasks.length)
+  if (truncatedTasks) truncated.tasks = truncatedTasks
+  let extraBytes = 0
+  let budgetExhausted = false
+  const sessions: Array<Record<string, unknown>> = []
+  const sessionRoot = join(stateRoot(worktree), "sessions")
+  let sessionNames: string[] = []
+  let sessionsScanTruncated = false
+  try {
+    const scan = readDirectoryBounded(sessionRoot, STATUS_LIMITS.sessionsEntries)
+    sessionNames = scan.entries.filter(entry => entry.isDirectory()).map(entry => entry.name)
+    sessionsScanTruncated = scan.truncated
+  } catch (error) {
+    if (!missingFsError(error)) {
+      if (nativeFsError(error)) throw new StatusReadError("ledger", "unreadable", extraBytes)
+      throw error
     }
   }
-  const events = wf ? readEvents(deps.worktree, wf.id).slice(-5).map((e) => ({ seq: e.seq, type: e.type, ...(e.to ? { to: e.to } : {}) })) : []
-  return {
-    workflow,
-    session: { id: sessionID, mode: mode.mode, modeActive: mode.active, queueRunning, ledger: counts(ledger) },
-    execution: {
-      generation: run.generation,
-      ...(run.claim ? { ownerSessionID: run.claim.ownerSession } : {}),
-      unresolved: unresolved.length,
-      cancelledAcknowledged: unresolved.filter((execution) => execution.cancel?.acknowledgedAt !== undefined).length,
-      usage: "unknown",
-      ...(passedLegacy ? { verification: "passed (legacy-unowned, descendants unproven)" } : {}),
-    },
-    events,
+  const candidates = sessionNames.filter(id => id !== sessionID && id !== ownerSessionID).map(id => {
+    try { return { id, mtime: statSync(ledgerPath(worktree, id)).mtimeMs } }
+    catch (error) {
+      if (missingFsError(error)) return { id, mtime: 0 }
+      if (nativeFsError(error)) throw new StatusReadError("ledger", "unreadable", extraBytes)
+      throw error
+    }
+  }).sort((a, b) => b.mtime - a.mtime).slice(0, STATUS_LIMITS.sessionsCount)
+  for (const { id } of candidates) {
+    const remaining = STATUS_LIMITS.detailInput - extraBytes
+    if (remaining <= 0) { budgetExhausted = true; break }
+    const path = ledgerPath(worktree, id)
+    try {
+      const size = statSync(path).size
+      if (size > STATUS_LIMITS.extraLedger) { sessions.push({ id: safeDisplay(id, 256), oversize: true }); continue }
+      if (size > remaining) { budgetExhausted = true; break }
+      const { value, bytesRead } = readBoundedJson(path, Math.min(STATUS_LIMITS.extraLedger, remaining))
+      extraBytes += bytesRead
+      if (value === undefined) continue
+      const other = parseLedger(value, id)
+      sessions.push({ id: safeDisplay(id, 256), counts: counts(other), updatedAt: other.updatedAt, ...(other.running ? { running: { taskId: safeDisplay(other.running.taskId, 80), since: other.running.since } } : {}) })
+    } catch (error) {
+      extraBytes += errorBytesRead(error)
+      if (missingFsError(error)) continue
+      if (oversizeError(error) && remaining < STATUS_LIMITS.extraLedger) { budgetExhausted = true; break }
+      if (oversizeError(error)) sessions.push({ id: safeDisplay(id, 256), oversize: true })
+      else if (error instanceof SyntaxError || invalidStateError(error, "invalid ledger state")) truncated.invalidSessions = (truncated.invalidSessions ?? 0) + 1
+      else if (nativeFsError(error) || unreadableSentinel(error)) throw new StatusReadError("ledger", "unreadable", extraBytes)
+      else throw error
+    }
   }
+  const history: Array<Record<string, unknown>> = []
+  const archiveDir = join(flowDir(worktree), "archive")
+  let archiveNames: string[] = []
+  let archivesScanTruncated = false
+  try {
+    const scan = readDirectoryBounded(archiveDir, STATUS_LIMITS.archiveEntries)
+    archiveNames = scan.entries.map(entry => entry.name).filter(name => name.endsWith(".json")).sort()
+    archivesScanTruncated = scan.truncated
+  } catch (error) {
+    if (!missingFsError(error)) {
+      if (nativeFsError(error)) throw new StatusReadError("workflow", "unreadable", extraBytes)
+      throw error
+    }
+  }
+  for (const name of archiveNames.slice(-STATUS_LIMITS.historyCount)) {
+    const remaining = STATUS_LIMITS.detailInput - extraBytes
+    if (remaining <= 0) { budgetExhausted = true; break }
+    try {
+      const path = join(archiveDir, name)
+      const size = statSync(path).size
+      if (size > STATUS_LIMITS.archive) { truncated.archives = (truncated.archives ?? 0) + 1; continue }
+      if (size > remaining) { budgetExhausted = true; break }
+      const { value, bytesRead } = readBoundedJson(path, Math.min(STATUS_LIMITS.archive, remaining))
+      extraBytes += bytesRead
+      if (value === undefined) continue
+      const archived = parseWorkflow(value)
+      history.push({ id: safeDisplay(archived.id, 256), phase: archived.phase, createdAt: archived.createdAt, updatedAt: archived.updatedAt })
+    } catch (error) {
+      extraBytes += errorBytesRead(error)
+      if (missingFsError(error)) continue
+      if (oversizeError(error) && remaining < STATUS_LIMITS.archive) { budgetExhausted = true; break }
+      if (oversizeError(error) || error instanceof SyntaxError || invalidStateError(error, "invalid workflow state")) {
+        truncated.archives = (truncated.archives ?? 0) + 1
+      } else if (nativeFsError(error) || unreadableSentinel(error)) throw new StatusReadError("workflow", "unreadable", extraBytes)
+      else throw error
+    }
+  }
+  const result: NonNullable<StatusJson["detail"]> = {
+    tasks, sessions, history, events: events.slice(-20).map(event => ({ seq: event.seq, type: safeDisplay(event.type, 80), at: event.at, ...(event.to ? { to: safeDisplay(event.to, 80) } : {}) })), truncated,
+    ...(truncatedTasks ? { truncatedTasks } : {}),
+    ...(sessionsScanTruncated ? { sessionsScanTruncated: true } : {}),
+    ...(archivesScanTruncated ? { archivesScanTruncated: true } : {}),
+    ...(budgetExhausted ? { budgetExhausted: true } : {}),
+  }
+  const dropOrder: Array<keyof Pick<NonNullable<StatusJson["detail"]>, "events" | "history" | "sessions" | "tasks">> = ["events", "history", "sessions", "tasks"]
+  for (const key of dropOrder) {
+    if (Buffer.byteLength(JSON.stringify(result)) <= STATUS_LIMITS.detailOutput) break
+    result.truncated[key] = (result.truncated[key] ?? 0) + result[key].length
+    result[key] = []
+  }
+  if (Buffer.byteLength(JSON.stringify(result)) > STATUS_LIMITS.detailOutput) throw new StatusReadError("detail", "oversize", extraBytes)
+  return { detail: result, bytesRead: extraBytes }
 }
 
-/** <= 25 lines, code-rendered; starts with STATUS_MARKER so e2e can prove the model did not write it. */
-export function renderStatus(deps: FlowRuntime, sessionID: string, queueRunning: boolean, now = Date.now()): string {
-  const s = statusJson(deps, sessionID, queueRunning, now)
+export function statusJson(deps: FlowRuntime, sessionID?: string, options: StatusOptions = {}): StatusJson {
+  const now = options.now ?? Date.now()
+  let bytesRead = 0
+  const accumulate = <T extends { bytesRead: number }>(read: () => T): T => {
+    try {
+      const result = read()
+      bytesRead += result.bytesRead
+      return result
+    } catch (error) {
+      if (error instanceof StatusReadError) throw new StatusReadError(error.source, error.code, bytesRead + error.bytesRead)
+      throw error
+    }
+  }
+  const wfRead = accumulate(() => workflowAt(deps.worktree))
+  const wf = wfRead.workflow
+  const resolvedSession = sessionID ?? wf?.sessionID
+  const sessionSource = options.sessionSource ?? (sessionID ? "arg" : resolvedSession ? "workflow" : "none")
+  const id = resolvedSession ?? "no-session"
+  const ledgerRead = resolvedSession ? accumulate(() => statusLedger(deps.worktree, id)) : { ledger: emptyLedger(id), bytesRead: 0 }
+  const modeRead = resolvedSession ? accumulate(() => statusMode(deps.worktree, id)) : { mode: EMPTY_MODE, bytesRead: 0 }
+  const runStore = createExecutionRunStore(deps.worktree)
+  let runRead: ReturnType<typeof runStore.statusBounded>
+  try { runRead = runStore.statusBounded(STATUS_LIMITS.execution) }
+  catch (error) {
+    if (oversizeError(error)) throw new StatusReadError("execution", "oversize", bytesRead + errorBytesRead(error))
+    if (error instanceof ExecutionRunCorruptError) throw new StatusReadError("execution", "invalid_state", bytesRead + errorBytesRead(error))
+    if (nativeFsError(error) || unreadableSentinel(error)) throw new StatusReadError("execution", "unreadable", bytesRead + errorBytesRead(error))
+    throw error
+  }
+  const run = runRead.status
+  bytesRead += runRead.bytesRead
+  const unresolved = run.executions.filter(execution => !settled(execution))
+  let workflow: StatusJson["workflow"] = null
+  let workflowLedger = ledgerRead.ledger
+  if (wf) {
+    if (wf.sessionID !== id) {
+      const ownerRead = accumulate(() => statusLedger(deps.worktree, wf.sessionID))
+      workflowLedger = ownerRead.ledger
+    }
+    const live = workflowOwnerLive(wf, {
+      now, instance: options.liveness?.instance ?? INSTANCE_ID, pidAlive: options.liveness?.ownerPidAlive ?? pidAlive,
+      sessionExists: options.liveness?.sessionExists ?? (ownerSessionID => existsSync(sessionDir(deps.worktree, ownerSessionID))),
+    })
+    const tagged = tasksForWorkflow(workflowLedger, wf.id)
+    const engine = typeof wf.engine === "string" && wf.engine.length > 0 && wf.engine.length <= 512 ? safeDisplay(wf.engine, 512) : undefined
+    const planSha = typeof wf.planRef?.jsonSha === "string" && /^[a-f0-9]{64}$/.test(wf.planRef.jsonSha) ? wf.planRef.jsonSha : undefined
+    workflow = {
+      id: safeDisplay(wf.id, 256), phase: wf.phase, ...(wf.stuckCause ? { stuckCause: wf.stuckCause } : {}), sessionID: safeDisplay(wf.sessionID, 256), ownerLive: live,
+      ...(engine ? { engine } : {}), ...(planSha ? { planSha } : {}),
+      ...(wf.planRef ? { plan: safeDisplay(wf.planRef.mdPath, 1024) } : {}), ...(wf.review ? { review: safeDisplay(`${wf.review.verdict}${wf.review.note ? ` (${wf.review.note})` : ""}`, 512) } : {}),
+      ...(tagged.length ? { tasks: {
+        total: tagged.length, done: tagged.filter(task => task.status === "done").length,
+        open: tagged.filter(task => task.status === "pending" || task.status === "running").length,
+        failed: tagged.filter(task => task.status === "failed" || task.status === "cancelled").length,
+      } } : {}),
+      counters: {
+        code_invalid: wf.counters.code_invalid, review_iterations: wf.counters.review_iterations,
+        user_rejections: wf.counters.user_rejections, nudges: wf.counters.nudges,
+      }, pendingCancel: !!wf.pendingCancel,
+    }
+  }
+  const selectedTask = ledgerRead.ledger.running
+  const taskStatus = selectedTask ? ledgerRead.ledger.tasks.find(task => task.id === selectedTask.taskId)?.status : undefined
+  const sessionExecutions = run.executions.filter(execution => execution.ownerSession === resolvedSession)
+  const queueInput: QueueInput = {
+    ...(resolvedSession ? { sessionID: resolvedSession } : {}), inProcess: options.queueRunning,
+    running: selectedTask, taskStatus, openTaskCount: openTasks(ledgerRead.ledger).length,
+    claim: run.claim, claimLive: !!run.claim && (options.liveness?.claimPidAlive ?? claimPidAlive)(run.claim.pid), sameProcess: !!run.claim && run.claim.pid === process.pid,
+    executions: sessionExecutions, workflowPhase: wf?.phase, workflowSessionID: wf?.sessionID, now,
+  }
+  const queue = classifyQueue(queueInput)
+  const eventsRead = wf ? accumulate(() => {
+    try { return readEventsTail(deps.worktree, { wfId: wf.id, limit: 20, maxBytes: STATUS_LIMITS.events }) }
+    catch (error) {
+      if (nativeFsError(error) || unreadableSentinel(error)) throw new StatusReadError("events", "unreadable", errorBytesRead(error))
+      throw error
+    }
+  }) : { events: [], windowTruncated: false, bytesRead: 0 }
+  const session: StatusJson["session"] = {
+    id: safeDisplay(id, 256), source: sessionSource, mode: modeRead.mode.mode, modeActive: modeRead.mode.active,
+    queueRunning: queue.state === "running_here" || queue.state === "running_elsewhere", queue,
+    ledger: counts(ledgerRead.ledger),
+  }
+  const claim = run.claim
+  const passedLegacy = run.executions.find(execution => execution.ownerSession === id && execution.kind === "verifier" && execution.profile === "legacy-unowned" &&
+    execution.descendantRisk === "unproven" && execution.terminal?.outcome === "ok" && execution.terminal.verification?.integrity === "unchanged" &&
+    ledgerRead.ledger.tasks.some(task => task.id === execution.taskId && task.status === "done"))
+  const status: StatusJson = {
+    schemaVersion: 1, generatedAt: now, workflow,
+    session,
+    execution: {
+      generation: run.generation, ...(claim ? { ownerSessionID: safeDisplay(claim.ownerSession, 256) } : {}), unresolved: unresolved.length,
+      cancelledAcknowledged: unresolved.filter(execution => execution.cancel?.acknowledgedAt !== undefined).length,
+      usage: "unknown", ...(claim ? { claim: { ownerSessionID: safeDisplay(claim.ownerSession, 256), sameSession: claim.ownerSession === id,
+        pid: claim.pid, pidAlive: (options.liveness?.claimPidAlive ?? claimPidAlive)(claim.pid), sameProcess: claim.pid === process.pid } } : {}),
+      ...(passedLegacy ? { verification: "passed (legacy-unowned, descendants unproven)" } : {}),
+    },
+    freshness: {
+      ...(wf ? { workflowUpdatedAt: wf.updatedAt, ownerHeartbeatAgeMs: Math.max(0, now - wf.owner.heartbeatAt) } : {}),
+      ...(resolvedSession && ledgerRead.bytesRead > 0 ? { ledgerUpdatedAt: ledgerRead.ledger.updatedAt } : {}), staleAfterMs: 90_000, eventsWindowTruncated: eventsRead.windowTruncated,
+    },
+    events: eventsRead.events.slice(-5).map(event => ({ seq: event.seq, type: safeDisplay(event.type, 80), ...(event.to ? { to: safeDisplay(event.to, 80) } : {}) })),
+  }
+  if (options.detail) {
+    const detail = accumulate(() => detailView(deps.worktree, id, wf?.sessionID, ledgerRead.ledger, eventsRead.events))
+    status.detail = detail.detail
+  }
+  Object.defineProperty(status, STATUS_INTERNAL, { value: { worktree: deps.worktree, queue: queueInput, liveness: options.liveness ?? {}, bytesRead, ...(wf ? { workflow: wf } : {}) } satisfies StatusInternal })
+  try { capStatusDetail(status) }
+  catch (error) {
+    if (error instanceof StatusReadError) throw new StatusReadError(error.source, error.code, bytesRead + error.bytesRead)
+    throw error
+  }
+  return status
+}
+
+function capStatusDetail(status: StatusJson): void {
+  if (!status.detail) return
+  const keys: Array<keyof Pick<NonNullable<StatusJson["detail"]>, "events" | "history" | "sessions" | "tasks">> = ["events", "history", "sessions", "tasks"]
+  for (const key of keys) {
+    if (Buffer.byteLength(JSON.stringify(status)) <= STATUS_LIMITS.detailOutput) return
+    status.detail.truncated[key] = (status.detail.truncated[key] ?? 0) + status.detail[key].length
+    status.detail[key] = []
+  }
+  if (Buffer.byteLength(JSON.stringify(status)) > STATUS_LIMITS.detailOutput) throw new StatusReadError("detail", "oversize")
+}
+
+/** Re-evaluate only OS/clock liveness from the previous parsed snapshot; no disk reads occur. */
+export function refreshStatusLiveness(status: StatusJson, now: number, livenessOverride?: StatusLiveness): StatusJson {
+  const internal = (status as StatusJson & { [STATUS_INTERNAL]?: StatusInternal })[STATUS_INTERNAL]
+  if (!internal) return status
+  const liveness = { ...internal.liveness, ...livenessOverride }
+  status.generatedAt = now
+  if (internal.workflow) {
+    status.workflow!.ownerLive = workflowOwnerLive(internal.workflow, {
+      now, instance: liveness.instance ?? INSTANCE_ID,
+      pidAlive: liveness.ownerPidAlive ?? pidAlive,
+      sessionExists: liveness.sessionExists ?? (sessionID => existsSync(sessionDir(internal.worktree, sessionID))),
+    })
+    status.freshness.ownerHeartbeatAgeMs = Math.max(0, now - internal.workflow.owner.heartbeatAt)
+  }
+  const claim = status.execution.claim
+  if (claim) {
+    claim.pidAlive = (liveness.claimPidAlive ?? claimPidAlive)(claim.pid)
+    internal.queue.claimLive = claim.pidAlive
+  }
+  internal.queue.now = now
+  status.session.queue = classifyQueue(internal.queue)
+  status.session.queueRunning = status.session.queue.state === "running_here" || status.session.queue.state === "running_elsewhere"
+  return status
+}
+
+function queueWord(state: QueueState): string {
+  return ({ running_here: "running", running_elsewhere: "running elsewhere", idle: "idle", stale: "stale", blocked: "blocked", unknown: "unknown" })[state]
+}
+
+/** <= 25 lines; richer detail is deliberately excluded from the model-facing path. */
+export function renderStatus(deps: FlowRuntime, sessionID?: string, queueRunning?: boolean, now = Date.now()): string {
+  return renderStatusSnapshot(statusJson(deps, sessionID, { queueRunning, now }), sessionID)
+}
+
+export function renderStatusSnapshot(status: StatusJson, sessionID?: string): string {
   const lines = [STATUS_MARKER]
-  const w = s.workflow
-  if (!w) lines.push("workflow: none")
+  const workflow = status.workflow
+  if (!workflow) lines.push("workflow: none")
   else {
-    const phase = w.stuckCause ? `${w.phase}(${w.stuckCause})` : w.phase
-    const owner = w.sessionID === sessionID ? "this session" : `session ${w.sessionID}`
-    lines.push(`workflow: ${w.id} ${phase}${w.pendingCancel ? " cancelling" : ""} — ${owner}${w.ownerLive ? "" : ", owner dead"}`)
-    if (w.plan) lines.push(`plan: ${w.plan}`)
-    if (w.review) lines.push(`review: ${w.review}`)
-    if (w.tasks) lines.push(`plan tasks: ${w.tasks.done}/${w.tasks.total} done, ${w.tasks.open} open, ${w.tasks.failed} failed/cancelled`)
-    const c = w.counters
+    const phase = workflow.stuckCause ? `${workflow.phase}(${workflow.stuckCause})` : workflow.phase
+    const owner = workflow.sessionID === sessionID ? "this session" : `session ${workflow.sessionID}`
+    lines.push(`workflow: ${workflow.id} ${phase}${workflow.pendingCancel ? " cancelling" : ""} — ${owner}${workflow.ownerLive ? "" : ", owner dead"}`)
+    if (workflow.plan) lines.push(`plan: ${workflow.plan}`)
+    if (workflow.review) lines.push(`review: ${workflow.review}`)
+    if (workflow.tasks) lines.push(`plan tasks: ${workflow.tasks.done}/${workflow.tasks.total} done, ${workflow.tasks.open} open, ${workflow.tasks.failed} failed/cancelled`)
+    const c = workflow.counters
     lines.push(`counters: invalid ${c.code_invalid}, review ${c.review_iterations}, rejects ${c.user_rejections}, nudges ${c.nudges}`)
   }
-  const l = s.session.ledger
-  lines.push(`mode: ${s.session.modeActive ? s.session.mode : "none"}`)
-  lines.push(`ledger: ${l.done ?? 0} done, ${(l.pending ?? 0) + (l.running ?? 0)} open, ${l.failed ?? 0} failed, ${l.cancelled ?? 0} cancelled; queue ${s.session.queueRunning ? "running" : "idle"}`)
-  if (s.execution.unresolved) lines.push(`execution: ${s.execution.unresolved} unresolved, ${s.execution.cancelledAcknowledged} cancel ACK; generation ${s.execution.generation}; usage unknown`)
-  if (s.execution.verification) lines.push(`verification: ${s.execution.verification}`)
-  if (s.events.length) lines.push(`events: ${s.events.map((e) => `#${e.seq} ${e.type}${e.to ? `→${e.to}` : ""}`).join(", ")}`)
+  if (status.session.source === "none") lines.push("session: none (pass --session)")
+  const ledger = status.session.ledger
+  lines.push(`mode: ${status.session.modeActive ? status.session.mode : "none"}`)
+  lines.push(`ledger: ${ledger.done ?? 0} done, ${(ledger.pending ?? 0) + (ledger.running ?? 0)} open, ${ledger.failed ?? 0} failed, ${ledger.cancelled ?? 0} cancelled; queue ${queueWord(status.session.queue.state)}`)
+  const q = status.session.queue
+  if (["stale", "blocked", "unknown", "running_elsewhere"].includes(q.state) || (q.state === "idle" && q.evidence !== "no_running")) {
+    const noOpenTasks = q.evidence.endsWith("+no_open_tasks")
+    const note = q.state === "running_elsewhere" ? "claim held by live pid; progress not proven" :
+      noOpenTasks ? "stale running pointer from an interrupted run; no pending work. Status does not change it. The next plan approval or task start replaces it." :
+      q.state === "idle" && q.evidence === "claim_pid_dead" ? "previous claim holder exited; the next run takes over automatically" :
+      q.state === "idle" && q.evidence === "claim_other_session" ? "claim belongs to another session; it is not evidence for this session" : q.evidence
+    lines.push(`queue: ${note}${q.taskId ? ` · ${q.taskId}` : ""}${q.ageMs !== undefined ? ` · ${Math.floor(q.ageMs / 1000)}s` : ""}${!noOpenTasks && q.state !== "running_elsewhere" && q.state !== "idle" && q.hint ? ` · ${q.hint}` : ""}`)
+  }
+  if (status.execution.unresolved) lines.push(`execution: ${status.execution.unresolved} unresolved, ${status.execution.cancelledAcknowledged} cancel ACK; generation ${status.execution.generation}; usage unknown`)
+  if (status.execution.verification) lines.push(`verification: ${status.execution.verification}`)
+  if (status.events.length) lines.push(`events: ${status.events.map(e => `#${e.seq} ${e.type}${e.to ? `→${e.to}` : ""}`).join(", ")}`)
   return lines.slice(0, 25).join("\n")
+}
+
+export function renderStatusError(error: StatusReadError): string {
+  return `${STATUS_MARKER}\nstatus unavailable: ${error.source} ${error.code}`
+}
+
+export function renderStatusDetail(status: StatusJson): string {
+  return status.detail ? JSON.stringify(status.detail) : "detail unavailable"
 }

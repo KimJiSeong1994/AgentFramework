@@ -161,6 +161,74 @@ the existing execution lease, and retain unresolved ownership after failures ins
 of replaying a completed or unknown process. The separate OpenCode imported-plan
 commands below retain their own admission requirements.
 
+### Read-only status dashboard
+
+`status --json` emits schema version 1. Top-level `schemaVersion` and `generatedAt` identify
+the contract and snapshot time. `workflow` is either null or a bounded workflow summary;
+when present, its `engine` identifies the recorded host and `planSha` is the validated canonical
+plan hash. `session` reports the selected ID, source (`arg`, `workflow`, or `none`), mode, task
+counts, and queue projection; `execution` reports the unresolved count, generation, claim
+liveness, and the deliberately unknown usage state. `freshness` contains source timestamps,
+the 90-second stale threshold, workflow-owner heartbeat age, and whether the bounded event tail
+was truncated. `events` contains only the last five concise events. It never includes plan
+bodies, task details, verification output, review reasons, reports, handoffs, SQL, or answers.
+
+Session selection is explicit `--session` first, then the current workflow's owning session,
+then `no-session`. A missing session yields `queue: unknown` rather than claiming idle.
+`status --detail` is a CLI-only allowlist: at most 50 newest tasks, 20 other sessions and 10
+archived workflows. Task outcomes are enums; paths, command output, error text, review reasons,
+handoff contents, and private task fields are excluded. Only approved workflow task titles are
+shown; other tasks use a generic label. The full status document with detail is capped at 64 KiB.
+Core input files are capped at 12 MiB + 384 KiB total; additional detail reads share an 8 MiB
+budget, for a combined input cap of 20 MiB + 384 KiB. When that budget prevents remaining
+session or archive reads, `detail.budgetExhausted` is true. Directory scans retain at most 500
+session entries and 1,000 archive entries, with one lookahead to detect more entries. The
+corresponding `detail.sessionsScanTruncated` and `detail.archivesScanTruncated` flags mean
+newest-item selection is limited to the scanned subset. When the output cap is reached,
+sections are dropped in this order: events, history, sessions, tasks, with counts in
+`detail.truncated`; `detail.truncatedTasks` records tasks omitted by the initial 50-task limit.
+
+Queue states are `idle`, `running_here`, `running_elsewhere`, `stale`, `blocked`, or `unknown`.
+Classification uses both the in-process queue flag and durable ledger pointers, task state,
+execution claim, and unresolved executions:
+
+| State/evidence | Meaning |
+| --- | --- |
+| `running_here` / `in_process_flag` | This process reports a live queue. |
+| `running_elsewhere` / `claim_pid_alive` (`+cancel_requested` when applicable) | A live pid holds the matching claim and task pointer; progress is not proven. |
+| `stale` / `claim_retained_here_inactive`, `running_pointer_orphaned`, `claim_pid_dead`, `running_without_matching_claim` | A persisted pointer or claim does not prove active work. With no open tasks, `+no_open_tasks` shows that status leaves the stale pointer unchanged and does not suggest resume. |
+| `blocked` / `claim_retained_unresolved`, `dead_owner_unresolved` | Execution is fenced or unresolved; status does not imply it is safe to retry. |
+| `unknown` / `no_session`, `claim_alive_no_task`, `claim_alive_no_task+phase_reviewing` | The available evidence cannot classify queue activity. |
+| `idle` / `no_running`, `claim_other_session`, `claim_pid_dead` | No active pointer is evidenced for the selected session; a dead claim notes that the next run takes over automatically. |
+
+Evidence uses a primary identifier with zero or more modifiers (`primary(+modifier)*`); the
+closed modifier set is `cancel_requested`, `phase_reviewing`, and `no_open_tasks`. When multiple
+modifiers apply they appear in that order. `phase_reviewing` is emitted only for the selected
+session's reviewing workflow.
+
+Workflow-owner liveness and execution-claim liveness intentionally differ. Workflow-owner
+liveness requires the owner session directory, a live PID, and either this plugin instance
+or a heartbeat younger than 90 seconds. Execution-claim liveness uses the run-store's
+`process.kill(pid, 0)` predicate and does not prove queue activity or descendant retirement.
+Cross-file snapshots can skew while writers atomically replace individual files; timestamps
+are surfaced per source and are not a transaction or authority grant.
+
+`status --watch --json` emits NDJSON frames with `{type, seq, reason, status, error, meta}`.
+`meta` (`tick`, `readMs`, `bytesRead`, `statCalls`) is watch-only and is not part of schema
+version 1. `bytesRead` includes bytes consumed before a read failure; `statCalls` counts the
+watcher's path-stat probes. Watch emits an initial frame, then only changed projections or
+liveness changes; ages alone do not emit. Read failures emit one error frame per distinct
+source/code and polling continues, retrying reads on changed stats or the tenth-tick forced
+refresh. SIGINT/SIGTERM exits cleanly. Text `--watch` requires a TTY; `--interval` accepts
+integer seconds from 1 to 60 (default 2). Invalid arguments retain CLI exit 2; runtime failures use exit 1. Status
+read failures exit 3 and print only the source and code to stderr.
+
+The dashboard is display-only. A stale/blocked hint, when present, names an existing resume
+boundary but does not invoke it; status, watch, and detail never take over ownership or repair
+pointers. The owning chat `/status` keeps its existing dead-owner takeover behavior. An
+OpenCode TUI sidebar is not implemented: it remains gated on proving extension loading against
+the pinned runtime and a separate decision. No GJC dashboard parity is claimed.
+
 ### Recovering a common-engine workflow from a new process
 
 Read the active workflow and original session without constructing an engine runtime:
@@ -229,8 +297,8 @@ auto-approves plans or establishes native-host qualification.
 
 Exit codes: **0** means success or help; **1** is a fixed host-admission diagnostic or a
 redacted runtime refusal/failure; **2** is
-invalid command-line usage or an inaccessible worktree; **3** is a `LinuxAdmissionRefused`
-admission refusal with bounded reason codes.
+invalid command-line usage or an inaccessible worktree; **3** is a typed status read failure
+or a `LinuxAdmissionRefused` admission refusal with bounded reason codes.
 
 After successful admission, the `run --plan` contract validates and advisory-reviews the saved plan, shows its canonical file/hash, and
 requires an interactive local terminal to type `APPROVE <workflow-id> <plan-sha>` or
