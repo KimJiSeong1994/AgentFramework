@@ -107,7 +107,14 @@ The terminal still exits after the plan's approval/execution or rejection; model
 switching does not turn recovery into a different-model replay.
 
 The conversation remains a scrolling terminal, not a full-screen TUI. Progress
-output separates model waiting, task lifecycle, tool activity, verification and
+is separated from single-line input by a compact engine/model header and command
+hints; engine/model pickers use the same input hierarchy. Chrome is clipped to
+the current terminal width at each prompt (the input marker stays intact even
+on narrower terminals). Cyan focus and dim hints are used only on color-capable
+terminals, never with `NO_COLOR` or `TERM=dumb`. Readline retains editing ownership;
+approval still uses the separate explicit human decision prompt.
+
+Progress output separates model waiting, task lifecycle, tool activity, verification and
 review from model replies, approval and the final result. It reports observed
 activity rather than estimated completion percentages or OS-process health.
 Repeated progress is suppressed or bounded; tool arguments, raw tool output and

@@ -6,6 +6,7 @@ import { createInterface } from "node:readline"
 import { activeWorkflow, readWorkflowChecked } from "../flow/state.ts"
 import { ledgerPath } from "../state/ledger.ts"
 import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
+import { inputColorSupported, inputLine, renderInput, type InputPresentation } from "./cli-input.ts"
 import { createCliProgressPresenter, type CliProgressTask, type CliTaskStatus } from "./cli-progress.ts"
 import { createPlanConversation } from "./plan-conversation.ts"
 import { createForegroundController, type ForegroundController } from "./controller.ts"
@@ -24,6 +25,7 @@ export type InteractiveExit = { code: number }
 export type Terminal = {
   stdinIsTTY: boolean
   stderrIsTTY: boolean
+  presentation?: () => InputPresentation
   readLine: (prompt: string, signal?: AbortSignal) => Promise<string | undefined>
   write: (text: string) => void
   close: () => void
@@ -169,6 +171,13 @@ function createTerminal(): Terminal {
   const terminal: Terminal = {
     stdinIsTTY: process.stdin.isTTY === true,
     stderrIsTTY: process.stderr.isTTY === true,
+    presentation: () => ({
+      columns: process.stderr.columns,
+      color: inputColorSupported(
+        process.stdin.isTTY === true && process.stderr.isTTY === true && Bun.enableANSIColors,
+        { NO_COLOR: process.env.NO_COLOR, TERM: process.env.TERM },
+      ),
+    }),
     readLine(prompt, signal) {
       if (signal?.aborted) return Promise.resolve(undefined)
       reader ??= createInterface({ input: process.stdin, output: process.stderr, terminal: process.stderr.isTTY === true })
@@ -251,10 +260,18 @@ function signalExit(signal: SignalName | undefined): InteractiveExit {
   return { code: signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 0 }
 }
 
+function readInput(terminal: Terminal, title: string, hint: string, prompt: string, signal: AbortSignal) {
+  if (signal.aborted) return Promise.resolve(undefined)
+  const rendered = renderInput(title, hint, prompt, terminal.presentation?.())
+  terminal.write(rendered.chrome)
+  return terminal.readLine(rendered.prompt, signal)
+}
+
 async function chooseEngine(terminal: Terminal, signal: AbortSignal): Promise<CliEngine | undefined> {
   const menu = "Choose an execution engine:\n  1) local  — Ollama CLI\n  2) codex  — Codex CLI\n  3) claude — Claude CLI\n"
+  terminal.write(menu.trimEnd().split("\n").map(line => inputLine(line, terminal.presentation?.())).join("\n") + "\n")
   while (!signal.aborted) {
-    const answer = await terminal.readLine(`${menu}Engine [1-3]: `, signal)
+    const answer = await readInput(terminal, "Engine selection", "Enter a number or engine name", "Engine [1-3]: ", signal)
     if (answer === undefined || signal.aborted) return undefined
     const normalized = answer.trim().toLowerCase()
     if (normalized === "1" || normalized === "local") return "local"
@@ -284,14 +301,18 @@ async function chooseModel(
     ? catalog.models.filter(model => !!model && validModelID(model.id) && typeof model.label === "string")
     : []
   const notice = typeof catalog?.notice === "string" ? catalog.notice : ""
-  const choices = models.map((model, index) => `  ${index + 1}) ${model.label} — ${model.id}`).join("\n")
-  terminal.write(terminalSafeText(
-    `${choices ? `Model choices for ${engine}:\n${choices}\n` : `No model choices were discovered for ${engine}.\n`}` +
-      `${notice ? `${notice}\n` : ""}Select a number or enter a native model ID (use id:<ID> for numeric IDs). Empty input or /cancel cancels selection. No default is selected.\n`,
-  ))
+  const presentation = terminal.presentation?.()
+  const menu = [
+    models.length ? `Model choices for ${engine}:` : `No model choices were discovered for ${engine}.`,
+    ...models.map((model, index) => `  ${index + 1}) ${model.label} — ${model.id}`),
+    ...(notice ? [notice] : []),
+    "Select a number or native model ID; id:<ID> for numeric IDs.",
+    "Empty input or /cancel cancels selection. No default is selected.",
+  ]
+  terminal.write(menu.map(line => inputLine(line, presentation)).join("\n") + "\n")
   while (!signal.aborted) {
     const prompt = models.length ? `Model [1-${models.length} or native ID]: ` : "Model [native ID]: "
-    const answer = await terminal.readLine(prompt, signal)
+    const answer = await readInput(terminal, `Model selection · ${engine}`, "Enter select · /cancel back · no default", prompt, signal)
     if (answer === undefined || signal.aborted) return undefined
     if (answer.trim() === "" || answer.trim() === "/cancel") return null
     if (/^[0-9]+$/u.test(answer)) {
@@ -307,11 +328,14 @@ async function chooseModel(
   return undefined
 }
 
-function selectionBanner(worktree: string, engine: CliEngine, model: string, reset = false): string {
-  return terminalSafeText(
-    `\nNative execution selection:\n  Engine: ${engine}\n  Model: ${model}\n  Worktree: ${worktree}\n` +
-      `${reset ? "  Conversation context reset after model switch.\n" : ""}\n`,
-  )
+function selectionBanner(worktree: string, engine: CliEngine, model: string, presentation?: InputPresentation, reset = false): string {
+  return "\n" + [
+    "Native execution selection:",
+    `  Engine: ${engine}`,
+    `  Model: ${model}`,
+    `  Worktree: ${worktree}`,
+    ...(reset ? ["  Conversation context reset after model switch."] : []),
+  ].map(line => inputLine(line, presentation)).join("\n") + "\n\n"
 }
 
 function helpText(): string {
@@ -396,7 +420,7 @@ export async function launchInteractive(
       conversation: deps.createConversation(initialRuntime, initialSessionID),
     }
     const usedSessionIDs = new Set([initialSessionID])
-    terminal.write(selectionBanner(worktree, selection.engine, selection.model))
+    terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.()))
 
     function acquireSwitchGuard(): { release?: () => void; refusal?: string } {
       const release = beginExecutionActivity(selection.runtime, selection.sessionID, "review")
@@ -449,7 +473,7 @@ export async function launchInteractive(
         if (abort.signal.aborted) return false
         selection = { engine: nextEngine, model: nextModel, sessionID, runtime, controller, conversation }
         usedSessionIDs.add(sessionID)
-        terminal.write(selectionBanner(worktree, selection.engine, selection.model, true))
+        terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.(), true))
       } catch (error) {
         if (!(error instanceof AdmissionRefusal) && !(error instanceof TypeError)) throw error
         if (abort.signal.aborted) return false
@@ -461,7 +485,10 @@ export async function launchInteractive(
     }
 
     while (!abort.signal.aborted) {
-      const text = await withProgressSuspended(() => terminal.readLine("You> ", abort.signal))
+      const text = await withProgressSuspended(() => readInput(
+        terminal, `${selection.engine} · ${selection.model}`,
+        "Enter send · /help commands · /model switch · /quit exit", "You> ", abort.signal,
+      ))
       if (abort.signal.aborted) return signalExit(receivedSignal)
       if (text === undefined) return { code: 0 }
       const message = text.trim()
@@ -480,7 +507,7 @@ export async function launchInteractive(
       }
       if (command === "/model") {
         if (commandArgs.length === 0) {
-          terminal.write(terminalSafeText(`Current selection: ${selection.engine} ${selection.model}\n`))
+          terminal.write(inputLine(`Current selection: ${selection.engine} ${selection.model}`, terminal.presentation?.()) + "\n")
           const guard = acquireSwitchGuard()
           if (!guard.release) {
             terminal.write(guard.refusal ?? "Model switch refused; current selection is unchanged.\n")
