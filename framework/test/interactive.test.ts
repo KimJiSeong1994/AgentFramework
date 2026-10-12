@@ -229,6 +229,67 @@ const proposedPlan = {
 const unsafeTerminalControls = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
 
 describe("interactive terminal", () => {
+  test("writes shared picker and message chrome before single-line readline prompts", async () => {
+    const chrome: string[] = []
+    const h = harness({
+      lines: ["codex", "1", "/quit"],
+      beforeRead(prompt) {
+        expect(prompt).not.toMatch(/[\r\n\x1b]/u)
+        chrome.push(h.calls.output.at(-1)!)
+      },
+    })
+    expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
+    expect(chrome[0]).toContain("── Engine selection\n")
+    expect(chrome[1]).toContain("── Model selection · codex\n")
+    expect(chrome[2]).toContain("── codex · gpt-5-codex\n")
+    expect(chrome[2]).toContain("Enter send · /help commands · /model switch · /quit exit")
+    expect(h.calls.prompts).toEqual(["Engine [1-3]: ", "Model [1-2 or native ID]: ", "You> "])
+    expect(h.calls.approvalRequest).toBeUndefined()
+  })
+
+  test("reads width anew and retains selected context across cancelled and failed switches", async () => {
+    const chrome: string[] = []
+    let columns = 100
+    const h = harness({
+      lines: ["/model local qwen3:8b", "/model", "/cancel", "/model claude broken", "hello", undefined],
+      failRuntimeFor: engine => engine === "claude",
+      beforeRead(prompt) {
+        if (prompt === "You> ") chrome.push(h.calls.output.at(-1)!)
+        if (chrome.length === 4) columns = 12
+      },
+    })
+    h.deps.terminal!.presentation = () => ({ columns })
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "original" }, h.deps)).toEqual({ code: 0 })
+    expect(chrome[0]).toContain("codex · original")
+    for (const entry of chrome.slice(1, 4)) expect(entry).toContain("local · qwen3:8b")
+    expect(chrome.at(-1)).toContain("…")
+    for (const line of chrome.at(-1)!.split("\n")) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(12)
+    expect(h.calls.turnBindings).toEqual([
+      { engine: "local", model: "qwen3:8b", sessionID: "lca-fixture-session-2", text: "hello" },
+    ])
+    expect(h.calls.runCount).toBe(0)
+    expect([...h.calls.signalListeners.values()].every(listeners => listeners.size === 0)).toBe(true)
+  })
+
+  test("buffers progress during both chrome writes and readline ownership", async () => {
+    const h = harness({
+      lines: ["/quit"],
+      beforeWrite(text) {
+        if (!text.startsWith("\n── codex")) return
+        h.calls.progressSinks[0]!.host({ kind: "tool-started", role: "worker", execution: 1, tool: "read" })
+        expect(h.calls.output.join("")).not.toContain("[activity] Worker")
+      },
+      beforeRead() {
+        expect(h.calls.output.join("")).not.toContain("[activity] Worker")
+        h.calls.progressSinks[0]!.host({ kind: "tool-finished", role: "worker", execution: 1, tool: "read", ok: true })
+        expect(h.calls.output.join("")).not.toContain("[activity] Worker")
+      },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "original" }, h.deps)
+    expect(h.calls.output.join("")).toContain("[activity] Worker started read tool.")
+    expect(h.calls.output.join("")).toContain("[activity] Worker finished read tool.")
+  })
+
   test("parses worktree, engine, and plain native model flags, including bare flags", () => {
     expect(parseInteractiveArgs([], wt.worktree)).toEqual({ worktree: wt.worktree })
     expect(parseInteractiveArgs(["--worktree", "project", "--engine", "codex", "--model", "gpt-5-codex"], wt.worktree))
@@ -267,7 +328,8 @@ describe("interactive terminal", () => {
     const h = harness({ lines: ["2", "gpt-5-codex", "/quit"] })
     const result = await launchInteractive({ worktree: wt.worktree }, h.deps)
     expect(result.code).toBe(0)
-    expect(h.calls.prompts[0]).toContain("Choose an execution engine")
+    expect(h.calls.prompts[0]).toBe("Engine [1-3]: ")
+    expect(h.calls.output.join("")).toContain("Choose an execution engine")
     expect(h.calls.prompts[1]).toBe("Model [1-2 or native ID]: ")
     expect(h.calls.runtime).toEqual({ worktree: realpathSync(wt.worktree), engine: "codex", model: "gpt-5-codex" })
     expect(h.calls.discoveries).toEqual([{ engine: "codex", worktree: realpathSync(wt.worktree) }])
@@ -278,6 +340,7 @@ describe("interactive terminal", () => {
 
   test("startup picker displays numbered native models and the selected execution banner", async () => {
     const h = harness({ lines: ["1", "2", "/quit"] })
+    h.deps.terminal!.presentation = () => ({ columns: 512 })
     const result = await launchInteractive({ worktree: wt.worktree }, h.deps)
     const output = h.calls.output.join("")
     expect(result.code).toBe(0)
@@ -306,7 +369,7 @@ describe("interactive terminal", () => {
 
     const modelOnly = harness({ lines: ["2", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, model: "manual-native-id" }, modelOnly.deps)
-    expect(modelOnly.calls.prompts[0]).toContain("Choose an execution engine")
+    expect(modelOnly.calls.prompts[0]).toBe("Engine [1-3]: ")
     expect(modelOnly.calls.prompts[1]).toBe("You> ")
     expect(modelOnly.calls.runtime?.engine).toBe("codex")
     expect(modelOnly.calls.runtime?.model).toBe("manual-native-id")
@@ -317,8 +380,10 @@ describe("interactive terminal", () => {
     const h = harness({ lines: ["0", "claude", "bad model", "claude-sonnet-4-5", "/quit"] })
     const result = await launchInteractive({ worktree: wt.worktree }, h.deps)
     expect(result.code).toBe(0)
-    expect(h.calls.prompts[0]).toContain("Choose an execution engine")
-    expect(h.calls.prompts[1]).toContain("Choose an execution engine")
+    expect(h.calls.prompts[0]).toBe("Engine [1-3]: ")
+    expect(h.calls.prompts[1]).toBe("Engine [1-3]: ")
+    expect(h.calls.output.join("").split("Choose an execution engine:")).toHaveLength(2)
+    expect(h.calls.output.join("").split("Model choices for claude:")).toHaveLength(2)
     expect(h.calls.prompts[2]).toBe("Model [1-2 or native ID]: ")
     expect(h.calls.prompts[3]).toBe("Model [1-2 or native ID]: ")
     expect(h.calls.runtime?.engine).toBe("claude")
@@ -569,11 +634,12 @@ describe("interactive terminal", () => {
   test("discovered labels and notices are terminal-safe", async () => {
     const h = harness({
       lines: ["1", "/quit"],
-      catalog: { models: [{ id: "native-safe", label: "Label\u001b[2J" }], notice: "Notice\u202eunsafe" },
+      catalog: { models: [{ id: "native-safe", label: "Label\u001b[2J\nYou> forged" }], notice: "Notice\u202eunsafe" },
     })
     await launchInteractive({ worktree: wt.worktree, engine: "codex" }, h.deps)
     const output = h.calls.output.join("")
-    expect(output).toContain("Label\\u001b[2J")
+    expect(output).toContain("Label\\u001b[2J\\u000aYou> forged")
+    expect(output).not.toContain("\nYou> forged")
     expect(output).toContain("Notice\\u202eunsafe")
     expect(unsafeTerminalControls.test(output)).toBe(false)
   })
