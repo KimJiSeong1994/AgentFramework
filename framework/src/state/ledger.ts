@@ -83,6 +83,35 @@ export function emptyLedger(sessionID: string, now = Date.now()): Ledger {
 
 export type ReadLedgerResult = { ledger: Ledger; corrupt?: string }
 
+/** Strict pure parser for status and other read-only consumers; never quarantines or writes. */
+export function parseLedger(value: unknown, sessionID: string): Ledger {
+  const object = (input: unknown): input is Record<string, unknown> => input !== null && typeof input === "object" && !Array.isArray(input)
+  const text = (input: unknown): input is string => typeof input === "string"
+  const timestamp = (input: unknown): boolean => typeof input === "number" && Number.isFinite(input) && input >= 0
+  const integer = (input: unknown, min = 0): boolean => Number.isSafeInteger(input) && (input as number) >= min
+  const optional = (record: Record<string, unknown>, key: string, check: (input: unknown) => boolean): boolean => !(key in record) || check(record[key])
+  const stringArray = (input: unknown): boolean => Array.isArray(input) && input.every(text)
+  const verifyResult = (input: unknown): boolean => object(input) && text(input.command) && typeof input.ok === "boolean" &&
+    (input.exitCode === null || Number.isSafeInteger(input.exitCode)) && typeof input.timedOut === "boolean" && text(input.output)
+  const reviewResult = (input: unknown): boolean => object(input) && ["accept", "reject", "skipped", "error"].includes(input.verdict as string) &&
+    optional(input, "reason", text) && optional(input, "sessionID", text) && optional(input, "aborted", x => typeof x === "boolean")
+  const workflowTag = (input: unknown): boolean => object(input) && text(input.id) && text(input.planSha)
+  const taskShape = (input: unknown): boolean => object(input) && text(input.id) && input.id.length > 0 &&
+    integer(input.n, 1) && integer(input.batch, 1) && ["pending", "running", "done", "failed", "cancelled"].includes(input.status as string) &&
+    integer(input.attempts) && timestamp(input.createdAt) && stringArray(input.childSessions) && text(input.title) &&
+    optional(input, "kind", x => x === "code" || x === "data") && optional(input, "detail", text) && optional(input, "verify", text) &&
+    optional(input, "wf", workflowTag) && optional(input, "startedAt", timestamp) && optional(input, "finishedAt", timestamp) &&
+    optional(input, "workerSessionID", text) && optional(input, "filesChanged", stringArray) && optional(input, "report", text) &&
+    optional(input, "verify_result", verifyResult) && optional(input, "review", reviewResult) && optional(input, "error", text) &&
+    optional(input, "blocked", text) && optional(input, "handoff", text) && optional(input, "sql", text) && optional(input, "answer", text)
+  if (!object(value) || value.version !== 1 || value.sessionID !== sessionID ||
+    !timestamp(value.createdAt) || !timestamp(value.updatedAt) || !Array.isArray(value.tasks) ||
+    (value.running !== undefined && (!object(value.running) || typeof value.running.taskId !== "string" || !value.running.taskId ||
+      !timestamp(value.running.since) || !optional(value.running, "childSessionID", text))) ||
+    (value.resumeNotifiedFor !== undefined && !stringArray(value.resumeNotifiedFor)) || !value.tasks.every(taskShape)) throw new Error("invalid ledger state")
+  return value as Ledger
+}
+
 /** A corrupt file is moved aside (path in `corrupt`) instead of being overwritten by the next write. */
 export function readLedgerChecked(worktree: string, sessionID: string): ReadLedgerResult {
   const r = readJsonChecked<Ledger | null>(ledgerPath(worktree, sessionID), null)

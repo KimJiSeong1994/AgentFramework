@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "kind": "api-package-test-report",
+  "baseCommit": "505e592",
+  "executedBy": "publication parent",
+  "results": [
+    {
+      "command": [
+        "bun",
+        "test"
+      ],
+      "cwd": "framework",
+      "finishedAt": "2026-10-12T03:26:33.078112+00:00",
+      "exitCode": 0,
+      "stdout": "bun test v1.4.2 (744846f84)\nverifier recovery regression observed {\"coordinatorPid\":77754,\"coordinatorExitCode\":137,\"verifierDispatch\":\"started\",\"recoveryAborted\":true,\"postCrashHostRoles\":[],\"runStateUnchanged\":true,\"ownershipRetained\":true,\"ledgerUnchanged\":true,\"originalBaselineUnchanged\":true,\"privateBaselineUnchanged\":true,\"detachedChildMarkerAfterCrash\":true,\"descendantTerminationClaimed\":false}\nblocked/not-run: Linux native verifier qualification is not applicable on this platform\n",
+      "stderr": "\ntest/skill-observer.test.ts:\n[lca] skill observation: record_refused\n[lca] skill observation: record_refused\n[lca] skill observation: unsupported_cross_instance\n[lca] skill observation: record_refused\n\ntest/verifier-recovery.test.ts:\nverifier recovery fixture retained because cleanup admission was blocked (run-store claim remains for ses_verifier_recovery_6c6b8375-a05e-4059-b2bb-8a98b28a7afe/crashed-coordinator-1ab0b5b0-c610-45ce-9455-6a65a336ff4d (pid 77754); 1 unsettled run-store execution(s) remain); durable authority does not establish that a writer is still alive; home: /var/folders/tz/hmmsgdvn2l5bkhnfsxv8k_940000gn/T/lca-state-oJEBjl/verifier-recovery-3500e239-234c-4033-a6fe-eeca20080359; stateHome: /var/folders/tz/hmmsgdvn2l5bkhnfsxv8k_940000gn/T/lca-state-oJEBjl; worktree: /var/folders/tz/hmmsgdvn2l5bkhnfsxv8k_940000gn/T/lca-test-VRyP2V; run state: /Users/gimjiseong/.local/state/lca/153323b2885b/execution-runs/state.json; execution authority: /Users/gimjiseong/.local/state/lca/153323b2885b\n\ntest/worktree.test.ts:\n\n 1483 pass\n 1 skip\n 0 fail\n 11170 expect() calls\nRan 1484 tests across 86 files. [333.13s]\n"
+    },
+    {
+      "command": [
+        "bunx",
+        "tsc",
+        "--noEmit",
+        "-p",
+        "tsconfig.json"
+      ],
+      "cwd": "framework",
+      "finishedAt": "2026-10-12T03:26:35.191307+00:00",
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "cwd": "framework",
+      "finishedAt": "2026-10-12T03:26:35.203354+00:00",
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ]
+}

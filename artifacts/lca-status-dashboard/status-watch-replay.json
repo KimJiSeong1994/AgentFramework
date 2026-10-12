@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "kind": "cli-replay",
+  "command": [
+    "bun",
+    "src/hosts/cli.ts",
+    "status",
+    "--worktree",
+    "/var/folders/tz/hmmsgdvn2l5bkhnfsxv8k_940000gn/T/lca-status-live-3ofw3hoq/worktree",
+    "--session",
+    "ses_status_live_proof",
+    "--detail",
+    "--watch",
+    "--interval",
+    "1"
+  ],
+  "cwd": "framework",
+  "expectedExitCode": 0,
+  "recordedStdout": "\u001b[2J\u001b[H[lca status]\r\nworkflow: wf_20261012032059_5c53 planning \u2014 this session, owner dead\r\nplan tasks: 0/10 done, 10 open, 0 failed/cancelled\r\ncounters: invalid 0, review 0, rejects 0, nudges 0\r\nmode: none\r\nledger: 0 done, 10 open, 0 failed, 0 cancelled; queue idle\r\n{\"tasks\":[{\"id\":\"t1\",\"n\":1,\"batch\":1,\"status\":\"pending\",\"attempts\":0,\"kind\":\"code\",\"wfId\":\"wf_20261012032059_5c53\",\"title\":\"Approved CLI evidence task 1\",\"createdAt\":1791775259792,\"blocked\":false},{\"id\":\"t2\",\"n\":2,\"batch\":1,\"status\":\"pending\",\"attempts\":0,\"kind\":\"code\",\"wfId\":\"wf_20261012032059_5c53\",\"title\":\"Approved CLI evidence task 2\",\"createdAt\":1791775259792,\"blocked\":false},{\"id\":\"t3\",\"n\":3,\"batch\":1,\"status\":\"pending\",\"attempts\":0,\"kind\":\"code\",\"wfId\":\"wf_20261012032059_5c53\",\"title\":\"Approved CLI evidence task 3\",\"createdAt\":1791775259792,\"blocked\":false},{\"id\":\"t4\",\"n\":4,\"batch\":1,\"status\":\"pending\",\"attempts\":0,\"kind\":\"code\",\"wfId\":\"wf_20261012032059_5c53\",\"title\":\"Approved CLI evidence task 4\",\"createdAt\":1791775259792,\"blocked\":false},{\"id\":\"t5\",\"n\":5,\"batch\":1,\"status\":\"pending\",\"attempts\":0,\"kind\":\"code\",\"wfId\":\"wf_20261012032059_5c53\",\"title\":\"Approved CLI evidence task 5\",\"createdAt\":1791775259792,\"blocked\":false},{\"id\":\"t6\",\"n\":6,\"batch\":1,\"status\":\"pending\",\"attempts\":0,\"kind\":\"code\",\"wfId\":\"wf_20261012032059_5c53\",\"title\":\"Approved CLI evidence task 6\",\"createdAt\":1791775259792,\"blocked\":false},{\"id\":\"t7\",\"n\":7,\"batch\":1,\"status\":\"pending\",\"attempts\":0,\"kind\":\"code\",\"wfId\":\"wf_20261012032059_5c53\",\"title\":\"Approved CLI evidence task 7\",\"createdAt\":1791775259792,\"blocked\":false},{\"id\":\"t8\",\"n\":8,\"batch\":1,\"status\":\"pending\",\"attempts\":0,\"kind\":\"code\",\"wfId\":\"wf_20261012032059_5c53\",\"title\":\"Approved CLI evidence task 8\",\"createdAt\":1791775259792,\"blocked\":false},{\"id\":\"t9\",\"n\":9,\"batch\":1,\"status\":\"pending\",\"attempts\":0,\"kind\":\"code\",\"wfId\":\"wf_20261012032059_5c53\",\"title\":\"Approved CLI evidence task 9\",\"createdAt\":1791775259792,\"blocked\":false},{\"id\":\"t10\",\"n\":10,\"batch\":1,\"status\":\"pending\",\"attempts\":0,\"kind\":\"code\",\"wfId\":\"wf_20261012032059_5c53\",\"title\":\"Approved CLI evidence task 10\",\"createdAt\":1791775259792,\"blocked\":false}],\"sessions\":[],\"history\":[],\"events\":[],\"truncated\":{}}\r\n",
+  "replayExempt": {
+    "reasonCode": "interactive_only",
+    "reason": "Text watch requires a real TTY and disposable state. The compiled GJC replay allowlist cannot execute this repository CLI. Actual PTY bytes, clean SIGTERM exit, and unchanged fixture-state hashes are preserved instead of claiming replay.",
+    "approvedBy": "0-Main (completion leader; audited structural PTY evidence, not user approval or executable replay)",
+    "fallbackArtifactRefs": [
+      "status-watch-pty"
+    ]
+  }
+}

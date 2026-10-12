@@ -3,6 +3,7 @@
 // names lca actually injected so a user-defined command with the same name is never acted on.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { createCommandHook, STATUS_COMMAND, STATUS_DESCRIPTION, STATUS_TEMPLATE, STOP_COMMAND } from "../src/hooks/command.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { createConfigHook } from "../src/hooks/config.ts"
@@ -13,7 +14,8 @@ import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-he
 import { fakeDeps } from "./helpers.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { createExecutionRunStore } from "../src/hosts/run-state.ts"
-import { addTasks, emptyLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
+import { addTasks, emptyLedger, ledgerPath, updateTask, writeLedger } from "../src/state/ledger.ts"
+import { executionRunDirectory, modeStatePath } from "../src/state/store.ts"
 
 const S = "ses_main"
 const OTHER = "ses_other"
@@ -40,6 +42,43 @@ async function runStatus(deps = makeDeps(client, wt.worktree), sessionID = S) {
   return part.text as string
 }
 
+const SECRET_MARKERS = [
+  "workflow-request-secret", "workflow-counter-secret", "task-detail-secret", "task-report-secret", "task-sql-secret",
+  "task-answer-secret", "task-handoff-secret", "task-error-secret", "task-blocked-secret", "task-verify-command-secret",
+  "task-verify-output-secret", "task-review-reason-secret", "task-review-session-secret",
+]
+
+function plantStatusSecrets() {
+  const wf = putWorkflow({
+    phase: "executing",
+    request: "workflow-request-secret",
+    counters: { code_invalid: 0, review_iterations: 0, user_rejections: 0, nudges: 0, private: "workflow-counter-secret" },
+  })
+  const created = addTasks(emptyLedger(S), [{ title: "Benign approved task", kind: "data", wf: { id: wf.id, planSha: "safe-plan-sha" } }])
+  const task = created.added[0]!
+  writeLedger(wt.worktree, updateTask(created.ledger, task.id, {
+    status: "failed", attempts: 1, startedAt: 10, finishedAt: 20,
+    detail: "task-detail-secret", report: "task-report-secret", sql: "task-sql-secret", answer: "task-answer-secret",
+    handoff: "task-handoff-secret", error: "task-error-secret", blocked: "task-blocked-secret",
+    verify: "task-verify-command-secret", verify_result: {
+      command: "task-verify-command-secret", ok: false, exitCode: 1, timedOut: false, output: "task-verify-output-secret",
+    },
+    review: { verdict: "reject", reason: "task-review-reason-secret", sessionID: "task-review-session-secret", aborted: false },
+    filesChanged: ["src/safe.ts"],
+  }))
+  return wf
+}
+
+function readIfPresent(path: string) {
+  try { return readFileSync(path) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error }
+}
+
+function statusInputSnapshot() {
+  return [workflowPath(wt.worktree), ledgerPath(wt.worktree, S), modeStatePath(wt.worktree, S), eventsPath(wt.worktree),
+    join(executionRunDirectory(wt.worktree), "state.json")].map(path => [path, readIfPresent(path)])
+}
+
 describe("/status", () => {
   test("JSON status exposes original recovery identifiers without taking over the workflow", () => {
     const planSha = "a".repeat(64)
@@ -52,11 +91,33 @@ describe("/status", () => {
     const before = readFileSync(workflowPath(wt.worktree))
     const runs = createExecutionRunStore(wt.worktree)
     const runsBefore = runs.status()
-    const status = statusJson(makeDeps(client, wt.worktree), OTHER, false)
+    const status = statusJson(makeDeps(client, wt.worktree), OTHER, { queueRunning: false })
     expect(status.workflow).toMatchObject({ id: wf.id, sessionID: S, engine: "codex", planSha })
     expect(status.session.id).toBe(OTHER)
     expect(readFileSync(workflowPath(wt.worktree))).toEqual(before)
     expect(runs.status()).toEqual(runsBefore)
+  })
+
+  test("malformed status state replaces the template with a safe source/code error", async () => {
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, {
+      version: 1, id: "wf_bad", kind: "plan", phase: "planning", sessionID: S, secret: "must-not-leak",
+    } as any))
+    const text = await runStatus()
+    expect(text).toBe("[lca status]\nstatus unavailable: workflow invalid_state\n\nReply only: ok")
+    expect(text).not.toContain("must-not-leak")
+  })
+
+  test("valid workflow and task free-form fields stay private on the chat status surface", async () => {
+    plantStatusSecrets()
+    const before = statusInputSnapshot()
+    const text = await runStatus()
+    for (const secret of SECRET_MARKERS) expect(text).not.toContain(secret)
+    expect(text.split("\n").length).toBeLessThanOrEqual(25)
+    expect(text).not.toContain('"sessions"')
+    expect(text).not.toContain('"history"')
+    expect(text).not.toContain('"detail"')
+    expect(text).not.toContain('"filesChangedCount"')
+    expect(statusInputSnapshot()).toEqual(before)
   })
 
   test("no workflow: marker, mode none, ledger, queue lines", async () => {

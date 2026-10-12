@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "kind": "cli-live-proof",
+  "command": [
+    "bun",
+    "src/hosts/cli.ts",
+    "status",
+    "--worktree",
+    "/var/folders/tz/hmmsgdvn2l5bkhnfsxv8k_940000gn/T/lca-status-live-3ofw3hoq/worktree",
+    "--session",
+    "ses_status_live_proof",
+    "--detail",
+    "--watch",
+    "--interval",
+    "1"
+  ],
+  "cwd": "framework",
+  "exitCode": 0,
+  "signal": "SIGTERM",
+  "captureBytes": 2209,
+  "terminalControlSequences": true,
+  "fixtureStateUnchanged": true,
+  "before": {
+    "43cd07dc8f0c": {
+      "mode": 16877,
+      "mtimeNs": 1791775259793258328,
+      "inode": 19744417
+    },
+    "43cd07dc8f0c/sessions": {
+      "mode": 16877,
+      "mtimeNs": 1791775259793293121,
+      "inode": 19744421
+    },
+    "43cd07dc8f0c/sessions/ses_status_live_proof": {
+      "mode": 16877,
+      "mtimeNs": 1791775259793420791,
+      "inode": 19744422
+    },
+    "43cd07dc8f0c/sessions/ses_status_live_proof/ledger.json": {
+      "mode": 33188,
+      "mtimeNs": 1791775259793367207,
+      "inode": 19744423,
+      "size": 3269,
+      "sha256": "09bf6d5bc152a879771fe4b177d5c4542920eb8c104ed184688d8fe2362b16fd"
+    },
+    "43cd07dc8f0c/workflow": {
+      "mode": 16877,
+      "mtimeNs": 1791775259792969987,
+      "inode": 19744418
+    },
+    "43cd07dc8f0c/workflow/workflow.json": {
+      "mode": 33188,
+      "mtimeNs": 1791775259792867067,
+      "inode": 19744420,
+      "size": 516,
+      "sha256": "b9f8396abf4626522202159a2c688e34b3b5d735453eb9a3201bd9c4de40b861"
+    }
+  },
+  "after": {
+    "43cd07dc8f0c": {
+      "mode": 16877,
+      "mtimeNs": 1791775259793258328,
+      "inode": 19744417
+    },
+    "43cd07dc8f0c/sessions": {
+      "mode": 16877,
+      "mtimeNs": 1791775259793293121,
+      "inode": 19744421
+    },
+    "43cd07dc8f0c/sessions/ses_status_live_proof": {
+      "mode": 16877,
+      "mtimeNs": 1791775259793420791,
+      "inode": 19744422
+    },
+    "43cd07dc8f0c/sessions/ses_status_live_proof/ledger.json": {
+      "mode": 33188,
+      "mtimeNs": 1791775259793367207,
+      "inode": 19744423,
+      "size": 3269,
+      "sha256": "09bf6d5bc152a879771fe4b177d5c4542920eb8c104ed184688d8fe2362b16fd"
+    },
+    "43cd07dc8f0c/workflow": {
+      "mode": 16877,
+      "mtimeNs": 1791775259792969987,
+      "inode": 19744418
+    },
+    "43cd07dc8f0c/workflow/workflow.json": {
+      "mode": 33188,
+      "mtimeNs": 1791775259792867067,
+      "inode": 19744420,
+      "size": 516,
+      "sha256": "b9f8396abf4626522202159a2c688e34b3b5d735453eb9a3201bd9c4de40b861"
+    }
+  }
+}

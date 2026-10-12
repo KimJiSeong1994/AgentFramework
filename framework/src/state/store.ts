@@ -9,7 +9,7 @@
 // worktree under .lca/handoffs (see ledger.ts). The e2e script isolates this via XDG_STATE_HOME.
 import { createHash } from "node:crypto"
 import * as childProcess from "node:child_process"
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs"
 import * as os from "node:os"
 import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
@@ -316,6 +316,86 @@ export type ModeState = {
   lastCompactedAt?: number
   /** why the loop stopped, if it did */
   stopReason?: string
+}
+
+/** Strict pure parser for status readers; it has no filesystem side effects. */
+export function parseModeState(value: unknown): ModeState {
+  const object = value !== null && typeof value === "object" && !Array.isArray(value)
+  if (!object) throw new Error("invalid mode state")
+  const state = value as Record<string, unknown>
+  const timestamp = (input: unknown): boolean => typeof input === "number" && Number.isFinite(input) && input >= 0
+  const counter = (input: unknown): boolean => Number.isSafeInteger(input) && (input as number) >= 0
+  const optional = (key: string, check: (input: unknown) => boolean): boolean => !(key in state) || check(state[key])
+  if (!["none", "ulw", "plan", "data"].includes(state.mode as string) || typeof state.active !== "boolean" ||
+    !timestamp(state.startedAt) || !timestamp(state.updatedAt) ||
+    !["iterations", "stagnation", "failures"].every(key => counter(state[key])) ||
+    !optional("lastFingerprint", input => typeof input === "string") ||
+    !optional("lastCompactedAt", timestamp) || !optional("stopReason", input => typeof input === "string")) {
+    throw new Error("invalid mode state")
+  }
+  return value as ModeState
+}
+
+export type BoundedJson = { value: unknown | undefined; bytesRead: number }
+
+function withBytesRead(error: unknown, bytesRead: number): Error {
+  const failure = error instanceof Error ? error : new Error("unreadable")
+  Object.defineProperty(failure, "bytesRead", { value: bytesRead, configurable: true, writable: true })
+  return failure
+}
+
+/** Retain at most maxEntries directory entries and inspect one more to detect truncation. */
+export function readDirectoryBounded(path: string, maxEntries: number): { entries: Dirent[]; truncated: boolean } {
+  if (!Number.isSafeInteger(maxEntries) || maxEntries < 0) throw new TypeError("invalid directory read limit")
+  const directory = opendirSync(path, { bufferSize: 1 })
+  const entries: Dirent[] = []
+  try {
+    while (entries.length < maxEntries) {
+      const entry = directory.readSync()
+      if (!entry) return { entries, truncated: false }
+      entries.push(entry)
+    }
+    const lookahead = directory.readSync()
+    return { entries, truncated: !!lookahead }
+  } finally {
+    directory.closeSync()
+  }
+}
+
+/** Read and parse at most maxBytes without creating, renaming, or otherwise mutating state. */
+export function readBoundedJson(path: string, maxBytes: number): BoundedJson {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new TypeError("invalid JSON read limit")
+  let fd: number
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK) }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { value: undefined, bytesRead: 0 }
+    throw withBytesRead(error, 0)
+  }
+  let bytesRead = 0
+  let result: BoundedJson | undefined
+  let failure: Error | undefined
+  try {
+    const initial = fstatSync(fd)
+    if (!initial.isFile()) throw Object.assign(new Error("unreadable"), { code: "unreadable" })
+    if (initial.size > maxBytes) throw Object.assign(new Error("oversize"), { code: "oversize" })
+    const buffer = Buffer.alloc(maxBytes)
+    while (bytesRead < buffer.length) {
+      const count = readSync(fd, buffer, bytesRead, buffer.length - bytesRead, bytesRead)
+      if (count === 0) break
+      bytesRead += count
+    }
+    // A writer may have extended the file after the initial size check. The
+    // fixed-size buffer enforces the byte cap; fstat detects such growth.
+    if (fstatSync(fd).size > maxBytes) throw Object.assign(new Error("oversize"), { code: "oversize" })
+    const value = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8")) as unknown
+    result = { value, bytesRead }
+  } catch (error) {
+    failure = withBytesRead(error, bytesRead)
+  }
+  try { closeSync(fd) }
+  catch (error) { if (!failure) failure = withBytesRead(error, bytesRead) }
+  if (failure) throw failure
+  return result!
 }
 
 export const EMPTY_MODE: ModeState = {

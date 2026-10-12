@@ -1,9 +1,14 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import * as fs from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { CliUsageError, parseCliArgs, runCli } from "../src/hosts/cli.ts"
-import { stateRoot } from "../src/state/store.ts"
+import { currentOwner } from "../src/flow/owner.ts"
+import { eventsPath, newWorkflow, workflowPath, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
+import { addTasks, emptyLedger, ledgerPath, updateTask, writeLedger } from "../src/state/ledger.ts"
+import { createExecutionRunStore } from "../src/hosts/run-state.ts"
+import { executionRunDirectory, modeStatePath, stateRoot } from "../src/state/store.ts"
 import { tempWorktree } from "./guards-helpers.ts"
 import { withTerminalLine } from "./operator-helpers.ts"
 
@@ -23,6 +28,95 @@ async function invokeCli(argv: string[]) {
     child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
   ])
   return { exitCode, stdout, stderr }
+}
+
+async function statusSubprocess(args: string[]) {
+  return invokeCli(["status", "--worktree", wt.worktree, ...args])
+}
+
+async function statusWatchSubprocess(args: string[]) {
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, "../src/hosts/cli.ts"), "status", "--worktree", wt.worktree, ...args], {
+    cwd: wt.worktree,
+    env: { ...process.env, XDG_CONFIG_HOME: join(wt.stateHome, "config") },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  let resolveFirst!: (line: string) => void
+  let rejectFirst!: (error: Error) => void
+  const firstLine = new Promise<string>((resolve, reject) => { resolveFirst = resolve; rejectFirst = reject })
+  const stdout = (async () => {
+    const reader = child.stdout.getReader()
+    const decoder = new TextDecoder()
+    let output = ""
+    let resolved = false
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) break
+      output += decoder.decode(value, { stream: true })
+      if (!resolved) {
+        const newline = output.indexOf("\n")
+        if (newline >= 0) { resolved = true; resolveFirst(output.slice(0, newline)) }
+      }
+    }
+    if (!resolved) rejectFirst(new Error(`watch exited before an NDJSON frame: ${output}`))
+    return output
+  })()
+  const stderr = new Response(child.stderr).text()
+  try { await firstLine }
+  catch (error) { child.kill("SIGKILL"); await child.exited; throw error }
+  child.kill("SIGTERM")
+  await child.exited
+  return { exitCode: child.exitCode, firstLine: await firstLine, stdout: await stdout, stderr: await stderr }
+}
+
+const SESSION = "ses_cli_status"
+
+function newStatusWorkflow(sessionID: string, request: string) {
+  return newWorkflow(sessionID, { instance: "fixture", pid: process.pid, heartbeatAt: Date.now() }, "command", request, "opencode")
+}
+
+function writeStatusWorkflow(workflow: ReturnType<typeof newStatusWorkflow>) {
+  return withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, workflow))
+}
+
+const SECRET_MARKERS = [
+  "workflow-request-secret", "workflow-counter-secret", "task-detail-secret", "task-report-secret", "task-sql-secret",
+  "task-answer-secret", "task-handoff-secret", "task-error-secret", "task-blocked-secret", "task-verify-command-secret",
+  "task-verify-output-secret", "task-review-reason-secret", "task-review-session-secret",
+]
+
+function plantStatusSecrets() {
+  const wf = writeStatusWorkflow({
+    ...newStatusWorkflow(SESSION, "safe default"),
+    phase: "executing",
+    request: "workflow-request-secret",
+    counters: { code_invalid: 0, review_iterations: 0, user_rejections: 0, nudges: 0, private: "workflow-counter-secret" },
+  } as any)
+  const primary = addTasks(emptyLedger(SESSION), [{ title: "Benign approved task", kind: "data", wf: { id: wf.id, planSha: "safe-plan-sha" } }])
+  const task = primary.added[0]!
+  writeLedger(wt.worktree, updateTask(primary.ledger, task.id, {
+    status: "failed", attempts: 1, startedAt: 10, finishedAt: 20,
+    detail: "task-detail-secret", report: "task-report-secret", sql: "task-sql-secret", answer: "task-answer-secret",
+    handoff: "task-handoff-secret", error: "task-error-secret", blocked: "task-blocked-secret",
+    verify: "task-verify-command-secret", verify_result: {
+      command: "task-verify-command-secret", ok: false, exitCode: 1, timedOut: false, output: "task-verify-output-secret",
+    },
+    review: { verdict: "reject", reason: "task-review-reason-secret", sessionID: "task-review-session-secret", aborted: false },
+    filesChanged: ["src/safe.ts"],
+  }))
+  const extra = addTasks(emptyLedger("ses_cli_other"), [{ title: "Benign extra task" }])
+  writeLedger(wt.worktree, extra.ledger)
+}
+
+function readIfPresent(path: string) {
+  try { return readFileSync(path) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error }
+}
+
+function statusInputSnapshot() {
+  return [workflowPath(wt.worktree), ledgerPath(wt.worktree, SESSION), ledgerPath(wt.worktree, "ses_cli_other"),
+    modeStatePath(wt.worktree, SESSION), eventsPath(wt.worktree), join(executionRunDirectory(wt.worktree), "state.json")].map(path => [path, readIfPresent(path)])
 }
 
 function admissionServer(worktree: string, sessionID: string) {
@@ -385,6 +479,140 @@ describe("foreground CLI", () => {
     expect(() => parseCliArgs(["resume", "--worktree", wt.worktree, "--server", "http://127.0.0.1:4096"])).toThrow("--session")
     expect(() => parseCliArgs(["status", "--worktree", wt.worktree, "--worktree", wt.worktree])).toThrow("duplicate")
     expect(() => parseCliArgs(["status", "--worktree", wt.worktree, "--json", "--json"])).toThrow("duplicate")
+  })
+
+  test("status read failures exit 3 and reveal only source and code", async () => {
+    mkdirSync(join(stateRoot(wt.worktree), "workflow"), { recursive: true })
+    writeFileSync(workflowPath(wt.worktree), JSON.stringify({ secret: "must-not-leak" }))
+    const result = await statusSubprocess([])
+    expect(result).toEqual({ exitCode: 3, stdout: "", stderr: "lca status: workflow invalid_state\n" })
+    expect(result.stderr).not.toContain("must-not-leak")
+  })
+
+  test("subprocess status distinguishes live, dead, orphaned, and fenced claims", async () => {
+    const owner = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { stdout: "ignore", stderr: "ignore" })
+    try {
+      const created = addTasks(emptyLedger(SESSION), [{ title: "CLI classifier" }])
+      const task = created.added[0]!
+      const running = updateTask(created.ledger, task.id, { status: "running", attempts: 1 })
+      writeLedger(wt.worktree, { ...running, running: { taskId: task.id, since: 100 } })
+      let runs = createExecutionRunStore(wt.worktree)
+      runs.claim(SESSION, "live-child", owner.pid)
+
+      const live = await statusSubprocess(["--session", SESSION, "--json"])
+      expect(live.exitCode).toBe(0)
+      expect(JSON.parse(live.stdout)).toMatchObject({ session: { queue: { state: "running_elsewhere", evidence: "claim_pid_alive" }, queueRunning: true } })
+
+      owner.kill("SIGTERM")
+      await owner.exited
+      const dead = await statusSubprocess(["--session", SESSION, "--json"])
+      expect(JSON.parse(dead.stdout)).toMatchObject({ session: { queue: { state: "stale", evidence: "claim_pid_dead" }, queueRunning: false } })
+
+      rmSync(join(executionRunDirectory(wt.worktree), "state.json"), { force: true })
+      const orphan = await statusSubprocess(["--session", SESSION, "--json"])
+      expect(JSON.parse(orphan.stdout)).toMatchObject({ session: { queue: { state: "stale", evidence: "running_without_matching_claim" }, queueRunning: false } })
+
+      runs = createExecutionRunStore(wt.worktree)
+      const claim = runs.claim(SESSION, "fenced-owner", process.pid)
+      runs.registerIntent(claim, { executionId: "fenced", ownerSession: SESSION, taskId: task.id, attemptId: "attempt",
+        generation: claim.generation, role: "worker", cwd: wt.worktree, policyID: "fixture", kind: "host", engine: "opencode", profile: "legacy-unowned" })
+      runs.fence(claim, "fenced", "unresolved child")
+      const fenced = await statusSubprocess(["--session", SESSION, "--json"])
+      expect(JSON.parse(fenced.stdout)).toMatchObject({ session: { queue: { state: "blocked", evidence: "claim_retained_unresolved" }, queueRunning: false } })
+    } finally {
+      if (owner.exitCode === null) owner.kill("SIGKILL")
+    }
+  })
+
+  test("subprocess status reports typed non-workflow errors and preserves usage exit two", async () => {
+    const root = stateRoot(wt.worktree)
+    const runStatePath = join(executionRunDirectory(wt.worktree), "state.json")
+    const cases = [
+      { source: "ledger", setup: () => { mkdirSync(join(root, "sessions", SESSION), { recursive: true }); writeFileSync(ledgerPath(wt.worktree, SESSION), "{") }, code: "invalid_state" },
+      { source: "mode", setup: () => { mkdirSync(join(root, "sessions", SESSION), { recursive: true }); writeFileSync(modeStatePath(wt.worktree, SESSION), "{}") }, code: "invalid_state" },
+      { source: "execution", setup: () => { mkdirSync(executionRunDirectory(wt.worktree), { recursive: true }); writeFileSync(runStatePath, "{") }, code: "invalid_state" },
+      { source: "events", setup: () => { writeStatusWorkflow(newStatusWorkflow(SESSION, "fixture")); mkdirSync(eventsPath(wt.worktree), { recursive: true }) }, code: "unreadable" },
+    ]
+    for (const row of cases) {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(runStatePath, { force: true })
+      row.setup()
+      const result = await statusSubprocess(["--session", SESSION])
+      expect(result).toEqual({ exitCode: 3, stdout: "", stderr: `lca status: ${row.source} ${row.code}\n` })
+    }
+
+    const argumentError = await statusSubprocess(["--json", "--watch", "--interval", "0"])
+    expect(argumentError).toEqual({ exitCode: 2, stdout: "", stderr: "lca: --interval must be an integer from 1 to 60\nRun 'lca --help' for usage.\n" })
+  })
+
+  test("status details and watch flags are scoped and validated", async () => {
+    const args = parseCliArgs(["status", "--worktree", wt.worktree, "--json", "--detail"])
+    const status = JSON.parse(await runCli(args))
+    expect(status.schemaVersion).toBe(1)
+    expect(status.detail).toMatchObject({ tasks: [], sessions: [], history: [], events: [] })
+    const watch = parseCliArgs(["status", "--worktree", wt.worktree, "--json", "--watch", "--interval", "3"])
+    expect(watch).toMatchObject({ watch: true, interval: 3 })
+    expect(() => parseCliArgs(["status", "--worktree", wt.worktree, "--watch"])).toThrow("requires a TTY")
+    expect(() => parseCliArgs(["status", "--worktree", wt.worktree, "--interval", "3"])).toThrow("requires --watch")
+    expect(() => parseCliArgs(["status", "--worktree", wt.worktree, "--json", "--watch", "--interval", "61"])).toThrow("integer from 1 to 60")
+    expect(() => parseCliArgs(["resume", "--worktree", wt.worktree, "--server", "http://127.0.0.1:4096", "--detail"])).toThrow("only available for status")
+  })
+
+  test("watch rejects unexpected stat errors and restores signal listeners", async () => {
+    const args = parseCliArgs(["status", "--worktree", wt.worktree, "--json", "--watch", "--interval", "3"])
+    const listenersBefore = { sigint: process.listenerCount("SIGINT"), sigterm: process.listenerCount("SIGTERM") }
+    const failure = new Error("unexpected status stat failure")
+    const original = fs.statSync
+    const stat = spyOn(fs, "statSync").mockImplementation(((target: fs.PathLike) => {
+      if (String(target) === workflowPath(wt.worktree)) throw failure
+      return original(target)
+    }) as typeof fs.statSync)
+    try {
+      let caught: unknown
+      try { await runCli(args) } catch (error) { caught = error }
+      expect(caught).toBe(failure)
+      expect({ sigint: process.listenerCount("SIGINT"), sigterm: process.listenerCount("SIGTERM") }).toEqual(listenersBefore)
+    } finally {
+      stat.mockRestore()
+    }
+  })
+
+  test("valid workflow and task free-form secrets are absent from CLI text, JSON, and detail surfaces", async () => {
+    plantStatusSecrets()
+    const before = statusInputSnapshot()
+    const text = await runCli(parseCliArgs(["status", "--worktree", wt.worktree, "--session", SESSION]))
+    const jsonText = await runCli(parseCliArgs(["status", "--worktree", wt.worktree, "--session", SESSION, "--json"]))
+    const detailText = await runCli(parseCliArgs(["status", "--worktree", wt.worktree, "--session", SESSION, "--detail"]))
+    const detailJsonText = await runCli(parseCliArgs(["status", "--worktree", wt.worktree, "--session", SESSION, "--json", "--detail"]))
+    for (const output of [text, jsonText, detailText, detailJsonText]) {
+      for (const secret of SECRET_MARKERS) expect(output).not.toContain(secret)
+    }
+    expect(text.split("\n").length).toBeLessThanOrEqual(25)
+    const concise = JSON.parse(jsonText)
+    expect(concise.detail).toBeUndefined()
+    expect(concise.workflow.counters).toEqual({ code_invalid: 0, review_iterations: 0, user_rejections: 0, nudges: 0 })
+    const detailTextStart = detailText.indexOf("\n{")
+    expect(detailTextStart).toBeGreaterThan(0)
+    expect(JSON.parse(detailText.slice(detailTextStart + 1)).tasks[0]).toMatchObject({
+      id: "t1", title: "Benign approved task", blocked: true, verify: { ok: false, exitCode: 1, timedOut: false }, review: { verdict: "reject" },
+    })
+    const detailJson = JSON.parse(detailJsonText)
+    expect(detailJson.detail.tasks[0]).toMatchObject({ id: "t1", title: "Benign approved task", blocked: true })
+    expect(detailJson.detail.sessions).toContainEqual(expect.objectContaining({ id: "ses_cli_other" }))
+    expect(statusInputSnapshot()).toEqual(before)
+  })
+
+  test("watch NDJSON frames exclude valid workflow and task free-form secrets without mutating state", async () => {
+    plantStatusSecrets()
+    const before = statusInputSnapshot()
+    const result = await statusWatchSubprocess(["--session", SESSION, "--json", "--detail", "--watch", "--interval", "1"])
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe("")
+    expect(result.firstLine).toBe(result.stdout.slice(0, result.stdout.indexOf("\n")))
+    const frames = result.stdout.trim().split("\n").map(line => JSON.parse(line))
+    expect(frames[0]).toMatchObject({ type: "snapshot", reason: "initial", status: { detail: { tasks: [{ id: "t1", title: "Benign approved task" }] } } })
+    for (const secret of SECRET_MARKERS) expect(result.stdout).not.toContain(secret)
+    expect(statusInputSnapshot()).toEqual(before)
   })
 
   test("remote and hostname-based services are refused before any SDK request", async () => {

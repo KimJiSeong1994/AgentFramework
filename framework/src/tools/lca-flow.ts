@@ -5,7 +5,7 @@
 import { tool, type ToolDefinition } from "@opencode-ai/plugin"
 import type { HookDeps } from "../hooks/types.ts"
 import { MAIN_AGENT } from "../hooks/tool-before.ts"
-import { flowOn, renderStatus } from "../flow/status.ts"
+import { flowOn, renderStatus, renderStatusError, StatusReadError } from "../flow/status.ts"
 import { getQueue } from "../orchestration/queue.ts"
 import {
   activeWorkflow, assertFlowTxWorktree, CorruptWorkflowError, readWorkflowForWrite,
@@ -74,8 +74,13 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       if (!flowOn(deps.config)) throw new Error("lca: the plan workflow feature is disabled.")
 
       if (args.op === "status") {
-        const text = renderStatus(runtime, ctx.sessionID, getQueue(runtime).isRunning(ctx.sessionID))
-        return { title: "lca_flow: status", output: text }
+        try {
+          const text = renderStatus(runtime, ctx.sessionID, getQueue(runtime).isRunning(ctx.sessionID))
+          return { title: "lca_flow: status", output: text }
+        } catch (error) {
+          if (!(error instanceof StatusReadError)) throw error
+          return { title: "lca_flow: status unavailable", output: renderStatusError(error) }
+        }
       }
 
       // op === "plan"

@@ -24,7 +24,7 @@ import {
   APPROVE_COMMAND, APPROVE_TEMPLATE, CANCEL_COMMAND, CANCEL_TEMPLATE, FLOW_COMMANDS, PLAN_COMMAND, PLAN_TEMPLATE,
   REJECT_COMMAND, REJECT_TEMPLATE_PREFIX, REJECT_TEMPLATE_SUFFIX, STATUS_COMMAND,
 } from "./command.ts"
-import { flowOn, renderStatus } from "../flow/status.ts"
+import { flowOn, renderStatus, renderStatusError, StatusReadError } from "../flow/status.ts"
 import { activeWorkflow, fileSha, planJsonPath, readWorkflow, workflowEngineRefusal, type Workflow } from "../flow/state.ts"
 import { applyEvent, approveWorkflow, cancelWorkflow, resolveAuthority, startWorkflow } from "../flow/runtime.ts"
 import { canonicalPlanSha, coercePlan, planMdPath, planToTasks } from "../flow/plan.ts"
@@ -141,12 +141,29 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     if (commandTurn?.name === STATUS_COMMAND) {
       const part = lastUserText(output.parts)
       if (part) {
-        const workflow = readWorkflow(worktree)
-        const refusal = workflow && workflowEngineRefusal(workflow, runtime.host.identity.engine)
-        if (refusal) log("/status takeover skipped: workflow engine identity refused", { sessionID, reason: refusal })
-        else resolveAuthority(runtime, "status", sessionID, runtime.host.identity.engine)
-        part.text = renderStatus(runtime, sessionID, queue.isRunning(sessionID)) + "\n\nReply only: ok"
-        log("chat.message: /status rendered", { sessionID })
+        let takeoverFailed = false
+        try {
+          const workflow = readWorkflow(worktree)
+          const refusal = workflow && workflowEngineRefusal(workflow, runtime.host.identity.engine)
+          if (refusal) log("/status takeover skipped: workflow engine identity refused", { sessionID, reason: refusal })
+          else resolveAuthority(runtime, "status", sessionID, runtime.host.identity.engine)
+        } catch {
+          takeoverFailed = true
+          log("chat.message: /status owner takeover failed", { sessionID, source: "workflow", code: "takeover_failed" })
+        }
+        try {
+          part.text = renderStatus(runtime, sessionID, queue.isRunning(sessionID)) +
+            (takeoverFailed ? "\nowner takeover failed" : "") + "\n\nReply only: ok"
+          log("chat.message: /status rendered", { sessionID })
+        } catch (error) {
+          if (error instanceof StatusReadError) {
+            part.text = renderStatusError(error) + "\n\nReply only: ok"
+            log("chat.message: /status unavailable", { sessionID, source: error.source, code: error.code })
+          } else {
+            part.text = "[lca status]\nstatus unavailable: unknown unreadable\n\nReply only: ok"
+            log("chat.message: /status unavailable", { sessionID, source: "unknown", code: "unreadable" })
+          }
+        }
       } else {
         log("chat.message: /status had no user text part", { sessionID })
       }

@@ -12,6 +12,7 @@ import { createSnapshotStore } from "../src/orchestration/snapshot.ts"
 import { createTaskWorktree, worktreeRoot } from "../src/orchestration/worktree.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { newWorkflow, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
+import { renderStatusSnapshot, statusJson } from "../src/flow/status.ts"
 import { addTasks, emptyLedger, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
 import { executionRunDirectory, sessionDir, stateRoot } from "../src/state/store.ts"
 import { tempGitWorktree, verifyScript, waitFor } from "./guards-helpers.ts"
@@ -730,6 +731,20 @@ describe("neutral execution queue", () => {
     expect(f.runtime.runs.status().claim?.ownerSession).toBe(S)
     expect(readLedger(wt.worktree, S).tasks.every(task => task.status !== "done")).toBe(true)
   })
+
+  test("status dashboard reports a stale running pointer without suggesting resume when no tasks remain", () => {
+    const f = fixture()
+    const queue = createQueue(f.runtime)
+    const [task] = queue.add(S, [{ title: "stale running pointer" }])
+    const failed = updateTask(readLedger(wt.worktree, S), task!.id, { status: "failed", attempts: 1 })
+    writeLedger(wt.worktree, { ...failed, running: { taskId: task!.id, since: 100 } })
+
+    const status = statusJson(f.runtime, S, { queueRunning: false })
+    expect(status.session.queue).toMatchObject({ state: "stale", evidence: "running_without_matching_claim+no_open_tasks" })
+    expect(renderStatusSnapshot(status)).toContain("no pending work. Status does not change it.")
+    expect(renderStatusSnapshot(status)).not.toContain("resume")
+  })
+
   test("stable runtime identity, serial worker/reviewer execution, independent verifier and handoff", async () => {
     const f = fixture()
     const queue = getQueue(f.runtime)
@@ -762,6 +777,30 @@ describe("neutral execution queue", () => {
     ])
     expect(f.runtime.runs.status().executions.filter(e => e.kind === "verifier")).toHaveLength(2)
     expect(f.runtime.runs.status().executions.filter(e => e.kind === "verifier").every(e => e.descendantRisk === "unproven" && e.terminal?.verification?.isolationEstablished === false && e.terminal?.verification?.domainState === "unknown")).toBe(true)
+    expect(f.runtime.runs.status().claim).toBeUndefined()
+  })
+
+  test("ledger.running spans task work and is cleared before the run claim is released", async () => {
+    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const q = createQueue(f.runtime)
+    const [task] = q.add(S, [{ title: "running pointer lifecycle" }])
+    let duringWork: ReturnType<typeof readLedger> | undefined
+    let atRelease: ReturnType<typeof readLedger> | undefined
+    f.replies.set("worker", () => {
+      duringWork = readLedger(wt.worktree, S)
+      return { status: "completed", text: "Files changed: none\nOpen issues: none" }
+    })
+    const originalRelease = f.runtime.runs.release.bind(f.runtime.runs)
+    f.runtime.runs.release = claim => {
+      atRelease = readLedger(wt.worktree, S)
+      originalRelease(claim)
+    }
+
+    expect(await q.run(S)).toMatchObject({ done: 1, failed: 0 })
+    expect(duringWork?.tasks.find(item => item.id === task!.id)?.status).toBe("running")
+    expect(duringWork?.running?.taskId).toBe(task!.id)
+    expect(atRelease?.running).toBeUndefined()
+    expect(readLedger(wt.worktree, S).running).toBeUndefined()
     expect(f.runtime.runs.status().claim).toBeUndefined()
   })
 

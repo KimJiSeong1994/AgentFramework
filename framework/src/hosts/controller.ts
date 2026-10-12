@@ -395,5 +395,5 @@ export function createForegroundController(runtime: ExecutionRuntime) {
 
 /** CLI status can call this with a FlowRuntime only: no host, SDK, policy, credential, claim or model construction. */
 export function readForegroundStatus(runtime: FlowRuntime, sessionID: string, json = false, queueRunning = false) {
-  return json ? statusJson(runtime, sessionID, queueRunning) : renderStatus(runtime, sessionID, queueRunning)
+  return json ? statusJson(runtime, sessionID, { queueRunning }) : renderStatus(runtime, sessionID, queueRunning)
 }

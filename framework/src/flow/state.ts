@@ -5,11 +5,11 @@
 //   <stateRoot>/workflow/events.jsonl      append-only, global monotonic seq across workflows
 //   <stateRoot>/workflow/plans/<id>.json   canonical plan (M1)
 import { createHash, randomBytes, randomUUID } from "node:crypto"
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { stateRoot, writeJsonAtomic } from "../state/store.ts"
 import type { Counters, FlowCore, Phase, StuckCause } from "./machine.ts"
-import { TERMINAL, ZERO_COUNTERS } from "./machine.ts"
+import { PHASES, TERMINAL, ZERO_COUNTERS } from "./machine.ts"
 import { INSTANCE_ID } from "./owner.ts"
 import type { Plan } from "./plan.ts"
 
@@ -183,8 +183,8 @@ export function newWorkflowId(now = Date.now()): string {
 }
 
 function isWorkflow(v: unknown): v is Workflow {
-  const w = v as Workflow | null
-  return !!w && w.version === 1 && typeof w.id === "string" && typeof w.phase === "string" && typeof w.sessionID === "string"
+  try { parseWorkflow(v); return true }
+  catch { return false }
 }
 
 export type ReadWorkflowResult = { wf: Workflow | null; corrupt?: string }
@@ -201,6 +201,36 @@ export function readWorkflowChecked(worktree: string): ReadWorkflowResult {
   }
   if (!isWorkflow(value)) return { wf: null, corrupt: path }
   return { wf: value }
+}
+
+/** Pure strict parser for read-only consumers; unlike workflow reads/writes, it never mutates state. */
+export function parseWorkflow(value: unknown): Workflow {
+  const object = (input: unknown): input is Record<string, unknown> => input !== null && typeof input === "object" && !Array.isArray(input)
+  if (!object(value)) throw new Error("invalid workflow state")
+  const w = value
+  const owner = w.owner
+  const counters = w.counters
+  const planRef = w.planRef
+  const review = w.review
+  const approval = w.approval
+  const counterKeys = ["code_invalid", "review_iterations", "user_rejections", "nudges"] as const
+  const nonnegativeInteger = (input: unknown): boolean => Number.isSafeInteger(input) && (input as number) >= 0
+  const timestamp = (input: unknown): boolean => typeof input === "number" && Number.isFinite(input) && input >= 0
+  if (w.version !== 1 || typeof w.id !== "string" || !w.id || w.kind !== "plan" ||
+    typeof w.sessionID !== "string" || !w.sessionID || !PHASES.includes(w.phase as Workflow["phase"]) ||
+    !["command", "keyword"].includes(w.entry as string) || typeof w.request !== "string" ||
+
+    !nonnegativeInteger(w.lastSeq) || !timestamp(w.createdAt) || !timestamp(w.updatedAt) ||
+    (w.stuckCause !== undefined && !["plan_invalid", "no_submission", "tasks_failed", "user_stop"].includes(w.stuckCause as string)) ||
+    !object(owner) || typeof owner.instance !== "string" || !owner.instance || !Number.isSafeInteger(owner.pid) || (owner.pid as number) < 1 || !timestamp(owner.heartbeatAt) ||
+    !object(counters) || !counterKeys.every(key => nonnegativeInteger(counters[key])) ||
+    (w.pendingCancel !== undefined && typeof w.pendingCancel !== "boolean") ||
+    (w.planRef !== undefined && (!object(planRef) || typeof planRef.mdPath !== "string" || typeof planRef.jsonSha !== "string" || typeof planRef.mdSha !== "string" || !nonnegativeInteger(planRef.revision))) ||
+    (w.review !== undefined && (!object(review) || !["okay", "iterate", "none"].includes(review.verdict as string) || !Array.isArray(review.findings) || !review.findings.every(x => typeof x === "string") || typeof review.planSha !== "string" ||
+      (review.note !== undefined && !["aborted", "cap"].includes(review.note as string)))) ||
+    (w.approval !== undefined && (!object(approval) || approval.by !== "user_command" || typeof approval.planSha !== "string" || !timestamp(approval.at))) ||
+    (w.taskIds !== undefined && (!Array.isArray(w.taskIds) || !w.taskIds.every(x => typeof x === "string")))) throw new Error("invalid workflow state")
+  return value as Workflow
 }
 
 export function readWorkflow(worktree: string): Workflow | null {
@@ -270,6 +300,83 @@ export function readEvents(worktree: string, wfId?: string): FlowEventLine[] {
     } catch {}
   }
   return out
+}
+
+export type EventTail = { events: FlowEventLine[]; windowTruncated: boolean; bytesRead: number }
+
+function withBytesRead(error: unknown, bytesRead: number): Error {
+  const failure = error instanceof Error ? error : new Error("unreadable")
+  Object.defineProperty(failure, "bytesRead", { value: bytesRead, configurable: true, writable: true })
+  return failure
+}
+
+/** Read only a bounded tail window; torn boundary lines are discarded and state is never modified. */
+export function readEventsTail(worktree: string, opts: { wfId?: string; limit: number; maxBytes?: number }): EventTail {
+  const maxBytes = opts.maxBytes ?? 64 * 1024
+  if (!Number.isSafeInteger(opts.limit) || opts.limit < 0 || !Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    throw new TypeError("invalid event tail limits")
+  }
+  const path = eventsPath(worktree)
+  let fd: number
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK) }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { events: [], windowTruncated: false, bytesRead: 0 }
+    throw withBytesRead(error, 0)
+  }
+  let bytesRead = 0
+  let result: EventTail | undefined
+  let failure: Error | undefined
+  try {
+    const file = fstatSync(fd)
+    if (!file.isFile()) throw Object.assign(new Error("unreadable"), { code: "unreadable" })
+    const size = file.size
+    const start = Math.max(0, size - maxBytes)
+    const length = Math.min(size, maxBytes)
+    const buffer = Buffer.alloc(length)
+    let offset = 0
+    while (offset < length) {
+      const count = readSync(fd, buffer, offset, length - offset, start + offset)
+      if (count === 0) break
+      offset += count
+      bytesRead = offset
+    }
+    let text = buffer.subarray(0, offset).toString("utf8")
+    let windowTruncated = start > 0
+    if (start > 0) {
+      const newline = text.indexOf("\n")
+      if (newline < 0) {
+        result = { events: [], windowTruncated: true, bytesRead }
+      } else {
+        text = text.slice(newline + 1)
+      }
+    }
+    if (!result) {
+      const lines = text.split("\n")
+      if (offset > 0 && buffer[offset - 1] !== 0x0a) {
+        lines.pop()
+        windowTruncated = true
+      }
+      const events: FlowEventLine[] = []
+      for (const line of lines) {
+        if (!line) continue
+        let parsed: unknown
+        try { parsed = JSON.parse(line) } catch { continue }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue
+        const event = parsed as Record<string, unknown>
+        if (!Number.isSafeInteger(event.seq) || (event.seq as number) < 0 || !Number.isFinite(event.at) || (event.at as number) < 0 ||
+          typeof event.wf !== "string" || typeof event.type !== "string" || (opts.wfId && event.wf !== opts.wfId)) continue
+        const { to, ...rest } = event
+        events.push({ ...rest, ...(typeof to === "string" ? { to } : {}) } as FlowEventLine)
+      }
+      result = { events: opts.limit === 0 ? [] : events.slice(-opts.limit), windowTruncated, bytesRead }
+    }
+  } catch (error) {
+    failure = withBytesRead(error, bytesRead)
+  }
+  try { closeSync(fd) }
+  catch (error) { if (!failure) failure = withBytesRead(error, bytesRead) }
+  if (failure) throw failure
+  return result!
 }
 
 /** Append events with a global monotonic seq. Returns the last seq written. */
