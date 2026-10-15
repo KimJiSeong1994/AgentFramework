@@ -6,31 +6,36 @@ import { z } from "zod"
 import { createLcaFlowTool, LCA_FLOW_DESCRIPTION, lcaFlowArgs } from "../src/tools/lca-flow.ts"
 import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
 import { estimateToolSchemaTokens } from "../src/tokens.ts"
-import {
-  FlowTransactionBusyError, eventsPath, flowDir, newWorkflow, planJsonPath, readEvents, readWorkflow, sha256, workflowPath,
-  writeWorkflow, withFlowTransaction,
-} from "../src/flow/state.ts"
+import { FlowTransactionBusyError, eventsPath, flowDir, newWorkflow, planJsonPath, readEvents, readWorkflow, sha256, workflowPath, withFlowTransaction } from "../src/flow/state.ts"
+import { writeRawSnapshot, writeWorkflow } from "./commit-fixture.ts"
 import { planMdPath } from "../src/flow/plan.ts"
-import { cancelWorkflow } from "../src/flow/runtime.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { addTasks, emptyLedger, ledgerPath, updateTask, writeLedger } from "../src/state/ledger.ts"
 import { executionRunDirectory, modeStatePath } from "../src/state/store.ts"
 import { currentOwner } from "../src/flow/owner.ts"
-import { fakeClient, makeDeps, tempGitWorktree, type FakeClient } from "./guards-helpers.ts"
+import { holdAdmission } from "../src/sessions/admission.ts"
+import { createNativeToolFixture } from "./native-tool-fixture.ts"
+import { admitFixtureSession, requestCancel, fakeClient, makeDeps, releaseFixtureSession, tempGitWorktree, type FakeClient } from "./guards-helpers.ts"
 
 const S = "ses_main"
 const OTHER = "ses_other"
 let wt: ReturnType<typeof tempGitWorktree>
 let client: FakeClient
+let owner: ReturnType<typeof admitFixtureSession>
+let nativeCallSequence = 0
 
 beforeEach(() => {
   wt = tempGitWorktree()
   client = fakeClient()
+  owner = admitFixtureSession(makeDeps(client, wt.worktree), S)
 })
-afterEach(() => wt.cleanup())
+afterEach(() => {
+  releaseFixtureSession(wt.worktree, owner)
+  wt.cleanup()
+})
 
 function putWorkflow(patch: Record<string, unknown> = {}) {
-  const wf = { ...newWorkflow(S, currentOwner(), "command", "do the thing", "opencode"), ...patch }
+  const wf = { ...newWorkflow(S, currentOwner(Date.now(), owner.epoch), "command", "do the thing", "opencode"), ...patch }
   return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf as any))
 }
 
@@ -49,6 +54,10 @@ function validPlanArgs() {
     ],
     risks: ["might miss an edge case"],
   }
+}
+
+function primeNativeToolCall(native: Awaited<ReturnType<typeof createNativeToolFixture>>, tool: string, args: Record<string, unknown>) {
+  return native.primeCall({ tool, args, callID: `lca_flow_fixture_${++nativeCallSequence}` })
 }
 
 const SECRET_MARKERS = [
@@ -126,9 +135,8 @@ describe('op:"status"', () => {
   })
 
   test("renders typed status failures without exposing state contents", async () => {
-    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, {
-      version: 1, id: "wf_bad", kind: "plan", phase: "planning", sessionID: S, secret: "must-not-leak",
-    } as any))
+    // Index-bound snapshot whose bytes hash correctly but fail strict parsing: status reports invalid_state only.
+    writeRawSnapshot(wt.worktree, { version: 2, id: "wf_bad", kind: "plan", phase: "planning", sessionID: S, secret: "must-not-leak" }, { id: "wf_bad", sessionID: S })
     const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
     const res = (await tool.execute({ op: "status" }, ctx() as any)) as { title: string; output: string }
     expect(res.title).toBe("lca_flow: status unavailable")
@@ -183,6 +191,22 @@ describe('op:"plan" authority and phase gates', () => {
 })
 
 describe("flow transaction consumers", () => {
+  test("a held owner cannot submit a plan or create review artifacts", async () => {
+    const workflow = putWorkflow({ phase: "planning" })
+    holdAdmission(wt.worktree, S, "test-held")
+    const before = readFileSync(workflowPath(wt.worktree))
+    const events = readEvents(wt.worktree, workflow.id)
+    const result = await createLcaFlowTool(makeDeps(client, wt.worktree)).execute(
+      { op: "plan", plan: validPlanArgs() }, ctx() as any,
+    ) as { output: string }
+    expect(result.output).toContain("held")
+    expect(readFileSync(workflowPath(wt.worktree))).toEqual(before)
+    expect(readEvents(wt.worktree, workflow.id)).toEqual(events)
+    expect(existsSync(planJsonPath(wt.worktree, workflow.id))).toBe(false)
+    expect(existsSync(join(wt.worktree, planMdPath(workflow.id)))).toBe(false)
+    expect(client.created).toEqual([])
+  })
+
   test("lca_flow refuses while the flow transaction is busy without writing artifacts or events", async () => {
     const workflow = putWorkflow({ phase: "planning" })
     const workflowBefore = readFileSync(workflowPath(wt.worktree))
@@ -203,17 +227,17 @@ describe("flow transaction consumers", () => {
   })
 
   test("boundary denial stays fail-closed while busy and does not append an unauthenticated audit event", async () => {
-    const workflow = putWorkflow({ phase: "planning" })
     const deps = makeDeps(client, wt.worktree)
     deps.interactive = true
+    const native = await createNativeToolFixture(deps, { sessionID: S })
+    await native.acceptUserTurn()
+    const workflow = putWorkflow({ phase: "planning" })
     const hook = createToolBeforeHook(deps)
     const lock = join(flowDir(wt.worktree), "workflow.lock")
     symlinkSync("held-by-another-process", lock)
     try {
-      await expect(hook(
-        { tool: "write", sessionID: S, callID: "write-1" } as any,
-        { args: { filePath: "new-file.ts" } } as any,
-      )).rejects.toBeInstanceOf(FlowTransactionBusyError)
+      const call = primeNativeToolCall(native, "delegate", { tasks: [] })
+      await expect(hook(call.input, call.output)).rejects.toBeInstanceOf(FlowTransactionBusyError)
       expect(readEvents(wt.worktree, workflow.id).filter((event) => event.type === "boundary_denied")).toEqual([])
     } finally {
       unlinkSync(lock)
@@ -221,15 +245,18 @@ describe("flow transaction consumers", () => {
   })
 
   test("boundary audit does not append for a foreign-engine workflow", async () => {
-    const workflow = putWorkflow({ phase: "planning", engine: "foreign-engine" })
-    const before = readFileSync(workflowPath(wt.worktree))
     const deps = makeDeps(client, wt.worktree)
     deps.interactive = true
+    const native = await createNativeToolFixture(deps, { sessionID: S })
+    const workflow = putWorkflow({ phase: "planning", engine: "foreign-engine" })
+    const before = readFileSync(workflowPath(wt.worktree))
+    // A foreign engine voids admission: no fresh native turn is accepted, so no call can be minted.
+    await native.deliverUserTurn()
+    expect(() => primeNativeToolCall(native, "delegate", { tasks: [] })).toThrow(/accept a native user turn/)
     const hook = createToolBeforeHook(deps)
-    await expect(hook(
-      { tool: "write", sessionID: S, callID: "write-foreign" } as any,
-      { args: { filePath: "new-file.ts" } } as any,
-    )).rejects.toThrow(/interactive mode is read-only/)
+    await expect(hook({ tool: "delegate", sessionID: S, callID: "foreign_engine_unminted" }, { args: { tasks: [] } })).rejects.toThrow(
+      "lca: OpenCode tool call refused (stale-turn)",
+    )
     expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
     expect(readEvents(wt.worktree, workflow.id).filter((event) => event.type === "boundary_denied")).toEqual([])
   })
@@ -262,6 +289,31 @@ describe('op:"plan" invalid plans (T2/T3)', () => {
 })
 
 describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () => {
+  test("review completion cannot change workflow or plan bytes after the owner is held", async () => {
+    const initial = putWorkflow({ phase: "planning" })
+    let snapshot: { workflow: Buffer; markdown: Buffer; events: ReturnType<typeof readEvents> } | undefined
+    client.replies.reviewer = {
+      text: "VERDICT: OKAY",
+      run() {
+        holdAdmission(wt.worktree, S, "review-owner-held")
+        snapshot = {
+          workflow: readFileSync(workflowPath(wt.worktree)),
+          markdown: readFileSync(join(wt.worktree, planMdPath(initial.id))),
+          events: readEvents(wt.worktree, initial.id),
+        }
+      },
+    }
+    const result = await createLcaFlowTool(makeDeps(client, wt.worktree)).execute(
+      { op: "plan", plan: validPlanArgs() }, ctx() as any,
+    ) as { output: string }
+    expect(snapshot).toBeDefined()
+    expect(result.output).toContain("held")
+    expect(readFileSync(workflowPath(wt.worktree)).equals(snapshot!.workflow)).toBe(true)
+    expect(readFileSync(join(wt.worktree, planMdPath(initial.id))).equals(snapshot!.markdown)).toBe(true)
+    expect(readEvents(wt.worktree, initial.id)).toEqual(snapshot!.events)
+    expect(readWorkflow(wt.worktree)?.phase).toBe("reviewing")
+  })
+
   test("same-engine cancellation during review returns changed without writing stale review artifacts", async () => {
     const initial = putWorkflow({ phase: "planning" })
     let cancellationSnapshot: { workflow: Buffer; eventsSeq: number; planJson: Buffer; planMd: Buffer } | undefined
@@ -270,7 +322,7 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
       text: "VERDICT: OKAY",
       run() {
         const current = readWorkflow(wt.worktree)!
-        const cancelled = cancelWorkflow(getOpenCodeRuntime(deps), current, false, () => {})
+        const cancelled = requestCancel(deps, current).result
         expect(cancelled.ok).toBe(true)
         const events = readEvents(wt.worktree, initial.id)
         cancellationSnapshot = {
@@ -286,12 +338,15 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
     expect(result.title).toBe("lca_flow: workflow changed")
     expect(cancellationSnapshot).toBeDefined()
     const snapshot = cancellationSnapshot!
-    expect(readFileSync(workflowPath(wt.worktree)).equals(snapshot.workflow)).toBe(true)
+    // The cancel was pending while the review ran; the lca_flow finally-observer then commits only cancel_settled.
+    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "cancelled", stopIntent: null })
     expect(readFileSync(planJsonPath(wt.worktree, initial.id)).equals(snapshot.planJson)).toBe(true)
     expect(readFileSync(join(wt.worktree, planMdPath(initial.id))).equals(snapshot.planMd)).toBe(true)
     expect(snapshot.planMd.toString("utf8")).not.toContain("verdict:")
     const laterEvents = readEvents(wt.worktree, initial.id).filter((event) => event.seq > snapshot.eventsSeq)
-    expect(laterEvents).toEqual([])
+    expect(laterEvents.length).toBeGreaterThan(0)
+    for (const event of laterEvents) expect(["transition", "cancel_settled"]).toContain(event.type)
+    expect(laterEvents.some(event => event.type === "transition" && ["review_okay", "review_none", "review_iterate", "review_aborted"].includes(String(event.data?.event)))).toBe(false)
   })
 
   test("valid plan + OKAY review: md exists, planRef shas match the files, phase pending_approval", async () => {

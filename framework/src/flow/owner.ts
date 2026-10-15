@@ -2,7 +2,9 @@
 // that session. Liveness = the pid exists AND (same instance OR heartbeat < 90 s). The owning instance refreshes the
 // heartbeat every 30 s while its workflow is non-terminal, so long queue runs stay live.
 import { randomBytes } from "node:crypto"
-import type { Owner, Workflow } from "./state.ts"
+import type { Owner } from "./state.ts"
+import type { WorkflowEnvelope as Workflow } from "../workflows/types.ts"
+import { inspectSessionAttachment } from "../sessions/store.ts"
 
 export const HEARTBEAT_MS = 30_000
 export const STALE_MS = 90_000
@@ -10,8 +12,17 @@ export const STALE_MS = 90_000
 /** One id per plugin instance (module load). */
 export const INSTANCE_ID = `inst_${process.pid}_${randomBytes(3).toString("hex")}`
 
-export function currentOwner(now = Date.now(), instance = INSTANCE_ID, pid = process.pid): Owner {
+/**
+ * Owner identity {instance(epoch), pid}. The optional `heartbeatAt` is a caller-side liveness hint only: it is
+ * never stored in the committed envelope (the heartbeat lives in the non-authoritative sidecar).
+ */
+export function currentOwner(now = Date.now(), instance = INSTANCE_ID, pid = process.pid): Owner & { heartbeatAt: number } {
   return { instance, pid, heartbeatAt: now }
+}
+
+/** Only attachment epochs can support a held-owner rebind receipt. */
+export function isAttachmentEpoch(instance: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(instance)
 }
 
 export function pidAlive(pid: number): boolean {
@@ -25,54 +36,60 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
-export type LivenessCtx = { now: number; instance: string; pidAlive: (pid: number) => boolean; sessionExists: (id: string) => boolean }
-
-export function defaultLiveness(sessionExists: (id: string) => boolean, now = Date.now()): LivenessCtx {
-  return { now, instance: INSTANCE_ID, pidAlive, sessionExists }
+export type LivenessCtx = {
+  now: number
+  instance: string
+  pidAlive: (pid: number) => boolean
+  /** True when the owner epoch's attachment lifecycle record says it was released (a released epoch owns nothing). */
+  epochReleased: (wf: Workflow) => boolean
+  /** Display-only heartbeat for this owner binding (sidecar); absent means "use the committed update time". */
+  heartbeatAt?: (wf: Workflow) => number | undefined
 }
 
+/** The persisted owner epoch's attachment lifecycle; unreadable or non-attachment epochs are not "released". */
+export function epochReleased(worktree: string): (wf: Workflow) => boolean {
+  return (wf: Workflow) => {
+    if (!isAttachmentEpoch(wf.owner.instance)) return false
+    try { return inspectSessionAttachment(worktree, wf.sessionID, wf.owner.instance)?.state === "released" }
+    catch { return false }
+  }
+}
+
+export function defaultLiveness(epochReleased: (wf: Workflow) => boolean, now = Date.now(), heartbeatAt?: LivenessCtx["heartbeatAt"]): LivenessCtx {
+  return { now, instance: INSTANCE_ID, pidAlive, epochReleased, ...(heartbeatAt ? { heartbeatAt } : {}) }
+}
+
+/** Last liveness evidence for the owner binding: the matching sidecar beat, else the last committed update. */
+export function heartbeatOf(wf: Workflow, ctx: Pick<LivenessCtx, "heartbeatAt">): number {
+  return ctx.heartbeatAt?.(wf) ?? wf.updatedAt
+}
+
+/** Display/status liveness only. Fences, authorization of mutation and takeover never consult the heartbeat. */
 export function ownerLive(wf: Workflow, ctx: LivenessCtx): boolean {
-  if (!ctx.sessionExists(wf.sessionID)) return false
+  if (ctx.epochReleased(wf)) return false
   if (!ctx.pidAlive(wf.owner.pid)) return false
   if (wf.owner.instance === ctx.instance) return true
-  return ctx.now - wf.owner.heartbeatAt < STALE_MS
+  return ctx.now - heartbeatOf(wf, ctx) < STALE_MS
 }
 
 export type Command = "status" | "plan" | "approve" | "reject" | "cancel"
 
 export type Authority =
   | { kind: "allow" }
-  | { kind: "takeover" }
   | { kind: "refuse"; text: string }
-  /** T20: another session starts a plan while the owner is dead or its session is gone */
-  | { kind: "foreign_dead_cancel" }
   | { kind: "none" }
 
 /**
- * §5.3 matrix. `wf` is the non-terminal workflow (or null). Only the owning session ever takes over; another
- * session never mutates a live or dead owner's workflow except via T20 on its own /plan (or plan keyword).
+ * Mutation authority is the persisted workflow sid plus the caller's current attachment epoch (`ctx.instance`).
+ * PID liveness and heartbeat age never grant it, and a different epoch of the same sid must first pass the S6.2a
+ * reattachment commit; a foreign sid never mutates. Liveness only selects the refusal wording.
  */
 export function authorize(cmd: Command, sessionID: string, wf: Workflow | null, ctx: LivenessCtx): Authority {
   if (!wf) return { kind: "none" }
-  const owning = wf.sessionID === sessionID
-  const live = ownerLive(wf, ctx)
-  if (owning) return live ? { kind: "allow" } : { kind: "takeover" }
   if (cmd === "status") return { kind: "allow" }
-  if (cmd === "plan") {
-    if (live) return { kind: "refuse", text: `plan workflow ${wf.id} is already active in session ${wf.sessionID}; use /status there or /cancel` }
-    return { kind: "foreign_dead_cancel" }
-  }
-  return {
-    kind: "refuse",
-    text: live
-      ? `plan workflow ${wf.id} is owned by session ${wf.sessionID}`
-      : `plan workflow ${wf.id} is owned by session ${wf.sessionID}, owner dead; /plan from this session replaces it`,
-  }
-}
-
-/** Rewrite the owner to this instance (takeover never changes the phase). */
-export function takeOver(wf: Workflow, now = Date.now(), instance = INSTANCE_ID, pid = process.pid): Workflow {
-  return { ...wf, owner: currentOwner(now, instance, pid) }
+  if (wf.sessionID === sessionID && wf.owner.instance === ctx.instance) return { kind: "allow" }
+  const state = ownerLive(wf, ctx) ? "already active in" : "owned by"
+  return { kind: "refuse", text: `plan workflow ${wf.id} is ${state} session ${wf.sessionID}; use /resume ${wf.sessionID} to continue` }
 }
 
 export type Heartbeat = { stop(): void }

@@ -1,0 +1,107 @@
+Terminal UI provenance and license notices
+==========================================
+
+Scope and parity boundary
+-------------------------
+The fixture file `framework/test/fixtures/gjc-keys-8cd17c0.json` records observable behavior from the frozen Gajae Code reference checkout at commit `8cd17c0f636d3c541c0c2af184e01709b0e6f2c1`. Its expected values describe that reference only; they are not a claim that the framework port is already behavior-identical. The fixture cites source paths, line ranges, input bytes, and SHA-256 hashes so reference behavior can be compared against the port independently.
+
+Pinned GJC reference sources
+----------------------------
+- `packages/tui/src/components/editor.ts` — editor dispatch, autocomplete, history, newline/submit, and paste handling; SHA-256 `46a67bb0c854e5e25d35f9c4c2559cddc6342073051b731cb36e5288ee16475d`.
+- `packages/tui/src/keys.ts` — TypeScript key API and raw backspace platform heuristic; SHA-256 `b274242c9c8aaeb0640bf2bb8e8a52c5271a25a2677f964175f0a44bb995cfed`.
+- `packages/tui/src/bracketed-paste.ts` — split-frame paste buffering; SHA-256 `f6a166584b7559cd6616d181d5e0f73f52d0adcc86a71c9660bd55d0972618d8`.
+- `packages/tui/src/utils.ts` and `crates/pi-natives/src/text.rs` — ANSI-aware text helpers and native grapheme widths; SHA-256 `17b7a1334359aef3e12921966d6c7b8a24cb148b5e4161567e36d8e41db1b671` and `3ad7ceab0b088732212ec8bd168e8ccd83822d14ce8a6660bae900671c67c644` respectively.
+
+Third-party source attribution
+------------------------------
+
+### oh-my-pi
+
+The pinned GJC reference source `crates/pi-natives/src/keys.rs` identifies itself as vendored from oh-my-pi `crates/pi-natives/src/keys.rs` at commit `a85bd5228d9f0f619deade1db78fa49420a721e1`. Its header at GJC lines 1-3 explicitly records GJC-local modifications: retaining GJC key-id validation, raw `0x08` handling, PSMux handling, and modifier hardening. The same source file's SHA-256 in the GJC reference checkout is `0d0082bb7ca46ccf906befea856702eb2209b5506685c10d50087af42226ca83`; the pinned upstream Git blob SHA-1 is `9481ed22c37da47782e673926c5552e2c8933a87`.
+
+The pinned GJC reference source `crates/pi-natives/src/text.rs` identifies itself as vendored from oh-my-pi `crates/pi-natives/src/text.rs` at that same commit. Its header at GJC lines 1-3 records GJC-local modifications: retaining OSC 8 handling, inline-math handling, CRLF correction, two-cell Hangul compatibility-Jamo width, and a private UTF-16 helper. The GJC reference file SHA-256 is `3ad7ceab0b088732212ec8bd168e8ccd83822d14ce8a6660bae900671c67c644`; the pinned upstream Git blob SHA-1 is `7fbbcce928a8b451c874de8a381660331e9fa3ae`.
+
+Pinned upstream source URLs:
+- https://raw.githubusercontent.com/earendil-works/pi/a85bd5228d9f0f619deade1db78fa49420a721e1/crates/pi-natives/src/keys.rs
+- https://raw.githubusercontent.com/earendil-works/pi/a85bd5228d9f0f619deade1db78fa49420a721e1/crates/pi-natives/src/text.rs
+- License: https://raw.githubusercontent.com/earendil-works/pi/a85bd5228d9f0f619deade1db78fa49420a721e1/LICENSE (pinned LICENSE Git blob SHA-1 `09a0c6c926a81c9d56dc3326cff1e5358c63c6d6`).
+
+### OpenTUI
+
+`packages/tui/src/keys.ts` in the pinned GJC reference labels OpenTUI `packages/core/src/lib/parse.keypress.ts` at commit `7da92b4088aebfe27b9f691c04163a48821e49fd` as a **reference** (GJC `keys.ts:4-6`). This is recorded as reference provenance, not as a claim that the GJC adapter or native parser is an unmodified OpenTUI copy. The pinned OpenTUI source Git blob SHA-1 is `a11f91cf3487fd63d27f547a4a116765d08cddd0`; the GJC reference `packages/tui/src/keys.ts` SHA-256 is `b274242c9c8aaeb0640bf2bb8e8a52c5271a25a2677f964175f0a44bb995cfed`.
+
+Pinned upstream source and license URLs:
+- https://raw.githubusercontent.com/anomalyco/opentui/7da92b4088aebfe27b9f691c04163a48821e49fd/packages/core/src/lib/parse.keypress.ts
+- https://raw.githubusercontent.com/anomalyco/opentui/7da92b4088aebfe27b9f691c04163a48821e49fd/LICENSE (pinned LICENSE Git blob SHA-1 `3cd7ff6e31124b3077894c19747e4b4751a08968`).
+
+Complete MIT license notices
+----------------------------
+The notices below are transcribed from the pinned raw LICENSE URLs above and from the pinned GJC LICENSE. They are included in full for the source material identified in this attribution.
+
+### Gajae Code — MIT License
+
+Copyright (c) 2025-2026 Yeachan-Heo and Gajae Code Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+### oh-my-pi — MIT License
+
+Copyright (c) 2025 Mario Zechner
+Copyright (c) 2025-2026 Can Bölük
+Copyright (c) 2026 Stencil Labs, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+### OpenTUI — MIT License
+
+Copyright (c) 2025 opentui
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

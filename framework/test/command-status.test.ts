@@ -5,13 +5,15 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { createCommandHook, STATUS_COMMAND, STATUS_DESCRIPTION, STATUS_TEMPLATE, STOP_COMMAND } from "../src/hooks/command.ts"
-import { createChatMessageHook } from "../src/hooks/chat-message.ts"
+import { consumeCommandTurn } from "../src/hooks/command-turns.ts"
 import { createConfigHook } from "../src/hooks/config.ts"
 import { STATUS_MARKER, statusJson } from "../src/flow/status.ts"
-import { eventsPath, newWorkflow, workflowPath, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
+import { eventsPath, newWorkflow, workflowPath, withFlowTransaction } from "../src/flow/state.ts"
+import { writeRawSnapshot, writeWorkflow } from "./commit-fixture.ts"
 import { currentOwner } from "../src/flow/owner.ts"
-import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
+import { admitFixtureSession, fakeClient, makeDeps, releaseFixtureSession, tempWorktree, type FakeClient } from "./guards-helpers.ts"
 import { fakeDeps } from "./helpers.ts"
+import { createNativeToolFixture } from "./native-tool-fixture.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { createExecutionRunStore } from "../src/hosts/run-state.ts"
 import { addTasks, emptyLedger, ledgerPath, updateTask, writeLedger } from "../src/state/ledger.ts"
@@ -21,25 +23,38 @@ const S = "ses_main"
 const OTHER = "ses_other"
 let wt: ReturnType<typeof tempWorktree>
 let client: FakeClient
+let fixtureSession: ReturnType<typeof admitFixtureSession>
 
 beforeEach(() => {
+  // Command marks are process-global; earlier files in the same run (e.g. command-stop) can leave unconsumed ones.
+  for (const id of [S, OTHER]) while (consumeCommandTurn(id)) { /* drain */ }
   wt = tempWorktree()
   client = fakeClient()
+  fixtureSession = admitFixtureSession(makeDeps(client, wt.worktree), S)
 })
-afterEach(() => wt.cleanup())
+afterEach(() => {
+  releaseFixtureSession(wt.worktree, fixtureSession)
+  wt.cleanup()
+})
 
 function putWorkflow(patch: Record<string, unknown> = {}) {
-  const wf = { ...newWorkflow(S, currentOwner(), "command", "do it", "opencode"), ...patch }
+  const wf = { ...newWorkflow(S, currentOwner(Date.now(), fixtureSession.epoch), "command", "do it", "opencode"), ...patch }
   return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf as any))
 }
 
 async function runStatus(deps = makeDeps(client, wt.worktree), sessionID = S) {
-  const commandHook = createCommandHook(deps, { stop: true, status: true })
-  await commandHook({ command: STATUS_COMMAND, sessionID, arguments: "" }, { parts: [] })
-  const part: any = { type: "text", text: STATUS_TEMPLATE }
-  const chatHook = createChatMessageHook(deps)
-  await chatHook({ sessionID, agent: "main" } as any, { message: {} as any, parts: [part] })
-  return part.text as string
+  const extraAdmission = sessionID === S ? undefined : admitFixtureSession(deps, sessionID)
+  try {
+    const native = await createNativeToolFixture(deps, { sessionID })
+    const commandHook = createCommandHook(deps, { stop: true, status: true })
+    await commandHook({ command: STATUS_COMMAND, sessionID, arguments: "" }, { parts: [] })
+    const { parts } = await native.deliverUserTurn({ text: STATUS_TEMPLATE })
+    const part = parts.find(candidate => candidate.type === "text")
+    if (!part || part.type !== "text") throw new Error("native status turn did not contain a text part")
+    return part.text
+  } finally {
+    if (extraAdmission) releaseFixtureSession(wt.worktree, extraAdmission)
+  }
 }
 
 const SECRET_MARKERS = [
@@ -99,9 +114,8 @@ describe("/status", () => {
   })
 
   test("malformed status state replaces the template with a safe source/code error", async () => {
-    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, {
-      version: 1, id: "wf_bad", kind: "plan", phase: "planning", sessionID: S, secret: "must-not-leak",
-    } as any))
+    // Index-bound snapshot whose bytes hash correctly but fail strict parsing: status reports invalid_state only.
+    writeRawSnapshot(wt.worktree, { version: 2, id: "wf_bad", kind: "plan", phase: "planning", sessionID: S, secret: "must-not-leak" }, { id: "wf_bad", sessionID: S })
     const text = await runStatus()
     expect(text).toBe("[lca status]\nstatus unavailable: workflow invalid_state\n\nReply only: ok")
     expect(text).not.toContain("must-not-leak")
@@ -195,21 +209,26 @@ describe("/status", () => {
     expect(evAfter).toEqual(evBefore)
   })
 
-  test("owning session, dead owner: takes over first, then renders exactly like the live-owner cell", async () => {
+  test("owning session, dead owner: status is read-only and leaves takeover for explicit Resume", async () => {
     const wf = putWorkflow({ phase: "pending_approval", owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 } })
+    const workflowBefore = readFileSync(workflowPath(wt.worktree))
+    const eventsBefore = readIfPresent(eventsPath(wt.worktree))
     const text = await runStatus()
-    expect(text).toContain(`workflow: ${wf.id} pending_approval — this session`)
-    expect(text).not.toContain("owner dead")
-    const events = JSON.parse(`[${readFileSync(eventsPath(wt.worktree), "utf8").trim().split("\n").join(",")}]`)
-    expect(events.some((e: any) => e.type === "owner_takeover")).toBe(true)
+    expect(text).toContain(`workflow: ${wf.id} pending_approval — this session, owner dead`)
+    expect(text).toContain("Session held; explicit owner Resume required.")
+    expect(readFileSync(workflowPath(wt.worktree))).toEqual(workflowBefore)
+    expect(readIfPresent(eventsPath(wt.worktree))).toEqual(eventsBefore)
   })
 
   test("a user-defined status command is not acted on (text untouched, no lca command logic runs)", async () => {
     const deps = makeDeps(client, wt.worktree)
-    const commandHook = createCommandHook(deps, { stop: true, status: true, injected: new Set([STOP_COMMAND]) }) // status shadowed by a user command
+    const native = await createNativeToolFixture(deps, { sessionID: S })
+    await createConfigHook(deps)({ command: { status: { template: "my custom status output" } } })
+    const commandHook = createCommandHook(deps, { stop: true, status: true })
     await commandHook({ command: STATUS_COMMAND, sessionID: S, arguments: "" }, { parts: [] })
-    const part: any = { type: "text", text: "my custom status output" }
-    await createChatMessageHook(deps)({ sessionID: S, agent: "main" } as any, { message: {} as any, parts: [part] })
+    const { parts } = await native.deliverUserTurn({ text: "my custom status output" })
+    const part = parts.find(candidate => candidate.type === "text")
+    if (!part || part.type !== "text") throw new Error("native custom status turn did not contain a text part")
     expect(part.text).toBe("my custom status output")
   })
 

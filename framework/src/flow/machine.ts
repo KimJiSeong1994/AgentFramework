@@ -2,10 +2,11 @@
 // prompts, toasts) after a successful transition. Any (phase, event) pair not listed here is an error and must
 // not write anything.
 
-export const PHASES = ["planning", "reviewing", "pending_approval", "executing", "stuck", "done", "cancelled"] as const
-export type Phase = (typeof PHASES)[number]
+import { PHASES, TERMINAL, type Phase, type StopKind } from "../workflows/types.ts"
+
+export { PHASES, TERMINAL }
+export type { Phase }
 export type StuckCause = "plan_invalid" | "no_submission" | "tasks_failed" | "user_stop"
-export const TERMINAL: ReadonlySet<Phase> = new Set(["done", "cancelled"])
 
 export const EVENTS = [
   "submit_invalid", "submit_valid",
@@ -13,7 +14,8 @@ export const EVENTS = [
   "approve", "reject",
   "nudge", "nudge_exhausted", "user_message",
   "settle_ok", "settle_fail", "user_stop",
-  "cancel", "cancel_settled", "session_deleted", "owner_dead",
+  "pause", "pause_settled", "resume",
+  "cancel", "cancel_settled",
 ] as const
 export type FlowEvent = (typeof EVENTS)[number]
 
@@ -25,7 +27,10 @@ export type FlowCore = {
   phase: Phase
   stuckCause?: StuckCause
   counters: Counters
-  pendingCancel?: boolean
+  /** A recorded stop intent. `pause_settled` keeps it as the settled marker; `cancel_settled` clears it. */
+  stop?: { kind: StopKind }
+  /** Phase a pause was requested from (history after a settled cancel); `resume` returns here. */
+  pausedFrom?: Phase
   reviewNote?: "aborted" | "cap"
 }
 
@@ -36,9 +41,11 @@ export type TransitionCtx = {
   limits?: Limits
   /** T11/T12 guard: the last assistant message asks the user something */
   lastAssistantAsks?: boolean
-  /** T18: the owning session's queue is running (cancel then settles at delegate return) */
-  queueRunning?: boolean
-  /** T15/T16/cancel_settled: status of the workflow's tagged tasks */
+  /** Any owned queue/review/stage/broker/reservation/claim/unsettled execution exists (computed in the flow transaction). */
+  active?: boolean
+  /** resume: every Resume precondition was verified by the caller inside the transaction. */
+  resumeChecked?: boolean
+  /** T15/T16: status of the workflow's tagged tasks */
   tasks?: { open: number; failedOrCancelled: number; total: number }
 }
 
@@ -65,6 +72,12 @@ export function transition(core: FlowCore, event: FlowEvent, ctx: TransitionCtx 
     return toast ? { core: next, row, toast } : { core: next, row }
   }
   const p = core.phase
+  const stopped = core.stop !== undefined
+  // A recorded stop (pending or settled pause, pending cancel) refuses every ordinary event; only the stop events act.
+  const STOP_EVENTS: readonly FlowEvent[] = ["pause", "pause_settled", "resume", "cancel", "cancel_settled"]
+  if ((stopped || p === "paused") && !STOP_EVENTS.includes(event)) {
+    return refuse(core, event, p === "paused" ? "workflow is paused" : `workflow ${core.stop!.kind} is pending`)
+  }
   switch (event) {
     case "submit_invalid":
       if (p !== "planning") return refuse(core, event)
@@ -115,32 +128,39 @@ export function transition(core: FlowCore, event: FlowEvent, ctx: TransitionCtx 
     case "settle_ok": {
       if (p !== "executing") return refuse(core, event)
       const t = ctx.tasks
-      if (core.pendingCancel || !t || t.open > 0 || t.failedOrCancelled > 0) return refuse(core, event, "tasks not all done")
+      if (!t || t.open > 0 || t.failedOrCancelled > 0) return refuse(core, event, "tasks not all done")
       return to({ phase: "done" }, "T15", "plan workflow done")
     }
     case "settle_fail": {
       if (p !== "executing") return refuse(core, event)
       const t = ctx.tasks
-      if (core.pendingCancel || !t || t.open > 0 || t.failedOrCancelled === 0) return refuse(core, event, "tasks not settled with a failure")
+      if (!t || t.open > 0 || t.failedOrCancelled === 0) return refuse(core, event, "tasks not settled with a failure")
       return to({ phase: "stuck", stuckCause: "tasks_failed" }, "T16", "plan workflow stopped: a task failed")
     }
     case "user_stop":
       if (p !== "executing") return refuse(core, event)
       return to({ phase: "stuck", stuckCause: "user_stop" }, "T17")
+    case "pause":
+      if (stopped || !(p === "planning" || p === "reviewing" || p === "pending_approval" || p === "executing")) return refuse(core, event)
+      return ctx.active
+        ? to({ stop: { kind: "pause" }, pausedFrom: p }, "P1")
+        : to({ phase: "paused", stop: { kind: "pause" }, pausedFrom: p }, "P2", "plan workflow paused")
+    case "pause_settled":
+      if (core.stop?.kind !== "pause" || p === "paused" || !NON_TERMINAL(p) || !core.pausedFrom) return refuse(core, event)
+      if (ctx.active) return refuse(core, event, "termination unconfirmed")
+      return to({ phase: "paused" }, "P3", "plan workflow paused")
+    case "resume":
+      if (p !== "paused" || core.stop?.kind !== "pause" || !core.pausedFrom) return refuse(core, event)
+      if (!ctx.resumeChecked) return refuse(core, event, "resume preconditions not verified")
+      return to({ phase: core.pausedFrom, stop: undefined, pausedFrom: undefined }, "P4")
     case "cancel":
-      if (!NON_TERMINAL(p)) return refuse(core, event)
-      // mirrors /stop: a running queue is aborted and the cancel completes at settle (cancel_settled)
-      if (ctx.queueRunning) return to({ pendingCancel: true }, "T18")
-      return to({ phase: "cancelled", pendingCancel: undefined }, "T18", "plan workflow cancelled")
+      if (!NON_TERMINAL(p) || core.stop?.kind === "cancel") return refuse(core, event)
+      // cancel > pause: a pending or settled pause is replaced; the phase stays until termination is proven
+      if (ctx.active) return to({ stop: { kind: "cancel" } }, "T18")
+      return to({ phase: "cancelled", stop: undefined }, "T18", "plan workflow cancelled")
     case "cancel_settled":
-      if (!core.pendingCancel || !NON_TERMINAL(p)) return refuse(core, event)
-      if (ctx.tasks && ctx.tasks.open > 0 && ctx.queueRunning) return refuse(core, event, "queue still running")
-      return to({ phase: "cancelled", pendingCancel: undefined }, "T18", "plan workflow cancelled")
-    case "session_deleted":
-      if (!NON_TERMINAL(p)) return refuse(core, event)
-      return to({ phase: "cancelled", pendingCancel: undefined }, "T19")
-    case "owner_dead":
-      if (!NON_TERMINAL(p)) return refuse(core, event)
-      return to({ phase: "cancelled", pendingCancel: undefined }, "T20")
+      if (core.stop?.kind !== "cancel" || !NON_TERMINAL(p)) return refuse(core, event)
+      if (ctx.active) return refuse(core, event, "termination unconfirmed")
+      return to({ phase: "cancelled", stop: undefined }, "T18", "plan workflow cancelled")
   }
 }

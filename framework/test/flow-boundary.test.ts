@@ -2,32 +2,54 @@
 // tool.execute.before. Owning session only; other sessions and no-workflow sessions are unaffected.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
-import { newWorkflow, readEvents, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
+import { newWorkflow, readEvents, withFlowTransaction } from "../src/flow/state.ts"
+import { writeWorkflow } from "./commit-fixture.ts"
 import { currentOwner } from "../src/flow/owner.ts"
-import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
+import { createBoundNativeToolChildFixture, createNativeToolFixture } from "./native-tool-fixture.ts"
+import { admitFixtureSession, fakeClient, makeDeps, releaseFixtureSession, tempWorktree, type FakeClient } from "./guards-helpers.ts"
 
 const S = "ses_owner"
 const OTHER = "ses_other"
 let wt: ReturnType<typeof tempWorktree>
 let client: FakeClient
+let owner: ReturnType<typeof admitFixtureSession>
+let other: ReturnType<typeof admitFixtureSession>
 
 beforeEach(() => {
   wt = tempWorktree()
   client = fakeClient()
+  const deps = makeDeps(client, wt.worktree)
+  owner = admitFixtureSession(deps, S)
+  other = admitFixtureSession(deps, OTHER)
 })
-afterEach(() => wt.cleanup())
+afterEach(() => {
+  releaseFixtureSession(wt.worktree, owner)
+  releaseFixtureSession(wt.worktree, other)
+  wt.cleanup()
+})
 
-const before = (tool: string, args: any, sessionID = S, callID = "c1") => ({ input: { tool, sessionID, callID }, output: { args } })
-const callArgs = (b: ReturnType<typeof before>): [any, any] => [b.input, b.output]
+let callSequence = 0
+
+async function nativeFixture(deps: ReturnType<typeof makeDeps>, sessionID = S) {
+  const native = await createNativeToolFixture(deps, { sessionID })
+  await native.acceptUserTurn()
+  return native
+}
+
+async function invokeBefore(deps: ReturnType<typeof makeDeps>, native: Awaited<ReturnType<typeof nativeFixture>>, tool: string, args: Record<string, unknown>) {
+  const call = native.primeCall({ tool, args, callID: `flow_boundary_${++callSequence}` })
+  return createToolBeforeHook(deps)(call.input, call.output)
+}
 
 function putWorkflow(phase: string, patch: Record<string, unknown> = {}) {
-  let wf = newWorkflow(S, currentOwner(), "command", "do the thing", "opencode")
+  let wf = newWorkflow(S, currentOwner(Date.now(), owner.epoch), "command", "do the thing", "opencode")
   wf = { ...wf, phase: phase as any, ...patch }
   return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf))
 }
 
 describe("planning boundary (AC0.4)", () => {
-  const DENIED_TOOLS = ["edit", "write", "multiedit", "patch", "apply_patch", "delegate", "task", "webfetch", "mcp_foo_write"]
+  const POLICY_DENIED_TOOLS = ["task", "webfetch", "mcp_foo_write"]
+  const BOUNDARY_DENIED_TOOLS = ["edit", "write", "multiedit", "patch", "apply_patch", "delegate"]
   const ALLOWED_TOOLS = ["read", "glob", "grep", "list", "todowrite"]
 
   const DENIED_BASH = [
@@ -57,22 +79,28 @@ describe("planning boundary (AC0.4)", () => {
 
   for (const phase of ["planning", "reviewing", "pending_approval"]) {
     test(`denies non-allowlisted tools in ${phase}`, async () => {
-      putWorkflow(phase)
       const deps = makeDeps(client, wt.worktree)
-      const hook = createToolBeforeHook(deps)
-      for (const tool of DENIED_TOOLS) {
-        await expect(hook(...callArgs(before(tool, { filePath: "x", path: "x" })))).rejects.toThrow(
+      const native = await nativeFixture(deps)
+      putWorkflow(phase)
+      for (const tool of POLICY_DENIED_TOOLS) {
+        await expect(invokeBefore(deps, native, tool, { filePath: "x", path: "x" })).rejects.toThrow(
+          "lca: OpenCode tool call refused (disallowed-tool)",
+        )
+      }
+      for (const tool of BOUNDARY_DENIED_TOOLS) {
+        const args = tool === "delegate" ? { tasks: [{ title: "x" }] } : { filePath: "x", path: "x" }
+        await expect(invokeBefore(deps, native, tool, args)).rejects.toThrow(
           'lca: planning phase — read-only. Submit the plan with lca_flow op:"plan", or /cancel.',
         )
       }
     })
 
     test(`allows allowlisted tools in ${phase}`, async () => {
-      const wf = putWorkflow(phase)
       const deps = makeDeps(client, wt.worktree)
-      const hook = createToolBeforeHook(deps)
+      const native = await nativeFixture(deps)
+      const wf = putWorkflow(phase)
       for (const tool of ALLOWED_TOOLS) {
-        await hook(...callArgs(before(tool, {})))
+        await invokeBefore(deps, native, tool, {})
       }
       // events.jsonl has no boundary_denied entries for the allowed calls
       const events = readEvents(wt.worktree, wf.id)
@@ -80,125 +108,153 @@ describe("planning boundary (AC0.4)", () => {
     })
 
     test(`bash argv policy applies in ${phase}`, async () => {
-      putWorkflow(phase)
       const deps = makeDeps(client, wt.worktree)
-      const hook = createToolBeforeHook(deps)
+      const native = await nativeFixture(deps)
+      putWorkflow(phase)
       for (const command of DENIED_BASH) {
-        await expect(hook(...callArgs(before("bash", { command })))).rejects.toThrow(
+        await expect(invokeBefore(deps, native, "bash", { command })).rejects.toThrow(
           'lca: planning phase — read-only. Submit the plan with lca_flow op:"plan", or /cancel.',
         )
       }
       for (const command of ALLOWED_BASH) {
-        await hook(...callArgs(before("bash", { command })))
+        await invokeBefore(deps, native, "bash", { command })
       }
     })
   }
 
   for (const cause of ["plan_invalid", "no_submission"]) {
     test(`denies in stuck(${cause})`, async () => {
-      putWorkflow("stuck", { stuckCause: cause })
       const deps = makeDeps(client, wt.worktree)
-      const hook = createToolBeforeHook(deps)
-      await expect(hook(...callArgs(before("write", { filePath: "x" })))).rejects.toThrow(/planning phase/)
-      await hook(...callArgs(before("read", {})))
+      const native = await nativeFixture(deps)
+      putWorkflow("stuck", { stuckCause: cause })
+      await expect(invokeBefore(deps, native, "write", { filePath: "x" })).rejects.toThrow(
+        'lca: planning phase — read-only. Submit the plan with lca_flow op:"plan", or /cancel.',
+      )
+      await invokeBefore(deps, native, "read", {})
     })
   }
 
   test("appends a boundary_denied event with the tool name", async () => {
-    const wf = putWorkflow("planning")
     const deps = makeDeps(client, wt.worktree)
-    const hook = createToolBeforeHook(deps)
-    await expect(hook(...callArgs(before("write", { filePath: "x" })))).rejects.toThrow()
+    const native = await nativeFixture(deps)
+    const wf = putWorkflow("planning")
+    await expect(invokeBefore(deps, native, "delegate", { tasks: [{ title: "x" }] })).rejects.toThrow(
+      'lca: planning phase — read-only. Submit the plan with lca_flow op:"plan", or /cancel.',
+    )
     const events = readEvents(wt.worktree, wf.id)
     const denied = events.filter((e) => e.type === "boundary_denied")
     expect(denied).toHaveLength(1)
     expect(denied[0]!.actor).toBe("model_tool")
-    expect(denied[0]!.data).toEqual({ tool: "write" })
+    expect(denied[0]!.data).toEqual({ tool: "delegate" })
   })
 
-  test("a non-owning session is unaffected", async () => {
-    putWorkflow("planning")
+  test("a non-owning session bypasses another session's workflow boundary", async () => {
     const deps = makeDeps(client, wt.worktree)
-    const hook = createToolBeforeHook(deps)
-    await hook(...callArgs(before("write", { filePath: "x" }, OTHER)))
-    await hook(...callArgs(before("bash", { command: "rm x" }, OTHER)))
-  })
-
-  test("a session with no active workflow is unaffected", async () => {
-    const deps = makeDeps(client, wt.worktree)
-    const hook = createToolBeforeHook(deps)
-    await hook(...callArgs(before("write", { filePath: "x" })))
-    await hook(...callArgs(before("bash", { command: "rm x" })))
-  })
-
-  test("disabling guard.plan_boundary lets every tool through", async () => {
+    const native = await nativeFixture(deps, OTHER)
     putWorkflow("planning")
+    await invokeBefore(deps, native, "delegate", { tasks: [{ title: "x" }] })
+    await invokeBefore(deps, native, "bash", { command: "git status" })
+  })
+
+  test("a session with no active workflow retains ordinary main-tool behavior", async () => {
+    const deps = makeDeps(client, wt.worktree)
+    const native = await nativeFixture(deps)
+    await invokeBefore(deps, native, "read", { filePath: "x" })
+    await invokeBefore(deps, native, "bash", { command: "git status" })
+  })
+
+  test("disabling guard.plan_boundary disables workflow restrictions", async () => {
     const deps = makeDeps(client, wt.worktree, { disabled_hooks: ["guard.plan_boundary"] })
-    const hook = createToolBeforeHook(deps)
-    await hook(...callArgs(before("write", { filePath: "x" })))
-    await hook(...callArgs(before("bash", { command: "rm x" })))
+    const native = await nativeFixture(deps)
+    putWorkflow("planning")
+    await invokeBefore(deps, native, "delegate", { tasks: [{ title: "x" }] })
+    await invokeBefore(deps, native, "bash", { command: "git status" })
   })
 
-  test("disabling the flow feature (config.flow.enabled=false) lets every tool through", async () => {
-    putWorkflow("planning")
+  test("disabling the flow feature disables workflow restrictions", async () => {
     const deps = makeDeps(client, wt.worktree, { flow: { enabled: false, max_code_invalid: 3, max_review_iterations: 2, nudge_max: 1, review_max_tool_calls: 6 } })
-    const hook = createToolBeforeHook(deps)
-    await hook(...callArgs(before("write", { filePath: "x" })))
+    const native = await nativeFixture(deps)
+    putWorkflow("planning")
+    await invokeBefore(deps, native, "delegate", { tasks: [{ title: "x" }] })
+  })
+
+  test("a real bound worker is the positive write authority during planning", async () => {
+    const deps = makeDeps(client, wt.worktree)
+    const child = await createBoundNativeToolChildFixture(deps, {
+      sessionID: "flow_boundary_worker", ownerSessionID: S, role: "worker",
+    })
+    try {
+      putWorkflow("planning")
+      // The workflow changed after the child's creation turn; deliver a fresh real worker turn so the call binds to current state.
+      await child.native.acceptUserTurn()
+      const call = child.native.primeCall({
+        tool: "write",
+        args: { filePath: "worker-output.ts", content: "export const workerOutput = true;\n" },
+        callID: `flow_boundary_worker_${++callSequence}`,
+      })
+      await createToolBeforeHook(deps)(call.input, call.output)
+    } finally {
+      child.cleanup()
+    }
   })
 })
 
 describe("forced resume in executing (AC0.5)", () => {
   test("delegate with tasks is refused", async () => {
-    putWorkflow("executing")
     const deps = makeDeps(client, wt.worktree)
-    const hook = createToolBeforeHook(deps)
-    await expect(
-      hook(...callArgs(before("delegate", { tasks: [{ title: "x" }] }))),
-    ).rejects.toThrow("lca: an approved plan is running; call delegate with resume:true only")
-  })
-
-  test("delegate with no args (implicit empty tasks, no resume) is refused", async () => {
+    const native = await nativeFixture(deps)
     putWorkflow("executing")
-    const deps = makeDeps(client, wt.worktree)
-    const hook = createToolBeforeHook(deps)
-    await expect(hook(...callArgs(before("delegate", {})))).rejects.toThrow(
+    await expect(invokeBefore(deps, native, "delegate", { tasks: [{ title: "x" }] })).rejects.toThrow(
       "lca: an approved plan is running; call delegate with resume:true only",
     )
   })
 
-  test("delegate with resume:true and a re-sent task list resumes and drops the list", async () => {
-    putWorkflow("executing")
+  test("delegate with no args (implicit empty tasks, no resume) is refused", async () => {
     const deps = makeDeps(client, wt.worktree)
+    const native = await nativeFixture(deps)
+    putWorkflow("executing")
+    await expect(invokeBefore(deps, native, "delegate", {})).rejects.toThrow(
+      "lca: an approved plan is running; call delegate with resume:true only",
+    )
+  })
+
+  test("delegate with resume:true and a re-sent task list is refused without changing args", async () => {
+    const deps = makeDeps(client, wt.worktree)
+    const native = await nativeFixture(deps)
+    putWorkflow("executing")
     const hook = createToolBeforeHook(deps)
-    const [input, output] = callArgs(before("delegate", { resume: true, tasks: [{ title: "x" }] }))
-    await hook(input, output)
-    expect(output.args).toEqual({ resume: true })
+    const args = { resume: true, tasks: [{ title: "x" }] }
+    const call = native.primeCall({ tool: "delegate", args, callID: `flow_boundary_${++callSequence}` })
+    await expect(hook(call.input, call.output)).rejects.toThrow(
+      "lca: delegate resume must omit tasks; retry with the exact approved resume arguments",
+    )
+    expect(call.output.args).toEqual(args)
   })
 
   test("delegate with resume:true and no tasks passes", async () => {
-    putWorkflow("executing")
     const deps = makeDeps(client, wt.worktree)
-    const hook = createToolBeforeHook(deps)
-    await hook(...callArgs(before("delegate", { resume: true })))
-    await hook(...callArgs(before("delegate", { resume: true, tasks: [] })))
+    const native = await nativeFixture(deps)
+    putWorkflow("executing")
+    await invokeBefore(deps, native, "delegate", { resume: true })
+    await invokeBefore(deps, native, "delegate", { resume: true, tasks: [] })
   })
 
   test("main cannot implement the approved plan itself: writes and mutating bash are refused in executing", async () => {
-    putWorkflow("executing")
     const deps = makeDeps(client, wt.worktree)
-    const hook = createToolBeforeHook(deps)
+    const native = await nativeFixture(deps)
+    putWorkflow("executing")
     for (const [tool, args] of [["write", { filePath: "x" }], ["edit", { filePath: "x" }], ["apply_patch", { patchText: "x" }], ["bash", { command: "rm x" }], ["bash", { command: "python3 -m pytest" }]] as const) {
-      await expect(hook(...callArgs(before(tool, { ...args })))).rejects.toThrow("lca: an approved plan is running")
+      await expect(invokeBefore(deps, native, tool, { ...args })).rejects.toThrow("lca: an approved plan is running")
     }
-    await hook(...callArgs(before("read", { filePath: "x" })))
-    await hook(...callArgs(before("bash", { command: "git status" })))
-    await hook(...callArgs(before("lca_flow", { op: "status" })))
+    await invokeBefore(deps, native, "read", { filePath: "x" })
+    await invokeBefore(deps, native, "bash", { command: "git status" })
+    await invokeBefore(deps, native, "lca_flow", { op: "status" })
   })
 
   test("a non-owning session's delegate is unaffected in executing", async () => {
-    putWorkflow("executing")
     const deps = makeDeps(client, wt.worktree)
-    const hook = createToolBeforeHook(deps)
-    await hook(...callArgs(before("delegate", { tasks: [{ title: "x" }] }, OTHER)))
+    const native = await nativeFixture(deps, OTHER)
+    putWorkflow("executing")
+    await invokeBefore(deps, native, "delegate", { tasks: [{ title: "x" }] })
   })
 })

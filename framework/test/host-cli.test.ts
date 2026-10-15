@@ -5,7 +5,8 @@ import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { CliUsageError, parseCliArgs, runCli } from "../src/hosts/cli.ts"
 import { currentOwner } from "../src/flow/owner.ts"
-import { eventsPath, newWorkflow, workflowPath, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
+import { eventsPath, newWorkflow, workflowPath, withFlowTransaction } from "../src/flow/state.ts"
+import { writeWorkflow } from "./commit-fixture.ts"
 import { addTasks, emptyLedger, ledgerPath, updateTask, writeLedger } from "../src/state/ledger.ts"
 import { createExecutionRunStore } from "../src/hosts/run-state.ts"
 import { executionRunDirectory, modeStatePath, stateRoot } from "../src/state/store.ts"
@@ -156,12 +157,17 @@ describe("foreground CLI", () => {
       expect(result.stdout).toContain("Usage:")
       expect(result.stdout).toContain("lca status --worktree")
       expect(result.stdout).toContain("lca run --plan")
-      expect(result.stdout).toContain("Common-engine workflow recovery")
+      expect(result.stdout).toContain("Common-engine workflow commands")
       expect(result.stdout).toContain("--engine local|codex|claude --model ID --session ID")
       expect(result.stdout).toContain("Standalone commands do not start a server")
       expect(result.stdout).toContain("--engine local|codex|claude")
       expect(result.stdout).toContain("/model <engine> <native-id>")
       expect(result.stdout).toContain("/help lists local commands")
+      expect(result.stdout).toContain("/skill:deep-interview <request>")
+      expect(result.stdout).toContain("/skill:ralplan <request>")
+      expect(result.stdout).toContain("invoking a name is not consent to execute")
+      expect(result.stdout).toContain("/skill:ultragoal <objective>")
+      expect(result.stdout).toContain("/skill:autoresearch <mission>")
       expect(result.stdout).toContain("input limits are estimated and output limits are reactive")
       expect(result.stdout).toContain("Interactive chat requires a terminal on stdin and stderr")
       expect(result.stdout).not.toContain("OpenCode TUI")

@@ -17,9 +17,14 @@ import { fetchOpenCodeTodos } from "../hosts/opencode-todos.ts"
 import { openTasks, readLedger, writeLedger } from "../state/ledger.ts"
 import { getQueue } from "../orchestration/queue.ts"
 import { getOpenCodeRuntime } from "../hosts/opencode-runtime.ts"
-import { activeWorkflow, readWorkflow, workflowEngineRefusal, type Workflow } from "../flow/state.ts"
+import { activeWorkflow, readWorkflow, readWorkflowChecked, workflowEngineRefusal, type Workflow } from "../flow/state.ts"
 import { flowOn } from "../flow/status.ts"
-import { applyEvent, settle } from "../flow/runtime.ts"
+import { applyEvent, settleOwned } from "../flow/runtime.ts"
+import { admissionEpoch, effectiveHold } from "../sessions/admission.ts"
+import { getOwnedSession } from "../sessions/store.ts"
+import { executionActivity } from "../hosts/runtime.ts"
+import { settled as executionSettled } from "../hosts/run-state.ts"
+import { isStopPending } from "../workflows/types.ts"
 
 export { abortPath }
 
@@ -31,7 +36,7 @@ export const EXECUTING_RESUME_PROMPT = "Call delegate with resume:true now."
 export type StopReason = "aborted" | "max_iterations" | "ttl" | "stagnation" | "failures" | "todos_done"
 
 export type IdleOutcome =
-  | { action: "ignored"; why: "inactive" | "debounced" | "compaction_guard" | "queue_running" | "state_changed" | "already_notified" | "workflow_engine_mismatch" }
+  | { action: "ignored"; why: "held" | "inactive" | "debounced" | "compaction_guard" | "queue_running" | "state_changed" | "already_notified" | "workflow_engine_mismatch" }
   | { action: "stopped"; reason: StopReason }
   | { action: "continued"; iterations: number; stagnation: number; remaining: number }
   | { action: "resume_offered"; open: number }
@@ -93,13 +98,16 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
 
   /** §5.6 workflow branch, run first while the session owns a non-terminal workflow. Never falls through. */
   const runWorkflow = async (sessionID: string, wf: Workflow): Promise<IdleOutcome> => {
+    const epoch = admissionEpoch(deps.worktree, sessionID)
+    const admitted = () => epoch !== undefined && admissionEpoch(deps.worktree, sessionID) === epoch && !effectiveHold(deps.worktree, sessionID)
+    if (!admitted()) return { action: "ignored", why: "held" }
     const initialRefusal = workflowEngineRefusal(wf, runtime.host.identity.engine)
     if (initialRefusal) {
       deps.log("workflow idle skipped: engine identity refused", { sessionID, reason: initialRefusal })
       return { action: "ignored", why: "workflow_engine_mismatch" }
     }
-    const settled = settle(runtime, wf, queue.isRunning(sessionID))
-    const current = settled?.ok ? settled.wf : wf
+    const settled = settleOwned(runtime, { sessionID, workflowID: wf.id, epoch }, "idle")
+    const current = settled.kind === "settled" && settled.result.ok && settled.result.wf.kind === "plan" ? settled.result.wf : wf
     const latest = readWorkflow(deps.worktree)
     const latestRefusal = latest && workflowEngineRefusal(latest, runtime.host.identity.engine)
     if (latestRefusal) {
@@ -111,7 +119,7 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
     }
     if (!loopOn) return { action: "workflow", wfId: current.id }
 
-    if (current.phase === "executing" && !current.pendingCancel) {
+    if (current.phase === "executing" && !isStopPending(current)) {
       const key = (current.taskIds ?? []).slice().sort().join(",")
       if (key && executingNotified.get(current.id) !== key) {
         const latest = readWorkflow(deps.worktree)
@@ -123,6 +131,7 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
         if (!latest || latest.id !== current.id || latest.engine !== current.engine || latest.lastSeq !== current.lastSeq || latest.phase !== current.phase) {
           return { action: "ignored", why: "state_changed" }
         }
+        if (!admitted()) return { action: "ignored", why: "held" }
         executingNotified.set(current.id, key)
         await sendMessage(deps, sessionID, EXECUTING_RESUME_PROMPT)
         deps.log("workflow: executing resume prompt sent", { sessionID, wfId: current.id })
@@ -132,6 +141,7 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
 
     if (current.phase === "planning") {
       const asking = await lastAssistantAsks(deps, sessionID)
+      if (!admitted()) return { action: "ignored", why: "held" }
       if (asking) return { action: "workflow", wfId: current.id }
       const latest = readWorkflow(deps.worktree)
       if (!latest || latest.id !== current.id || latest.engine !== current.engine || latest.lastSeq !== current.lastSeq || latest.phase !== current.phase) {
@@ -152,6 +162,7 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
             deps.log("workflow idle nudge prompt skipped: workflow changed", { sessionID, reason: promptRefusal ?? "state_changed" })
             return { action: "ignored", why: promptRefusal ? "workflow_engine_mismatch" : "state_changed" }
           }
+          if (!admitted()) return { action: "ignored", why: "held" }
           await sendMessage(deps, sessionID, NUDGE_PROMPT)
           deps.log("workflow: nudge sent", { sessionID, wfId: current.id })
           return { action: "workflow", wfId: current.id, event: "nudge" }
@@ -171,6 +182,22 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
   }
 
   return async (sessionID, now = Date.now()) => {
+    const epoch = admissionEpoch(deps.worktree, sessionID)
+    const admitted = () => epoch !== undefined && admissionEpoch(deps.worktree, sessionID) === epoch && !effectiveHold(deps.worktree, sessionID)
+    if (!admitted()) {
+      // Only an already-owned live epoch may finish a recorded stop (pause or cancel) under hold; the one settlement
+      // routine proves quiescence itself and commits only stop events.
+      try {
+        const checked = readWorkflowChecked(deps.worktree)
+        const wf = checked.corrupt ? null : checked.wf
+        if (wf && wf.stopIntent && wf.sessionID === sessionID && !workflowEngineRefusal(wf, runtime.host.identity.engine)) {
+          settleOwned(runtime, { sessionID, workflowID: wf.id }, "idle", { heldSafety: true, stopOnly: true })
+        }
+      } catch {
+        deps.log("held cancellation remains unconfirmed", { sessionID })
+      }
+      return { action: "ignored", why: "held" }
+    }
     // §5.6: the workflow branch runs first and never falls through to the legacy paths while a workflow is owned.
     // It runs even when loop.idle is disabled (settle is state repair, not continuation).
     if (flowOn(deps.config)) {
@@ -191,6 +218,7 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
     // ---- interrupted delegation: offer a resume once (any mode); an already-notified ledger falls through to the
     // todo path so a session is never stuck (chat.message also attaches the offer to the user's next message)
     const offered = await offerResume(deps, sessionID)
+    if (!admitted()) return { action: "ignored", why: "held" }
     if (offered) return { action: "resume_offered", open: offered }
 
     // ---- stage-1 todo continuation (ulw only)
@@ -211,6 +239,7 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
     }
 
     const todos = await fetchOpenCodeTodos(deps.client, sessionID, deps.log)
+    if (!admitted()) return { action: "ignored", why: "held" }
     // Optimistic check: a user cancel (/stop, "그만"), a compaction or a tool error may have written mode.json
     // while we were waiting; never overwrite that with our stale copy.
     const cur = readModeState(deps.worktree, sessionID)
@@ -241,6 +270,9 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
  * (nothing could resume them) or an abort marker is in force.
  */
 export async function offerResume(deps: HookDeps, sessionID: string): Promise<number> {
+  const epoch = admissionEpoch(deps.worktree, sessionID)
+  const admitted = () => epoch !== undefined && admissionEpoch(deps.worktree, sessionID) === epoch && !effectiveHold(deps.worktree, sessionID)
+  if (!admitted()) return 0
   if (!enabled(deps.config, "tool.delegate")) return 0
   if (existsSync(abortPath(deps.worktree, sessionID))) return 0
   const ledger = readLedger(deps.worktree, sessionID)
@@ -269,7 +301,7 @@ export async function offerResume(deps: HookDeps, sessionID: string): Promise<nu
     }
   }
   const sent = await sendMessage(deps, sessionID, resumeMessage(open.length, open.map((t) => t.title)))
-  if (!sent) return 0
+  if (!sent || !admitted()) return 0
   if (linkedWorkflow) {
     const latest = readWorkflow(deps.worktree)
     const refusal = latest && workflowEngineRefusal(latest, runtime!.host.identity.engine)
@@ -287,6 +319,7 @@ export async function offerResume(deps: HookDeps, sessionID: string): Promise<nu
 
 /** Mark open tasks as already offered (chat.message attaches the offer text itself). */
 export function markResumeOffered(deps: HookDeps, sessionID: string, ids: string[]): void {
+  if (effectiveHold(deps.worktree, sessionID)) return
   const ledger = readLedger(deps.worktree, sessionID)
   writeLedger(deps.worktree, { ...ledger, resumeNotifiedFor: [...new Set([...(ledger.resumeNotifiedFor ?? []), ...ids])] })
 }
@@ -297,6 +330,7 @@ export function markResumeOffered(deps: HookDeps, sessionID: string, ids: string
  * Parts are marked synthetic so chat.message does not treat them as user text (no mode suffix / detection).
  */
 async function sendMessage(deps: HookDeps, sessionID: string, text: string): Promise<boolean> {
+  if (effectiveHold(deps.worktree, sessionID)) return false
   const session = (deps.client as any).session
   const body = { parts: [{ type: "text" as const, text, synthetic: true }] }
   try {

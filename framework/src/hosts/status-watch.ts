@@ -2,7 +2,7 @@ import { statSync } from "node:fs"
 import { join } from "node:path"
 import type { FlowRuntime } from "./types.ts"
 import { StatusReadError, STATUS_LIMITS, refreshStatusLiveness, statusBytesRead, statusJson, type StatusJson, type StatusLiveness } from "../flow/status.ts"
-import { eventsPath, flowDir, workflowPath } from "../flow/state.ts"
+import { eventsPath, flowDir, heartbeatPath, workflowPath } from "../flow/state.ts"
 import { ledgerPath } from "../state/ledger.ts"
 import { executionRunDirectory, modeStatePath, readDirectoryBounded, sessionDir, stateRoot } from "../state/store.ts"
 
@@ -87,7 +87,7 @@ function watchEntries(path: string, maxEntries: number, source: WatchErrorSource
 
 function basePathsFor(runtime: FlowRuntime, state: StatusWatchState, status?: StatusJson): string[] {
   const root = runtime.worktree
-  const paths = [workflowPath(root), eventsPath(root), join(executionRunDirectory(root), "state.json")]
+  const paths = [workflowPath(root), heartbeatPath(root), eventsPath(root), join(executionRunDirectory(root), "state.json")]
   const sessionID = state.sessionID ?? status?.session.id
   if (sessionID && sessionID !== "no-session") {
     paths.push(sessionDir(root, sessionID), ledgerPath(root, sessionID), modeStatePath(root, sessionID))

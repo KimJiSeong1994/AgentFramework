@@ -10,7 +10,9 @@ not granted by model output. Native CLI budget and containment limits are descri
 | Layer | Files | Scope |
 | --- | --- | --- |
 | Shared runtime | `src/hosts/{types,runtime,tool-policy,run-state}.ts` | Host contracts, fixed role policy, execution ownership and durable recovery state. |
-| Common CLI host | `src/hosts/{interactive,cli-progress,model-catalog,cli-runtime,cli-host,cli-transport,cli-tools,codex-profile,plan-conversation}.ts` | Engine/model discovery and selection, scrolling progress, conversation and controlled native CLI inference. |
+| Common CLI host | `src/hosts/{interactive,interactive-session,cli-progress,model-catalog,cli-runtime,cli-host,cli-transport,cli-tools,codex-profile,plan-conversation}.ts` | Shared TUI/readline coordinator, engine/model selection, conversation and controlled native CLI inference. |
+| Terminal UI | `src/tui/` | Exclusive raw input, editor, transcript viewport and observational progress. |
+| Durable sessions | `src/sessions/`, `src/state/durable.ts` | Segmented history, exclusive attachment epochs, restored holds and explicit admission. |
 | OpenCode adapter | `src/hosts/{opencode,opencode-runtime}.ts` | Retained plugin and imported-plan host integration. |
 | Workflow entry points | `src/hosts/{cli,controller}.ts`, `src/flow/`, `src/hooks/`, `src/tools/` | Import, approval, delegation, review, cancellation and status. |
 | Task execution | `src/orchestration/{queue,snapshot,worktree,git-boundary,shell,verifier,legacy-verifier}.ts` | Serial tasks, snapshots, verification and accepted changes. The default verifier remains `legacy-unowned`. |
@@ -103,21 +105,66 @@ state is corrupt, or execution ownership is unresolved; recover with the origina
 engine/model/session instead. Cancelling the picker or a failed selection leaves
 the current selection intact. Native host preflight must pass before a candidate
 replaces the current selection. These commands do not run model inference.
-The terminal still exits after the plan's approval/execution or rejection; model
-switching does not turn recovery into a different-model replay.
+The full-screen terminal returns to conversation after execution. Readline still
+exits after execution; rejection exits either frontend. Model switching never
+turns recovery into a different-model replay.
 
-The conversation remains a scrolling terminal, not a full-screen TUI. Progress
-is separated from single-line input by a compact engine/model header and command
-hints; engine/model pickers use the same input hierarchy. Chrome is clipped to
-the current terminal width at each prompt (the input marker stays intact even
-on narrower terminals). Cyan focus and dim hints are used only on color-capable
-terminals, never with `NO_COLOR` or `TERM=dumb`. Readline retains editing ownership;
-approval still uses the separate explicit human decision prompt.
+Bare `lca` selects a three-region TUI (transcript, status, composer) when all
+standard streams are TTYs, raw input is supported, `TERM` is set and not `dumb`,
+and the screen is at least 80x24. `LCA_TUI=0` selects readline. Unsupported
+terminals receive a plain fallback notice; missing stdin/stderr TTYs still
+refuse interactive operation. Noninteractive JSON/status commands are unchanged.
+`NO_COLOR` disables styling, not the TUI. Shrinking below 80x24 suspends display
+and input admission except cancellation; growing redraws the same draft.
+
+Enter submits; Shift+Enter (enhanced keyboard protocol) and Ctrl+J insert a
+newline. Legacy terminals that send the same bytes for Enter and Shift+Enter
+cannot distinguish them. Bracketed paste is one editing transaction and never
+submits. Tab/Enter on a focused completion inserts only. Up/Down navigate
+history at editor boundaries, and Ctrl+R searches submitted input. First Ctrl+C
+clears the draft; a second strictly less than 500ms later requests shutdown.
+Escape dismisses transient input UI or requests cancellation. While busy,
+Alt+Q on macOS / Alt+Enter on Linux queues text for later serial turns; queued
+text never answers choices or supplies execution approval.
+
+`/sessions` lists retained sessions; `/resume <sid>` opens one without dispatching
+work. `/new` opens a fresh session. Session switching is distinct from `/continue`,
+which offers Keep/Resume for the current session; noninteractive `lca resume
+--session ...` remains work-resume. Switching refuses live turns, queues,
+reviewers, claims and unsettled execution intents. A settled nonterminal owner
+is held before its attachment is released; another session cannot take its work.
+
+Accepted history is retained in private, numbered JSONL segments under the
+external session state directory, independently of the bounded newest-complete-pair
+model context. Search and paging include older segments; unsent drafts and queued
+text never become restored model input. Every restored attachment starts held,
+with no reusable process-local admission. Same-session owner rebinding requires
+exclusive attachment and an exact released-epoch receipt or proven dead process
+identity; rebinding itself does not resume work. `/status` never takes ownership.
+Host session deletion retains history, metadata and execution evidence, and
+releases only a matching attachment after termination and quiescence are proven.
+Corrupt history or uncertain ownership stays held rather than being truncated
+or reported as a complete replay.
+
+Inline Approve/Reject opens an exclusive cooked-terminal confirmation using the
+existing reader-issued, single-use receipt. Keep leaves the plan pending without
+execution. Raw input and buffered paste are detached before that reader runs.
+`/pause` requests a pause and `/cancel` (or Escape) requests a cancel. Both are requests: the status line says
+`pausing — termination unconfirmed` or `cancelling — termination unconfirmed` until the owner proves that no queue,
+review, stage, broker wait, claim or unsettled execution remains, and only then shows `paused (from <phase>/<stage>)`
+or `cancelled`. A cancel never exits the process while termination is unconfirmed. `/continue` on a paused workflow
+shows the residual and done tasks and asks Keep or Resume; Resume rechecks every precondition, commits one `resume` and
+runs only the residual tasks. `/continue` and `lca resume` refuse while a cancel is pending. Ctrl+Z requests a pause and
+suspends only after the pause is settled with no blockers; otherwise it refuses.
 
 Progress output separates model waiting, task lifecycle, tool activity, verification and
 review from model replies, approval and the final result. It reports observed
 activity rather than estimated completion percentages or OS-process health.
-Repeated progress is suppressed or bounded; tool arguments, raw tool output and
+Repeated calls to the same tool are individual correlated items, including
+denied and thrown calls; duplicate notifications for one call are not new calls.
+The TUI uses `/search <tool/status/task>` to filter this session's transcript,
+`/search` to clear the filter, `/expand <item number>` to show correlation and
+termination evidence, and PageUp/PageDown to scroll. Tool arguments, raw tool output and
 model response fragments are not progress messages. Model replies still appear
 after the turn completes rather than as a token stream.
 
@@ -167,6 +214,80 @@ Conversation turns and worker runs record execution intents before dispatch, reu
 the existing execution lease, and retain unresolved ownership after failures instead
 of replaying a completed or unknown process. The separate OpenCode imported-plan
 commands below retain their own admission requirements.
+
+### LCA workflows: truth labels and the four kinds
+
+LCA owns four workflow kinds on one authority (`workflow/workflow.json`) and never runs GJC. They are started only by
+a submitted `/skill:<name>` command that matches a **builtin protected name**; a project or home skill with the same
+name cannot supply instructions or redirect the kind (it is shown as refused), and model output or text that merely
+mentions `/skill:ralplan` starts nothing. **Invoking a name is not consent to execute anything.**
+
+| Kind | Status in this build | What it is |
+|---|---|---|
+| `plan` | available | `/plan` → local human `APPROVE` → verified workers (unchanged). |
+| `deep-interview` | available (P6a) | Code-owned interview: topology confirmation, one question per round, code-computed ambiguity, independent researcher/contrarian/simplifier (+architect) panels whose records must all verify, closure, restatement, then a verified `spec.md` with the final ambiguity and threshold. |
+| `ralplan` | available (P6a) | Planner → independent architect/critic review → revision up to five openers; consensus needs Architect `CLEAR`/`APPROVE` and Critic `OKAY` on the **same plan hash**, re-derived from disk, then `pending-approval.md` + `consensus.json`. |
+| `ultragoal` | available (P6b) | A direct start decomposes the objective and reviews one unit at a time. No implementation command runs until the current pending unit is approved with its exact `APPROVE-UNIT <workflow id> <subject sha>` receipt. |
+| `autoresearch` | available (P6b) | A direct start runs the research mission. No experiment command runs until the current pending experiment is approved with its exact `RUN <workflow id> <subject sha>` receipt. A verified verdict can be productified into a fresh deep-interview; no execution consent is inherited. |
+
+Usage in the terminal (`lca` / `lca chat`, TUI or readline):
+
+```text
+/skill:deep-interview <request>   start an interview (the TUI status line shows `deep-interview · <stage> · <phase>`)
+/skill:ralplan <request>          start consensus planning on its own
+/skill:ultragoal <objective>      start goal decomposition; units still need exact APPROVE-UNIT receipts
+/skill:autoresearch <mission>     start research; experiments still need exact RUN receipts
+/finish                           early-exit request; allowed from round 3 above the threshold, and closure + restatement still run
+```
+
+Workflow questions, the topology and restatement confirmations, stuck Retry/Keep, the round-cap choice and the
+consensus choice are **inline chooser lists** (a numbered list under readline). Between choices the next chat line is
+the answer to the open question (bounded to 10,000 characters). `/pause`, `/cancel`, `/status`, `/continue` and Escape
+behave as for a plan: Escape interrupts the running step and leaves the committed state, `/pause` and `/cancel` are
+requests labelled `pausing — termination unconfirmed` / `cancelling — termination unconfirmed` until the owner proves
+quiescence, and `/continue` offers Keep/Resume.
+
+**Preset (AC-W3).** A deep interview that reaches a *verified* `spec.md` connects to a ralplan in the same live
+session epoch with exactly one committed handoff: the ralplan carries `lineage` (interview id, revision, spec path and
+sha256) and its planner reads that exact spec. The connection is refused — and the verified spec is simply kept — when
+the session is held, a pause/cancel is pending, the session is not the owner, or the spec changed. Cancelling the
+ralplan keeps the interview's spec.
+
+**Known edges (stated, not hidden).** When the connection to ralplan is refused, the interview still completes with its
+verified `spec.md`, but the successor has no `lineage`: starting a ralplan by hand later is a fresh workflow seeded by
+nothing. A crash before a commit's index publish can leave readable files under `.lca/workflows/<sid>/<wid>/` (a spec,
+a round file, a plan iteration) that no committed revision references; they are orphans, never authority, and a status
+read or the next commit ignores them. Interview completion re-verifies every panel, closure, topology, restatement and
+early-exit record from disk at the commit, at the handoff, and on every display; a deleted or edited record refuses the
+commit or shows `incomplete`. Failed-attempt counts are committed, so Escape + `/continue` or a restart cannot reset the
+two-attempt limit.
+
+**Consensus is not consent.** Reaching consensus shows `Architect CLEAR/APPROVE + Critic OKAY · execution pending`.
+*Stop here* ends with `planning complete; not executed`. *Execute via ultragoal* needs the exact typed text
+`EXECUTE <workflow id> <plan sha>` and then only connects the plan to ultragoal; each implementation unit still needs
+its own exact `APPROVE-UNIT` receipt before anything runs. Direct `/skill:ultragoal` and `/skill:autoresearch` starts
+follow the same rule: invoking a name creates or resumes the workflow, never execution or experiment consent. Planning
+workflows run read-only roles only and create no ledger tasks.
+
+**Truth labels.** Every claim above is computed from committed state: panel completeness, consensus and the `spec.md`
+verification are recomputed from disk on every display and restore (a missing, edited or unverifiable artifact shows
+as `incomplete`, never as remembered-verified). Fake-model tests prove the logic; they are not live-model proof. The
+OpenCode host cannot start these workflows (it observes only), and the loopback-model PTY scenario `workflowDI`
+proves dispatch, engines, status line and choosers with scripted replies, not model quality.
+
+### Autoresearch and ultragoal: a verifier that timed out (operator recovery)
+
+Autoresearch experiment commands (and ultragoal verify commands) run through the framework verifier. With the default
+`legacy-unowned` verifier a command that exceeds `delegate.verify_timeout_ms` (120 s) or is killed is only known by its
+parent shell: descendants cannot be proven stopped, so the execution stays **fenced** and the run claim is retained.
+Autoresearch records the run (`runs/<n>.json`, `valid:false`, `invalid:"unsettled"`, plus its verification receipt), shows the
+reason in the stuck state and refuses Retry while the fence exists. A pending pause or cancel keeps reporting `pausing` /
+`cancelling` with the fence reason; it is never labelled `paused` or `cancelled` until termination is proven. A pause or
+cancel issued while a legacy command is running does not kill it: it runs to exit or to its deadline, and the run is then
+recorded as `interrupted` (autoresearch) or settles normally (queue). To recover: confirm no stray process from the
+experiment remains (`ps`, check the worktree for stray files), then cancel the workflow and start a new one; the fenced
+execution record and the recorded runs are retained as evidence. Use the Linux single-use verifier profile when
+descendant containment is required.
 
 ### Read-only status dashboard
 
@@ -232,7 +353,7 @@ read failures exit 3 and print only the source and code to stderr.
 
 The dashboard is display-only. A stale/blocked hint, when present, names an existing resume
 boundary but does not invoke it; status, watch, and detail never take over ownership or repair
-pointers. The owning chat `/status` keeps its existing dead-owner takeover behavior. An
+pointers. The owning chat `/status` is also read-only, including a dead recorded owner. An
 OpenCode TUI sidebar is not implemented: it remains gated on proving extension loading against
 the pinned runtime and a separate decision. No GJC dashboard parity is claimed.
 
@@ -252,6 +373,7 @@ original engine and exact model explicitly; LCA refuses missing or
 mismatched engine/model/session evidence and never falls back to another selection:
 
 ```sh
+lca pause --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID
 lca cancel --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID
 lca approve --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID \
   --workflow WORKFLOW_ID --sha PLAN_SHA
@@ -585,7 +707,7 @@ remain blockers; existing login must not be accessed or forwarded by LCA to bypa
 
 In the OpenCode chat workflow, approval comes from your typed `/approve` command (never from model text). Workflow state lives outside
 the repo in `<stateRoot>/workflow/` (`workflow.json`, `archive/`, `events.jsonl`, `plans/<id>.json`); a new
-`opencode` process continues the same session (owning-session takeover). `flow.enabled: false` in `.lca/lca.jsonc`
+`opencode` process restores the same session held, with epoch-validated reattachment and explicit owner Resume required before work. `flow.enabled: false` in `.lca/lca.jsonc`
 restores the legacy suffix-only plan mode. Results and numbers: `docs/lca-harness-m1-2026-10-01.md`.
 
 E2E: `scripts/lca-e2e.sh --flow plan --fixture plan3 [--entry keyword] [--seed-open-task]` (F01-F07) and
@@ -608,9 +730,9 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   text part in place (same proven path as the mode suffix, ARCH-08 — no `output.parts` replacement) to
   `renderStatus()` (≤ 25 lines: workflow id/phase/owner incl. "owner dead"/plan path/review/task counts, legacy
   mode, ledger counts, queue running, last 5 events) followed by `Reply only: ok`, starting with the marker
-  `[lca status]` so e2e can prove the model never produced it. Per §5.3: the owning session with a dead recorded
-  owner **takes over** first (owner rewritten, heartbeat started, `owner_takeover` emitted) and then renders like
-  the live-owner cell; any other session always renders read-only and never mutates workflow state.
+  `[lca status]` so e2e can prove the model never produced it. It never rewrites an owner, starts a
+  heartbeat or repairs workflow state. A dead owner remains held until proven same-session
+  reattachment and explicit Resume; another session may only observe it.
 - **Config wiring (ARCH-13):** the `config` hook registers `status` (template `"Reply only: ok"`) only when
   `config.flow.enabled` and hook id `command.status` are both on, and records exactly the command names it wrote
   (a user-defined `status`/`stop` command of the same name wins and is left alone — `hooks/command.ts` never acts

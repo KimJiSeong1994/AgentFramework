@@ -1,0 +1,599 @@
+{
+  "schemaVersion": 1,
+  "fixtureSet": "gjc-keys-8cd17c0",
+  "reference": {
+    "repository": "https://github.com/Yeachan-Heo/gajae-code",
+    "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1",
+    "frozenCheckout": "artifacts/lca-tui-P0-20261012T095502Z/gjc-reference",
+    "referenceBehavior": "Every expected result below is a source-derived oracle for the pinned GJC reference checkout, supported by the cited implementation and/or reference tests.",
+    "frameworkPortBehavior": "Not asserted by this file. These rows specify reference inputs and outcomes; they do not claim that the framework port already matches them.",
+    "sourceHashMethod": "SHA-256 over the exact bytes of files in the frozen GJC reference checkout. Third-party GitHub source/license hashes are Git blob SHA-1 values obtained from the pinned commit Contents API.",
+    "counterConvention": "Callbacks named in expected.counts are installed as counters unless a precondition explicitly states otherwise. App callbacks whose downstream effects are outside a fixture are instrumented no-op callbacks; stateful effects are modeled only where their source implementation is cited."
+  },
+  "licenseSources": [
+    {
+      "name": "Gajae Code",
+      "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1",
+      "path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/8cd17c0f636d3c541c0c2af184e01709b0e6f2c1/LICENSE",
+      "gitBlobSha1": "16eb3fc020a9dbefb165d2fb1d4597d2203c44bd",
+      "frozenCheckoutSha256": "a6625a82edf7b97e90ccd713c16fc6a3cee8cd8978752b638b34a488154cb0f1"
+    },
+    {
+      "name": "oh-my-pi",
+      "commit": "a85bd5228d9f0f619deade1db78fa49420a721e1",
+      "path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/earendil-works/pi/a85bd5228d9f0f619deade1db78fa49420a721e1/LICENSE",
+      "gitBlobSha1": "09a0c6c926a81c9d56dc3326cff1e5358c63c6d6"
+    },
+    {
+      "name": "OpenTUI",
+      "commit": "7da92b4088aebfe27b9f691c04163a48821e49fd",
+      "path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/anomalyco/opentui/7da92b4088aebfe27b9f691c04163a48821e49fd/LICENSE",
+      "gitBlobSha1": "3cd7ff6e31124b3077894c19747e4b4751a08968"
+    }
+  ],
+  "sourceHashes": [
+    { "path": "packages/tui/src/components/editor.ts", "sha256": "46a67bb0c854e5e25d35f9c4c2559cddc6342073051b731cb36e5288ee16475d" },
+    { "path": "packages/coding-agent/src/modes/components/custom-editor.ts", "sha256": "f168b4716cdf1cb37dc23422a709cd4bd40968e17d402dcf9eb876ae975cd28b" },
+    { "path": "packages/coding-agent/src/modes/controllers/input-controller.ts", "sha256": "592f65da072622b4dd98984b2bdb876e312bbcdf7a5cd1d88a2a1cbc2511ac10" },
+    { "path": "packages/coding-agent/src/modes/interactive-mode.ts", "sha256": "dc4e3bf49ec43aa8ac4676e4bfa9eb83e00b5d9760d3da2ccdbbef861b0d9df9" },
+    { "path": "packages/coding-agent/src/modes/utils/ui-helpers.ts", "sha256": "865c93518a35e3547869a9d0116b21a190a5c20c9625c43d9329b771250627b3" },
+    { "path": "packages/coding-agent/src/config/keybindings.ts", "sha256": "86b62f2257e3e918982fbeb2e376419192d8e44952a452207a0a93ff0dc944d3" },
+    { "path": "packages/tui/src/keybindings.ts", "sha256": "c488fc1830792aca0a5cc62f615a72123d69e614486e498e88d3f5539c11f920" },
+    { "path": "crates/pi-natives/src/keys.rs", "sha256": "0d0082bb7ca46ccf906befea856702eb2209b5506685c10d50087af42226ca83" },
+    { "path": "packages/tui/src/keys.ts", "sha256": "b274242c9c8aaeb0640bf2bb8e8a52c5271a25a2677f964175f0a44bb995cfed" },
+    { "path": "packages/tui/src/bracketed-paste.ts", "sha256": "f6a166584b7559cd6616d181d5e0f73f52d0adcc86a71c9660bd55d0972618d8" },
+    { "path": "packages/tui/src/utils.ts", "sha256": "17b7a1334359aef3e12921966d6c7b8a24cb148b5e4161567e36d8e41db1b671" },
+    { "path": "crates/pi-natives/src/text.rs", "sha256": "3ad7ceab0b088732212ec8bd168e8ccd83822d14ce8a6660bae900671c67c644" },
+    { "path": "packages/tui/test/editor.test.ts", "sha256": "d81114b0eb4e2d6cdc4c058d624e108d441da3de63f1648ba63e02a99f148e0a" },
+    { "path": "packages/tui/test/editor-autocomplete-actions.test.ts", "sha256": "e76fe8ae513f7abb658afc382de28284bcdae7cf4894e52b3e356c05bfeb6098" },
+    { "path": "packages/tui/test/visible-width-jamo.test.ts", "sha256": "0469215c1eab41a3e60e659360e80ffaad78c34e7ce76fe799a767bd34bd9ae6" },
+    { "path": "packages/tui/test/wrap-ansi.test.ts", "sha256": "23a8b271e042132e80738fcd2ece4b0664fe82df5aa492a6d7b05c2066ad48f9" },
+    { "path": "packages/tui/test/keys.test.ts", "sha256": "eaaee138b4063208677adbf51bb4a81151deea52757346bbb5dc31ac7eaa1127" },
+    { "path": "packages/tui/test/bracketed-paste.test.ts", "sha256": "42f0a6e0d409555e0cbb5122591800f1de1efdc3749c2c6b69f860c5aa257e46" },
+    { "path": "packages/coding-agent/test/input-controller-escape.test.ts", "sha256": "3d53142996ba92bfde88124dbea22ade346899353d0af0028479f4141cbb966b" },
+    { "path": "packages/coding-agent/test/input-controller-keybindings.test.ts", "sha256": "ec9b8084aea7c20dbad2c457b4763b9bf709d127fc3483eb2852b1e7610eb954" },
+    { "path": "packages/coding-agent/test/custom-editor-keybindings.test.ts", "sha256": "318fb1ad93c9f726174b4a3b570677fa8012425ff3056876380d7e81fc394836" },
+    { "path": "packages/coding-agent/src/modes/components/history-search.ts", "sha256": "a273aae28f8c7606e63178d5939c7880651ad31dc87ee23724963a96ad8a9550" },
+    { "path": "packages/coding-agent/src/session/history-storage.ts", "sha256": "e491910ae52ffd484f5c1f8f5b60d8e40457217a922b416f1d581a0f41b6d295" }
+  ],
+  "upstreamSourceHashes": [
+    {
+      "repository": "https://github.com/earendil-works/pi",
+      "commit": "a85bd5228d9f0f619deade1db78fa49420a721e1",
+      "path": "crates/pi-natives/src/keys.rs",
+      "url": "https://raw.githubusercontent.com/earendil-works/pi/a85bd5228d9f0f619deade1db78fa49420a721e1/crates/pi-natives/src/keys.rs",
+      "algorithm": "gitBlobSha1",
+      "value": "9481ed22c37da47782e673926c5552e2c8933a87"
+    },
+    {
+      "repository": "https://github.com/earendil-works/pi",
+      "commit": "a85bd5228d9f0f619deade1db78fa49420a721e1",
+      "path": "crates/pi-natives/src/text.rs",
+      "url": "https://raw.githubusercontent.com/earendil-works/pi/a85bd5228d9f0f619deade1db78fa49420a721e1/crates/pi-natives/src/text.rs",
+      "algorithm": "gitBlobSha1",
+      "value": "7fbbcce928a8b451c874de8a381660331e9fa3ae"
+    },
+    {
+      "repository": "https://github.com/anomalyco/opentui",
+      "commit": "7da92b4088aebfe27b9f691c04163a48821e49fd",
+      "path": "packages/core/src/lib/parse.keypress.ts",
+      "url": "https://raw.githubusercontent.com/anomalyco/opentui/7da92b4088aebfe27b9f691c04163a48821e49fd/packages/core/src/lib/parse.keypress.ts",
+      "algorithm": "gitBlobSha1",
+      "value": "a11f91cf3487fd63d27f547a4a116765d08cddd0"
+    }
+  ],
+  "knownReferenceAmbiguities": [
+    {
+      "id": "kitty-modifier-lock-bits-doc-body",
+      "source": "crates/pi-natives/src/keys.rs:168-171,422-429,1260-1318",
+      "detail": "ParsedKittyResult.modifier is documented as excluding lock bits, but parse_kitty_sequence returns p.modifier directly and parse_csi_u stores mod_value - 1 without clearing LOCK_MASK. Key matching/formatting separately mask LOCK_MASK (64|128), while CustomEditor consumes bit 64 for its Caps Lock callback. The fixtures preserve both raw parsed bits and the masked match result; do not silently normalize the parse result to match its comment."
+    },
+    {
+      "id": "ctrl-c-exact-500ms-boundary",
+      "source": "packages/coding-agent/src/modes/controllers/input-controller.ts:1281-1289",
+      "detail": "The pinned body uses the strict comparison now - lastSigintTime < 500. The cited upstream test demonstrates first-clear/second-shutdown but does not set an exact elapsed time; 499ms and 500ms outcomes below are derived from the literal comparison, not claimed as upstream test assertions."
+    }
+  ],
+  "fixtures": [
+    {
+      "id": "enter.active-slash-autocomplete-applies-and-submits",
+      "evidenceClass": "reference-test-and-source",
+      "sourceRefs": [
+        { "path": "packages/tui/src/components/editor.ts", "lines": ["1310-1337", "1420-1494", "2166-2180"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "46a67bb0c854e5e25d35f9c4c2559cddc6342073051b731cb36e5288ee16475d" },
+        { "path": "packages/tui/test/editor-autocomplete-actions.test.ts", "lines": ["667-714"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "e76fe8ae513f7abb658afc382de28284bcdae7cf4894e52b3e356c05bfeb6098" },
+        { "path": "packages/tui/src/keybindings.ts", "lines": ["110-125"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "c488fc1830792aca0a5cc62f615a72123d69e614486e498e88d3f5539c11f920" }
+      ],
+      "preconditions": {
+        "editorBuffer": { "utf8": "/mo", "bytesHex": "2f6d6f" },
+        "cursor": { "line": 0, "column": 3 },
+        "autocomplete": { "state": "regular", "prefix": "/mo", "selectedValue": "model", "selectionCurrent": true, "suggestionsReady": true },
+        "providerContract": "The selected item's applyCompletion produces '/model ' and cursor column 7; it has no onApplied callback."
+      },
+      "events": [{ "utf8": "\r", "bytesHex": "0d", "kind": "Enter" }],
+      "expected": {
+        "actions": ["apply selected slash completion", "submit trimmed completed value"],
+        "submittedText": "/model",
+        "editorBuffer": { "utf8": "", "bytesHex": "" },
+        "cursor": { "line": 0, "column": 0 },
+        "counts": { "inputEvents": 1, "applyCompletion": 1, "onApplied": 0, "onAutocompleteUpdate": 0, "onSubmit": 1, "onChange": 1, "onQueue": 0 }
+      }
+    },
+    {
+      "id": "enter.forced-file-completion-first-enter-does-not-submit",
+      "evidenceClass": "reference-test-and-source",
+      "sourceRefs": [
+        { "path": "packages/tui/src/components/editor.ts", "lines": ["1338-1368"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "46a67bb0c854e5e25d35f9c4c2559cddc6342073051b731cb36e5288ee16475d" },
+        { "path": "packages/tui/test/editor-autocomplete-actions.test.ts", "lines": ["145-168", "299-320"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "e76fe8ae513f7abb658afc382de28284bcdae7cf4894e52b3e356c05bfeb6098" }
+      ],
+      "preconditions": {
+        "editorBuffer": { "utf8": "please read `src/", "bytesHex": "706c65617365207265616420607372632f" },
+        "cursor": { "line": 0, "column": 17 },
+        "autocomplete": { "state": "force", "prefix": "src/", "selectedValue": "src/file.ts", "selectionCurrent": true, "suggestionsReady": true },
+        "providerContract": "The inline-code file-path autocomplete result is ready after slash entry. DelayedFileProvider.applyCompletion replaces only the src/ prefix, preserves preceding prompt text, and returns cursor column 24."
+      },
+      "events": [{ "utf8": "\r", "bytesHex": "0d", "kind": "Enter" }],
+      "expected": {
+        "actions": ["apply selected file completion", "return without submitting"],
+        "editorBuffer": { "utf8": "please read `src/file.ts", "bytesHex": "706c65617365207265616420607372632f66696c652e7473" },
+        "cursor": { "line": 0, "column": 24 },
+        "counts": { "inputEvents": 1, "applyCompletion": 1, "onAutocompleteUpdate": 1, "onChange": 1, "onSubmit": 0, "onApplied": 0, "onQueue": 0 }
+      }
+    },
+    {
+      "id": "newline.kitty-shift-enter",
+      "evidenceClass": "reference-source",
+      "sourceRefs": [
+        { "path": "packages/tui/src/components/editor.ts", "lines": ["1420-1478", "2138-2158"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "46a67bb0c854e5e25d35f9c4c2559cddc6342073051b731cb36e5288ee16475d" },
+        { "path": "packages/tui/src/keybindings.ts", "lines": ["110-125"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "c488fc1830792aca0a5cc62f615a72123d69e614486e498e88d3f5539c11f920" },
+        { "path": "crates/pi-natives/src/keys.rs", "lines": ["314-327", "1270-1384", "1441-1445"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "0d0082bb7ca46ccf906befea856702eb2209b5506685c10d50087af42226ca83" }
+      ],
+      "preconditions": { "editorBuffer": { "utf8": "ab", "bytesHex": "6162" }, "cursor": { "line": 0, "column": 1 }, "submitEnabled": true },
+      "events": [{ "utf8": "\u001b[13;2u", "bytesHex": "1b5b31333b3275", "kind": "Kitty Shift+Enter" }],
+      "expected": {
+        "actions": ["insert newline"],
+        "editorBuffer": { "utf8": "a\nb", "bytesHex": "610a62" },
+        "cursor": { "line": 1, "column": 0 },
+        "counts": { "inputEvents": 1, "onChange": 1, "onSubmit": 0, "onQueue": 0 }
+      }
+    },
+    {
+      "id": "newline.ctrl-j",
+      "evidenceClass": "reference-source",
+      "sourceRefs": [
+        { "path": "packages/tui/src/components/editor.ts", "lines": ["1420-1478", "2138-2158"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "46a67bb0c854e5e25d35f9c4c2559cddc6342073051b731cb36e5288ee16475d" },
+        { "path": "crates/pi-natives/src/keys.rs", "lines": ["314-327", "1270-1384", "1441-1445"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "0d0082bb7ca46ccf906befea856702eb2209b5506685c10d50087af42226ca83" },
+        { "path": "packages/tui/src/keys.ts", "lines": ["741-774"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "b274242c9c8aaeb0640bf2bb8e8a52c5271a25a2677f964175f0a44bb995cfed" }
+      ],
+      "preconditions": { "editorBuffer": { "utf8": "ab", "bytesHex": "6162" }, "cursor": { "line": 0, "column": 1 }, "submitEnabled": true },
+      "events": [{ "utf8": "\u001b[106;5u", "bytesHex": "1b5b3130363b3575", "kind": "Kitty Ctrl+J" }],
+      "expected": {
+        "actions": ["insert newline"],
+        "editorBuffer": { "utf8": "a\nb", "bytesHex": "610a62" },
+        "cursor": { "line": 1, "column": 0 },
+        "counts": { "inputEvents": 1, "onChange": 1, "onSubmit": 0, "onQueue": 0 }
+      }
+    },
+    {
+      "id": "history.up-down-cursor-anchors-and-bounds",
+      "evidenceClass": "reference-test-and-source",
+      "sourceRefs": [
+        { "path": "packages/tui/src/components/editor.ts", "lines": ["718-752", "1529-1552"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "46a67bb0c854e5e25d35f9c4c2559cddc6342073051b731cb36e5288ee16475d" },
+        { "path": "packages/tui/test/editor.test.ts", "lines": ["18-240"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "d81114b0eb4e2d6cdc4c058d624e108d441da3de63f1648ba63e02a99f148e0a" }
+      ],
+      "preconditions": { "editorBuffer": { "utf8": "", "bytesHex": "" }, "cursor": { "line": 0, "column": 0 }, "historyOldestToNewest": ["older", "newest"], "historyIndex": -1 },
+      "events": [
+        { "utf8": "\u001b[A", "bytesHex": "1b5b41", "kind": "Up" },
+        { "utf8": "\u001b[A", "bytesHex": "1b5b41", "kind": "Up" },
+        { "utf8": "\u001b[A", "bytesHex": "1b5b41", "kind": "Up" },
+        { "utf8": "\u001b[B", "bytesHex": "1b5b42", "kind": "Down" },
+        { "utf8": "\u001b[B", "bytesHex": "1b5b42", "kind": "Down" },
+        { "utf8": "\u001b[B", "bytesHex": "1b5b42", "kind": "Down" }
+      ],
+      "expected": {
+        "actionsAfterEachEvent": ["history.older", "history.older", "none-at-oldest-boundary", "history.newer", "history.return-to-current", "none-at-current-boundary"],
+        "statesAfterEachEvent": [
+          { "buffer": "newest", "cursor": { "line": 0, "column": 0 }, "historyIndex": 0 },
+          { "buffer": "older", "cursor": { "line": 0, "column": 0 }, "historyIndex": 1 },
+          { "buffer": "older", "cursor": { "line": 0, "column": 0 }, "historyIndex": 1 },
+          { "buffer": "newest", "cursor": { "line": 0, "column": 6 }, "historyIndex": 0 },
+          { "buffer": "", "cursor": { "line": 0, "column": 0 }, "historyIndex": -1 },
+          { "buffer": "", "cursor": { "line": 0, "column": 0 }, "historyIndex": -1 }
+        ],
+        "editorBuffer": { "utf8": "", "bytesHex": "" },
+        "cursor": { "line": 0, "column": 0 },
+        "counts": { "inputEvents": 6, "successfulHistoryTransitions": 4, "onChange": 4, "onSubmit": 0 }
+      }
+    },
+    {
+      "id": "history.ctrl-r-search-prefix-and-substring-results",
+      "evidenceClass": "reference-source",
+      "sourceRefs": [
+        { "path": "packages/coding-agent/src/modes/components/history-search.ts", "lines": ["74-166"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "a273aae28f8c7606e63178d5939c7880651ad31dc87ee23724963a96ad8a9550" },
+        { "path": "packages/coding-agent/src/session/history-storage.ts", "lines": ["204-237", "304-325"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "e491910ae52ffd484f5c1f8f5b60d8e40457217a922b416f1d581a0f41b6d295" }
+      ],
+      "preconditions": {
+        "editorBuffer": { "utf8": "keep draft", "bytesHex": "6b656570206472616674" },
+        "cursor": { "line": 0, "column": 4 },
+        "historyOldestToNewest": ["gilded comic", "commit logic", "gift company"]
+      },
+      "events": [
+        { "utf8": "\u0012", "bytesHex": "12", "kind": "Ctrl+R opens history search" },
+        { "utf8": "gi com", "bytesHex": "676920636f6d", "kind": "query by two tokens" },
+        { "utf8": "\u001b[A", "bytesHex": "1b5b41", "kind": "Up clamps at first result" },
+        { "utf8": "\u001b[B", "bytesHex": "1b5b42", "kind": "Down" },
+        { "utf8": "\u001b[B", "bytesHex": "1b5b42", "kind": "Down" },
+        { "utf8": "\u001b[B", "bytesHex": "1b5b42", "kind": "Down clamps at last result" },
+        { "utf8": "\r", "bytesHex": "0d", "kind": "Enter selects history without submitting" }
+      ],
+      "expected": {
+        "historySearchStatesAfterEachEvent": [
+          { "text": "", "cursor": { "line": 0, "column": 0 }, "searchState": { "query": "", "results": ["gift company", "commit logic", "gilded comic"], "selected": 0 } },
+          { "text": "gi com", "cursor": { "line": 0, "column": 6 }, "searchState": { "query": "gi com", "results": ["gift company", "gilded comic", "commit logic"], "selected": 0 } },
+          { "text": "gi com", "cursor": { "line": 0, "column": 6 }, "searchState": { "query": "gi com", "results": ["gift company", "gilded comic", "commit logic"], "selected": 0 } },
+          { "text": "gi com", "cursor": { "line": 0, "column": 6 }, "searchState": { "query": "gi com", "results": ["gift company", "gilded comic", "commit logic"], "selected": 1 } },
+          { "text": "gi com", "cursor": { "line": 0, "column": 6 }, "searchState": { "query": "gi com", "results": ["gift company", "gilded comic", "commit logic"], "selected": 2 } },
+          { "text": "gi com", "cursor": { "line": 0, "column": 6 }, "searchState": { "query": "gi com", "results": ["gift company", "gilded comic", "commit logic"], "selected": 2 } },
+          { "text": "commit logic", "cursor": { "line": 0, "column": 12 }, "searchState": null }
+        ]
+      }
+    },
+    {
+      "id": "queue.darwin-alt-q",
+      "evidenceClass": "reference-test-and-source",
+      "sourceRefs": [
+        { "path": "packages/coding-agent/src/config/keybindings.ts", "lines": ["70-80", "151-158"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "86b62f2257e3e918982fbeb2e376419192d8e44952a452207a0a93ff0dc944d3" },
+        { "path": "packages/coding-agent/src/modes/controllers/input-controller.ts", "lines": ["806-809"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "592f65da072622b4dd98984b2bdb876e312bbcdf7a5cd1d88a2a1cbc2511ac10" },
+        { "path": "packages/coding-agent/src/modes/components/custom-editor.ts", "lines": ["461-477"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "f168b4716cdf1cb37dc23422a709cd4bd40968e17d402dcf9eb876ae975cd28b" },
+        { "path": "packages/coding-agent/test/custom-editor-keybindings.test.ts", "lines": ["121-193"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "318fb1ad93c9f726174b4a3b570677fa8012425ff3056876380d7e81fc394836" }
+      ],
+      "preconditions": { "platform": "darwin", "editorBuffer": { "utf8": "draft", "bytesHex": "6472616674" }, "cursor": { "line": 0, "column": 5 }, "configuredQueueKeys": ["alt+q"], "onQueue": "instrumented callback; no downstream queue side effect" },
+      "events": [{ "utf8": "\u001bq", "bytesHex": "1b71", "kind": "Alt+Q" }],
+      "expected": {
+        "actions": ["app.message.queue"],
+        "editorBuffer": { "utf8": "draft", "bytesHex": "6472616674" },
+        "cursor": { "line": 0, "column": 5 },
+        "counts": { "inputEvents": 1, "onQueue": 1, "onSubmit": 0, "onChange": 0, "baseEditorInput": 0 }
+      }
+    },
+    {
+      "id": "queue.linux-alt-enter",
+      "evidenceClass": "reference-test-and-source",
+      "sourceRefs": [
+        { "path": "packages/coding-agent/src/config/keybindings.ts", "lines": ["70-80", "151-158"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "86b62f2257e3e918982fbeb2e376419192d8e44952a452207a0a93ff0dc944d3" },
+        { "path": "packages/coding-agent/src/modes/controllers/input-controller.ts", "lines": ["806-809"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "592f65da072622b4dd98984b2bdb876e312bbcdf7a5cd1d88a2a1cbc2511ac10" },
+        { "path": "packages/coding-agent/src/modes/components/custom-editor.ts", "lines": ["461-477"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "f168b4716cdf1cb37dc23422a709cd4bd40968e17d402dcf9eb876ae975cd28b" },
+        { "path": "packages/coding-agent/test/custom-editor-keybindings.test.ts", "lines": ["158-174"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "318fb1ad93c9f726174b4a3b570677fa8012425ff3056876380d7e81fc394836" }
+      ],
+      "preconditions": { "platform": "linux", "editorBuffer": { "utf8": "draft", "bytesHex": "6472616674" }, "cursor": { "line": 0, "column": 5 }, "configuredQueueKeys": ["alt+enter"], "onQueue": "instrumented callback; no downstream queue side effect" },
+      "events": [{ "utf8": "\u001b\r", "bytesHex": "1b0d", "kind": "Alt+Enter (legacy ESC-CR)" }],
+      "expected": {
+        "actions": ["app.message.queue"],
+        "editorBuffer": { "utf8": "draft", "bytesHex": "6472616674" },
+        "cursor": { "line": 0, "column": 5 },
+        "counts": { "inputEvents": 1, "onQueue": 1, "onSubmit": 0, "onChange": 0, "baseEditorInput": 0 }
+      }
+    },
+    {
+      "id": "newline.darwin-alt-enter-does-not-hit-queue-binding",
+      "evidenceClass": "reference-test-and-source",
+      "sourceRefs": [
+        { "path": "packages/coding-agent/src/config/keybindings.ts", "lines": ["70-80", "151-158"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "86b62f2257e3e918982fbeb2e376419192d8e44952a452207a0a93ff0dc944d3" },
+        { "path": "packages/coding-agent/src/modes/components/custom-editor.ts", "lines": ["461-477"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "f168b4716cdf1cb37dc23422a709cd4bd40968e17d402dcf9eb876ae975cd28b" },
+        { "path": "packages/tui/src/components/editor.ts", "lines": ["1420-1478", "2138-2158"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "46a67bb0c854e5e25d35f9c4c2559cddc6342073051b731cb36e5288ee16475d" },
+        { "path": "packages/coding-agent/test/custom-editor-keybindings.test.ts", "lines": ["175-205"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "318fb1ad93c9f726174b4a3b570677fa8012425ff3056876380d7e81fc394836" }
+      ],
+      "preconditions": { "platform": "darwin", "editorBuffer": { "utf8": "a", "bytesHex": "61" }, "cursor": { "line": 0, "column": 1 }, "configuredQueueKeys": ["alt+q"], "onQueue": "instrumented callback", "onAltEnter": "absent" },
+      "events": [{ "utf8": "\u001b\r", "bytesHex": "1b0d", "kind": "Alt+Enter (legacy ESC-CR)" }],
+      "expected": {
+        "actions": ["insert newline; do not queue"],
+        "editorBuffer": { "utf8": "a\n", "bytesHex": "610a" },
+        "cursor": { "line": 1, "column": 0 },
+        "counts": { "inputEvents": 1, "onQueue": 0, "onSubmit": 0, "onChange": 1, "baseEditorInput": 1 }
+      }
+    },
+    {
+      "id": "clear.ctrl-c-elapsed-499ms-shuts-down",
+      "evidenceClass": "source-derived-boundary",
+      "sourceRefs": [
+        { "path": "packages/coding-agent/src/modes/components/custom-editor.ts", "lines": ["430-450"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "f168b4716cdf1cb37dc23422a709cd4bd40968e17d402dcf9eb876ae975cd28b" },
+        { "path": "packages/coding-agent/src/modes/controllers/input-controller.ts", "lines": ["696-708", "1281-1289"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "592f65da072622b4dd98984b2bdb876e312bbcdf7a5cd1d88a2a1cbc2511ac10" },
+        { "path": "packages/coding-agent/src/config/keybindings.ts", "lines": ["95-101"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "86b62f2257e3e918982fbeb2e376419192d8e44952a452207a0a93ff0dc944d3" },
+        { "path": "packages/coding-agent/src/modes/interactive-mode.ts", "lines": ["2117-2119"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "dc4e3bf49ec43aa8ac4676e4bfa9eb83e00b5d9760d3da2ccdbbef861b0d9df9" },
+        { "path": "packages/coding-agent/test/input-controller-escape.test.ts", "lines": ["811-830"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "3d53142996ba92bfde88124dbea22ade346899353d0af0028479f4141cbb966b" }
+      ],
+      "preconditions": { "editorBuffer": { "utf8": "draft", "bytesHex": "6472616674" }, "cursor": { "line": 0, "column": 5 }, "configuredClearKeys": ["ctrl+c"], "lastSigintTime": 1000, "dateNow": 1499, "elapsedMilliseconds": 499, "actionEnabled": true },
+      "events": [{ "utf8": "\u0003", "bytesHex": "03", "kind": "Ctrl+C" }],
+      "expected": {
+        "actions": ["app.clear dispatch", "shutdown"],
+        "editorBuffer": { "utf8": "draft", "bytesHex": "6472616674" },
+        "cursor": { "line": 0, "column": 5 },
+        "lastSigintTime": 1000,
+        "counts": { "inputEvents": 1, "app.clear": 1, "handleCtrlC": 1, "shutdown": 1, "clearEditor": 0, "onChange": 0 }
+      }
+    },
+    {
+      "id": "clear.ctrl-c-elapsed-500ms-clears",
+      "evidenceClass": "source-derived-boundary",
+      "sourceRefs": [
+        { "path": "packages/coding-agent/src/modes/components/custom-editor.ts", "lines": ["430-450"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "f168b4716cdf1cb37dc23422a709cd4bd40968e17d402dcf9eb876ae975cd28b" },
+        { "path": "packages/coding-agent/src/modes/controllers/input-controller.ts", "lines": ["696-708", "1281-1289"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "592f65da072622b4dd98984b2bdb876e312bbcdf7a5cd1d88a2a1cbc2511ac10" },
+        { "path": "packages/coding-agent/src/config/keybindings.ts", "lines": ["95-101"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "86b62f2257e3e918982fbeb2e376419192d8e44952a452207a0a93ff0dc944d3" },
+        { "path": "packages/coding-agent/src/modes/interactive-mode.ts", "lines": ["2117-2119"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "dc4e3bf49ec43aa8ac4676e4bfa9eb83e00b5d9760d3da2ccdbbef861b0d9df9" },
+        { "path": "packages/coding-agent/src/modes/utils/ui-helpers.ts", "lines": ["981-989"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "865c93518a35e3547869a9d0116b21a190a5c20c9625c43d9329b771250627b3" },
+        { "path": "packages/coding-agent/test/input-controller-escape.test.ts", "lines": ["811-830"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "3d53142996ba92bfde88124dbea22ade346899353d0af0028479f4141cbb966b" }
+      ],
+      "preconditions": { "editorBuffer": { "utf8": "draft", "bytesHex": "6472616674" }, "cursor": { "line": 0, "column": 5 }, "configuredClearKeys": ["ctrl+c"], "lastSigintTime": 1000, "dateNow": 1500, "elapsedMilliseconds": 500, "actionEnabled": true, "isBackgrounded": false },
+      "events": [{ "utf8": "\u0003", "bytesHex": "03", "kind": "Ctrl+C" }],
+      "expected": {
+        "actions": ["app.clear dispatch", "clear editor; do not shut down"],
+        "editorBuffer": { "utf8": "", "bytesHex": "" },
+        "cursor": { "line": 0, "column": 0 },
+        "lastSigintTime": 1500,
+        "counts": { "inputEvents": 1, "app.clear": 1, "handleCtrlC": 1, "shutdown": 0, "clearEditor": 1, "onChange": 1 }
+      }
+    },
+    {
+      "id": "escape.priority-interrupt-wins-over-onEscape",
+      "evidenceClass": "reference-source",
+      "sourceRefs": [
+        { "path": "packages/coding-agent/src/modes/components/custom-editor.ts", "lines": ["80-91", "399-435"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "f168b4716cdf1cb37dc23422a709cd4bd40968e17d402dcf9eb876ae975cd28b" },
+        { "path": "packages/coding-agent/src/config/keybindings.ts", "lines": ["95-98"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "86b62f2257e3e918982fbeb2e376419192d8e44952a452207a0a93ff0dc944d3" },
+        { "path": "packages/coding-agent/test/input-controller-escape.test.ts", "lines": ["328-335", "443-482"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "3d53142996ba92bfde88124dbea22ade346899353d0af0028479f4141cbb966b" }
+      ],
+      "preconditions": { "editorBuffer": { "utf8": "draft", "bytesHex": "6472616674" }, "cursor": { "line": 0, "column": 5 }, "configuredInterruptKeys": ["escape"], "autocompleteVisible": false, "shouldBypassAutocompleteOnEscape": false, "onInterruptPriorityReturns": true, "onEscapeInstalled": true },
+      "events": [{ "utf8": "\u001b", "bytesHex": "1b", "kind": "Escape" }],
+      "expected": {
+        "actions": ["priority interrupt consumes Escape"],
+        "editorBuffer": { "utf8": "draft", "bytesHex": "6472616674" },
+        "cursor": { "line": 0, "column": 5 },
+        "counts": { "inputEvents": 1, "onInterruptPriority": 1, "onEscape": 0, "baseEditorInput": 0 }
+      }
+    },
+    {
+      "id": "escape.default-autocomplete-dismissal",
+      "evidenceClass": "reference-source",
+      "sourceRefs": [
+        { "path": "packages/coding-agent/src/modes/components/custom-editor.ts", "lines": ["399-435"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "f168b4716cdf1cb37dc23422a709cd4bd40968e17d402dcf9eb876ae975cd28b" },
+        { "path": "packages/coding-agent/src/config/keybindings.ts", "lines": ["95-98"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "86b62f2257e3e918982fbeb2e376419192d8e44952a452207a0a93ff0dc944d3" },
+        { "path": "packages/tui/src/components/editor.ts", "lines": ["1238-1255", "3133-3146"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "46a67bb0c854e5e25d35f9c4c2559cddc6342073051b731cb36e5288ee16475d" },
+        { "path": "packages/tui/src/keybindings.ts", "lines": ["134-138"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "c488fc1830792aca0a5cc62f615a72123d69e614486e498e88d3f5539c11f920" }
+      ],
+      "preconditions": { "editorBuffer": { "utf8": "@src", "bytesHex": "40737263" }, "cursor": { "line": 0, "column": 4 }, "configuredInterruptKeys": ["escape"], "autocompleteVisible": true, "shouldBypassAutocompleteOnEscape": false, "onInterruptPriorityInstalled": true, "onEscapeInstalled": true, "autocompleteCancelBinding": ["escape", "ctrl+c"] },
+      "events": [{ "utf8": "\u001b", "bytesHex": "1b", "kind": "Escape" }],
+      "expected": {
+        "actions": ["dismiss autocomplete; do not invoke global interrupt callbacks"],
+        "editorBuffer": { "utf8": "@src", "bytesHex": "40737263" },
+        "cursor": { "line": 0, "column": 4 },
+        "autocompleteVisible": false,
+        "counts": { "inputEvents": 1, "onAutocompleteCancel": 1, "onInterruptPriority": 0, "onEscape": 0, "onChange": 0 }
+      }
+    },
+    {
+      "id": "escape.bypass-false-priority-falls-through-to-onEscape",
+      "evidenceClass": "reference-source",
+      "sourceRefs": [
+        { "path": "packages/coding-agent/src/modes/components/custom-editor.ts", "lines": ["399-435"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "f168b4716cdf1cb37dc23422a709cd4bd40968e17d402dcf9eb876ae975cd28b" },
+        { "path": "packages/coding-agent/src/config/keybindings.ts", "lines": ["95-98"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "86b62f2257e3e918982fbeb2e376419192d8e44952a452207a0a93ff0dc944d3" }
+      ],
+      "preconditions": { "editorBuffer": { "utf8": "draft", "bytesHex": "6472616674" }, "cursor": { "line": 0, "column": 5 }, "configuredInterruptKeys": ["escape"], "autocompleteVisible": true, "shouldBypassAutocompleteOnEscape": true, "onInterruptPriorityReturns": false, "onEscapeInstalled": true },
+      "events": [{ "utf8": "\u001b", "bytesHex": "1b", "kind": "Escape" }],
+      "expected": {
+        "actions": ["call priority consumer, then onEscape"],
+        "editorBuffer": { "utf8": "draft", "bytesHex": "6472616674" },
+        "cursor": { "line": 0, "column": 5 },
+        "autocompleteVisible": true,
+        "counts": { "inputEvents": 1, "onInterruptPriority": 1, "onEscape": 1, "baseEditorInput": 0 }
+      }
+    },
+    {
+      "id": "kitty.press-repeat-release-backspace",
+      "evidenceClass": "reference-test-and-source",
+      "sourceRefs": [
+        { "path": "crates/pi-natives/src/keys.rs", "lines": ["80-98", "1199-1235", "1270-1375", "1441-1508"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "0d0082bb7ca46ccf906befea856702eb2209b5506685c10d50087af42226ca83" },
+        { "path": "packages/tui/src/keys.ts", "lines": ["548-595", "741-783"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "b274242c9c8aaeb0640bf2bb8e8a52c5271a25a2677f964175f0a44bb995cfed" },
+        { "path": "packages/tui/test/keys.test.ts", "lines": ["1-150"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "eaaee138b4063208677adbf51bb4a81151deea52757346bbb5dc31ac7eaa1127" },
+        { "path": "packages/tui/src/components/editor.ts", "lines": ["1450-1475", "2184-2210"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "46a67bb0c854e5e25d35f9c4c2559cddc6342073051b731cb36e5288ee16475d" }
+      ],
+      "preconditions": { "editorBuffer": { "utf8": "ab", "bytesHex": "6162" }, "cursor": { "line": 0, "column": 2 }, "kittyProtocolActive": true, "deleteCharBackwardBinding": "backspace" },
+      "events": [
+        { "utf8": "\u001b[127;1:1u", "bytesHex": "1b5b3132373b313a3175", "kind": "Kitty Backspace press", "eventType": 1 },
+        { "utf8": "\u001b[127;1:2u", "bytesHex": "1b5b3132373b313a3275", "kind": "Kitty Backspace repeat", "eventType": 2 },
+        { "utf8": "\u001b[127;1:3u", "bytesHex": "1b5b3132373b313a3375", "kind": "Kitty Backspace release", "eventType": 3 }
+      ],
+      "expected": {
+        "actionsAfterEachEvent": ["backspace", "backspace", "ignore release"],
+        "editorBuffer": { "utf8": "", "bytesHex": "" },
+        "cursor": { "line": 0, "column": 0 },
+        "counts": { "inputEvents": 3, "backspaceActions": 2, "matchedEvents": 2, "ignoredReleaseEvents": 1, "onChange": 2 }
+      }
+    },
+    {
+      "id": "kitty.shift-enter-caps-lock-mask-match-and-raw-parse",
+      "evidenceClass": "source-derived-with-documented-conflict",
+      "sourceRefs": [
+        { "path": "crates/pi-natives/src/keys.rs", "lines": ["22-23", "167-171", "314-327", "418-429", "1270-1384", "1441-1445"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "0d0082bb7ca46ccf906befea856702eb2209b5506685c10d50087af42226ca83" }
+      ],
+      "preconditions": { "kittyProtocolActive": true, "matchKeyId": "shift+enter", "modifierWireEncoding": "1-based Kitty modifier value" },
+      "events": [{ "utf8": "\u001b[13;66u", "bytesHex": "1b5b31333b363675", "kind": "Kitty Shift+Enter with Caps Lock bit", "wireModifierValue": 66 }],
+      "expected": {
+        "actions": ["parse raw modifier", "match after lock-bit masking"],
+        "parsed": { "codepoint": 13, "modifierRaw": 65, "eventType": null },
+        "effectiveMatchModifier": 1,
+        "keyMatches": true,
+        "buffer": null,
+        "cursor": null,
+        "counts": { "inputEvents": 1, "parseKittySequence": 1, "matchesKey": 1, "editorMutations": 0 }
+      },
+      "note": "The raw public parse field is intentionally kept distinct from effective modifier matching because the pinned API comment and implementation disagree; see knownReferenceAmbiguities."
+    },
+    {
+      "id": "kitty.caps-lock-callback-precedes-editor-key-routing",
+      "evidenceClass": "reference-source",
+      "sourceRefs": [
+        { "path": "packages/coding-agent/src/modes/components/custom-editor.ts", "lines": ["300-312"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "f168b4716cdf1cb37dc23422a709cd4bd40968e17d402dcf9eb876ae975cd28b" },
+        { "path": "crates/pi-natives/src/keys.rs", "lines": ["418-429", "1270-1375"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "0d0082bb7ca46ccf906befea856702eb2209b5506685c10d50087af42226ca83" }
+      ],
+      "preconditions": { "editorBuffer": { "utf8": "a", "bytesHex": "61" }, "cursor": { "line": 0, "column": 1 }, "onCapsLockInstalled": true, "submitEnabled": true },
+      "events": [{ "utf8": "\u001b[13;66u", "bytesHex": "1b5b31333b363675", "kind": "Kitty Shift+Enter with Caps Lock bit" }],
+      "expected": {
+        "actions": ["onCapsLock; consume before parent Editor"],
+        "editorBuffer": { "utf8": "a", "bytesHex": "61" },
+        "cursor": { "line": 0, "column": 1 },
+        "counts": { "inputEvents": 1, "onCapsLock": 1, "baseEditorInput": 0, "onChange": 0, "onSubmit": 0 }
+      }
+    },
+    {
+      "id": "kitty.shift-enter-num-lock-mask-still-inserts-newline",
+      "evidenceClass": "reference-source",
+      "sourceRefs": [
+        { "path": "packages/coding-agent/src/modes/components/custom-editor.ts", "lines": ["300-312", "474-477"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "f168b4716cdf1cb37dc23422a709cd4bd40968e17d402dcf9eb876ae975cd28b" },
+        { "path": "packages/tui/src/components/editor.ts", "lines": ["1420-1478", "2138-2158"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "46a67bb0c854e5e25d35f9c4c2559cddc6342073051b731cb36e5288ee16475d" },
+        { "path": "crates/pi-natives/src/keys.rs", "lines": ["22-23", "314-327", "1270-1384"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "0d0082bb7ca46ccf906befea856702eb2209b5506685c10d50087af42226ca83" }
+      ],
+      "preconditions": { "editorBuffer": { "utf8": "a", "bytesHex": "61" }, "cursor": { "line": 0, "column": 1 }, "onCapsLockInstalled": true, "submitEnabled": true },
+      "events": [{ "utf8": "\u001b[13;130u", "bytesHex": "1b5b31333b31333075", "kind": "Kitty Shift+Enter with Num Lock bit", "wireModifierValue": 130 }],
+      "expected": {
+        "actions": ["match Shift+Enter after lock mask", "insert newline"],
+        "parsedModifierRaw": 129,
+        "capsLockCallback": 0,
+        "editorBuffer": { "utf8": "a\n", "bytesHex": "610a" },
+        "cursor": { "line": 1, "column": 0 },
+        "counts": { "inputEvents": 1, "onCapsLock": 0, "onChange": 1, "onSubmit": 0 }
+      }
+    },
+    {
+      "id": "keys.raw-bs-del-platform-disambiguation-linux",
+      "evidenceClass": "reference-source",
+      "sourceRefs": [
+        { "path": "packages/tui/src/keys.ts", "lines": ["30-72", "741-774"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "b274242c9c8aaeb0640bf2bb8e8a52c5271a25a2677f964175f0a44bb995cfed" },
+        { "path": "crates/pi-natives/src/keys.rs", "lines": ["760-790", "1114-1152"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "0d0082bb7ca46ccf906befea856702eb2209b5506685c10d50087af42226ca83" }
+      ],
+      "preconditions": { "platform": "linux", "environment": { "WT_SESSION": "unset", "SSH_CONNECTION": "unset", "SSH_CLIENT": "unset", "SSH_TTY": "unset" }, "editorBuffer": { "utf8": "ab", "bytesHex": "6162" }, "cursor": { "line": 0, "column": 2 } },
+      "events": [
+        { "utf8": "\b", "bytesHex": "08", "kind": "raw BS" },
+        { "utf8": "\u007f", "bytesHex": "7f", "kind": "DEL" }
+      ],
+      "expected": {
+        "matchResultsPerEvent": [
+          { "backspace": true, "ctrl+backspace": false },
+          { "backspace": true, "ctrl+backspace": false }
+        ],
+        "actions": ["match raw BS as plain backspace", "match DEL as plain backspace"],
+        "editorBuffer": { "utf8": "ab", "bytesHex": "6162" },
+        "cursor": { "line": 0, "column": 2 },
+        "counts": { "inputEvents": 2, "backspaceMatches": 2, "ctrlBackspaceMatches": 2, "editorMutations": 0 }
+      }
+    },
+    {
+      "id": "keys.raw-bs-windows-terminal-is-ctrl-backspace",
+      "evidenceClass": "reference-source",
+      "sourceRefs": [
+        { "path": "packages/tui/src/keys.ts", "lines": ["30-72", "741-774"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "b274242c9c8aaeb0640bf2bb8e8a52c5271a25a2677f964175f0a44bb995cfed" },
+        { "path": "crates/pi-natives/src/keys.rs", "lines": ["760-790", "1114-1152"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "0d0082bb7ca46ccf906befea856702eb2209b5506685c10d50087af42226ca83" }
+      ],
+      "preconditions": { "platform": "win32", "environment": { "WT_SESSION": "set", "SSH_CONNECTION": "unset", "SSH_CLIENT": "unset", "SSH_TTY": "unset" }, "editorBuffer": { "utf8": "ab", "bytesHex": "6162" }, "cursor": { "line": 0, "column": 2 } },
+      "events": [{ "utf8": "\b", "bytesHex": "08", "kind": "raw BS" }],
+      "expected": {
+        "matchResults": { "backspace": false, "ctrl+backspace": true },
+        "actions": ["match raw BS as Ctrl+Backspace"],
+        "editorBuffer": { "utf8": "ab", "bytesHex": "6162" },
+        "cursor": { "line": 0, "column": 2 },
+        "counts": { "inputEvents": 1, "backspaceMatches": 1, "ctrlBackspaceMatches": 1, "editorMutations": 0 }
+      }
+    },
+    {
+      "id": "paste.split-start-and-end-markers",
+      "evidenceClass": "reference-test-and-source",
+      "sourceRefs": [
+        { "path": "packages/tui/src/bracketed-paste.ts", "lines": ["1-112"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "f6a166584b7559cd6616d181d5e0f73f52d0adcc86a71c9660bd55d0972618d8" },
+        { "path": "packages/coding-agent/src/modes/components/custom-editor.ts", "lines": ["149-231", "245-313"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "f168b4716cdf1cb37dc23422a709cd4bd40968e17d402dcf9eb876ae975cd28b" },
+        { "path": "packages/tui/src/components/editor.ts", "lines": ["1204-1221", "2058-2130"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "46a67bb0c854e5e25d35f9c4c2559cddc6342073051b731cb36e5288ee16475d" },
+        { "path": "packages/tui/test/bracketed-paste.test.ts", "lines": ["1-73"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "42f0a6e0d409555e0cbb5122591800f1de1efdc3749c2c6b69f860c5aa257e46" }
+      ],
+      "preconditions": { "editorBuffer": { "utf8": "ab", "bytesHex": "6162" }, "cursor": { "line": 0, "column": 1 }, "onPasteTextReturns": false, "pastePayload": { "utf8": "P", "bytesHex": "50" } },
+      "events": [
+        { "utf8": "\u001b[20", "bytesHex": "1b5b3230", "kind": "partial paste-start marker" },
+        { "utf8": "0~P\u001b[201", "bytesHex": "307e501b5b323031", "kind": "paste-start completion, payload, partial paste-end marker" },
+        { "utf8": "~", "bytesHex": "7e", "kind": "paste-end completion" }
+      ],
+      "expected": {
+        "actionsAfterEachEvent": ["buffer partial start marker", "retain payload and partial end marker", "dispatch paste then insert through base Editor"],
+        "editorBuffer": { "utf8": "aPb", "bytesHex": "615062" },
+        "cursor": { "line": 0, "column": 2 },
+        "counts": { "customEditorInputEvents": 3, "pasteFrameCompletions": 1, "onViewportFollowLive": 1, "onPasteText": 1, "baseEditorSyntheticInput": 1, "onChange": 1, "onSubmit": 0 }
+      }
+    },
+    {
+      "id": "width.hangul-compatibility-jamo",
+      "evidenceClass": "reference-test-and-source",
+      "sourceRefs": [
+        { "path": "crates/pi-natives/src/text.rs", "lines": ["630-750", "2028-2055"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "3ad7ceab0b088732212ec8bd168e8ccd83822d14ce8a6660bae900671c67c644" },
+        { "path": "packages/tui/src/utils.ts", "lines": ["317-366"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "17b7a1334359aef3e12921966d6c7b8a24cb148b5e4161567e36d8e41db1b671" },
+        { "path": "packages/tui/test/visible-width-jamo.test.ts", "lines": ["23-80"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "0469215c1eab41a3e60e659360e80ffaad78c34e7ce76fe799a767bd34bd9ae6" }
+      ],
+      "preconditions": { "measurement": "visibleWidth", "buffer": null, "cursor": null },
+      "events": [{ "utf8": "ㅁ", "bytesHex": "e38581", "kind": "measure compatibility jamo U+3141" }],
+      "expected": { "actions": ["measure grapheme width"], "visibleWidth": 2, "buffer": null, "cursor": null, "counts": { "measureCalls": 1, "wrapCalls": 0, "editorEvents": 0 } }
+    },
+    {
+      "id": "width.hangul-conjoining-jamo-nfd",
+      "evidenceClass": "reference-test-and-source",
+      "sourceRefs": [
+        { "path": "crates/pi-natives/src/text.rs", "lines": ["630-750"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "3ad7ceab0b088732212ec8bd168e8ccd83822d14ce8a6660bae900671c67c644" },
+        { "path": "packages/tui/src/utils.ts", "lines": ["297-300", "340-342"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "17b7a1334359aef3e12921966d6c7b8a24cb148b5e4161567e36d8e41db1b671" },
+        { "path": "packages/tui/test/visible-width-jamo.test.ts", "lines": ["63-71"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "0469215c1eab41a3e60e659360e80ffaad78c34e7ce76fe799a767bd34bd9ae6" }
+      ],
+      "preconditions": { "measurement": "visibleWidth", "buffer": null, "cursor": null },
+      "events": [{ "utf8": "한", "bytesHex": "e18492e185a1e186ab", "kind": "measure NFD Hangul sequence" }],
+      "expected": { "actions": ["normalize NFD input to NFC in the TUI width wrapper, then call the native width helper"], "visibleWidth": 2, "buffer": null, "cursor": null, "counts": { "measureCalls": 1, "wrapCalls": 0, "editorEvents": 0 } }
+    },
+    {
+      "id": "width.cjk-wide-characters",
+      "evidenceClass": "reference-test-and-source",
+      "sourceRefs": [
+        { "path": "crates/pi-natives/src/text.rs", "lines": ["630-750"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "3ad7ceab0b088732212ec8bd168e8ccd83822d14ce8a6660bae900671c67c644" },
+        { "path": "packages/tui/test/visible-width-jamo.test.ts", "lines": ["95-108"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "0469215c1eab41a3e60e659360e80ffaad78c34e7ce76fe799a767bd34bd9ae6" }
+      ],
+      "preconditions": { "measurement": "visibleWidth", "buffer": null, "cursor": null },
+      "events": [{ "utf8": "漢字", "bytesHex": "e6bca2e5ad97", "kind": "measure two CJK wide characters" }],
+      "expected": { "actions": ["measure grapheme widths"], "visibleWidth": 4, "buffer": null, "cursor": null, "counts": { "measureCalls": 1, "wrapCalls": 0, "editorEvents": 0 } }
+    },
+    {
+      "id": "width.zwj-family-emoji",
+      "evidenceClass": "reference-source-test",
+      "sourceRefs": [
+        { "path": "crates/pi-natives/src/text.rs", "lines": ["2028-2037", "2088-2098"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "3ad7ceab0b088732212ec8bd168e8ccd83822d14ce8a6660bae900671c67c644" }
+      ],
+      "preconditions": { "measurement": "visibleWidth", "buffer": null, "cursor": null },
+      "events": [{ "utf8": "👨‍👩‍👧‍👦", "bytesHex": "f09f91a8e2808df09f91a9e2808df09f91a7e2808df09f91a6", "kind": "measure family ZWJ grapheme" }],
+      "expected": { "actions": ["measure one ZWJ grapheme"], "visibleWidth": 2, "buffer": null, "cursor": null, "counts": { "measureCalls": 1, "wrapCalls": 0, "editorEvents": 0 } }
+    },
+    {
+      "id": "width.combining-hangul-tone-mark-wrap-boundary",
+      "evidenceClass": "reference-test-and-source",
+      "sourceRefs": [
+        { "path": "crates/pi-natives/src/text.rs", "lines": ["693-750"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "3ad7ceab0b088732212ec8bd168e8ccd83822d14ce8a6660bae900671c67c644" },
+        { "path": "packages/tui/src/utils.ts", "lines": ["131-135", "317-366"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "17b7a1334359aef3e12921966d6c7b8a24cb148b5e4161567e36d8e41db1b671" },
+        { "path": "packages/tui/test/visible-width-jamo.test.ts", "lines": ["104-125"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "0469215c1eab41a3e60e659360e80ffaad78c34e7ce76fe799a767bd34bd9ae6" }
+      ],
+      "preconditions": { "operation": "wrapTextWithAnsi", "widthCells": 2, "buffer": null, "cursor": null },
+      "events": [{ "utf8": "가〮X", "bytesHex": "eab080e380ae58", "kind": "wrap combining tone-marked syllable and ASCII" }],
+      "expected": { "actions": ["wrap without splitting the grapheme at the cell boundary"], "visibleWidthOfFirstGrapheme": 2, "wrappedLines": ["가〮", "X"], "lineWidths": [2, 1], "buffer": null, "cursor": null, "counts": { "wrapCalls": 1, "measureCalls": 0, "editorEvents": 0 } }
+    },
+    {
+      "id": "width.ansi-color-preserved-across-wrap",
+      "evidenceClass": "reference-source-test",
+      "sourceRefs": [
+        { "path": "crates/pi-natives/src/text.rs", "lines": ["1323-1379", "2168-2179"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "3ad7ceab0b088732212ec8bd168e8ccd83822d14ce8a6660bae900671c67c644" },
+        { "path": "packages/tui/src/utils.ts", "lines": ["131-135"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "17b7a1334359aef3e12921966d6c7b8a24cb148b5e4161567e36d8e41db1b671" },
+        { "path": "packages/tui/test/wrap-ansi.test.ts", "lines": ["1-128"], "commit": "8cd17c0f636d3c541c0c2af184e01709b0e6f2c1", "sha256": "23a8b271e042132e80738fcd2ece4b0664fe82df5aa492a6d7b05c2066ad48f9" }
+      ],
+      "preconditions": { "operation": "wrapTextWithAnsi", "widthCells": 5, "buffer": null, "cursor": null },
+      "events": [{ "utf8": "\u001b[38;2;156;163;176mhello world\u001b[0m", "bytesHex": "1b5b33383b323b3135363b3136333b3137366d68656c6c6f20776f726c641b5b306d", "kind": "wrap ANSI-colored text" }],
+      "expected": { "actions": ["wrap and restore active SGR state on continuation"], "lineCount": 2, "firstAndSecondLineStartWith": "\u001b[38;2;156;163;176m", "secondLineContains": "world", "buffer": null, "cursor": null, "counts": { "wrapCalls": 1, "measureCalls": 0, "editorEvents": 0 } }
+    }
+  ]
+}

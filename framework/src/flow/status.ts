@@ -6,8 +6,32 @@ import { join } from "node:path"
 import { claimPidAlive, createExecutionRunStore, settled, ExecutionRunCorruptError, type ExecutionRecord } from "../hosts/run-state.ts"
 import { counts, emptyLedger, ledgerPath, openTasks, parseLedger, tasksForWorkflow, type Ledger, type LedgerTask } from "../state/ledger.ts"
 import { EMPTY_MODE, modeStatePath, parseModeState, readBoundedJson, readDirectoryBounded, sessionDir, stateRoot, type ModeState } from "../state/store.ts"
-import { INSTANCE_ID, ownerLive as workflowOwnerLive, pidAlive } from "./owner.ts"
-import { flowDir, parseWorkflow, readEventsTail, workflowPath, type Workflow } from "./state.ts"
+import { epochReleased, heartbeatOf, INSTANCE_ID, ownerLive as workflowOwnerLive, pidAlive } from "./owner.ts"
+import { isCancelPending, stopDisplay, type Phase, type StopDisplay, type WorkflowEnvelope } from "../workflows/types.ts"
+import { describeArtifactsBudgeted } from "../workflows/artifacts.ts"
+import { readCommitted, committedEventBound } from "../workflows/commit.ts"
+import { parseEnvelope } from "../workflows/registry.ts"
+import { ralplanReview } from "../workflows/ralplan-evidence.ts"
+import { deepInterviewView, verifiedSpec } from "../workflows/deep-interview-driver.ts"
+import { flowDir, readEventsTail, readHeartbeat } from "./state.ts"
+
+type Workflow = WorkflowEnvelope
+
+/** Truth-first deep-interview line: round, final ambiguity, threshold and source, panel record states and the spec, all recomputed from disk. */
+function interviewReview(worktree: string, wf: WorkflowEnvelope): { plan?: string; review: string } {
+  try {
+    const view = deepInterviewView(wf as never, worktree)
+    const panel = view.panel.length ? `; panel ${view.panel.map(item => `${item.persona} ${item.state}`).join(", ")}` : ""
+    const spec = wf.phase === "done" ? verifiedSpec(worktree, wf as never) : undefined
+    const specText = spec ? (spec.ok ? `; spec verified (${spec.path})` : `; spec incomplete: ${spec.reason}`) : ""
+    const ambiguity = view.ambiguity === undefined ? "ambiguity not scored" : `ambiguity ${Number(view.ambiguity.toFixed(4))} (${view.band})`
+    const early = view.earlyExit ? `; early exit: ${view.earlyExit}` : ""
+    return {
+      ...(spec?.ok ? { plan: spec.path } : {}),
+      review: `round ${view.round}; ${ambiguity}; threshold ${view.threshold} (${view.thresholdSource})${panel}${early}${specText}; records ${view.evidenceOk ? "verified" : view.evidence}`,
+    }
+  } catch { return { review: "interview state unreadable" } }
+}
 
 export const STATUS_MARKER = "[lca status]"
 
@@ -16,7 +40,7 @@ export function flowOn(config: LcaConfig): boolean {
 }
 
 export type StatusSource = "workflow" | "ledger" | "mode" | "execution" | "events" | "detail"
-export type StatusErrorCode = "invalid_state" | "unreadable" | "oversize" | "takeover_failed"
+export type StatusErrorCode = "invalid_state" | "unreadable" | "oversize"
 export class StatusReadError extends Error {
   constructor(readonly source: StatusSource, readonly code: StatusErrorCode, readonly bytesRead = 0) {
     super(`status unavailable: ${source} ${code}`)
@@ -103,7 +127,16 @@ export type StatusJson = {
     id: string; phase: string; stuckCause?: string; sessionID: string; ownerLive: boolean
     engine?: string; planSha?: string
     plan?: string; review?: string; tasks?: { total: number; done: number; open: number; failed: number }
-    counters: Workflow["counters"]; pendingCancel: boolean
+    /** Plan only; planning kinds have no counters. */
+    counters?: { code_invalid: number; review_iterations: number; user_rejections: number; nudges: number }; pendingCancel: boolean
+    /** Truth-first stop presentation: paused only after the settled pause; pending stops stay "unconfirmed". */
+    stop: StopDisplay; pausedFrom?: { phase: string; stage: string }
+    /** Generic view (R7): committed envelope facts, not plan authority. */
+    kind: string; stage: string; revision: number; stopIntent: "pause" | "cancel" | null
+    /** Recomputed from disk on every read; never a stored verified flag. */
+    artifacts: Array<{ key: string; path: string; state: "verified" | "present-unhashed" | "incomplete" | "unverified" }>
+    /** Refs beyond the status read budget; they were not read at all. */
+    artifactsOmitted?: number
   }
   session: { id: string; source: "arg" | "workflow" | "none"; mode: string; modeActive: boolean; queueRunning: boolean; queue: QueueProjection; ledger: Record<string, number> }
   execution: { generation: number; ownerSessionID?: string; unresolved: number; cancelledAcknowledged: number; usage: "unknown"; verification?: string; claim?: { ownerSessionID: string; sameSession: boolean; pid: number; pidAlive: boolean; sameProcess: boolean } }
@@ -112,11 +145,11 @@ export type StatusJson = {
   detail?: { tasks: Array<Record<string, unknown>>; sessions: Array<Record<string, unknown>>; history: Array<Record<string, unknown>>; events: Array<Record<string, unknown>>; truncated: Record<string, number>; truncatedTasks?: number; sessionsScanTruncated?: boolean; archivesScanTruncated?: boolean; budgetExhausted?: boolean }
 }
 
-export type StatusLiveness = { instance?: string; ownerPidAlive?: (pid: number) => boolean; claimPidAlive?: (pid: number) => boolean; sessionExists?: (sessionID: string) => boolean }
+export type StatusLiveness = { instance?: string; ownerPidAlive?: (pid: number) => boolean; claimPidAlive?: (pid: number) => boolean; epochReleased?: (wf: Workflow) => boolean }
 export type StatusOptions = { queueRunning?: boolean; sessionSource?: "arg" | "workflow" | "none"; detail?: boolean; now?: number; liveness?: StatusLiveness }
 
 const STATUS_INTERNAL = Symbol("status-internal")
-type StatusInternal = { worktree: string; queue: QueueInput; workflow?: Workflow; liveness: StatusLiveness; bytesRead: number }
+type StatusInternal = { worktree: string; queue: QueueInput; workflow?: Workflow; heartbeatAt?: number; liveness: StatusLiveness; bytesRead: number }
 
 export function statusBytesRead(status: StatusJson): number {
   return (status as StatusJson & { [STATUS_INTERNAL]?: StatusInternal })[STATUS_INTERNAL]?.bytesRead ?? 0
@@ -182,12 +215,17 @@ function readValue(path: string, source: StatusSource, maxBytes: number): { valu
 }
 
 function workflowAt(worktree: string): { workflow: Workflow | null; bytesRead: number } {
-  const { value, bytesRead } = readValue(workflowPath(worktree), "workflow", STATUS_LIMITS.workflow)
-  if (value === undefined) return { workflow: null, bytesRead }
-  try { return { workflow: parseWorkflow(value), bytesRead } }
-  catch (error) {
-    if (invalidStateError(error, "invalid workflow state")) throw new StatusReadError("workflow", "invalid_state", bytesRead)
-    throw error
+  const committed = readCommitted(worktree, { index: STATUS_LIMITS.workflow, snapshot: STATUS_LIMITS.workflow })
+  switch (committed.state) {
+    case "none": return { workflow: null, bytesRead: 0 }
+    // A terminal pre-v2 record is retained history, not a current workflow. A non-terminal one is unreadable here
+    // by design (read-only, no conversion): status reports invalid_state and never guesses at its authority.
+    case "legacy":
+      if (committed.terminal) return { workflow: null, bytesRead: committed.bytesRead }
+      throw new StatusReadError("workflow", "invalid_state", committed.bytesRead)
+    case "corrupt": throw new StatusReadError("workflow", committed.code === "invalid" ? "invalid_state" : committed.code, committed.bytesRead)
+    case "ok":
+      return { workflow: committed.wf, bytesRead: committed.bytesRead }
   }
 }
 
@@ -303,7 +341,7 @@ function detailView(worktree: string, sessionID: string, ownerSessionID: string 
       const { value, bytesRead } = readBoundedJson(path, Math.min(STATUS_LIMITS.archive, remaining))
       extraBytes += bytesRead
       if (value === undefined) continue
-      const archived = parseWorkflow(value)
+      const archived = parseEnvelope(value)
       history.push({ id: safeDisplay(archived.id, 256), phase: archived.phase, createdAt: archived.createdAt, updatedAt: archived.updatedAt })
     } catch (error) {
       extraBytes += errorBytesRead(error)
@@ -365,32 +403,45 @@ export function statusJson(deps: FlowRuntime, sessionID?: string, options: Statu
   bytesRead += runRead.bytesRead
   const unresolved = run.executions.filter(execution => !settled(execution))
   let workflow: StatusJson["workflow"] = null
+  let heartbeatAt: number | undefined
   let workflowLedger = ledgerRead.ledger
   if (wf) {
     if (wf.sessionID !== id) {
       const ownerRead = accumulate(() => statusLedger(deps.worktree, wf.sessionID))
       workflowLedger = ownerRead.ledger
     }
+    heartbeatAt = readHeartbeat(deps.worktree, wf)
     const live = workflowOwnerLive(wf, {
       now, instance: options.liveness?.instance ?? INSTANCE_ID, pidAlive: options.liveness?.ownerPidAlive ?? pidAlive,
-      sessionExists: options.liveness?.sessionExists ?? (ownerSessionID => existsSync(sessionDir(deps.worktree, ownerSessionID))),
+      epochReleased: options.liveness?.epochReleased ?? epochReleased(deps.worktree),
+      heartbeatAt: () => heartbeatAt,
     })
-    const tagged = tasksForWorkflow(workflowLedger, wf.id)
+    const plan = wf.kind === "plan" ? wf : undefined
+    const tagged = plan ? tasksForWorkflow(workflowLedger, wf.id) : []
     const engine = typeof wf.engine === "string" && wf.engine.length > 0 && wf.engine.length <= 512 ? safeDisplay(wf.engine, 512) : undefined
-    const planSha = typeof wf.planRef?.jsonSha === "string" && /^[a-f0-9]{64}$/.test(wf.planRef.jsonSha) ? wf.planRef.jsonSha : undefined
+    const planSha = typeof plan?.planRef?.jsonSha === "string" && /^[a-f0-9]{64}$/.test(plan.planRef.jsonSha) ? plan.planRef.jsonSha : undefined
+    const budgeted = describeArtifactsBudgeted(deps.worktree, plan ?? wf)
+    const ralplanView = wf.kind === "ralplan" ? ralplanReview(deps.worktree, wf) : undefined
+    const interviewView = wf.kind === "deep-interview" ? interviewReview(deps.worktree, wf) : undefined
     workflow = {
-      id: safeDisplay(wf.id, 256), phase: wf.phase, ...(wf.stuckCause ? { stuckCause: wf.stuckCause } : {}), sessionID: safeDisplay(wf.sessionID, 256), ownerLive: live,
+      id: safeDisplay(wf.id, 256), phase: wf.phase, ...(plan?.stuckCause ? { stuckCause: plan.stuckCause } : {}), sessionID: safeDisplay(wf.sessionID, 256), ownerLive: live,
       ...(engine ? { engine } : {}), ...(planSha ? { planSha } : {}),
-      ...(wf.planRef ? { plan: safeDisplay(wf.planRef.mdPath, 1024) } : {}), ...(wf.review ? { review: safeDisplay(`${wf.review.verdict}${wf.review.note ? ` (${wf.review.note})` : ""}`, 512) } : {}),
+      ...(plan?.planRef ? { plan: safeDisplay(plan.planRef.mdPath, 1024) } : {}), ...(plan?.review ? { review: safeDisplay(`${plan.review.verdict}${plan.review.note ? ` (${plan.review.note})` : ""}`, 512) } : {}),
+      ...(interviewView ? { ...(interviewView.plan ? { plan: safeDisplay(interviewView.plan, 1024) } : {}), review: safeDisplay(interviewView.review, 512) } : {}),
+      ...(ralplanView ? { ...(ralplanView.plan ? { plan: safeDisplay(ralplanView.plan, 1024) } : {}), review: safeDisplay(ralplanView.review, 512) } : {}),
       ...(tagged.length ? { tasks: {
         total: tagged.length, done: tagged.filter(task => task.status === "done").length,
         open: tagged.filter(task => task.status === "pending" || task.status === "running").length,
         failed: tagged.filter(task => task.status === "failed" || task.status === "cancelled").length,
       } } : {}),
-      counters: {
-        code_invalid: wf.counters.code_invalid, review_iterations: wf.counters.review_iterations,
-        user_rejections: wf.counters.user_rejections, nudges: wf.counters.nudges,
-      }, pendingCancel: !!wf.pendingCancel,
+      ...(plan ? { counters: {
+        code_invalid: plan.counters.code_invalid, review_iterations: plan.counters.review_iterations,
+        user_rejections: plan.counters.user_rejections, nudges: plan.counters.nudges,
+      } } : {}), pendingCancel: isCancelPending(wf), stop: stopDisplay(wf),
+      ...(wf.pausedFrom ? { pausedFrom: { phase: safeDisplay(wf.pausedFrom.phase, 32), stage: safeDisplay(wf.pausedFrom.stage, 64) } } : {}),
+      kind: safeDisplay(wf.kind, 64), stage: safeDisplay(wf.stage, 64), revision: wf.lastSeq, stopIntent: wf.stopIntent?.kind ?? null,
+      artifacts: budgeted.items.map(item => ({ key: safeDisplay(item.key, 128), path: safeDisplay(item.path, 1024), state: item.state })),
+      ...(budgeted.omitted > 0 ? { artifactsOmitted: budgeted.omitted } : {}),
     }
   }
   const selectedTask = ledgerRead.ledger.running
@@ -404,7 +455,7 @@ export function statusJson(deps: FlowRuntime, sessionID?: string, options: Statu
   }
   const queue = classifyQueue(queueInput)
   const eventsRead = wf ? accumulate(() => {
-    try { return readEventsTail(deps.worktree, { wfId: wf.id, limit: 20, maxBytes: STATUS_LIMITS.events }) }
+    try { return readEventsTail(deps.worktree, { wfId: wf.id, limit: 20, maxBytes: STATUS_LIMITS.events, bound: committedEventBound(deps.worktree) }) }
     catch (error) {
       if (nativeFsError(error) || unreadableSentinel(error)) throw new StatusReadError("events", "unreadable", errorBytesRead(error))
       throw error
@@ -430,7 +481,7 @@ export function statusJson(deps: FlowRuntime, sessionID?: string, options: Statu
       ...(passedLegacy ? { verification: "passed (legacy-unowned, descendants unproven)" } : {}),
     },
     freshness: {
-      ...(wf ? { workflowUpdatedAt: wf.updatedAt, ownerHeartbeatAgeMs: Math.max(0, now - wf.owner.heartbeatAt) } : {}),
+      ...(wf ? { workflowUpdatedAt: wf.updatedAt, ownerHeartbeatAgeMs: Math.max(0, now - heartbeatOf(wf, { heartbeatAt: () => heartbeatAt })) } : {}),
       ...(resolvedSession && ledgerRead.bytesRead > 0 ? { ledgerUpdatedAt: ledgerRead.ledger.updatedAt } : {}), staleAfterMs: 90_000, eventsWindowTruncated: eventsRead.windowTruncated,
     },
     events: eventsRead.events.slice(-5).map(event => ({ seq: event.seq, type: safeDisplay(event.type, 80), ...(event.to ? { to: safeDisplay(event.to, 80) } : {}) })),
@@ -439,7 +490,7 @@ export function statusJson(deps: FlowRuntime, sessionID?: string, options: Statu
     const detail = accumulate(() => detailView(deps.worktree, id, wf?.sessionID, ledgerRead.ledger, eventsRead.events))
     status.detail = detail.detail
   }
-  Object.defineProperty(status, STATUS_INTERNAL, { value: { worktree: deps.worktree, queue: queueInput, liveness: options.liveness ?? {}, bytesRead, ...(wf ? { workflow: wf } : {}) } satisfies StatusInternal })
+  Object.defineProperty(status, STATUS_INTERNAL, { value: { worktree: deps.worktree, queue: queueInput, liveness: options.liveness ?? {}, bytesRead, ...(wf ? { workflow: wf } : {}), ...(heartbeatAt !== undefined ? { heartbeatAt } : {}) } satisfies StatusInternal })
   try { capStatusDetail(status) }
   catch (error) {
     if (error instanceof StatusReadError) throw new StatusReadError(error.source, error.code, bytesRead + error.bytesRead)
@@ -469,9 +520,10 @@ export function refreshStatusLiveness(status: StatusJson, now: number, livenessO
     status.workflow!.ownerLive = workflowOwnerLive(internal.workflow, {
       now, instance: liveness.instance ?? INSTANCE_ID,
       pidAlive: liveness.ownerPidAlive ?? pidAlive,
-      sessionExists: liveness.sessionExists ?? (sessionID => existsSync(sessionDir(internal.worktree, sessionID))),
+      epochReleased: liveness.epochReleased ?? epochReleased(internal.worktree),
+      heartbeatAt: () => internal.heartbeatAt,
     })
-    status.freshness.ownerHeartbeatAgeMs = Math.max(0, now - internal.workflow.owner.heartbeatAt)
+    status.freshness.ownerHeartbeatAgeMs = Math.max(0, now - heartbeatOf(internal.workflow, { heartbeatAt: () => internal.heartbeatAt }))
   }
   const claim = status.execution.claim
   if (claim) {
@@ -488,6 +540,25 @@ function queueWord(state: QueueState): string {
   return ({ running_here: "running", running_elsewhere: "running elsewhere", idle: "idle", stale: "stale", blocked: "blocked", unknown: "unknown" })[state]
 }
 
+/** Exhaustive over Phase: a new phase fails compilation here instead of rendering as a raw literal. */
+export const PHASE_LABEL: Readonly<Record<Phase, string>> = {
+  planning: "planning", reviewing: "reviewing", pending_approval: "pending_approval", executing: "executing",
+  stuck: "stuck", paused: "paused", done: "done", cancelled: "cancelled",
+}
+
+/** Exhaustive over StopDisplay: a new display value fails compilation here. `paused` also names the phase it came from. */
+export const STOP_LABEL: Readonly<Record<StopDisplay, string>> = {
+  none: "",
+  pausing: "pausing — termination unconfirmed",
+  paused: "paused",
+  cancelling: "cancelling — termination unconfirmed",
+}
+
+export function stopLabel(workflow: { stop: StopDisplay; pausedFrom?: { phase: string; stage: string } }): string {
+  const base = STOP_LABEL[workflow.stop]
+  return workflow.stop === "paused" && workflow.pausedFrom ? `${base} (from ${workflow.pausedFrom.phase}/${workflow.pausedFrom.stage})` : base
+}
+
 /** <= 25 lines; richer detail is deliberately excluded from the model-facing path. */
 export function renderStatus(deps: FlowRuntime, sessionID?: string, queueRunning?: boolean, now = Date.now()): string {
   return renderStatusSnapshot(statusJson(deps, sessionID, { queueRunning, now }), sessionID)
@@ -498,14 +569,18 @@ export function renderStatusSnapshot(status: StatusJson, sessionID?: string): st
   const workflow = status.workflow
   if (!workflow) lines.push("workflow: none")
   else {
-    const phase = workflow.stuckCause ? `${workflow.phase}(${workflow.stuckCause})` : workflow.phase
+    const label = PHASE_LABEL[workflow.phase as Phase] ?? "unknown"
+    const phase = workflow.stuckCause ? `${label}(${workflow.stuckCause})` : label
     const owner = workflow.sessionID === sessionID ? "this session" : `session ${workflow.sessionID}`
-    lines.push(`workflow: ${workflow.id} ${phase}${workflow.pendingCancel ? " cancelling" : ""} — ${owner}${workflow.ownerLive ? "" : ", owner dead"}`)
+    const stop = stopLabel(workflow)
+    lines.push(`workflow: ${workflow.id} ${workflow.stop === "paused" ? "" : `${phase}${stop ? " · " : ""}`}${stop} — ${owner}${workflow.ownerLive ? "" : ", owner dead"}`)
     if (workflow.plan) lines.push(`plan: ${workflow.plan}`)
     if (workflow.review) lines.push(`review: ${workflow.review}`)
+    lines.push(`kind: ${workflow.kind} · stage ${workflow.stage} · revision ${workflow.revision}${workflow.stopIntent ? ` · stop intent ${workflow.stopIntent}` : ""}`)
+    if (workflow.artifacts.length) lines.push(`artifacts: ${workflow.artifacts.map(item => `${item.key} ${item.state} (${item.path})`).join(", ")}${workflow.artifactsOmitted ? ` (+${workflow.artifactsOmitted} not read)` : ""}`)
     if (workflow.tasks) lines.push(`plan tasks: ${workflow.tasks.done}/${workflow.tasks.total} done, ${workflow.tasks.open} open, ${workflow.tasks.failed} failed/cancelled`)
     const c = workflow.counters
-    lines.push(`counters: invalid ${c.code_invalid}, review ${c.review_iterations}, rejects ${c.user_rejections}, nudges ${c.nudges}`)
+    if (c) lines.push(`counters: invalid ${c.code_invalid}, review ${c.review_iterations}, rejects ${c.user_rejections}, nudges ${c.nudges}`)
   }
   if (status.session.source === "none") lines.push("session: none (pass --session)")
   const ledger = status.session.ledger

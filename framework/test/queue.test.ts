@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { DEFAULT_CONFIG, type LcaConfig } from "../src/config.ts"
 import { createExecutionRunStore } from "../src/hosts/run-state.ts"
@@ -11,7 +11,8 @@ import type { VerificationHandle, VerificationRequest, VerificationResult } from
 import { createSnapshotStore } from "../src/orchestration/snapshot.ts"
 import { createTaskWorktree, worktreeRoot } from "../src/orchestration/worktree.ts"
 import { currentOwner } from "../src/flow/owner.ts"
-import { newWorkflow, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
+import { newWorkflow, withFlowTransaction } from "../src/flow/state.ts"
+import { writeWorkflow } from "./commit-fixture.ts"
 import { renderStatusSnapshot, statusJson } from "../src/flow/status.ts"
 import { addTasks, emptyLedger, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
 import { executionRunDirectory, sessionDir, stateRoot } from "../src/state/store.ts"
@@ -668,6 +669,31 @@ describe("neutral execution queue", () => {
     expect(f.runtime.runs.status().executions[0]?.terminal).toBeUndefined()
   })
 
+  test("a persisted pause intent aborts the queue in pause mode: the running task reverts to pending uncounted and no open task is cancelled", async () => {
+    const f = fixture({ delegate: { review: false, max_attempts: 2 } as LcaConfig["delegate"] })
+    f.setCancellation("ack-only")
+    const workflow = { ...newWorkflow(S, currentOwner(), "command", "queue pause", "fixture"), phase: "executing" as const }
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, workflow))
+    let workerStarted = false
+    f.replies.set("worker", () => {
+      workerStarted = true
+      return new Promise<ExecutionOutcome>(() => {})
+    })
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "hanging" }, { title: "residual" }])
+    const run = q.run(S)
+    await waitFor(() => workerStarted)
+    const intent = { kind: "pause" as const, token: "tok-pause", requestedFrom: { phase: "executing" as const, stage: "unit" }, checkpoint: null, reason: "p" }
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...workflow, stopIntent: intent, pausedFrom: intent.requestedFrom }))
+    const result = await run
+    expect(result).toMatchObject({ aborted: true, abortReason: "workflow_pause:tok-pause", cancelled: 0 })
+    const tasks = readLedger(wt.worktree, S).tasks
+    expect(tasks.map(task => task.status)).toEqual(["pending", "pending"])
+    expect(tasks[0]).toMatchObject({ attempts: 0, error: "paused: workflow_pause:tok-pause" })
+    // the execution keeps the true cancelled/fenced record; the ledger revert is not proof
+    expect(f.runtime.runs.status().executions[0]?.fence).toBeDefined()
+  })
+
   for (const mismatch of ["workflow", "session"] as const) {
     test(`persisted cancellation for a different ${mismatch} does not abort the queue`, async () => {
       const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
@@ -759,6 +785,10 @@ describe("neutral execution queue", () => {
       { title: "one", verify: verify("check_one.sh", "test -f mod1.py") },
       { title: "two", verify: verify("check_two.sh", "test -f mod2.py") },
     ])
+    for (const child of ["child_1", "child_2"]) {
+      mkdirSync(sessionDir(wt.worktree, child), { recursive: true, mode: 0o700 })
+      writeFileSync(join(sessionDir(wt.worktree, child), "evidence.json"), JSON.stringify({ child, retained: true }))
+    }
     expect(await queue.run(S)).toMatchObject({ done: 2, failed: 0, cancelled: 0 })
     expect(f.requests.map((r) => r.role)).toEqual(["worker", "reviewer", "worker", "reviewer"])
     expect(f.requests[0]?.policy).toBe(f.runtime.policy.resolve("worker"))
@@ -769,7 +799,9 @@ describe("neutral execution queue", () => {
     expect(ledger.tasks.map((task) => task.status)).toEqual(["done", "done"])
     expect(ledger.tasks.map((task) => task.verify_result?.ok)).toEqual([true, true])
     expect(existsSync(join(wt.worktree, ledger.tasks[0]!.handoff!))).toBe(true)
-    expect(existsSync(sessionDir(wt.worktree, "child_1"))).toBe(false)
+    for (const child of ["child_1", "child_2"]) {
+      expect(readFileSync(join(sessionDir(wt.worktree, child), "evidence.json"), "utf8")).toBe(JSON.stringify({ child, retained: true }))
+    }
     expect(f.runtime.runs.status().executions).toHaveLength(6)
     expect(f.runtime.runs.status().executions.filter(e => e.kind === "host").map(({ role, engine }) => ({ role, engine }))).toEqual([
       { role: "worker", engine: "fixture" }, { role: "reviewer", engine: "fixture" },
@@ -1623,7 +1655,7 @@ describe("neutral execution queue", () => {
     expect(f.hostRunCalls).toEqual(["worker"])
   })
 
-  test("discard cancellation counts the active task once alongside remaining tasks", async () => {
+  test("session-end cancellation retains outcomes and counts the active task once alongside remaining tasks", async () => {
     const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
     f.setCancellation("terminal")
     let workerStarted = false
@@ -1638,11 +1670,16 @@ describe("neutral execution queue", () => {
     expect(completion).toBeDefined()
     await waitFor(() => workerStarted)
 
-    await q.abort(S, "discard active queue", { discard: true })
+    await q.abort(S, "session deleted")
     const result = await completion!
     expect(result).toMatchObject({ taskIds: ["t1", "t2"], done: 0, failed: 0, cancelled: 2, aborted: true })
     expect(result.done + result.failed + result.cancelled).toBe(result.taskIds.length)
     expect(await run).toEqual(result)
+    const retained = readLedger(wt.worktree, S)
+    expect(retained.tasks.map(task => task.status)).toEqual(["cancelled", "cancelled"])
+    expect(retained.running).toBeUndefined()
+    expect(retained.tasks[0]!.handoff).toBeDefined()
+    expect(existsSync(join(wt.worktree, retained.tasks[0]!.handoff!))).toBe(true)
     const status = f.runtime.runs.status()
     expect(status.claim).toBeUndefined()
     expect(status.executions).toHaveLength(1)

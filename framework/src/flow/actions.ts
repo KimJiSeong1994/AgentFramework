@@ -1,7 +1,7 @@
 // Host-neutral plan submission and advisory review. Operator approval is deliberately not an action here.
 import {
-  assertFlowTxWorktree, CorruptWorkflowError, readWorkflowForWrite,
-  planJsonPath, renderArtifact, fileSha, workflowEngineRefusal, withFlowTransaction, writePlanJson,
+  assertFlowTxWorktree, workflowReadError, readWorkflowForWrite,
+  planJsonPath, renderArtifact, workflowEngineRefusal, withFlowTransaction, writePlanJson,
   type FlowTx, type Workflow,
 } from "./state.ts"
 import { readJson } from "../state/store.ts"
@@ -10,6 +10,7 @@ import { canonicalPlanJson, canonicalPlanSha, coercePlan, planMdPath, renderPlan
 import { runPlanReview } from "./review.ts"
 import { LinuxAdmissionRefused, type ExecutionRuntime, type PlanSubmissionAdmission } from "../hosts/types.ts"
 import type { FlowEvent } from "./machine.ts"
+import { planArtifactRefs, verifyArtifact } from "../workflows/artifacts.ts"
 
 export type PlanSubmission = { result: FlowResult; planSha: string; renderedPlan?: string }
 
@@ -27,7 +28,7 @@ function currentSnapshot(runtime: ExecutionRuntime, expected: Workflow): Workflo
   return withFlowTransaction(runtime.worktree, (tx) => {
     assertFlowTxWorktree(tx, runtime.worktree)
     const checked = readWorkflowForWrite(tx)
-    if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+    if (checked.corrupt) throw workflowReadError(checked)
     const inputRefusal = workflowRefusal(runtime, expected)
     if (inputRefusal) throw new Error(inputRefusal)
     const current = checked.wf
@@ -52,7 +53,7 @@ function submitPlanIn(
 ): FlowResult {
   assertFlowTxWorktree(tx, runtime.worktree)
   const checked = readWorkflowForWrite(tx)
-  if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+  if (checked.corrupt) throw workflowReadError(checked)
   const current = checked.wf
   const inputRefusal = workflowRefusal(runtime, expected)
   if (inputRefusal) throw new Error(inputRefusal)
@@ -85,7 +86,7 @@ function reviewPlanIn(
 ): FlowResult {
   assertFlowTxWorktree(tx, runtime.worktree)
   const checked = readWorkflowForWrite(tx)
-  if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+  if (checked.corrupt) throw workflowReadError(checked)
   const current = checked.wf
   const inputRefusal = workflowRefusal(runtime, expected)
   if (inputRefusal) throw new Error(inputRefusal)
@@ -121,8 +122,9 @@ export function savedPlan(runtime: ExecutionRuntime, wf: Workflow): Plan | null 
   try {
     const value = readJson<unknown>(planJsonPath(runtime.worktree, wf.id), null)
     const plan = importedPlan(value, wf.planRef.revision, runtime)
+    // Authority is the committed hash: the rendered view must verify from disk (no-follow regular file, matching sha).
     return canonicalPlanSha(plan) === wf.planRef.jsonSha &&
-      fileSha(runtime.worktree, wf.planRef.mdPath) === wf.planRef.mdSha ? plan : null
+      planArtifactRefs(wf).every(ref => verifyArtifact(runtime.worktree, ref).state === "verified") ? plan : null
   } catch { return null }
 }
 
@@ -159,7 +161,18 @@ async function writeAndReviewImportedPlan(runtime: ExecutionRuntime, wf: Workflo
   const submitted = withFlowTransaction(runtime.worktree, (tx) =>
     submitPlanIn(tx, runtime, wf, plan, "code", planSha, initialMd))
   if (!submitted.ok) return { result: submitted, planSha }
+  return reviewSubmittedPlan(runtime, submitted.wf, plan, signal)
+}
 
+/**
+ * The review half of a submission: one review attempt on the committed `reviewing` subject and its single result
+ * commit. A Resume of a pause taken in `reviewing` calls this directly (A3: exactly one new review attempt).
+ */
+export async function reviewSubmittedPlan(runtime: ExecutionRuntime, submittedWf: Workflow, plan: Plan, signal?: AbortSignal): Promise<PlanSubmission> {
+  const submitted = { wf: submittedWf }
+  const planSha = canonicalPlanSha(plan)
+  const mdPath = planMdPath(submittedWf.id)
+  const wf = submittedWf
   const beforeReview = currentSnapshot(runtime, submitted.wf)
   if ("result" in beforeReview) return { result: beforeReview.result, planSha }
   if (beforeReview.current.phase !== "reviewing") {

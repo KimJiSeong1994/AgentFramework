@@ -10,6 +10,8 @@ export type PlanStep = { title: string; files: string[]; detail: string; verify:
 export type Plan = { goal: string; steps: PlanStep[]; risks: string[]; revision: number }
 
 export const PLAN_LIMITS = { minSteps: 3, maxSteps: 10, title: 120, goal: 300, detail: 1000, minRisks: 1, maxRisks: 5 }
+/** Ultragoal units are 1-10 steps; the only limits other than PLAN_LIMITS that validatePlan accepts. */
+export const UNIT_LIMITS = { minSteps: 1, maxSteps: 10 } as const
 const FORBIDDEN_ROOTS = [".git", ".lca", "knowledge/raw"]
 
 function str(v: unknown): string {
@@ -49,8 +51,11 @@ function fileProblem(worktree: string, f: string): string | null {
 }
 
 /** §5.1 hard gates. Returns every problem (empty = valid). File existence is not required (new files/dirs OK). */
-export function validatePlan(plan: Plan, worktree: string, verifyAllow: string[]): string[] {
-  const L = PLAN_LIMITS
+export function validatePlan(plan: Plan, worktree: string, verifyAllow: string[], limits: Partial<Pick<typeof PLAN_LIMITS, "minSteps" | "maxSteps">> = {}): string[] {
+  const bounded = (limits.minSteps === undefined || limits.minSteps === UNIT_LIMITS.minSteps || limits.minSteps === PLAN_LIMITS.minSteps) &&
+    (limits.maxSteps === undefined || limits.maxSteps === UNIT_LIMITS.maxSteps)
+  if (!bounded) throw new RangeError("validatePlan accepts only the plan limits or UNIT_LIMITS")
+  const L = { ...PLAN_LIMITS, ...limits }
   const errs: string[] = []
   if (!plan.goal) errs.push("goal is empty")
   else if (plan.goal.length > L.goal) errs.push(`goal longer than ${L.goal} chars`)

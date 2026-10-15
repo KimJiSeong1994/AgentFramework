@@ -3,9 +3,32 @@ import type { CheckRun } from "../data/check.ts"
 import type { SkillTaskFactInput, SkillVerificationFactInput } from "../telemetry/skills.ts"
 import type { ExecutionRunStore } from "./run-state.ts"
 import type { VerificationExecutor, VerificationProfile } from "../orchestration/verifier.ts"
+import type { SkillInvocationContext } from "../skills/context.ts"
+import type { SkillHoldTicket } from "../skills/broker.ts"
 
-export const EXECUTION_ROLES = ["main", "worker", "reviewer", "data-analyst", "data-verifier", "ontology-evolver", "answer-judge"] as const
+/** These keys are the existing serialized model configuration, not every runtime role. */
+export const CONFIG_MODEL_ROLES = Object.freeze(["main", "worker", "reviewer", "data-analyst", "data-verifier", "ontology-evolver", "answer-judge"] as const)
+export const WORKFLOW_READ_ONLY_ROLES = Object.freeze(["interviewer", "planner", "architect", "critic", "researcher", "contrarian", "simplifier"] as const)
+export const EXECUTION_ROLES = Object.freeze([...CONFIG_MODEL_ROLES, ...WORKFLOW_READ_ONLY_ROLES] as const)
 export type ExecutionRole = (typeof EXECUTION_ROLES)[number]
+export type WorkflowReadOnlyRole = (typeof WORKFLOW_READ_ONLY_ROLES)[number]
+export const EXECUTION_TOOL_NAMES = Object.freeze(["read", "glob", "grep", "list", "bash", "write", "edit", "patch", "apply_patch", "multiedit", "webfetch", "skill", "todowrite", "todoread", "delegate", "lca_flow", "db_query", "schema_lookup", "task"] as const)
+
+const CLI_WRITE_CAPABILITY = Object.freeze({
+  main: false, worker: true, reviewer: false,
+  "data-analyst": true, "data-verifier": true, "ontology-evolver": true, "answer-judge": true,
+  interviewer: false, planner: false, architect: false, critic: false,
+  researcher: false, contrarian: false, simplifier: false,
+} satisfies Record<ExecutionRole, boolean>)
+
+export function isWorkflowReadOnlyRole(role: string): role is WorkflowReadOnlyRole {
+  return (WORKFLOW_READ_ONLY_ROLES as readonly string[]).includes(role)
+}
+
+/** Capability is necessary, not sufficient: the fixed tool allowlist and denials still apply. */
+export function roleAllowsCliWrites(role: ExecutionRole): boolean {
+  return Object.hasOwn(CLI_WRITE_CAPABILITY, role) && CLI_WRITE_CAPABILITY[role] === true
+}
 export type ControlProfile = "estimated-input-reactive-output-v1"
 export type BudgetEvidence = {
   input: "estimated"
@@ -49,6 +72,8 @@ export type ExecutionRequest = {
   deadlineAt: number
   policy: ExecutionPolicySnapshot
   handlers: ExecutionPolicyHandlers
+  /** Runtime-owned invocation authority, outside policy snapshots and serialized native inputs. */
+  skillContext?: SkillInvocationContext
   /**
    * Persist one canonical recovery reference synchronously. During prepare, call before policy binding
    * or returning; during run, emit immediately once the adapter learns a stable engine recovery ID and
@@ -125,7 +150,7 @@ export interface ExecutionHost {
   reconcile(reference: ExecutionReference): Promise<ExecutionReconciliation>
 }
 
-export type ExecutionDecision = { allow: true } | { allow: false; reason: string }
+export type ExecutionDecision = { allow: true } | { allow: false; reason: string; holdTicket?: SkillHoldTicket }
 export type ExecutionPolicyHandlers = {
   beforeTool(event: Extract<ExecutionEvent, { type: "tool-before" }>): ExecutionDecision
   toolResult(event: Extract<ExecutionEvent, { type: "tool-result" }>): { result?: unknown; error?: unknown; trimmed?: boolean; hinted?: boolean }

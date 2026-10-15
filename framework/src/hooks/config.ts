@@ -10,12 +10,15 @@ import { estimateTokens } from "../tokens.ts"
 import { enabled, type HookDeps } from "./types.ts"
 import {
   APPROVE_COMMAND, APPROVE_DESCRIPTION, APPROVE_TEMPLATE, CANCEL_COMMAND, CANCEL_DESCRIPTION, CANCEL_TEMPLATE,
-  PLAN_COMMAND, PLAN_DESCRIPTION, PLAN_TEMPLATE, REJECT_COMMAND, REJECT_DESCRIPTION, REJECT_TEMPLATE,
+  CONTINUE_COMMAND, CONTINUE_DESCRIPTION, CONTINUE_TEMPLATE, PLAN_COMMAND, PLAN_DESCRIPTION, PLAN_TEMPLATE, REJECT_COMMAND, REJECT_DESCRIPTION, REJECT_TEMPLATE,
   STATUS_COMMAND, STATUS_DESCRIPTION, STATUS_TEMPLATE, STOP_COMMAND, STOP_DESCRIPTION, STOP_TEMPLATE,
   recordInjectedCommands,
 } from "./command.ts"
 import { flowOn } from "../flow/status.ts"
 import { parseModelSelection, supportsLocalTemperature } from "../config.ts"
+import { createExecutionPolicy } from "../hosts/tool-policy.ts"
+import { WORKFLOW_READ_ONLY_ROLES } from "../hosts/types.ts"
+import { captureOpenCodeAgentConfigSafety } from "../hosts/opencode-system.ts"
 
 /**
  * The plugin package types the hook input with the v1 SDK Config, which lacks keys the running
@@ -60,6 +63,8 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
     }
 
     // (a) agents (data agents only when a backend is configured: their prompts + tool schemas are prefix cost)
+    const workflowPolicy = createExecutionPolicy(deps.config)
+    captureOpenCodeAgentConfigSafety(deps, config, workflowPolicy)
     config.agent ??= {}
     const merged: string[] = []
     const dataOn = deps.config.data.backend !== "none" && enabled(deps.config, "tool.data")
@@ -97,6 +102,28 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
       config.agent[name] = effective
     }
 
+    // Workflow roles are code-scheduled, not user-overridable agents. Their vendor permissions
+    // mirror the immutable runtime snapshot, including a deny default for future native tools.
+    for (const role of WORKFLOW_READ_ONLY_ROLES) {
+      const snapshot = workflowPolicy.resolve(role)
+      const agent = {
+        mode: "subagent",
+        hidden: true,
+        prompt: snapshot.system.join("\n\n"),
+        ...(snapshot.model ? { model: `${snapshot.model.providerID}/${snapshot.model.modelID}` } : {}),
+        permission: {
+          "*": "deny",
+          edit: "deny",
+          bash: "deny",
+          webfetch: "deny",
+          external_directory: "deny",
+          doom_loop: "deny",
+          ...Object.fromEntries(snapshot.tools.allowed.map(tool => [tool, "allow" as const])),
+        },
+      } satisfies NonNullable<ConfigV2["agent"]>[string]
+      config.agent[role] = agent
+    }
+
     // (b) built-in task tool off for every agent: orchestration is done by code, and its schema alone costs ~2.5K
     // prefix tokens. `config.tools` is ignored post-decode (same reason as agent `tools`), so use permission.
     ;(config as any).permission = { ...(config as any).permission, task: "deny" }
@@ -126,13 +153,17 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
       }
     }
 
-    // (b2) /stop and /status commands (handled in hooks/command.ts). A user-defined command with the same name
+    // (b2) owner/session commands (handled in hooks/command.ts). A user-defined command with the same name
     // wins (spread after the lca default); `injectedNames` records only the names lca actually wrote so
     // hooks/command.ts never acts on a shadowed name (ARCH-13). `lca_flow` is not registered in M0 (ARCH-06).
     const injectedNames = new Set<string>()
     if (enabled(deps.config, "command.stop")) {
       config.command = { [STOP_COMMAND]: { template: STOP_TEMPLATE, description: STOP_DESCRIPTION }, ...config.command }
       if (!config.command[STOP_COMMAND] || config.command[STOP_COMMAND].template === STOP_TEMPLATE) injectedNames.add(STOP_COMMAND)
+    }
+    if (!Object.prototype.hasOwnProperty.call(config.command ?? {}, CONTINUE_COMMAND)) {
+      config.command = { [CONTINUE_COMMAND]: { template: CONTINUE_TEMPLATE, description: CONTINUE_DESCRIPTION }, ...config.command }
+      injectedNames.add(CONTINUE_COMMAND)
     }
     if (flowOn(deps.config) && enabled(deps.config, "command.status")) {
       config.command = { [STATUS_COMMAND]: { template: STATUS_TEMPLATE, description: STATUS_DESCRIPTION }, ...config.command }

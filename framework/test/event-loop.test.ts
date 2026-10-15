@@ -4,20 +4,27 @@ import { join } from "node:path"
 import { createEventHook } from "../src/hooks/event.ts"
 import { createCompactingHook, checkpointPath } from "../src/hooks/compacting.ts"
 import { createIdleLoop, CONTINUE_PROMPT, abortPath } from "../src/loop/idle.ts"
-import { readModeState, writeModeState, writeJsonAtomic, sessionDir, EMPTY_MODE, type ModeState } from "../src/state/store.ts"
+import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
+import { readModeState, writeModeState, writeJsonAtomic, sessionDir, modeStatePath, EMPTY_MODE, type ModeState } from "../src/state/store.ts"
 import { todoFingerprint, type Todo } from "../src/guards/todos.ts"
 import { fetchOpenCodeTodos } from "../src/hosts/opencode-todos.ts"
-import { fakeClient, makeDeps, tempWorktree, todo, type FakeClient } from "./guards-helpers.ts"
+import { admitFixtureSession, fakeClient, makeDeps, releaseFixtureSession, tempWorktree, todo, type FakeClient } from "./guards-helpers.ts"
+import { createNativeToolFixture } from "./native-tool-fixture.ts"
 
 const S = "ses_1"
 let wt: ReturnType<typeof tempWorktree>
 let client: FakeClient
 
+let fixtureSession: ReturnType<typeof admitFixtureSession>
 beforeEach(() => {
   wt = tempWorktree()
   client = fakeClient({ promptAsync: true })
+  fixtureSession = admitFixtureSession(makeDeps(client, wt.worktree), S)
 })
-afterEach(() => wt.cleanup())
+afterEach(() => {
+  releaseFixtureSession(wt.worktree, fixtureSession)
+  wt.cleanup()
+})
 
 function ulw(patch: Partial<ModeState> = {}): ModeState {
   const now = Date.now()
@@ -25,6 +32,35 @@ function ulw(patch: Partial<ModeState> = {}): ModeState {
 }
 const idleEvent = (sessionID = S) => ({ event: { type: "session.idle", properties: { sessionID } } as any })
 const prompts = () => client.calls.filter((c) => c.method === "promptAsync" || c.method === "prompt")
+
+const messageUpdated = (info: unknown) => ({
+  event: { type: "message.updated", properties: { info } } as any,
+})
+
+async function createNativeEventFixture(deps: ReturnType<typeof makeDeps>) {
+  const native = await createNativeToolFixture(deps, { sessionID: S })
+  const event = createEventHook(deps)
+  const userMessage = await native.acceptUserTurn()
+  await event(messageUpdated(userMessage))
+  return {
+    event,
+    native,
+    async primeCall(options: Parameters<typeof native.primeCall>[0]) {
+      const call = native.primeCall(options)
+      await event(messageUpdated(call.assistantMessage))
+      return call
+    },
+  }
+}
+
+function textPart(part: { id: string; sessionID: string; messageID: string; text: string }, text: string, delta?: string) {
+  return {
+    event: {
+      type: "message.part.updated",
+      properties: { part: { ...part, text }, ...(delta === undefined ? {} : { delta }) },
+    } as any,
+  }
+}
 
 describe("loop.idle", () => {
   test("re-prompts with the continuation text when ulw is active and todos remain", async () => {
@@ -144,13 +180,21 @@ describe("loop.idle", () => {
     expect(prompts().length).toBe(1)
   })
 
-  test("abort.json breaker", async () => {
+  test("an abort marker holds admission without dispatching or rewriting mode evidence", async () => {
     client.todos = [todo("1", "pending")]
     writeModeState(wt.worktree, S, ulw())
     writeJsonAtomic(abortPath(wt.worktree, S), { reason: "repetition" })
-    await createEventHook(makeDeps(client, wt.worktree))(idleEvent())
+    const deps = makeDeps(client, wt.worktree)
+    const modeBefore = readModeState(wt.worktree, S)
+    const modeBytesBefore = readFileSync(modeStatePath(wt.worktree, S))
+    const abortBefore = readFileSync(abortPath(wt.worktree, S))
+    expect(await createIdleLoop(deps)(S)).toEqual({ action: "ignored", why: "held" })
+    await createEventHook(deps)(idleEvent())
     expect(prompts().length).toBe(0)
-    expect(readModeState(wt.worktree, S).stopReason).toBe("aborted")
+    expect(client.created).toEqual([])
+    expect(readModeState(wt.worktree, S)).toEqual(modeBefore)
+    expect(readFileSync(modeStatePath(wt.worktree, S))).toEqual(modeBytesBefore)
+    expect(readFileSync(abortPath(wt.worktree, S))).toEqual(abortBefore)
   })
 
   test("debounce: idle within 3s of our continuation is ignored", async () => {
@@ -279,56 +323,73 @@ describe("fetchOpenCodeTodos", () => {
 describe("repetition abort (event hook)", () => {
   const phrase = "I will now proceed to read the file and then apply the same change again"
   const loopText = Array.from({ length: 4 }, () => phrase).join(" ")
-  const textPart = (text: string, delta?: string) => ({
-    event: {
-      type: "message.part.updated",
-      properties: { part: { id: "prt_1", sessionID: S, messageID: "msg_a", type: "text", text }, delta },
-    } as any,
-  })
-  const msgUpdated = (role: "user" | "assistant", id = "msg_a") => ({
-    event: { type: "message.updated", properties: { info: { id, sessionID: S, role } } } as any,
-  })
 
   test("aborts once and writes abort.json for a repeating assistant part", async () => {
-    const hook = createEventHook(makeDeps(client, wt.worktree))
-    await hook(msgUpdated("assistant"))
-    await hook(textPart("short", "short"))
-    await hook(textPart(loopText, " again"))
-    await hook(textPart(loopText + " more", " more"))
+    const deps = makeDeps(client, wt.worktree)
+    const { native, event: hook } = await createNativeEventFixture(deps)
+    const assistant = await native.deliverAssistantMessage({ text: "short" })
+    await hook(messageUpdated(assistant.message))
+    const part = assistant.parts.find(candidate => candidate.type === "text")
+    if (!part || part.type !== "text") throw new Error("native assistant message did not contain a text part")
+    await hook(textPart(part, "short", "short"))
+    await hook(textPart(part, loopText, " again"))
+    await hook(textPart(part, loopText + " more", " more"))
     expect(client.calls.filter((c) => c.method === "abort").length).toBe(1)
     const note = JSON.parse(readFileSync(abortPath(wt.worktree, S), "utf8"))
     expect(note.reason).toBe("repetition")
-    expect(note.partID).toBe("prt_1")
+    expect(note.partID).toBe(part.id)
   })
 
   test("never aborts on user parts (role from message.updated, or no delta)", async () => {
-    const hook = createEventHook(makeDeps(client, wt.worktree))
-    await hook(msgUpdated("user"))
-    await hook(textPart(loopText, undefined))
-    await hook(textPart(loopText, "x"))
-    await hook({ event: { type: "message.part.updated", properties: { part: { id: "prt_2", sessionID: S, messageID: "unknown", type: "text", text: loopText } } } } as any)
+    const deps = makeDeps(client, wt.worktree)
+    const { native, event: hook } = await createNativeEventFixture(deps)
+    const user = await native.deliverUserTurn({ text: loopText })
+    await hook(messageUpdated(user.message))
+    const part = user.parts.find(candidate => candidate.type === "text")
+    if (!part || part.type !== "text") throw new Error("native user message did not contain a text part")
+    await hook(textPart(part, loopText))
+    await hook(textPart(part, loopText, "x"))
+    await hook(textPart({ ...part, id: "unmatched-part", messageID: "unmatched-message" }, loopText))
     expect(client.calls.filter((c) => c.method === "abort").length).toBe(0)
     expect(existsSync(abortPath(wt.worktree, S))).toBe(false)
   })
 
   test("abort_on_repetition=false only logs", async () => {
     const deps = makeDeps(client, wt.worktree, { guards: { ...makeDeps(client, wt.worktree).config.guards, abort_on_repetition: false } })
-    const hook = createEventHook(deps)
-    await hook(msgUpdated("assistant"))
-    await hook(textPart(loopText, "x"))
+    const { native, event: hook } = await createNativeEventFixture(deps)
+    const assistant = await native.deliverAssistantMessage({ text: "short" })
+    await hook(messageUpdated(assistant.message))
+    const part = assistant.parts.find(candidate => candidate.type === "text")
+    if (!part || part.type !== "text") throw new Error("native assistant message did not contain a text part")
+    await hook(textPart(part, loopText, "x"))
     expect(client.calls.filter((c) => c.method === "abort").length).toBe(0)
     expect(deps.logs).toContain("repetition detected")
   })
 
   test("tool error parts increment loop failures while active", async () => {
     writeModeState(wt.worktree, S, ulw())
-    const hook = createEventHook(makeDeps(client, wt.worktree))
-    const err = (callID: string) => ({
-      event: { type: "message.part.updated", properties: { part: { id: "p", sessionID: S, messageID: "m", type: "tool", callID, tool: "write", state: { status: "error", error: "Error: File already exists", input: {}, time: { start: 0, end: 1 } } } } } as any,
+    const deps = makeDeps(client, wt.worktree)
+    const native = await createNativeEventFixture(deps)
+    const hook = native.event
+    const before = createToolBeforeHook(deps)
+    const err = (call: { part: unknown; input: { args: Record<string, unknown> } }) => ({
+      event: { type: "message.part.updated", properties: { part: {
+        ...(call.part as object),
+        state: {
+          status: "error",
+          error: "Error: File already exists",
+          input: call.input.args,
+          time: { start: (call.part as any).state.time.start, end: Date.now() },
+        },
+      } } } as any,
     })
-    await hook(err("c1"))
-    await hook(err("c1")) // duplicate update of the same call is ignored
-    await hook(err("c2"))
+    const call1 = await native.primeCall({ tool: "write", args: { filePath: "a.ts" }, callID: "c1" })
+    await before(call1.input as any, call1.output as any)
+    await hook(err(call1))
+    await hook(err(call1)) // duplicate update of the same call is ignored
+    const call2 = await native.primeCall({ tool: "write", args: { filePath: "b.ts" }, callID: "c2" })
+    await before(call2.input as any, call2.output as any)
+    await hook(err(call2))
     expect(readModeState(wt.worktree, S).failures).toBe(2)
   })
 

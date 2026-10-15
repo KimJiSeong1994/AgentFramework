@@ -6,7 +6,8 @@ import { afterEach, beforeEach, expect, test } from "bun:test"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { submitAdmittedImportedPlan, submitImportedPlan } from "../src/flow/actions.ts"
 import { currentOwner } from "../src/flow/owner.ts"
-import { eventsPath, newWorkflow, planJsonPath, workflowPath, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
+import { eventsPath, newWorkflow, planJsonPath, workflowPath, withFlowTransaction } from "../src/flow/state.ts"
+import { rewriteCommitted, writeWorkflow } from "./commit-fixture.ts"
 import { LinuxAdmissionRefused, type ExecutionRuntime, type LinuxAdmission } from "../src/hosts/types.ts"
 import { createExecutionRunStore } from "../src/hosts/run-state.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
@@ -155,10 +156,12 @@ for (const changedEngine of ["foreign", "missing"] as const) {
       async admitNewExecution() {
         calls++
         const path = workflowPath(wt.worktree)
-        const current = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>
-        if (changedEngine === "missing") delete current.engine
-        else current.engine = "foreign-engine"
-        writeFileSync(path, JSON.stringify(current))
+        rewriteCommitted(wt.worktree, (current) => {
+          const next = { ...current } as Record<string, unknown>
+          if (changedEngine === "missing") delete next.engine
+          else next.engine = "foreign-engine"
+          return next as never
+        })
         changedBytes = readFileSync(path)
       },
       async admitPlanSubmission() { throw new Error("not used") },
@@ -310,7 +313,8 @@ mock.module(${JSON.stringify(modules.domain)}, () => ({
 const { createLinuxAdmission } = await import(${JSON.stringify(modules.runtime)});
 const { submitAdmittedImportedPlan } = await import(${JSON.stringify(modules.actions)});
 const { currentOwner } = await import(${JSON.stringify(modules.owner)});
-const { newWorkflow, writeWorkflow, withFlowTransaction, workflowPath, planJsonPath } = await import(${JSON.stringify(modules.state)});
+const { newWorkflow, withFlowTransaction, workflowPath, planJsonPath } = await import(${JSON.stringify(modules.state)});
+const { writeWorkflow } = await import(${JSON.stringify(fileURLToPath(new URL("./commit-fixture.ts", import.meta.url)))});
 const { planMdPath } = await import(${JSON.stringify(modules.plan)});
 const { readFileSync, existsSync } = await import("node:fs");
 const { join } = await import("node:path");
@@ -423,21 +427,24 @@ import { join } from "node:path";
 import { DEFAULT_CONFIG } from ${JSON.stringify(fileURLToPath(new URL("../src/config.ts", import.meta.url)))};
 import { LinuxAdmissionRefused } from ${JSON.stringify(fileURLToPath(new URL("../src/hosts/types.ts", import.meta.url)))};
 import { currentOwner } from ${JSON.stringify(fileURLToPath(new URL("../src/flow/owner.ts", import.meta.url)))};
-import { newWorkflow, writeWorkflow, withFlowTransaction, readWorkflow, workflowPath, planJsonPath } from ${JSON.stringify(fileURLToPath(new URL("../src/flow/state.ts", import.meta.url)))};
+import { attachAdmission } from ${JSON.stringify(fileURLToPath(new URL("../src/sessions/admission.ts", import.meta.url)))};
+import { newWorkflow, withFlowTransaction, readWorkflow, workflowPath, planJsonPath } from ${JSON.stringify(fileURLToPath(new URL("../src/flow/state.ts", import.meta.url)))};
+import { writeWorkflow } from ${JSON.stringify(fileURLToPath(new URL("./commit-fixture.ts", import.meta.url)))};
 import { planMdPath } from ${JSON.stringify(fileURLToPath(new URL("../src/flow/plan.ts", import.meta.url)))};
 const root = process.env.LCA_ADMISSION_TEST_WORKTREE;
 let admissions = 0;
 const refused = new LinuxAdmissionRefused("admit", ["latched"]);
-const runtime = { host: { identity: { engine: "opencode" } }, linuxAdmission: { assertBootEpoch() {}, async admitNewExecution() { admissions++; throw refused; } } };
 const runtimeExports = await import(${JSON.stringify(modules.runtime)});
+const config = DEFAULT_CONFIG;
+const deps = { client: {}, directory: root, worktree: root, config, log() {} };
+const runtime = { ...runtimeExports.getOpenCodeRuntime(deps), linuxAdmission: { assertBootEpoch() {}, async admitNewExecution() { admissions++; throw refused; } } };
 mock.module(${JSON.stringify(modules.runtime)}, () => ({ ...runtimeExports, getOpenCodeRuntime() { return runtime; } }));
 const { createLcaFlowTool } = await import(${JSON.stringify(modules.tool)});
 const sessionID = "lca-session";
-const workflow = newWorkflow(sessionID, currentOwner(), "command", "test", "opencode");
+const store = attachAdmission(runtime, sessionID, { engine: "opencode" });
+const workflow = newWorkflow(sessionID, currentOwner(Date.now(), store.epoch), "command", "test", "opencode");
 withFlowTransaction(root, tx => writeWorkflow(tx, workflow));
 const before = readFileSync(workflowPath(root));
-const config = DEFAULT_CONFIG;
-const deps = { client: {}, directory: root, worktree: root, config, log() {} };
 const tool = createLcaFlowTool(deps);
 const ctx = { sessionID, messageID: "m", agent: "main", abort: new AbortController().signal, metadata() {} };
 const valid = { goal: "g", steps: [1,2,3].map(n => ({ title: "s"+n, files: ["src/s"+n+".ts"], detail: "d", verify: "bun test test/s"+n+".test.ts" })), risks: ["r"] };

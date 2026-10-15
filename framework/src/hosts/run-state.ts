@@ -18,6 +18,12 @@ export type ExecutionIntent = {
   inputDigest?: string
   deadlineAt?: number
   maxOutputChars?: number
+  /** Workflow stage-turn binding persisted with the intent (P5a). Absent for queue/verifier executions. */
+  workflowBinding?: WorkflowTurnBinding
+}
+export type WorkflowTurnBinding = {
+  workflowID: string | null; revision: number | null; kind: string; stage: string; role: string
+  promptSha: string; attemptId: string; supervisorSessionID: string; epoch: string | null
 }
 export type ExecutionRecord = ExecutionIntent & {
   vendorRef?: string
@@ -208,6 +214,10 @@ const recordShape = (value: unknown): value is ExecutionRecord => {
   if (value.kind === "verifier" && "engine" in value) return false
   if (value.kind === "verifier" && (!text(value.inputSnapshotID) || typeof value.inputDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.inputDigest) ||
     !timestamp(value.deadlineAt) || !integer(value.maxOutputChars) || value.maxOutputChars > 65536)) return false
+  if (!optional(value, "workflowBinding", x => value.kind === "host" && object(x) &&
+    Object.keys(x).length === 9 && (x.workflowID === null || text(x.workflowID)) && (x.revision === null || (typeof x.revision === "number" && Number.isSafeInteger(x.revision) && x.revision >= 0)) &&
+    text(x.kind) && text(x.stage) && text(x.role) && typeof x.promptSha === "string" && /^[a-f0-9]{64}$/.test(x.promptSha) &&
+    text(x.attemptId) && text(x.supervisorSessionID) && (x.epoch === null || text(x.epoch)))) return false
   if (value.kind !== "verifier" && ["inputSnapshotID", "inputDigest", "deadlineAt", "maxOutputChars"].some(key => key in value)) return false
   if (!optional(value, "boundaryRef", x => value.kind === "host" ? hostRefShape(x) && x.executionID === value.executionId :
     value.kind === "verifier" && verifierRefShape(x) && x.executionID === value.executionId && x.profile === value.profile &&

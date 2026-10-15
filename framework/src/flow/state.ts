@@ -1,17 +1,25 @@
-// Plan workflow persistence (ralplan §5.1). Control plane lives in the state root (outside the worktree, so a worker
-// cannot edit it); only the human-readable plan view is rendered into <worktree>/.lca/plans/.
-//   <stateRoot>/workflow/workflow.json     active-workflow index (at most one; terminal ones are rotated to archive/)
-//   <stateRoot>/workflow/archive/<id>.json terminal workflows
-//   <stateRoot>/workflow/events.jsonl      append-only, global monotonic seq across workflows
-//   <stateRoot>/workflow/plans/<id>.json   canonical plan (M1)
+// Plan workflow persistence (ralplan §5.1, P5a). Control plane lives in the state root (outside the worktree, so a
+// worker cannot edit it); only the human-readable plan view is rendered into <worktree>/.lca/plans/.
+//   <stateRoot>/workflow/workflow.json        v2 index {version,id,sessionID,kind,revision,path,sha256}: the single commit point
+//   <stateRoot>/sessions/<sid>/workflows/<wid>/revisions/<seq>.json  immutable snapshots (workflows/commit.ts)
+//   <stateRoot>/workflow/heartbeat.json       non-authoritative owner liveness sidecar (display only)
+//   <stateRoot>/workflow/archive/<id>.json    derived copy of a terminal workflow, for status history
+//   <stateRoot>/workflow/legacy/<id>.v1.json  retained bytes of a terminal pre-v2 inline record
+//   <stateRoot>/workflow/events.jsonl         append-only, global monotonic seq across workflows
+//   <stateRoot>/workflow/plans/<id>.json      canonical plan (M1)
 import { createHash, randomBytes, randomUUID } from "node:crypto"
-import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
-import { dirname, join } from "node:path"
-import { stateRoot, writeJsonAtomic } from "../state/store.ts"
-import type { Counters, FlowCore, Phase, StuckCause } from "./machine.ts"
-import { PHASES, TERMINAL, ZERO_COUNTERS } from "./machine.ts"
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readlinkSync, readSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from "node:fs"
+import { basename, dirname, join } from "node:path"
+import { readBoundedJson, stateRoot } from "../state/store.ts"
+import { durableWriteBytes, durableWriteJson } from "../state/durable.ts"
+import type { Counters, FlowCore, StuckCause } from "./machine.ts"
+import { ZERO_COUNTERS } from "./machine.ts"
 import { INSTANCE_ID } from "./owner.ts"
-import type { Plan } from "./plan.ts"
+import { canonicalPlanJson, type Plan } from "./plan.ts"
+import { TERMINAL, type Owner, type Phase, type PlanWorkflow, type WorkflowEnvelope, type WorkflowKind } from "../workflows/types.ts"
+import { narrowPlan, parseEnvelope, REGISTRY } from "../workflows/registry.ts"
+import { retainContentAddressed } from "../workflows/artifacts.ts"
+import { committedEventBound, eventAdmitted, legacyArchive, readCommitted, writeArchiveCopy, type EventBound } from "../workflows/commit.ts"
 
 declare const flowTxBrand: unique symbol
 export type FlowTx = { readonly [flowTxBrand]: true }
@@ -36,9 +44,17 @@ export class FlowTransactionIntegrityError extends Error {
 }
 
 export class CorruptWorkflowError extends Error {
-  constructor(path: string) {
-    super(`corrupt workflow state at ${path}; refusing flow write`)
+  constructor(path: string, message = `corrupt workflow state at ${path}; refusing flow write`) {
+    super(message)
     this.name = "CorruptWorkflowError"
+  }
+}
+
+/** A non-terminal pre-v2 inline record: every writer refuses and the bytes stay untouched (no migration). */
+export class LegacyWorkflowError extends CorruptWorkflowError {
+  constructor(path: string) {
+    super(path, `legacy workflow format at ${path}; finish or cancel it with the prior version; refusing flow write`)
+    this.name = "LegacyWorkflowError"
   }
 }
 
@@ -51,7 +67,7 @@ export function withFlowTransaction<T>(
   const dir = flowDir(worktree)
   const lock = join(dir, "workflow.lock")
   if (heldFlowDirs.has(dir)) throw new TypeError("nested flow transaction")
-  mkdirSync(dir, { recursive: true })
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
   const identity = JSON.stringify({ pid: process.pid, instance: INSTANCE_ID, token: randomUUID() })
   try {
     symlinkSync(identity, lock)
@@ -102,36 +118,41 @@ function assertFlowTx(tx: FlowTx): FlowTxState {
   return state
 }
 
+/** Worktree a live flow transaction belongs to (throws when the transaction is inactive or its lock changed). */
+export function flowTxWorktree(tx: FlowTx): string {
+  return assertFlowTx(tx).worktree
+}
+
 export function assertFlowTxWorktree(tx: FlowTx, worktree: string): void {
   if (flowDir(worktree) !== assertFlowTx(tx).dir) throw new TypeError("flow transaction belongs to a different worktree")
 }
 
-export type Owner = { instance: string; pid: number; heartbeatAt: number }
+export type { Owner }
+
+export type HeartbeatRecord = { wid: string; epoch: string; pid: number; heartbeatAt: number }
+
+/** Non-authoritative, display-only owner liveness. Written without bumping any revision; never an authority fence. */
+export function writeHeartbeat(tx: FlowTx, wf: Pick<Workflow, "id" | "owner">, heartbeatAt = Date.now()): void {
+  const { worktree } = assertFlowTx(tx)
+  const record: HeartbeatRecord = { wid: wf.id, epoch: wf.owner.instance, pid: wf.owner.pid, heartbeatAt }
+  durableWriteBytes(heartbeatPath(worktree), Buffer.from(`${JSON.stringify(record)}\n`, "utf8"))
+}
+
+/** The beat for exactly this owner binding, or undefined (missing, unreadable or for another binding). */
+export function readHeartbeat(worktree: string, wf: Pick<WorkflowEnvelope, "id" | "owner">): number | undefined {
+  try {
+    const { value } = readBoundedJson(heartbeatPath(worktree), 4096)
+    if (!value || typeof value !== "object") return undefined
+    const r = value as Record<string, unknown>
+    if (r.wid !== wf.id || r.epoch !== wf.owner.instance || r.pid !== wf.owner.pid ||
+      typeof r.heartbeatAt !== "number" || !Number.isFinite(r.heartbeatAt) || r.heartbeatAt < 0) return undefined
+    return r.heartbeatAt
+  } catch { return undefined }
+}
 export type EventActor = "code" | "user_command" | "user_keyword" | "user_message" | "model_tool"
 
-export type Workflow = {
-  version: 1
-  id: string
-  kind: "plan"
-  /** Observed host identity; legacy or malformed values remain readable but confer no execution authority. */
-  engine?: unknown
-  phase: Phase
-  stuckCause?: StuckCause
-  /** authority key */
-  sessionID: string
-  owner: Owner
-  entry: "command" | "keyword"
-  request: string
-  planRef?: { jsonSha: string; mdPath: string; mdSha: string; revision: number }
-  review?: { verdict: "okay" | "iterate" | "none"; findings: string[]; planSha: string; note?: "aborted" | "cap" }
-  approval?: { by: "user_command"; planSha: string; at: number }
-  taskIds?: string[]
-  counters: Counters
-  pendingCancel?: boolean
-  lastSeq: number
-  createdAt: number
-  updatedAt: number
-}
+/** The only workflow kind with an engine in this gate; plan APIs never accept another kind (see `narrowPlan`). */
+export type Workflow = PlanWorkflow
 
 export type FlowEventLine = {
   seq: number
@@ -142,6 +163,8 @@ export type FlowEventLine = {
   to?: string
   actor: EventActor
   data?: Record<string, unknown>
+  /** Non-committing audit line (e.g. a denied tool call): admitted regardless of revision and never authority. */
+  audit?: true
 }
 
 export const REQUEST_MAX = 2000
@@ -152,7 +175,7 @@ function validEngine(engine: unknown): engine is string {
 }
 
 /** Refuse host use unless the persisted workflow and this host identify the same bounded engine. */
-export function workflowEngineRefusal(wf: Workflow, expectedEngine: unknown): string | undefined {
+export function workflowEngineRefusal(wf: Pick<WorkflowEnvelope, "engine">, expectedEngine: unknown): string | undefined {
   if (!validEngine(wf.engine)) return "workflow engine identity is missing or malformed; recovery refused"
   if (!validEngine(expectedEngine)) return "host engine identity is missing or malformed; recovery refused"
   if (wf.engine !== expectedEngine) return "workflow engine identity mismatch; recovery refused"
@@ -171,6 +194,9 @@ export function archivePath(worktree: string, id: string): string {
 export function eventsPath(worktree: string): string {
   return join(flowDir(worktree), "events.jsonl")
 }
+export function heartbeatPath(worktree: string): string {
+  return join(flowDir(worktree), "heartbeat.json")
+}
 export function planJsonPath(worktree: string, id: string): string {
   return join(flowDir(worktree), "plans", `${id}.json`)
 }
@@ -182,55 +208,45 @@ export function newWorkflowId(now = Date.now()): string {
   return `wf_${stamp}_${randomBytes(2).toString("hex")}`
 }
 
-function isWorkflow(v: unknown): v is Workflow {
-  try { parseWorkflow(v); return true }
-  catch { return false }
-}
+/** A valid committed non-plan envelope that occupies the slot; plan readers see it as foreign, never as corrupt. */
+export type Occupant = { id: string; kind: WorkflowKind; sessionID: string; phase: Phase }
+export type ReadWorkflowResult = { wf: Workflow | null; corrupt?: string; legacy?: { terminal: boolean }; occupiedBy?: Occupant }
+export type ReadAnyWorkflowResult = { wf: WorkflowEnvelope | null; corrupt?: string; legacy?: { terminal: boolean } }
 
-export type ReadWorkflowResult = { wf: Workflow | null; corrupt?: string }
-
-/** Corrupt workflow state is reported in place; even status reads never rename it. */
-export function readWorkflowChecked(worktree: string): ReadWorkflowResult {
+/** Kind-generic checked read: any valid committed envelope. Corrupt state is reported in place; reads never rename it. */
+export function readAnyWorkflowChecked(worktree: string): ReadAnyWorkflowResult {
   const path = workflowPath(worktree)
-  if (!existsSync(path)) return { wf: null }
-  let value: unknown
-  try {
-    value = JSON.parse(readFileSync(path, "utf8")) as unknown
-  } catch {
-    return { wf: null, corrupt: path }
+  const committed = readCommitted(worktree)
+  switch (committed.state) {
+    case "none": return { wf: null }
+    case "ok": return { wf: committed.wf }
+    case "legacy": return committed.terminal ? { wf: null, legacy: { terminal: true } } : { wf: null, corrupt: path, legacy: { terminal: false } }
+    case "corrupt": return { wf: null, corrupt: path }
   }
-  if (!isWorkflow(value)) return { wf: null, corrupt: path }
-  return { wf: value }
 }
 
-/** Pure strict parser for read-only consumers; unlike workflow reads/writes, it never mutates state. */
-export function parseWorkflow(value: unknown): Workflow {
-  const object = (input: unknown): input is Record<string, unknown> => input !== null && typeof input === "object" && !Array.isArray(input)
-  if (!object(value)) throw new Error("invalid workflow state")
-  const w = value
-  const owner = w.owner
-  const counters = w.counters
-  const planRef = w.planRef
-  const review = w.review
-  const approval = w.approval
-  const counterKeys = ["code_invalid", "review_iterations", "user_rejections", "nudges"] as const
-  const nonnegativeInteger = (input: unknown): boolean => Number.isSafeInteger(input) && (input as number) >= 0
-  const timestamp = (input: unknown): boolean => typeof input === "number" && Number.isFinite(input) && input >= 0
-  if (w.version !== 1 || typeof w.id !== "string" || !w.id || w.kind !== "plan" ||
-    typeof w.sessionID !== "string" || !w.sessionID || !PHASES.includes(w.phase as Workflow["phase"]) ||
-    !["command", "keyword"].includes(w.entry as string) || typeof w.request !== "string" ||
+/** Plan-only checked read. A non-plan occupant yields `wf: null` with `occupiedBy`, so plan code can refuse by name. */
+export function readWorkflowChecked(worktree: string): ReadWorkflowResult {
+  const any = readAnyWorkflowChecked(worktree)
+  if (!any.wf) return any as ReadWorkflowResult
+  if (any.wf.kind === "plan") return { wf: any.wf }
+  return { wf: null, occupiedBy: { id: any.wf.id, kind: any.wf.kind, sessionID: any.wf.sessionID, phase: any.wf.phase } }
+}
 
-    !nonnegativeInteger(w.lastSeq) || !timestamp(w.createdAt) || !timestamp(w.updatedAt) ||
-    (w.stuckCause !== undefined && !["plan_invalid", "no_submission", "tasks_failed", "user_stop"].includes(w.stuckCause as string)) ||
-    !object(owner) || typeof owner.instance !== "string" || !owner.instance || !Number.isSafeInteger(owner.pid) || (owner.pid as number) < 1 || !timestamp(owner.heartbeatAt) ||
-    !object(counters) || !counterKeys.every(key => nonnegativeInteger(counters[key])) ||
-    (w.pendingCancel !== undefined && typeof w.pendingCancel !== "boolean") ||
-    (w.planRef !== undefined && (!object(planRef) || typeof planRef.mdPath !== "string" || typeof planRef.jsonSha !== "string" || typeof planRef.mdSha !== "string" || !nonnegativeInteger(planRef.revision))) ||
-    (w.review !== undefined && (!object(review) || !["okay", "iterate", "none"].includes(review.verdict as string) || !Array.isArray(review.findings) || !review.findings.every(x => typeof x === "string") || typeof review.planSha !== "string" ||
-      (review.note !== undefined && !["aborted", "cap"].includes(review.note as string)))) ||
-    (w.approval !== undefined && (!object(approval) || approval.by !== "user_command" || typeof approval.planSha !== "string" || !timestamp(approval.at))) ||
-    (w.taskIds !== undefined && (!Array.isArray(w.taskIds) || !w.taskIds.every(x => typeof x === "string")))) throw new Error("invalid workflow state")
-  return value as Workflow
+export function readAnyWorkflowForWrite(tx: FlowTx): ReadAnyWorkflowResult {
+  return readAnyWorkflowChecked(assertFlowTx(tx).worktree)
+}
+
+/** Non-terminal workflow of any kind that currently occupies the slot. */
+export function activeAnyWorkflow(worktree: string): WorkflowEnvelope | null {
+  const wf = readAnyWorkflowChecked(worktree).wf
+  return wf && !TERMINAL.has(wf.phase) ? wf : null
+}
+
+/** Pure strict parser for read-only consumers: a v2 plan envelope or "invalid workflow state". */
+export function parseWorkflow(value: unknown): Workflow {
+  try { return narrowPlan(parseEnvelope(value)) }
+  catch { throw new Error("invalid workflow state") }
 }
 
 export function readWorkflow(worktree: string): Workflow | null {
@@ -242,17 +258,14 @@ export function readWorkflowForWrite(tx: FlowTx): ReadWorkflowResult {
   return readWorkflowChecked(worktree)
 }
 
-function assertNoCorruptWorkflow(tx: FlowTx): void {
-  const result = readWorkflowForWrite(tx)
-  if (result.corrupt) throw new CorruptWorkflowError(result.corrupt)
+/** The refusal for a failed checked read: legacy non-terminal records and corrupt state both refuse writes. */
+export function workflowReadError(result: { corrupt?: string; legacy?: { terminal: boolean } }): CorruptWorkflowError {
+  return result.legacy?.terminal === false ? new LegacyWorkflowError(result.corrupt!) : new CorruptWorkflowError(result.corrupt!)
 }
 
-export function writeWorkflow(tx: FlowTx, wf: Workflow, now = Date.now()): Workflow {
-  const { worktree } = assertFlowTx(tx)
-  assertNoCorruptWorkflow(tx)
-  const next = { ...wf, updatedAt: now }
-  writeJsonAtomic(workflowPath(worktree), next)
-  return next
+function assertNoCorruptWorkflow(tx: FlowTx): void {
+  const result = readWorkflowForWrite(tx)
+  if (result.corrupt) throw workflowReadError(result)
 }
 
 /** Non-terminal workflow that currently blocks a new one (stuck counts: it still has an exit). */
@@ -261,15 +274,24 @@ export function activeWorkflow(worktree: string): Workflow | null {
   return wf && !TERMINAL.has(wf.phase) ? wf : null
 }
 
-/** Move a terminal workflow.json into archive/<id>.json. Returns the archived id, or null when nothing moved. */
+/**
+ * Retain a terminal workflow's history before the next start replaces the index pointer. Nothing is deleted: a v2
+ * terminal gets a derived archive/<id>.json copy and a terminal v1 inline record is copied byte-for-byte to
+ * legacy/<id>.v1.json. Returns the retained id, or null when nothing was terminal.
+ */
 export function rotate(tx: FlowTx): string | null {
   const { worktree } = assertFlowTx(tx)
   assertNoCorruptWorkflow(tx)
-  const wf = readWorkflowForWrite(tx).wf
-  if (!wf || !TERMINAL.has(wf.phase)) return null
-  writeJsonAtomic(archivePath(worktree, wf.id), wf)
-  rmSync(workflowPath(worktree), { force: true })
-  return wf.id
+  const committed = readCommitted(worktree)
+  if (committed.state === "ok" && TERMINAL.has(committed.wf.phase)) {
+    writeArchiveCopy(worktree, committed.wf)
+    return committed.wf.id
+  }
+  if (committed.state === "legacy" && committed.terminal) {
+    legacyArchive(worktree, committed.id, committed.bytes)
+    return committed.id
+  }
+  return null
 }
 
 /** Last seq in events.jsonl (0 when empty). A torn last line is skipped. */
@@ -288,18 +310,22 @@ export function lastEventSeq(worktree: string): number {
   return 0
 }
 
-export function readEvents(worktree: string, wfId?: string): FlowEventLine[] {
+/** Every event line in the file, committed or not. Only commit.ts (orphan classification) may use this. */
+export function readAllEventLines(worktree: string): FlowEventLine[] {
   const path = eventsPath(worktree)
   if (!existsSync(path)) return []
   const out: FlowEventLine[] = []
   for (const line of readFileSync(path, "utf8").split("\n")) {
     if (!line.trim()) continue
-    try {
-      const e = JSON.parse(line) as FlowEventLine
-      if (!wfId || e.wf === wfId) out.push(e)
-    } catch {}
+    try { out.push(JSON.parse(line) as FlowEventLine) } catch {}
   }
   return out
+}
+
+/** Events admitted by the committed index: precommit orphans never appear. Audit lines are always admitted. */
+export function readEvents(worktree: string, wfId?: string): FlowEventLine[] {
+  const bound = committedEventBound(worktree)
+  return readAllEventLines(worktree).filter((e) => (!wfId || e.wf === wfId) && eventAdmitted(bound, e))
 }
 
 export type EventTail = { events: FlowEventLine[]; windowTruncated: boolean; bytesRead: number }
@@ -311,7 +337,7 @@ function withBytesRead(error: unknown, bytesRead: number): Error {
 }
 
 /** Read only a bounded tail window; torn boundary lines are discarded and state is never modified. */
-export function readEventsTail(worktree: string, opts: { wfId?: string; limit: number; maxBytes?: number }): EventTail {
+export function readEventsTail(worktree: string, opts: { wfId?: string; limit: number; maxBytes?: number; bound?: EventBound | null }): EventTail {
   const maxBytes = opts.maxBytes ?? 64 * 1024
   if (!Number.isSafeInteger(opts.limit) || opts.limit < 0 || !Number.isSafeInteger(maxBytes) || maxBytes < 1) {
     throw new TypeError("invalid event tail limits")
@@ -365,6 +391,7 @@ export function readEventsTail(worktree: string, opts: { wfId?: string; limit: n
         const event = parsed as Record<string, unknown>
         if (!Number.isSafeInteger(event.seq) || (event.seq as number) < 0 || !Number.isFinite(event.at) || (event.at as number) < 0 ||
           typeof event.wf !== "string" || typeof event.type !== "string" || (opts.wfId && event.wf !== opts.wfId)) continue
+        if (opts.bound && !eventAdmitted(opts.bound, event as unknown as FlowEventLine)) continue
         const { to, ...rest } = event
         events.push({ ...rest, ...(typeof to === "string" ? { to } : {}) } as FlowEventLine)
       }
@@ -379,16 +406,64 @@ export function readEventsTail(worktree: string, opts: { wfId?: string; limit: n
   return result!
 }
 
-/** Append events with a global monotonic seq. Returns the last seq written. */
-export function appendEvents(tx: FlowTx, events: Array<Omit<FlowEventLine, "seq" | "at"> & { at?: number }>, now = Date.now()): number {
+/** A torn final line (no trailing newline) is never truncated; the next append starts on a fresh line instead. */
+function tornTailPrefix(path: string): string {
+  let fd: number
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return ""; throw error }
+  try {
+    const size = fstatSync(fd).size
+    if (size === 0) return ""
+    const last = Buffer.alloc(1)
+    readSync(fd, last, 0, 1, size - 1)
+    return last[0] === 0x0a ? "" : "\n"
+  } finally { closeSync(fd) }
+}
+
+/** Append non-committing audit events with a global monotonic seq. Returns the last seq written. */
+export function appendEvents(tx: FlowTx, events: Array<Omit<FlowEventLine, "seq" | "at" | "audit"> & { at?: number }>, now = Date.now()): number {
   const { worktree } = assertFlowTx(tx)
   assertNoCorruptWorkflow(tx)
   let seq = lastEventSeq(worktree)
   if (events.length === 0) return seq
   const path = eventsPath(worktree)
   mkdirSync(dirname(path), { recursive: true })
-  const text = events.map((e) => JSON.stringify({ seq: ++seq, at: e.at ?? now, ...e })).join("\n") + "\n"
+  const text = tornTailPrefix(path) + events.map((e) => JSON.stringify({ seq: ++seq, at: e.at ?? now, ...e, audit: true })).join("\n") + "\n"
   appendFileSync(path, text)
+  return seq
+}
+
+/** Append events and fsync the event file before a durable workflow revision refers to them. */
+export function appendEventsDurable(tx: FlowTx, events: Array<Omit<FlowEventLine, "seq" | "at"> & { at?: number }>, now = Date.now(), beforeFsync?: () => void): number {
+  const { worktree } = assertFlowTx(tx)
+  assertNoCorruptWorkflow(tx)
+  let seq = lastEventSeq(worktree)
+  if (events.length === 0) return seq
+  const path = eventsPath(worktree)
+  mkdirSync(dirname(path), { recursive: true })
+  const text = tornTailPrefix(path) + events.map((event) => JSON.stringify({ seq: ++seq, at: event.at ?? now, ...event })).join("\n") + "\n"
+  const bytes = Buffer.from(text, "utf8")
+  const fd = openSync(path, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600)
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error("workflow events are not a regular file")
+    let offset = 0
+    while (offset < bytes.length) {
+      const written = writeSync(fd, bytes, offset, bytes.length - offset, null)
+      if (written <= 0) throw new Error("short write while appending workflow events")
+      offset += written
+    }
+    beforeFsync?.()
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+  const directoryFD = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+  try {
+    if (!fstatSync(directoryFD).isDirectory()) throw new Error("workflow events directory is not a directory")
+    fsyncSync(directoryFD)
+  } finally {
+    closeSync(directoryFD)
+  }
   return seq
 }
 
@@ -396,25 +471,30 @@ export function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex")
 }
 
-/** Write a code-rendered artifact under <worktree>/<rel>; returns its sha256. */
+/** Immutable, content-addressed retention of plan artifacts, so a retained revision re-verifies after the live file moves on. */
+export function planRevisionDir(worktree: string, id: string): string {
+  return join(flowDir(worktree), "plans", "revisions", id)
+}
+
+/** Durably write a code-rendered artifact under <worktree>/<rel> and an immutable `<sha256>.md` copy; returns its sha256. */
 export function renderArtifact(tx: FlowTx, rel: string, text: string): string {
   const { worktree } = assertFlowTx(tx)
   assertNoCorruptWorkflow(tx)
   const path = join(worktree, rel)
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, text)
-  return sha256(text)
+  const bytes = Buffer.from(text, "utf8")
+  const sha = sha256(text)
+  retainContentAddressed(planRevisionDir(worktree, basename(rel).replace(/\.md$/, "")), bytes, "md", sha)
+  durableWriteBytes(path, bytes, undefined, { createParents: false })
+  return sha
 }
 
 export function writePlanJson(tx: FlowTx, id: string, plan: Plan): void {
   const { worktree } = assertFlowTx(tx)
   assertNoCorruptWorkflow(tx)
-  writeJsonAtomic(planJsonPath(worktree, id), plan)
-}
-
-export function fileSha(worktree: string, rel: string): string | null {
-  const path = join(worktree, rel)
-  return existsSync(path) ? sha256(readFileSync(path, "utf8")) : null
+  const canonical = canonicalPlanJson(plan)
+  retainContentAddressed(planRevisionDir(worktree, id), Buffer.from(canonical, "utf8"), "json", sha256(canonical))
+  durableWriteJson(planJsonPath(worktree, id), plan)
 }
 
 export function coreOf(wf: Workflow): FlowCore {
@@ -422,18 +502,26 @@ export function coreOf(wf: Workflow): FlowCore {
     phase: wf.phase,
     stuckCause: wf.stuckCause,
     counters: wf.counters,
-    pendingCancel: wf.pendingCancel,
+    ...(wf.stopIntent ? { stop: { kind: wf.stopIntent.kind } } : {}),
+    ...(wf.pausedFrom ? { pausedFrom: wf.pausedFrom.phase } : {}),
     reviewNote: wf.review?.note,
   }
 }
 
 /** Apply a machine result back onto the workflow record. */
 export function withCore(wf: Workflow, core: FlowCore): Workflow {
-  const next: Workflow = { ...wf, phase: core.phase, counters: core.counters }
+  const next: Workflow = { ...wf, phase: core.phase, stage: REGISTRY.plan.stageOf(core.phase, wf.stage), counters: core.counters }
   if (core.stuckCause) next.stuckCause = core.stuckCause
   else delete next.stuckCause
-  if (core.pendingCancel) next.pendingCancel = true
-  else delete next.pendingCancel
+  if (core.stop) {
+    // The token, checkpoint and reason are minted only by requestStop (it patches them over this placeholder).
+    next.stopIntent = wf.stopIntent?.kind === core.stop.kind ? wf.stopIntent : {
+      kind: core.stop.kind, token: randomUUID(), requestedFrom: { phase: wf.phase, stage: wf.stage }, checkpoint: null, reason: `${core.stop.kind} requested`,
+    }
+  } else next.stopIntent = null
+  if (core.pausedFrom) {
+    next.pausedFrom = wf.pausedFrom?.phase === core.pausedFrom ? wf.pausedFrom : { phase: core.pausedFrom, stage: wf.stage }
+  } else delete next.pausedFrom
   if (next.review) {
     if (core.reviewNote) next.review = { ...next.review, note: core.reviewNote }
     else if (next.review.note) {
@@ -444,16 +532,20 @@ export function withCore(wf: Workflow, core: FlowCore): Workflow {
   return next
 }
 
-export function newWorkflow(sessionID: string, owner: Owner, entry: Workflow["entry"], request: string, engine: string, now = Date.now()): Workflow {
+/** `owner` may carry a liveness hint (heartbeatAt) from callers; it is never stored in the envelope. */
+export function newWorkflow(sessionID: string, owner: Owner & { heartbeatAt?: number }, entry: Workflow["entry"], request: string, engine: string, now = Date.now()): Workflow {
   if (!validEngine(engine)) throw new TypeError("workflow engine must be a nonempty string no longer than 512 characters")
   return {
-    version: 1,
+    version: 2,
     id: newWorkflowId(now),
     kind: "plan",
+    stage: "draft",
     engine,
     phase: "planning",
     sessionID,
-    owner,
+    owner: { instance: owner.instance, pid: owner.pid },
+    stopIntent: null,
+    artifacts: [],
     entry,
     request: request.slice(0, REQUEST_MAX),
     counters: { ...ZERO_COUNTERS },

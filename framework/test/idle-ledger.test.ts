@@ -1,22 +1,30 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 import { createEventHook } from "../src/hooks/event.ts"
 import { createIdleLoop, resumeMessage } from "../src/loop/idle.ts"
 import { createCompactingHook, buildCheckpoint } from "../src/hooks/compacting.ts"
-import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
+import { eventsPath, workflowPath } from "../src/flow/state.ts"
 import { getQueue } from "../src/orchestration/queue.ts"
+import { admissionEpoch, attachAdmission, effectiveHold, isAdmissionCurrent } from "../src/sessions/admission.ts"
 import { addTasks, emptyLedger, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
-import { abortPath, EMPTY_MODE, readModeState, sessionInfoPath, writeJsonAtomic, writeModeState, type ModeState } from "../src/state/store.ts"
-import { fakeClient, makeDeps, tempGitWorktree, todo, waitFor, type FakeClient } from "./guards-helpers.ts"
+import { abortPath, EMPTY_MODE, modeStatePath, readModeState, sessionInfoPath, writeJsonAtomic, writeModeState, type ModeState } from "../src/state/store.ts"
+import { admitFixtureSession, fakeClient, makeDeps, releaseFixtureSession, tempGitWorktree, todo, waitFor, type FakeClient } from "./guards-helpers.ts"
+import { createNativeToolFixture } from "./native-tool-fixture.ts"
 
 const S = "ses_main"
 let wt: ReturnType<typeof tempGitWorktree>
 let client: FakeClient
+let fixtureSession: ReturnType<typeof admitFixtureSession>
 beforeEach(() => {
   wt = tempGitWorktree()
   client = fakeClient({ promptAsync: true })
+  fixtureSession = admitFixtureSession(makeDeps(client, wt.worktree), S)
 })
-afterEach(() => wt.cleanup())
+afterEach(() => {
+  releaseFixtureSession(wt.worktree, fixtureSession)
+  wt.cleanup()
+})
 
 function ulw(patch: Partial<ModeState> = {}): ModeState {
   const now = Date.now()
@@ -25,7 +33,47 @@ function ulw(patch: Partial<ModeState> = {}): ModeState {
 const mainPrompts = () => client.calls.filter((c) => c.method === "promptAsync" && (c.args as any).path.id === S)
 const idleEvent = { event: { type: "session.idle", properties: { sessionID: S } } } as any
 
+function optionalBytes(path: string): Buffer | null {
+  try {
+    return readFileSync(path)
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return null
+    throw error
+  }
+}
+
 describe("idle loop with a ledger", () => {
+  test("restored active ulw remains held: idle sends no prompt and leaves mode and flow state unchanged", async () => {
+    const deps = makeDeps(client, wt.worktree)
+    const oldEpoch = fixtureSession.epoch
+    writeModeState(wt.worktree, S, ulw())
+    client.todos = [todo("1", "pending")]
+    const modeBefore = readFileSync(modeStatePath(wt.worktree, S))
+    const workflowBefore = optionalBytes(workflowPath(wt.worktree))
+    const eventsBefore = optionalBytes(eventsPath(wt.worktree))
+
+    fixtureSession.release({
+      workflowQuiescent: true,
+      evidence: "fixture state persisted before simulating a restored attachment",
+      workflowID: null,
+      revision: null,
+    })
+    fixtureSession = attachAdmission(getOpenCodeRuntime(deps), S, { engine: "opencode" })
+
+    expect(fixtureSession.restored).toBe(true)
+    expect(effectiveHold(wt.worktree, S)).toBe(true)
+    expect(admissionEpoch(wt.worktree, S)).toBeUndefined()
+    expect(isAdmissionCurrent(wt.worktree, S, oldEpoch)).toBe(false)
+
+    await createEventHook(deps)(idleEvent)
+
+    expect(client.calls.filter(call => call.method === "prompt" || call.method === "promptAsync")).toEqual([])
+    expect(client.created).toEqual([])
+    expect(readFileSync(modeStatePath(wt.worktree, S))).toEqual(modeBefore)
+    expect(optionalBytes(workflowPath(wt.worktree))).toEqual(workflowBefore)
+    expect(optionalBytes(eventsPath(wt.worktree))).toEqual(eventsBefore)
+  })
+
   test("open tasks (any mode) -> main is told ONCE to call delegate resume:true; the queue is never run from idle", async () => {
     const deps = makeDeps(client, wt.worktree)
     let { ledger } = addTasks(emptyLedger(S), [{ title: "a" }, { title: "b" }, { title: "c" }])
@@ -55,10 +103,17 @@ describe("idle loop with a ledger", () => {
 
   test("the resume message is synthetic: chat.message adds no mode suffix and detects nothing", async () => {
     const deps = makeDeps(client, wt.worktree)
+    const native = await createNativeToolFixture(deps, { sessionID: S })
     writeModeState(wt.worktree, S, ulw())
-    const part: any = { type: "text", text: resumeMessage(1, ["ulw everything"]), synthetic: true }
-    await createChatMessageHook(deps)({ sessionID: S, agent: "main" }, { message: {} as any, parts: [part] })
-    expect(part.text).not.toContain("<lca-mode")
+    const modeBefore = readFileSync(modeStatePath(wt.worktree, S))
+    const text = resumeMessage(1, ["ulw everything"])
+    // A synthetic-only user message has no real user text: the product refuses to bind a system channel for it.
+    await expect(native.deliverUserTurn({ parts: [{ type: "text", text, synthetic: true }] }))
+      .rejects.toThrow("lca: OpenCode system channel refused (invalid-turn)")
+    expect(native.messages).toHaveLength(0)
+    expect(readFileSync(modeStatePath(wt.worktree, S))).toEqual(modeBefore)
+    expect(readModeState(wt.worktree, S).mode).toBe("ulw")
+    expect(text).not.toContain("<lca-mode")
   })
 
   test("settled ledger -> falls through to the stage-1 todo path (through the event hook)", async () => {
@@ -106,6 +161,7 @@ describe("idle loop with a ledger", () => {
 
   test("todo path: a user cancel written while todos were being fetched is not overwritten", async () => {
     const deps = makeDeps(client, wt.worktree)
+    const native = await createNativeToolFixture(deps, { sessionID: S })
     writeModeState(wt.worktree, S, ulw())
     client.todos = [todo("1", "pending")]
     const slowTodo = client.session.todo!
@@ -117,8 +173,7 @@ describe("idle loop with a ledger", () => {
     const p = idle(S)
     await new Promise((r) => setTimeout(r, 5))
     // user says stop while the loop waits for todos
-    const part: any = { type: "text", text: "stop lca" }
-    await createChatMessageHook(deps)({ sessionID: S, agent: "main" }, { message: {} as any, parts: [part] })
+    await native.deliverUserTurn({ text: "stop lca" })
     const out = await p
     expect(out).toEqual({ action: "ignored", why: "state_changed" })
     expect(readModeState(wt.worktree, S).active).toBe(false)
@@ -148,15 +203,21 @@ describe("idle loop with a ledger", () => {
     expect(mainPrompts().length).toBe(0)
   })
 
-  test("breakers still run first on the todo path; an abort marker also suppresses the resume offer", async () => {
+  test("an abort marker holds admission without dispatching or rewriting loop evidence", async () => {
     const deps = makeDeps(client, wt.worktree)
     const { ledger } = addTasks(emptyLedger(S), [{ title: "a" }])
     writeLedger(wt.worktree, ledger)
     writeJsonAtomic(abortPath(wt.worktree, S), { reason: "user_stop", at: Date.now() })
     writeModeState(wt.worktree, S, ulw({ iterations: 20 }))
-    expect(await createIdleLoop(deps)(S)).toEqual({ action: "stopped", reason: "aborted" })
+    const modeBefore = readFileSync(modeStatePath(wt.worktree, S))
+    const ledgerBefore = readLedger(wt.worktree, S)
+    const abortBefore = readFileSync(abortPath(wt.worktree, S))
+    expect(await createIdleLoop(deps)(S)).toEqual({ action: "ignored", why: "held" })
     expect(mainPrompts().length).toBe(0)
     expect(client.created.length).toBe(0)
+    expect(readFileSync(modeStatePath(wt.worktree, S))).toEqual(modeBefore)
+    expect(readLedger(wt.worktree, S)).toEqual(ledgerBefore)
+    expect(readFileSync(abortPath(wt.worktree, S))).toEqual(abortBefore)
   })
 })
 

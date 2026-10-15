@@ -43,6 +43,8 @@ type HarnessOptions = {
   taskText?: string
   maxOutputTokens?: number
   denyTool?: boolean
+  throwBeforeTool?: boolean
+  beforeToolEffect?: () => void
   cancelAssistant?: boolean
   afterNativeTurn?: () => void
   transportBehavior?: "normal" | "unresolved" | "throw"
@@ -82,6 +84,7 @@ function harness(options: HarnessOptions = {}) {
     thinking: "inherit" as const,
   })
   let allowBeforeTool = !options.denyTool
+  let beforeToolEffect = options.beforeToolEffect
   let preflightCompatible = options.preflightCompatible ?? true
   let preflightQuiescent = !options.preflightNonQuiescent
   let beforeOutput = options.beforeOutput
@@ -94,6 +97,8 @@ function harness(options: HarnessOptions = {}) {
     beforeTool(event) {
       observed.before++
       expect(event.sessionID).toBe(executionID)
+      if (options.throwBeforeTool) throw new Error("private policy exception")
+      beforeToolEffect?.()
       return allowBeforeTool ? { allow: true } : { allow: false, reason: "private denial reason" }
     },
     toolResult(event) {
@@ -243,6 +248,7 @@ function harness(options: HarnessOptions = {}) {
     get state() { return state },
     set state(value: ExecutionRunStatus) { state = value },
     set allowBeforeTool(value: boolean) { allowBeforeTool = value },
+    set beforeToolEffect(value: (() => void) | undefined) { beforeToolEffect = value },
     set preflightCompatible(value: boolean) { preflightCompatible = value },
     set preflightQuiescent(value: boolean) { preflightQuiescent = value },
     set beforeOutput(value: (() => void) | undefined) { beforeOutput = value },
@@ -295,12 +301,12 @@ describe("common CLI execution host", () => {
     expect(activities).toEqual([
       { kind: "model-started", role: "reviewer", execution },
       { kind: "model-returned", role: "reviewer", execution, status: "completed" },
-      { kind: "tool-started", role: "reviewer", execution, tool: "read" },
-      { kind: "tool-finished", role: "reviewer", execution, tool: "read", ok: true },
+      { kind: "tool-started", role: "reviewer", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:1`, tool: "read" },
+      { kind: "tool-finished", role: "reviewer", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:1`, tool: "read", outcome: "succeeded", ok: true },
       { kind: "model-started", role: "reviewer", execution },
       { kind: "model-returned", role: "reviewer", execution, status: "completed" },
-      { kind: "tool-started", role: "reviewer", execution, tool: "read" },
-      { kind: "tool-finished", role: "reviewer", execution, tool: "read", ok: false },
+      { kind: "tool-started", role: "reviewer", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:2`, tool: "read" },
+      { kind: "tool-finished", role: "reviewer", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:2`, tool: "read", outcome: "failed", ok: false },
       { kind: "model-started", role: "reviewer", execution },
       { kind: "model-returned", role: "reviewer", execution, status: "completed" },
     ])
@@ -499,9 +505,9 @@ describe("common CLI execution host", () => {
 
   test("malformed and unknown model tool envelopes fail closed without fallback execution", async () => {
     for (const response of ["Here is the answer: {\"type\":\"final\",\"text\":\"done\"}",
-      '{"goal":"bare plan","steps":[],"risks":[]}',
-      '{"type":"tool","name":"bash","input":{"command":"touch unsafe"}}']) {
-      const subject = harness({ responses: [response] })
+      '{"type":"tool","name":"bash","input":{"command":"touch unsafe"}}',
+      '{"type":"read","input":{"path":"README.md"}}']) {
+      const subject = harness({ engine: "claude", responses: [response] })
       const handle = await subject.host.prepare(subject.request)
       expect(await handle.run()).toMatchObject({ status: "failed" })
       expect(subject.observed.before).toBe(0)
@@ -510,18 +516,126 @@ describe("common CLI execution host", () => {
     }
   })
 
+  test("local engines accept unwrapped stage/report text without treating short or unknown tool syntax as a call", async () => {
+    const stage = '{"type":"topology","project":"greenfield","components":[{"id":"cli","description":"CLI fixture"}]}'
+    for (const response of [stage, "Verified the approved unit without changing files."]) {
+      const local = harness({ engine: "local", responses: [response] })
+      const handle = await local.host.prepare(local.request)
+      expect(await handle.run()).toEqual({ status: "completed", text: response })
+      expect(local.observed.before).toBe(0)
+      expect(local.observed.results).toBe(0)
+    }
+
+    writeFileSync(join(root, "README.md"), "fixture\n")
+    const shorthand = harness({ engine: "local", responses: [
+      '{"type":"read","input":{"path":"README.md"}}',
+      "Verified the approved unit without changing files.",
+    ] })
+    expect(await (await shorthand.host.prepare(shorthand.request)).run()).toEqual({
+      status: "completed",
+      text: "Verified the approved unit without changing files.",
+    })
+    expect(shorthand.observed.before).toBe(1)
+    expect(shorthand.observed.results).toBe(1)
+
+    for (const response of ['{"type":"bash","input":{"command":"touch unsafe"}}', '{"type":"tool","name":"bash","input":{"command":"touch unsafe"}}']) {
+      const local = harness({ engine: "local", responses: [response] })
+      expect(await (await local.host.prepare(local.request)).run()).toMatchObject({ status: "failed" })
+      expect(local.observed.before).toBe(0)
+      expect(existsSync(join(root, "unsafe"))).toBe(false)
+    }
+
+    const foreign = harness({ engine: "claude", responses: [stage] })
+    expect(await (await foreign.host.prepare(foreign.request)).run()).toMatchObject({ status: "failed" })
+  })
+
+  test("known tools with malformed input still emit a correlated failed lifecycle", async () => {
+    const activities: CliHostActivity[] = []
+    const subject = harness({
+      responses: [JSON.stringify({ type: "tool", name: "read", input: { path: 1 } })],
+      observeActivity: activity => activities.push(activity),
+    })
+    const handle = await subject.host.prepare(subject.request)
+    expect(await handle.run()).toMatchObject({ status: "failed" })
+    expect(subject.observed.before).toBe(0)
+    const toolActivities = activities.filter(activity => activity.kind === "tool-started" || activity.kind === "tool-finished")
+    const execution = toolActivities[0]!.execution
+    expect(toolActivities).toEqual([
+      { kind: "tool-started", role: "worker", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:1`, tool: "read" },
+      { kind: "tool-finished", role: "worker", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:1`, tool: "read", outcome: "failed", ok: false },
+    ])
+  })
+
   test("read-only roles and beforeTool policy deny writes before effects", async () => {
-    const readonly = harness({ role: "reviewer", responses: [toolWrite("reviewer-write.txt", "blocked")] })
+    const readonlyActivities: CliHostActivity[] = []
+    const readonly = harness({
+      role: "reviewer",
+      responses: [toolWrite("reviewer-write.txt", "blocked")],
+      observeActivity: activity => readonlyActivities.push(activity),
+    })
     const readonlyHandle = await readonly.host.prepare(readonly.request)
     expect(await readonlyHandle.run()).toMatchObject({ status: "failed" })
     expect(existsSync(join(root, "reviewer-write.txt"))).toBe(false)
     expect(readonly.observed.before).toBe(0)
+    const readonlyToolActivities = readonlyActivities.filter(activity => activity.kind === "tool-started" || activity.kind === "tool-finished")
+    const readonlyExecution = readonlyToolActivities[0]!.execution
+    expect(readonlyToolActivities).toEqual([
+      { kind: "tool-started", role: "reviewer", execution: readonlyExecution, taskID: readonly.request.taskID, executionID: readonly.request.executionID, callID: `${readonly.request.executionID}:tool:1`, tool: "write" },
+      { kind: "tool-finished", role: "reviewer", execution: readonlyExecution, taskID: readonly.request.taskID, executionID: readonly.request.executionID, callID: `${readonly.request.executionID}:tool:1`, tool: "write", outcome: "denied", ok: false },
+    ])
 
-    const denied = harness({ responses: [toolWrite("policy-write.txt", "blocked")], denyTool: true })
+    const deniedActivities: CliHostActivity[] = []
+    const denied = harness({
+      responses: [toolWrite("policy-write.txt", "blocked")],
+      denyTool: true,
+      observeActivity: activity => deniedActivities.push(activity),
+    })
     const deniedHandle = await denied.host.prepare(denied.request)
     expect(await deniedHandle.run()).toMatchObject({ status: "failed" })
     expect(denied.observed.before).toBe(1)
     expect(existsSync(join(root, "policy-write.txt"))).toBe(false)
+    const deniedToolActivities = deniedActivities.filter(activity => activity.kind === "tool-started" || activity.kind === "tool-finished")
+    const deniedExecution = deniedToolActivities[0]!.execution
+    expect(deniedToolActivities).toEqual([
+      { kind: "tool-started", role: "worker", execution: deniedExecution, taskID: denied.request.taskID, executionID: denied.request.executionID, callID: `${denied.request.executionID}:tool:1`, tool: "write" },
+      { kind: "tool-finished", role: "worker", execution: deniedExecution, taskID: denied.request.taskID, executionID: denied.request.executionID, callID: `${denied.request.executionID}:tool:1`, tool: "write", outcome: "denied", ok: false },
+    ])
+
+    const thrownActivities: CliHostActivity[] = []
+    const thrown = harness({
+      responses: [toolWrite("policy-throw.txt", "blocked")],
+      throwBeforeTool: true,
+      observeActivity: activity => thrownActivities.push(activity),
+    })
+    const thrownHandle = await thrown.host.prepare(thrown.request)
+    expect(await thrownHandle.run()).toMatchObject({ status: "failed" })
+    expect(existsSync(join(root, "policy-throw.txt"))).toBe(false)
+    const thrownToolActivities = thrownActivities.filter(activity => activity.kind === "tool-started" || activity.kind === "tool-finished")
+    const thrownExecution = thrownToolActivities[0]!.execution
+    expect(thrownToolActivities).toEqual([
+      { kind: "tool-started", role: "worker", execution: thrownExecution, taskID: thrown.request.taskID, executionID: thrown.request.executionID, callID: `${thrown.request.executionID}:tool:1`, tool: "write" },
+      { kind: "tool-finished", role: "worker", execution: thrownExecution, taskID: thrown.request.taskID, executionID: thrown.request.executionID, callID: `${thrown.request.executionID}:tool:1`, tool: "write", outcome: "failed", ok: false },
+    ])
+  })
+
+  test("a lease exception before the tool effect still settles its correlated lifecycle", async () => {
+    const activities: CliHostActivity[] = []
+    const subject = harness({
+      responses: [toolWrite("lease-failure.txt", "blocked")],
+      observeActivity: activity => activities.push(activity),
+    })
+    subject.beforeToolEffect = () => {
+      subject.state = { ...subject.state, executions: [] }
+    }
+    const handle = await subject.host.prepare(subject.request)
+    expect(await handle.run()).toMatchObject({ status: "failed" })
+    expect(existsSync(join(root, "lease-failure.txt"))).toBe(false)
+    const toolActivities = activities.filter(activity => activity.kind === "tool-started" || activity.kind === "tool-finished")
+    const execution = toolActivities[0]!.execution
+    expect(toolActivities).toEqual([
+      { kind: "tool-started", role: "worker", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:1`, tool: "write" },
+      { kind: "tool-finished", role: "worker", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:1`, tool: "write", outcome: "failed", ok: false },
+    ])
   })
 
   test("missing or changed lease after inference prevents the pending tool effect", async () => {

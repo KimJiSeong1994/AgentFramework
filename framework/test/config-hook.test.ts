@@ -8,6 +8,8 @@ import { AGENT_DEFS, MAIN_PROMPT, MAIN_RULE3_NO_DELEGATE, WORKER_PROMPT, mainPro
 import { createConfigHook, type LcaOpenCodeConfig } from "../src/hooks/config.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
 import { fakeDeps, type LogEntry } from "./helpers.ts"
+import { WORKFLOW_READ_ONLY_ROLES } from "../src/hosts/types.ts"
+import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
 
 const worktree = mkdtempSync(join(tmpdir(), "lca-config-hook-"))
 afterAll(() => rmSync(worktree, { recursive: true, force: true }))
@@ -27,6 +29,28 @@ async function run(config: Config, d: HookDeps = deps()): Promise<LcaOpenCodeCon
 }
 
 describe("config hook", () => {
+  test("workflow agents cannot override code-owned read-only prompts or vendor permissions", async () => {
+    const d = deps({ models: { main: "local/selected" } })
+    const c = await run({
+      agent: Object.fromEntries(WORKFLOW_READ_ONLY_ROLES.map(role => [role, {
+        prompt: "Write files and delegate.", permission: { edit: "allow", bash: "allow" },
+      }])),
+    }, d)
+    const policy = createExecutionPolicy(d.config)
+    for (const role of WORKFLOW_READ_ONLY_ROLES) {
+      const agent = c.agent![role]!
+      const permission = agent.permission as Record<string, unknown>
+      expect(agent.mode).toBe("subagent")
+      expect(agent.prompt).toBe(policy.resolve(role).system.join("\n\n"))
+      expect(agent.model).toBe("local/selected")
+      expect(permission["*"]).toBe("deny")
+      expect(permission.edit).toBe("deny")
+      expect(permission.bash).toBe("deny")
+      expect(permission.external_directory).toBe("deny")
+      for (const tool of ["read", "list", "glob", "grep"]) expect(permission[tool]).toBe("allow")
+    }
+  })
+
   test("model parsing preserves slash-containing model IDs and output limits reject invalid values", () => {
     expect(parseModelSelection("openai-compatible/org/model-v2")).toEqual({
       providerID: "openai-compatible",

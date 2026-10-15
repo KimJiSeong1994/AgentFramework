@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mainPrompt } from "../src/agents/prompts.ts"
 import { DEFAULT_CONFIG, type LcaConfig } from "../src/config.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
-import type { ExecutionRequest } from "../src/hosts/types.ts"
+import { EXECUTION_ROLES, EXECUTION_TOOL_NAMES, WORKFLOW_READ_ONLY_ROLES, type ExecutionRequest, type ExecutionRole } from "../src/hosts/types.ts"
 import { EMPTY_MODE, readModeState, writeModeState } from "../src/state/store.ts"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -17,7 +17,7 @@ const config = (patch: Partial<LcaConfig> = {}): LcaConfig => ({
   disabled_hooks: patch.disabled_hooks ?? [],
 })
 
-function request(policy: ReturnType<typeof createExecutionPolicy>, role: "main" | "worker" | "reviewer" = "worker"): ExecutionRequest {
+function request(policy: ReturnType<typeof createExecutionPolicy>, role: ExecutionRole = "worker"): ExecutionRequest {
   return {
     executionID: "exec", supervisorSessionID: "parent", taskID: "task", attemptID: "attempt", generation: 1,
     role, title: "task", cwd: "/repo", text: "dynamic task", deadlineAt: Date.now() + 1000,
@@ -26,6 +26,43 @@ function request(policy: ReturnType<typeof createExecutionPolicy>, role: "main" 
 }
 
 describe("host-neutral execution tool policy", () => {
+  test("every role enforces its actual allowlist and denials, including data roles", () => {
+    const p = createExecutionPolicy(config())
+    for (const role of EXECUTION_ROLES) {
+      const snapshot = p.resolve(role)
+      for (const name of [...EXECUTION_TOOL_NAMES, "future_mutator", "approve", "constructor"]) {
+        const handlers = p.handlers(request(p, role))
+        const decision = handlers.beforeTool({
+          type: "tool-before", sessionID: role, callID: name, toolID: name, name, input: {},
+        })
+        expect(decision.allow).toBe(snapshot.tools.allowed.includes(name) && !snapshot.tools.denied.includes(name))
+      }
+    }
+    expect(() => p.resolve("unknown" as ExecutionRole)).toThrow("Unsupported execution role")
+    expect(() => p.handlers({ ...request(p), role: "unknown" as ExecutionRole })).toThrow("fixed role snapshot")
+    expect(() => p.handlers({ ...request(p), role: "architect" })).toThrow("fixed role snapshot")
+  })
+
+  test("workflow roles have fixed read-only capabilities without adding model configuration keys", () => {
+    const input = config({ models: { main: "local/selected-model" } })
+    const before = JSON.stringify(input)
+    const p = createExecutionPolicy(input)
+    for (const role of WORKFLOW_READ_ONLY_ROLES) {
+      const snapshot = p.resolve(role)
+      expect(snapshot.tools.allowed).toEqual(["read", "list", "glob", "grep"])
+      expect(snapshot.tools.denied).toEqual(expect.arrayContaining(["write", "edit", "bash", "delegate", "task", "lca_flow", "skill"]))
+      expect(snapshot.model).toEqual({ providerID: "local", modelID: "selected-model" })
+      expect(Object.isFrozen(snapshot)).toBe(true)
+      expect(Object.isFrozen(snapshot.tools.allowed)).toBe(true)
+      expect(Object.isFrozen(snapshot.model)).toBe(true)
+      expect(snapshot.system.join("\n")).toContain("Never modify files")
+      expect(snapshot.id).not.toBe(p.resolve("main").id)
+      expect(() => p.bindSession(role, p.handlers(request(p, role)), Object.freeze({ ...snapshot }))).toThrow("fixed frozen snapshot")
+    }
+    expect(JSON.stringify(input)).toBe(before)
+    expect(new Set(WORKFLOW_READ_ONLY_ROLES.map(role => p.resolve(role).id)).size).toBe(WORKFLOW_READ_ONLY_ROLES.length)
+  })
+
   test("returns stable frozen per-role prompt, model, budget and tool snapshots", () => {
     const p = createExecutionPolicy(config({ models: { worker: "ollama/org/model:v2" } }))
     const first = p.resolve("worker")

@@ -1,19 +1,20 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import type { Part, TextPart, UserMessage } from "@opencode-ai/sdk"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
+import { createConfigHook } from "../src/hooks/config.ts"
 import { EMPTY_MODE, readJson, readModeState, sessionInfoPath, writeModeState } from "../src/state/store.ts"
 import type { SessionInfo } from "../src/state/store.ts"
 import { MODE_INSTRUCTIONS, modeSuffix, stripModeSuffix } from "../src/modes/instructions.ts"
+import { admitFixtureSession, fakeClient, releaseFixtureSession, tempWorktree, type TempWorktree } from "./guards-helpers.ts"
 
 const SESSION = "ses_test"
+let messageNumber = 0
+let partNumber = 0
 
 function textPart(text: string, synthetic = false): TextPart {
-  return { id: "prt_1", sessionID: SESSION, messageID: "msg_1", type: "text", text, synthetic }
+  return { id: `prt_${++partNumber}`, sessionID: SESSION, messageID: "msg_unbound", type: "text", text, synthetic }
 }
 
 function message(): UserMessage {
@@ -27,29 +28,42 @@ function message(): UserMessage {
   }
 }
 
+let fixture: TempWorktree
 let worktree: string
 let logs: Array<{ msg: string; extra?: Record<string, unknown> }>
 let deps: HookDeps
+let fixtureSession: ReturnType<typeof admitFixtureSession>
 
 beforeEach(() => {
-  worktree = mkdtempSync(join(tmpdir(), "lca-chat-"))
+  fixture = tempWorktree()
+  worktree = fixture.worktree
   logs = []
+  const client = fakeClient()
+  ;(client.session as any).get = async () => ({
+    data: { id: SESSION, directory: worktree, time: { created: 1, updated: 2 } },
+  })
   deps = {
-    client: {} as HookDeps["client"],
+    client: client as unknown as HookDeps["client"],
     directory: worktree,
     worktree,
     config: DEFAULT_CONFIG,
     log: (msg, extra) => logs.push({ msg, extra }),
   }
+  fixtureSession = admitFixtureSession(deps, SESSION)
 })
 
 afterEach(() => {
-  rmSync(worktree, { recursive: true, force: true })
+  releaseFixtureSession(worktree, fixtureSession)
+  fixture.cleanup()
 })
 
-async function run(parts: Part[], agent = "main") {
+async function run(parts: Part[], agent = "main", messageID = `msg_${++messageNumber}`) {
+  await createConfigHook(deps)({})
   const hook = createChatMessageHook(deps)
-  await hook({ sessionID: SESSION, agent, model: { providerID: "ollama", modelID: "gemma4:26b" } }, { message: message(), parts })
+  for (const part of parts) part.messageID = messageID
+  await hook({ sessionID: SESSION, agent, model: { providerID: "ollama", modelID: "gemma4:26b" } }, {
+    message: { ...message(), id: messageID, agent }, parts,
+  })
 }
 
 describe("chat.message hook", () => {
@@ -64,8 +78,8 @@ describe("chat.message hook", () => {
     expect(state.active).toBe(true)
     expect(state.iterations).toBe(0)
     expect(state.startedAt).toBeGreaterThan(0)
-    // running the hook again on the same (already-suffixed) part does not double-append
-    await run([part])
+    // A replay cannot dispatch again or double-append the retained part.
+    await expect(run([part], "main", part.messageID)).rejects.toThrow("stale-turn")
     expect(part.text.split("<lca-mode").length - 1).toBe(1)
   })
 
@@ -81,13 +95,19 @@ describe("chat.message hook", () => {
   })
 
   test("records session info once", async () => {
-    await run([textPart("hello")], "worker")
+    await run([textPart("hello")])
     const info = readJson<SessionInfo | null>(sessionInfoPath(worktree, SESSION), null)
-    expect(info?.agent).toBe("worker")
+    expect(info?.agent).toBe("main")
     expect(info?.model).toBe("ollama/gemma4:26b")
     expect(info?.createdAt).toBeGreaterThan(0)
     await run([textPart("again")], "main")
-    expect(readJson<SessionInfo | null>(sessionInfoPath(worktree, SESSION), null)?.agent).toBe("worker")
+    expect(readJson<SessionInfo | null>(sessionInfoPath(worktree, SESSION), null)).toEqual(info)
+  })
+
+  test("an unbound worker cannot create session metadata or start a mode", async () => {
+    await expect(run([textPart("ultrawork")], "worker")).rejects.toThrow("unknown-role")
+    expect(readJson<SessionInfo | null>(sessionInfoPath(worktree, SESSION), null)).toBeNull()
+    expect(readModeState(worktree, SESSION)).toEqual(EMPTY_MODE)
   })
 
   test("plain message with no active mode leaves the text untouched", async () => {
@@ -134,8 +154,8 @@ describe("chat.message hook", () => {
     expect(readModeState(worktree, SESSION).stopReason).toBe("user_cancel")
   })
 
-  test("a message with no text part is a no-op", async () => {
-    await run([])
+  test("a message with no genuine text cannot authorize inference or change mode", async () => {
+    await expect(run([])).rejects.toThrow("invalid-turn")
     expect(readModeState(worktree, SESSION)).toEqual(EMPTY_MODE)
   })
 })

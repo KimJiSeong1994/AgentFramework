@@ -6,7 +6,12 @@ import { taskWorktreeOwner } from "../orchestration/worktree.ts"
 import { realpathSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { createExecutionRuntime } from "./runtime.ts"
-import { EXECUTION_ROLES, type ExecutionReference, type ExecutionRuntime, type ExecutionRole } from "./types.ts"
+import {
+  EXECUTION_ROLES, type ExecutionPolicyHandlers, type ExecutionPolicySnapshot,
+  type ExecutionReference, type ExecutionRuntime, type ExecutionRole,
+} from "./types.ts"
+import { getOwnedSession, inspectCurrentSessionAttachment, readSessionMetadata } from "../sessions/store.ts"
+import { effectiveHold } from "../sessions/admission.ts"
 
 const runtimes = new WeakMap<HookDeps, ExecutionRuntime>()
 
@@ -239,11 +244,25 @@ function boundOpenCodeReference(record: ExecutionRecord): (ExecutionReference & 
   return reference
 }
 
+export type OpenCodeSessionPolicyBinding = Readonly<{
+  sessionID: string
+  ownerWorktree: string
+  ownerSessionID: string
+  ownerEpoch: string
+  executionID: string
+  taskID: string
+  attemptID: string
+  generation: number
+  role: ExecutionRole
+  policy: ExecutionPolicySnapshot
+  handlers: ExecutionPolicyHandlers
+}>
+
 /** Resolve a child prepared by a foreground controller in another process.
  * The actual plugin process owns the pre-tool hook; an SDK client outside it
  * cannot enforce policy merely by holding an in-memory callback map.
  */
-export function policyForOpenCodeSession(deps: HookDeps, sessionID: string) {
+export function policyBindingForOpenCodeSession(deps: HookDeps, sessionID: string): OpenCodeSessionPolicyBinding | undefined {
   const runtime = getOpenCodeRuntime(deps)
   let source: ExecutionStoreSource
   let execution: ExecutionRecord | undefined
@@ -269,7 +288,8 @@ export function policyForOpenCodeSession(deps: HookDeps, sessionID: string) {
         }
         return true
       })
-      const unique = !invalidReference && matches.length === 1 ? matches[0] : undefined
+      if (invalidReference || matches.length > 1) throw new Error("lca: execution session reference is invalid or ambiguous")
+      const unique = matches.length === 1 ? matches[0] : undefined
       managed = unique?.kind === "host" && unique.engine === "opencode" ? unique : undefined
       execution = managed && state.claim?.generation === managed.generation
         && state.claim.ownerSession === managed.ownerSession && !managed.terminal && !managed.cancel
@@ -285,6 +305,14 @@ export function policyForOpenCodeSession(deps: HookDeps, sessionID: string) {
     if (managed) throw new Error("lca: execution session is cancelled, fenced or terminal")
     return undefined
   }
+  const supervisorWorktree = source.owner?.mainWorktree ?? deps.worktree
+  const supervisor = readSessionMetadata(supervisorWorktree, execution.ownerSession)
+  const attachment = inspectCurrentSessionAttachment(supervisorWorktree, execution.ownerSession)
+  if (!supervisor || supervisor.held || !attachment || attachment.state !== "attached" || attachment.identity !== "live" ||
+      getOwnedSession(supervisorWorktree, execution.ownerSession) && effectiveHold(supervisorWorktree, execution.ownerSession)) {
+    runtime.policy.unbindSession(sessionID)
+    throw new Error("lca: execution supervisor is held or has no proven live session attachment")
+  }
   let fixed: ReturnType<typeof fixedPolicyForExecution>
   try {
     fixed = fixedPolicyForExecution(runtime, execution)
@@ -297,14 +325,63 @@ export function policyForOpenCodeSession(deps: HookDeps, sessionID: string) {
     runtime.policy.unbindSession(sessionID)
     throw new Error("lca: required execution policy hooks are disabled")
   }
-  const existing = runtime.policy.handlersForSession(sessionID)
-  if (existing) return existing
-  const request = {
-    executionID: execution.executionId, supervisorSessionID: execution.ownerSession,
-    taskID: execution.taskId, attemptID: execution.attemptId, generation: execution.generation,
-    role, title: "", cwd: execution.cwd, text: "", deadlineAt: 0, policy,
+  let canonicalOwnerWorktree: string
+  try { canonicalOwnerWorktree = realpathSync.native(supervisorWorktree) }
+  catch {
+    runtime.policy.unbindSession(sessionID)
+    throw new Error("lca: OpenCode execution owner worktree is unavailable")
   }
-  const handlers = runtime.policy.handlers(request)
-  runtime.policy.bindSession(sessionID, handlers, policy)
-  return handlers
+  if (attachment.worktree !== canonicalOwnerWorktree || attachment.sessionID !== execution.ownerSession || !attachment.epoch ||
+      !execution.executionId) {
+    runtime.policy.unbindSession(sessionID)
+    throw new Error("lca: OpenCode execution binding identity is incomplete")
+  }
+  const existing = runtime.policy.handlersForSession(sessionID)
+  let handlers = existing
+  if (handlers) {
+    if (runtime.policy.snapshotForSession(sessionID) !== policy) {
+      runtime.policy.unbindSession(sessionID)
+      throw new Error("lca: OpenCode execution policy snapshot changed")
+    }
+  } else {
+    const request = {
+      executionID: execution.executionId, supervisorSessionID: execution.ownerSession,
+      taskID: execution.taskId, attemptID: execution.attemptId, generation: execution.generation,
+      role, title: "", cwd: execution.cwd, text: "", deadlineAt: 0, policy,
+    }
+    handlers = runtime.policy.handlers(request)
+    runtime.policy.bindSession(sessionID, handlers, policy)
+  }
+  if (!handlers) {
+    runtime.policy.unbindSession(sessionID)
+    throw new Error("lca: OpenCode execution handlers are unavailable")
+  }
+  const finalAttachment = inspectCurrentSessionAttachment(supervisorWorktree, execution.ownerSession)
+  const finalSupervisor = readSessionMetadata(supervisorWorktree, execution.ownerSession)
+  if (!finalAttachment || finalAttachment.state !== "attached" || finalAttachment.identity !== "live" ||
+      finalAttachment.epoch !== attachment.epoch || finalAttachment.worktree !== canonicalOwnerWorktree ||
+      !finalSupervisor || finalSupervisor.held ||
+      (getOwnedSession(supervisorWorktree, execution.ownerSession) && effectiveHold(supervisorWorktree, execution.ownerSession)) ||
+      runtime.policy.handlersForSession(sessionID) !== handlers || runtime.policy.snapshotForSession(sessionID) !== policy) {
+    runtime.policy.unbindSession(sessionID)
+    throw new Error("lca: OpenCode execution binding changed during policy validation")
+  }
+  return Object.freeze({
+    sessionID,
+    ownerWorktree: canonicalOwnerWorktree,
+    ownerSessionID: execution.ownerSession,
+    ownerEpoch: attachment.epoch,
+    executionID: execution.executionId,
+    taskID: execution.taskId,
+    attemptID: execution.attemptId,
+    generation: execution.generation,
+    role,
+    policy,
+    handlers,
+  })
+}
+
+/** Preserve the existing handler-only API for tool hooks and other callers. */
+export function policyForOpenCodeSession(deps: HookDeps, sessionID: string) {
+  return policyBindingForOpenCodeSession(deps, sessionID)?.handlers
 }

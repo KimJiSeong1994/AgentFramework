@@ -5,7 +5,8 @@ import type { LcaConfig } from "../src/config.ts"
 import { createChatParamsHook, isGemmaOnOllama } from "../src/hooks/chat-params.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
 import { BASE_CONFIG, fakeDeps } from "./helpers.ts"
-import { tempWorktree } from "./guards-helpers.ts"
+import { admitFixtureSession, releaseFixtureSession, tempWorktree } from "./guards-helpers.ts"
+import { WORKFLOW_READ_ONLY_ROLES } from "../src/hosts/types.ts"
 
 let worktree: ReturnType<typeof tempWorktree>
 beforeEach(() => { worktree = tempWorktree() })
@@ -54,6 +55,26 @@ function deps(overrides: Partial<LcaConfig> = {}): HookDeps {
 }
 
 describe("chat.params hook", () => {
+  test("workflow roles require a code-owned binding before native inference parameters change", async () => {
+    const hook = createChatParamsHook(deps())
+    for (const role of WORKFLOW_READ_ONLY_ROLES) {
+      const o = output()
+      const before = structuredClone(o)
+      await expect(hook(input(role), o)).rejects.toThrow("code-owned execution binding")
+      expect(o).toEqual(before)
+    }
+  })
+
+  test("an owned main session cannot dispatch an unknown native role", async () => {
+    const d = deps()
+    const store = admitFixtureSession(d, "s1")
+    try {
+      const o = output()
+      await expect(createChatParamsHook(d)(input("unrecognized-agent"), o)).rejects.toThrow("unknown role")
+      expect(o).toEqual(output())
+    } finally { releaseFixtureSession(worktree.worktree, store) }
+  })
+
   test("caps maxOutputTokens per agent from config.max_output", async () => {
     const hook = createChatParamsHook(deps())
     const o = output()

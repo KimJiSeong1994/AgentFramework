@@ -1,18 +1,22 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { TextPart, UserMessage } from "@opencode-ai/sdk"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
 import { createOpenCodeSkillPermissionSource } from "../src/hosts/opencode-skill-source.ts"
+import { UnsafeOpenCodeSystemChannel, type UnsafeOpenCodeSystemReason } from "../src/hosts/opencode-system.ts"
+import { createConfigHook } from "../src/hooks/config.ts"
 import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { createSkillRouter } from "../src/routing/router.ts"
 import { createCommandHook } from "../src/hooks/command.ts"
-import { EMPTY_MODE, readModeState, removeSessionDir, stateRoot, writeModeState } from "../src/state/store.ts"
+import { EMPTY_MODE, modeStatePath, readModeState, sessionInfoPath, stateRoot, writeModeState } from "../src/state/store.ts"
 import { routingLogPath } from "../src/telemetry/routing.ts"
+import { admitFixtureSession, releaseFixtureSession, tempWorktree } from "./guards-helpers.ts"
 
 let root: string
+let wt: ReturnType<typeof tempWorktree>
 let deps: HookDeps
 let server: ReturnType<typeof Bun.serve>
 let requests: unknown[]
@@ -20,6 +24,13 @@ let logs: unknown[]
 let rules: Array<{ permission: string; pattern: string; action: string }>
 let handler: (request: Request) => Response | Promise<Response>
 let agentLookup: () => Promise<unknown>
+let fixtureSessions: Array<ReturnType<typeof admitFixtureSession>>
+
+function admitSession(sessionID: string) {
+  const store = admitFixtureSession(deps, sessionID)
+  fixtureSessions.push(store)
+  return store
+}
 
 function answer(choice = "plan", probabilities = { plan: 0.99, none: 0.01 }) {
   return { answers: { route: { type: "choice", choice, probabilities, confidence: 0.9 } } }
@@ -32,8 +43,61 @@ function skill(name: string, description = "Read-only investigation and numbered
 function part(text: string, id = "msg1", synthetic = false): TextPart {
   return { type: "text", text, id: `part-${id}`, messageID: id, sessionID: "s1", synthetic }
 }
-async function turn(hook: ReturnType<typeof createChatMessageHook>, p: TextPart, agent = "main") {
-  await hook({ sessionID: p.sessionID, agent }, { parts: [p], message: { id: p.messageID } as UserMessage })
+async function turn(
+  hook: ReturnType<typeof createChatMessageHook>,
+  p: TextPart,
+  agent = "main",
+  messageAgent: string | null = agent,
+  system?: string,
+) {
+  const message: UserMessage = {
+    id: p.messageID,
+    sessionID: p.sessionID,
+    role: "user",
+    time: { created: Date.now() },
+    agent: messageAgent ?? agent,
+    model: { providerID: "fixture", modelID: "skill-router-test" },
+    ...(system === undefined ? {} : { system }),
+  }
+  if (messageAgent === null) delete (message as Partial<UserMessage>).agent
+  await hook({ sessionID: p.sessionID, agent, model: message.model }, { parts: [p], message })
+}
+
+async function createNativeChatHook() {
+  await createConfigHook(deps)({})
+  if (!fixtureSessions.some((store) => store.sessionID === "s1")) admitSession("s1")
+  return createChatMessageHook(deps)
+}
+
+async function expectUnsafeTurn(promise: Promise<unknown>, reason: UnsafeOpenCodeSystemReason) {
+  const error = await promise.then(
+    () => { throw new Error(`Expected OpenCode system-channel refusal: ${reason}`) },
+    (rejection: unknown) => rejection,
+  )
+  expect(error).toBeInstanceOf(UnsafeOpenCodeSystemChannel)
+  expect(error).toMatchObject({
+    code: "LCA_UNSAFE_OPENCODE_SYSTEM_CHANNEL",
+    reason,
+  })
+}
+
+function expectNoChatEffects(sessionID = "s1") {
+  expect(requests).toHaveLength(0)
+  expect(existsSync(routingLogPath(root, sessionID))).toBe(false)
+  expect(existsSync(sessionInfoPath(root, sessionID))).toBe(false)
+  expect(existsSync(modeStatePath(root, sessionID))).toBe(false)
+  expect(readModeState(root, sessionID)).toEqual(EMPTY_MODE)
+}
+
+function hostClient(app: unknown = { agents: () => agentLookup() }): HookDeps["client"] {
+  return {
+    app,
+    session: {
+      get: async ({ path }: { path: { id: string } }) => ({
+        data: { id: path.id, directory: root, time: { created: 1 } },
+      }),
+    },
+  } as unknown as HookDeps["client"]
 }
 
 function createRouter() {
@@ -41,7 +105,9 @@ function createRouter() {
 }
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "lca-router-"))
+  wt = tempWorktree()
+  root = realpathSync.native(wt.worktree)
+  fixtureSessions = []
   requests = []; logs = []
   rules = [{ permission: "skill", pattern: "*", action: "deny" }, { permission: "skill", pattern: "plan", action: "allow" }]
   agentLookup = async () => ({ data: [{ name: "main", permission: rules }] })
@@ -54,15 +120,15 @@ beforeEach(() => {
     worktree: root, directory: root,
     config: { ...structuredClone(DEFAULT_CONFIG), disabled_hooks: ["tool.delegate"], skills: { allow: ["plan"] },
       skill_router: { ...DEFAULT_CONFIG.skill_router, mode: "shadow", endpoint: `http://127.0.0.1:${server.port}` } },
-    client: { app: { agents: () => agentLookup() } } as unknown as HookDeps["client"],
+    client: hostClient(),
     log: (message, extra) => logs.push({ message, extra }),
   }
   skill("plan")
 })
 afterEach(() => {
   server.stop(true)
-  rmSync(stateRoot(root), { recursive: true, force: true })
-  rmSync(root, { recursive: true, force: true })
+  for (const store of fixtureSessions) releaseFixtureSession(root, store)
+  wt.cleanup()
 })
 
 function routingEvents(sessionID = "s1") {
@@ -70,13 +136,15 @@ function routingEvents(sessionID = "s1") {
 }
 
 describe("OpenJev skill router package", () => {
-  test("routing history survives router restart and session deletion; duplicate attempts remain distinguishable", async () => {
+  test("routing history survives router restart and retained session release; duplicate attempts remain distinguishable", async () => {
+    const sessionID = "router-history"
+    const store = admitSession(sessionID)
     const router = createRouter()
-    await router.recommend("s1", "m1", "Investigate")
-    await router.recommend("s1", "m1", "Investigate")
-    removeSessionDir(root, "s1")
-    await createRouter().recommend("s1", "m2", "Investigate")
-    const events = routingEvents()
+    await router.recommend(sessionID, "m1", "Investigate")
+    await router.recommend(sessionID, "m1", "Investigate")
+    releaseFixtureSession(root, store)
+    await createRouter().recommend(sessionID, "m2", "Investigate")
+    const events = routingEvents(sessionID)
     expect(events.map((event) => event.reason)).toEqual(["recommended", "duplicate", "recommended"])
     expect(events.map((event) => event.requestSent)).toEqual([true, false, true])
     expect(new Set(events.map((event) => event.decisionID)).size).toBe(3)
@@ -100,7 +168,7 @@ describe("OpenJev skill router package", () => {
     symlinkSync(target, routingLogPath(root, "s1"))
     deps.config.skill_router.mode = "suggest"
     const p = part("Investigate this module and list the implementation steps.")
-    await turn(createChatMessageHook(deps), p)
+    await turn(await createNativeChatHook(), p)
     expect(p.text).toContain("lca-skill-advice")
     expect(readFileSync(target, "utf8")).toBe("sentinel")
     expect(JSON.stringify(logs)).toContain("skill.router persistence failed")
@@ -117,7 +185,7 @@ describe("OpenJev skill router package", () => {
   test("shadow sends only bounded metadata and never changes text or mode", async () => {
     const p = part("Investigate authentication and provide numbered implementation steps, without edits.")
     const original = p.text
-    await turn(createChatMessageHook(deps), p)
+    await turn(await createNativeChatHook(), p)
     expect(requests).toHaveLength(1)
     expect(requests[0]).toMatchObject({ model: "jev-latest", samples: 1, steps: 1, state: original })
     expect(JSON.stringify(requests)).not.toContain("Private skill instructions")
@@ -140,40 +208,51 @@ describe("OpenJev skill router package", () => {
     expect(statSync(routingLogPath(root, "s1")).mode & 0o777).toBe(0o600)
   })
 
-  test("suggest is optional advice only, idempotent per message", async () => {
+  test("suggest advice keeps provenance and a replayed message ID refuses before routing again", async () => {
     deps.config.skill_router.mode = "suggest"
-    const hook = createChatMessageHook(deps)
+    const hook = await createNativeChatHook()
     const p = part("Investigate architecture and give numbered implementation steps.")
     await turn(hook, p)
     expect(p.text).toContain("<lca-skill-advice>")
     expect(p.text).not.toContain("<lca-mode")
     expect(readModeState(root, "s1")).toEqual(EMPTY_MODE)
-    await turn(hook, p)
+    const firstRouteEvents = routingEvents()
+    expect(firstRouteEvents.map((event) => event.event)).toEqual(["decision", "advice_applied"])
+    expect(firstRouteEvents[1].decisionID).toBe(firstRouteEvents[0].decisionID)
+    expect(firstRouteEvents[1].skill).toBe("plan")
+    const routingBeforeReplay = readFileSync(routingLogPath(root, "s1"), "utf8")
+    await expectUnsafeTurn(turn(hook, p), "stale-turn")
     expect(p.text.split("<lca-skill-advice>")).toHaveLength(2)
     expect(requests).toHaveLength(1)
-    const events = routingEvents()
-    expect(events.map((event) => event.event)).toEqual(["decision", "advice_applied"])
-    expect(events[1].decisionID).toBe(events[0].decisionID)
-    expect(events[1].skill).toBe("plan")
+    expect(readFileSync(routingLogPath(root, "s1"), "utf8")).toBe(routingBeforeReplay)
+    expect(readModeState(root, "s1")).toEqual(EMPTY_MODE)
   })
 
-  test("off, explicit commands, child agents, synthetic turns and active modes bypass inference", async () => {
-    const hook = createChatMessageHook(deps)
+  test("off, explicit commands and active modes bypass inference", async () => {
+    const hook = await createNativeChatHook()
     await turn(hook, part("/stop"))
     await turn(hook, part("/skill:plan", "m2"))
-    await turn(hook, part("Investigate", "m3"), "worker")
-    await turn(hook, part("Investigate", "m4", true))
-    await turn(hook, part("ulw fix it", "m5"))
-    await turn(hook, part("continue", "m6"))
+    await turn(hook, part("ulw fix it", "m3"))
+    await turn(hook, part("continue", "m4"))
     writeModeState(root, "s1", EMPTY_MODE)
     deps.config.skill_router.mode = "off"
-    await turn(hook, part("Investigate", "m7"))
+    await turn(hook, part("Investigate", "m5"))
     expect(requests).toHaveLength(0)
     expect(routingEvents().map((event) => event.reason)).toEqual(["off"])
   })
 
+  test("unbound roles, missing main metadata and synthetic-only input refuse before routing or state writes", async () => {
+    deps.config.skill_router.mode = "suggest"
+    const hook = await createNativeChatHook()
+    await expectUnsafeTurn(turn(hook, part("Investigate", "unbound-worker"), "worker"), "unknown-role")
+    await expectUnsafeTurn(turn(hook, part("Investigate", "unknown-role"), "main", "unknown"), "unknown-role")
+    await expectUnsafeTurn(turn(hook, part("Investigate", "missing-agent"), "main", null), "unknown-role")
+    await expectUnsafeTurn(turn(hook, part("Investigate", "synthetic-only", true)), "invalid-turn")
+    expectNoChatEffects()
+  })
+
   test("an expanded command template (no literal slash) is not routed; the next plain turn is", async () => {
-    const hook = createChatMessageHook(deps)
+    const hook = await createNativeChatHook()
     const command = createCommandHook(deps, { stop: false })
     await command({ command: "review", sessionID: "s1", arguments: "" } as any, { parts: [] } as any)
     await turn(hook, part("Investigate the auth module and give numbered implementation steps.", "c1"))
@@ -182,8 +261,8 @@ describe("OpenJev skill router package", () => {
     expect(requests).toHaveLength(1)
   })
 
-  test("back-to-back commands each keep their bypass; a worker turn consumes nothing extra", async () => {
-    const hook = createChatMessageHook(deps)
+  test("back-to-back commands keep their bypass; an unbound worker refuses before dispatch", async () => {
+    const hook = await createNativeChatHook()
     const command = createCommandHook(deps, { stop: false })
     await command({ command: "a", sessionID: "s1", arguments: "" } as any, { parts: [] } as any)
     await command({ command: "b", sessionID: "s1", arguments: "" } as any, { parts: [] } as any)
@@ -191,7 +270,7 @@ describe("OpenJev skill router package", () => {
     await turn(hook, part("Investigate the auth module and give numbered implementation steps.", "d2"))
     expect(requests).toHaveLength(0)
     await command({ command: "c", sessionID: "s1", arguments: "" } as any, { parts: [] } as any)
-    await turn(hook, part("Investigate", "d3"), "worker")
+    await expectUnsafeTurn(turn(hook, part("Investigate", "d3"), "worker"), "unknown-role")
     await turn(hook, part("Investigate the auth module and give numbered implementation steps.", "d4"))
     expect(requests).toHaveLength(1)
   })
@@ -269,9 +348,10 @@ describe("OpenJev skill router package", () => {
   })
 
   test("none and low margins are abstentions, not forced winners", async () => {
-    for (const value of [answer("none", { plan: 0.01, none: 0.99 }), answer("plan", { plan: 0.51, none: 0.49 })]) {
+    const outcomes = [answer("none", { plan: 0.01, none: 0.99 }), answer("plan", { plan: 0.51, none: 0.49 })]
+    for (const [index, value] of outcomes.entries()) {
       handler = () => Response.json(value)
-      expect((await createRouter().recommend("s", "m", "Investigate")).reason).toBe("abstained")
+      expect((await createRouter().recommend("s", `margin-${index}`, "Investigate")).reason).toBe("abstained")
     }
     const events = routingEvents("s")
     expect(events.map((event) => event.reason)).toEqual(["abstained", "abstained"])
@@ -285,9 +365,10 @@ describe("OpenJev skill router package", () => {
   })
 
   test("503, 529, invalid JSON and oversized responses do not retry", async () => {
-    for (const response of [new Response("down", { status: 503 }), new Response("busy", { status: 529 }), new Response("not-json"), new Response("x".repeat(65537))]) {
+    const responses = [new Response("down", { status: 503 }), new Response("busy", { status: 529 }), new Response("not-json"), new Response("x".repeat(65537))]
+    for (const [index, response] of responses.entries()) {
       handler = () => response
-      expect((await createRouter().recommend("s", "m", "Investigate")).skill).toBeNull()
+      expect((await createRouter().recommend("s", `response-${index}`, "Investigate")).skill).toBeNull()
     }
     expect(requests).toHaveLength(4)
   })
@@ -344,12 +425,13 @@ describe("OpenJev skill router package", () => {
     const ready = new Promise<void>((resolve) => { arrived = resolve })
     const held = new Promise<void>((resolve) => { release = resolve })
     handler = async () => { arrived(); await held; return Response.json(answer()) }
-    const hook = createChatMessageHook(deps)
+    const hook = await createNativeChatHook()
     const p = part("Investigate architecture and give implementation steps.")
     const pending = turn(hook, p)
     await ready
     const other = part("Investigate another module", "other")
     other.sessionID = "s2"
+    admitSession("s2")
     await turn(hook, other)
     expect(requests).toHaveLength(1)
     await turn(hook, part("/stop", "stop"))
