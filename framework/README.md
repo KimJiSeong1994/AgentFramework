@@ -114,8 +114,12 @@ standard streams are TTYs, raw input is supported, `TERM` is set and not `dumb`,
 and the screen is at least 80x24. `LCA_TUI=0` selects readline. Unsupported
 terminals receive a plain fallback notice; missing stdin/stderr TTYs still
 refuse interactive operation. Noninteractive JSON/status commands are unchanged.
-`NO_COLOR` disables styling, not the TUI. Shrinking below 80x24 suspends display
-and input admission except cancellation; growing redraws the same draft.
+`NO_COLOR` disables semantic styling, not the TUI. `/theme neutral`, `/theme light`
+and `/theme dark` select a process-local palette; `/ascii` toggles ASCII chrome.
+Neither setting is persisted, and ASCII mode never rewrites user, plan, model or
+receipt text. Shrinking below 80x24 shows only nonprivate recovery instructions
+and blocks ordinary input, paste, queue and decisions; growing redraws the same
+draft, pager, chooser and optional panel.
 
 Enter submits; Shift+Enter (enhanced keyboard protocol) and Ctrl+J insert a
 newline. Legacy terminals that send the same bytes for Enter and Shift+Enter
@@ -127,8 +131,11 @@ Escape dismisses transient input UI or requests cancellation. While busy,
 Alt+Q on macOS / Alt+Enter on Linux queues text for later serial turns; queued
 text never answers choices or supplies execution approval.
 
-`/sessions` lists retained sessions; `/resume <sid>` opens one without dispatching
-work. `/new` opens a fresh session. Session switching is distinct from `/continue`,
+`/sessions` opens a captured, stable-ID retained-session chooser with original-index
+paging and selected/visible-range indicators; it never refreshes or rebinds candidates
+while pending. Enter passes the captured stable ID through the same `/resume` checks,
+and navigation, resize, cancellation and opening history dispatch no work. `/resume
+<sid>` remains the direct checked form. `/new` opens a fresh session. Session switching is distinct from `/continue`,
 which offers Keep/Resume for the current session; noninteractive `lca resume
 --session ...` remains work-resume. Switching refuses live turns, queues,
 reviewers, claims and unsettled execution intents. A settled nonterminal owner
@@ -146,9 +153,13 @@ releases only a matching attachment after termination and quiescence are proven.
 Corrupt history or uncertain ownership stays held rather than being truncated
 or reported as a complete replay.
 
-Inline Approve/Reject opens an exclusive cooked-terminal confirmation using the
-existing reader-issued, single-use receipt. Keep leaves the plan pending without
-execution. Raw input and buffered paste are detached before that reader runs.
+Inline plan review keeps the exact canonical document independently scrollable from
+its pinned decisions and binding. Document focus is initial: Up/Down scroll, PageUp/
+PageDown page, Tab changes focus, and Enter cannot decide until decision focus is
+explicit. Approve/Reject then opens the unchanged exclusive cooked-terminal
+confirmation using the existing reader-issued, single-use receipt. Keep or Escape
+leaves the plan pending without execution. Raw input and buffered paste are detached
+before that reader runs.
 `/pause` requests a pause and `/cancel` (or Escape) requests a cancel. Both are requests: the status line says
 `pausing — termination unconfirmed` or `cancelling — termination unconfirmed` until the owner proves that no queue,
 review, stage, broker wait, claim or unsettled execution remains, and only then shows `paused (from <phase>/<stage>)`
@@ -164,9 +175,20 @@ Repeated calls to the same tool are individual correlated items, including
 denied and thrown calls; duplicate notifications for one call are not new calls.
 The TUI uses `/search <tool/status/task>` to filter this session's transcript,
 `/search` to clear the filter, `/expand <item number>` to show correlation and
-termination evidence, and PageUp/PageDown to scroll. Tool arguments, raw tool output and
+termination evidence, `/details` to toggle the bounded task/evidence panel, and
+PageUp/PageDown to scroll. Help and completion share the same command descriptors.
+Transcript text carries explicit user/assistant/notice/error provenance; code/diff
+presentation remains inert. The status view prioritizes held, read-only, ownership
+and unconfirmed termination/request facts before ordinary activity and distinguishes
+selected/discovered models from observed requests. Tool arguments, raw tool output and
 model response fragments are not progress messages. Model replies still appear
 after the turn completes rather than as a token stream.
+
+Required UX evidence is classified separately: the macOS native gate drives the
+production TUI with the explicitly installed model and validates its current model
+ID; the fixture matrix covers macOS local/tmux and Linux local/SSH/SSH+tmux PTY
+transports. Fixture transport results are never reported as model inference, and
+Linux-native inference is not part of this gate.
 
 Progress is observational: it cannot approve work, acquire execution ownership or
 change cancellation semantics. It is suspended while the human approval reader

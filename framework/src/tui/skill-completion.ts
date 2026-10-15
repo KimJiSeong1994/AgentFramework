@@ -1,4 +1,5 @@
 import type { SkillCatalog, SkillCatalogEntry } from "../skills/session.ts"
+import { commandInsertions } from "../hosts/interactive-actions.ts"
 
 export type SkillCompletionRow = Readonly<{
   name: string
@@ -84,7 +85,5 @@ export function skillCompletionWindow(
 }
 
 export function commandCompletions(draft: string): string[] {
-  if (!/^\/[a-z-]*$/u.test(draft)) return []
-  return ["/help", "/sessions", "/resume", "/new", "/search", "/expand", "/status", "/continue", "/model", "/plan", "/skills", "/finish", "/pause", "/cancel", "/quit", "/exit"]
-    .filter(command => command.startsWith(draft) && command !== draft)
+  return commandInsertions(draft)
 }

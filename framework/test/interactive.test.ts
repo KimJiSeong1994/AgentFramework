@@ -938,8 +938,31 @@ describe("interactive terminal", () => {
     ])
     expect(h.calls.sessionIDs).toEqual(["lca-fixture-session", "lca-fixture-session-2"])
     expect(h.calls.discoveries).toEqual([{ engine: "codex", worktree: realpathSync(wt.worktree) }])
-    expect(h.calls.output.join("")).toContain("Local commands: /help, /model")
+    expect(h.calls.output.join("")).toContain("Commands (chat):\n/help — show contextual commands and keys")
     expect(h.calls.output.join("")).toContain("Conversation context reset after model switch.")
+  })
+
+  test("readline refuses full-screen local presentation commands without model dispatch", async () => {
+    const h = harness({ lines: ["/search task", "/expand 1", "/details", "/theme dark", "/ascii", "/quit"] })
+    const result = await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(result.code).toBe(0)
+    expect(h.calls.turns).toEqual([])
+    expect(h.calls.output.join("")).toContain("/search is a local full-screen TUI action")
+    expect(h.calls.output.join("")).toContain("/ascii is a local full-screen TUI action")
+  })
+
+  test("captured session chooser hands the stable target to the shared opener exactly once", async () => {
+    const target = openSession(wt.worktree, "captured-target", { engine: "local", model: "qwen3:8b" })
+    target.release({ workflowQuiescent: true, evidence: "chooser fixture", workflowID: null, revision: null })
+    const h = harness({
+      lines: ["/sessions", "/quit"],
+      choose: async (_title, values) => values.findIndex(value => value.includes("captured-target")),
+    })
+    const result = await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(result.code).toBe(0)
+    expect(h.calls.choices).toHaveLength(1)
+    expect(h.calls.boundSessions.filter(sessionID => sessionID === "captured-target")).toHaveLength(1)
+    expect(h.calls.turns).toEqual([])
   })
 
   test("direct model switch uses the new runtime and session on the next turn without discovery", async () => {

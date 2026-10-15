@@ -21,10 +21,10 @@ export function restoreTranscript(model: TranscriptModel, records: readonly Tran
     const data = record.data
     if (record.kind === "user" && typeof data.text === "string") {
       history.push(data.text)
-      model.append(`You> ${data.text}`)
-    } else if (record.kind === "assistant" && typeof data.text === "string") model.append(`Conversation:\n${data.text}`)
+      model.append({ provenance: "user", text: data.text })
+    } else if (record.kind === "assistant" && typeof data.text === "string") model.append({ provenance: "assistant", text: data.text })
     else if (record.kind === "notice") {
-      if (typeof data.text === "string") model.append(data.text)
+      if (typeof data.text === "string") model.append({ provenance: "notice", text: data.text })
       if (typeof data.draft === "string" && Array.isArray(data.queued) && data.queued.every(value => typeof value === "string")) {
         draft = data.draft
         queued = data.queued as string[]
@@ -56,7 +56,7 @@ export function restoreTranscript(model: TranscriptModel, records: readonly Tran
         ...(data.fence ? ["Unresolved execution fence retained"] : []),
       ])
     } else if (record.kind === "workflow-choice" || record.kind === "workflow-stage") {
-      if (typeof data.text === "string") model.append(data.text)
+      if (typeof data.text === "string") model.append({ provenance: "notice", text: data.text })
     }
   }
   return { history, draft, queued }
