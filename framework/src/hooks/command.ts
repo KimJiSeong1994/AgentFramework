@@ -1,17 +1,21 @@
-// `/stop`, `/status`, `/plan`, `/approve`, `/reject`, `/cancel` commands (command.execute.before): the user's hard
-// stop for the idle loop and the task queue, the live code-rendered status, and the M1 plan-workflow entry points
-// (ralplan §5.2/§5.3/§5.5). Writes abort.json (checked by every breaker), deactivates the mode, and aborts the
-// running child session for /stop. The command's template text still reaches the model as a normal user message;
-// chat.message turns /stop's template into the cancel suffix (so main finishes its current step and stops),
-// rewrites /status's template in place with the rendered status (ARCH-08), and rewrites /plan/approve/reject/cancel
-// with the outcome of the state work already done here (this file). Approval is only ever triggered from the
-// dispatch branch below for an lca-injected `approve` command turn: prose "/approve"/"approved" never approves.
+// Explicit SDK commands. /stop durably holds the proven owner before cancellation; /continue confirm is the
+// only SDK command that can acknowledge a settled user_stop. Plan approval remains tied to an injected command
+// turn, never prose. chat.message renders the command status receipt but performs no admission or workflow work.
 import type { Hooks } from "@opencode-ai/plugin"
 import type { HookDeps } from "./types.ts"
-import { EMPTY_MODE, abortPath, readModeState, writeJsonAtomic, writeModeState } from "../state/store.ts"
+import { EMPTY_MODE, abortPath, readModeState, writeModeState } from "../state/store.ts"
 import { getQueue } from "../orchestration/queue.ts"
 import { getOpenCodeRuntime } from "../hosts/opencode-runtime.ts"
 import { markCommandTurn } from "./command-turns.ts"
+import { executionActivity } from "../hosts/runtime.ts"
+import { settled } from "../hosts/run-state.ts"
+import { readWorkflowChecked } from "../flow/state.ts"
+import { resumePaused } from "../flow/resume.ts"
+import { admissionFence, attachHeldAdmission, effectiveHold, holdOwnedAdmission, resumeAdmission } from "../sessions/admission.ts"
+import { getOwnedSession, readSessionMetadata } from "../sessions/store.ts"
+import { assertSDKSessionQuiescent, readSDKResumeIdentity } from "../sessions/sdk-quiescence.ts"
+import { captureSDKSessionLifetime } from "../sessions/sdk-transcript.ts"
+import { durableWriteJson } from "../state/durable.ts"
 
 export const STOP_COMMAND = "stop"
 export const STOP_TEMPLATE = "stop lca: cancel the active mode and the task queue. Finish the current step, then stop."
@@ -40,7 +44,54 @@ export const CANCEL_COMMAND = "cancel"
 export const CANCEL_TEMPLATE = "The workflow was cancelled; stop."
 export const CANCEL_DESCRIPTION = "lca: cancel the active plan workflow"
 
+export const CONTINUE_COMMAND = "continue"
+export const CONTINUE_TEMPLATE = "LCA explicit Resume command. Use /continue confirm to acknowledge a held session."
+export const CONTINUE_DESCRIPTION = "lca: explicitly resume the current held session (requires confirm)"
+export const CONTINUE_CONFIRMATION_PROMPT = "To acknowledge explicit owner Resume, run /continue confirm. This command did not change session admission."
+export const CONTINUE_HELD_RECEIPT = "Resume was refused; this command granted no admission and started no work."
+export const CONTINUE_PAUSED_RESUMED_RECEIPT = "Paused workflow resumed for this attachment epoch only. Residual approved tasks are not started; ask main to call delegate with resume:true."
+export const CONTINUE_RESUMED_RECEIPT = "Session admission resumed for this attachment epoch only. No workflow or task was started."
+
 export const FLOW_COMMANDS = [PLAN_COMMAND, APPROVE_COMMAND, REJECT_COMMAND, CANCEL_COMMAND] as const
+const CONTINUE_RECEIPT_TTL_MS = 30_000
+type ContinueReceipt = { arguments: string; text: string; at: number }
+const continueReceipts = new WeakMap<HookDeps, Map<string, ContinueReceipt[]>>()
+
+function recordContinueReceipt(deps: HookDeps, sessionID: string, args: string, text: string): void {
+  let bySession = continueReceipts.get(deps)
+  if (!bySession) continueReceipts.set(deps, bySession = new Map())
+  const now = Date.now()
+  for (const [id, entries] of bySession) {
+    const live = entries.filter(entry => now - entry.at <= CONTINUE_RECEIPT_TTL_MS)
+    if (live.length) bySession.set(id, live)
+    else bySession.delete(id)
+  }
+  bySession.set(sessionID, [...(bySession.get(sessionID) ?? []), { arguments: args, text, at: now }])
+}
+
+/** Consume the status produced by this exact command-argument turn; receipts never authorize admission. */
+export function consumeContinueReceipt(deps: HookDeps, sessionID: string, args: string): string | undefined {
+  const bySession = continueReceipts.get(deps)
+  const entries = bySession?.get(sessionID)
+  if (!entries) return undefined
+  const now = Date.now()
+  const live = entries.filter(entry => now - entry.at <= CONTINUE_RECEIPT_TTL_MS)
+  const index = live.findIndex(entry => entry.arguments === args)
+  const receipt = index < 0 ? undefined : live.splice(index, 1)[0]
+  if (live.length) bySession!.set(sessionID, live)
+  else bySession!.delete(sessionID)
+  return receipt?.text
+}
+
+function canCancelOpenQueue(runtime: ReturnType<typeof getOpenCodeRuntime>, queueRunning: boolean): boolean {
+  if (queueRunning || executionActivity(runtime.worktree)) return false
+  try {
+    const status = runtime.runs.status()
+    return !status.claim && status.executions.every(settled)
+  } catch {
+    return false
+  }
+}
 
 /**
  * Names lca actually wrote into `config.command` this load (a user-defined same-named command wins there and is
@@ -59,46 +110,131 @@ export function recordInjectedCommands(deps: HookDeps, names: Set<string>): void
  */
 export function createCommandHook(
   deps: HookDeps,
-  opts: { stop?: boolean; status?: boolean; flow?: boolean; injected?: Set<string> } = {},
+  opts: { stop?: boolean; status?: boolean; flow?: boolean; continue?: boolean } = {},
 ): NonNullable<Hooks["command.execute.before"]> {
-  const queue = getQueue(getOpenCodeRuntime(deps))
+  const runtime = getOpenCodeRuntime(deps)
+  const queue = getQueue(runtime)
   const stopOn = opts.stop ?? true
   const statusOn = opts.status ?? false
   const flowCmdsOn = opts.flow ?? false
-  // Explicit opts.injected wins; otherwise the config hook's recorded set (real injection, e.g. a user override
-  // excluded); falling back to stop/status/flow flags keeps direct unit construction (no config hook run) working.
-  const fallback = new Set<string>([
+  const continueOn = opts.continue ?? true
+  const enabledCommands = new Set<string>([
     ...(stopOn ? [STOP_COMMAND] : []),
     ...(statusOn ? [STATUS_COMMAND] : []),
     ...(flowCmdsOn ? FLOW_COMMANDS : []),
+    ...(continueOn ? [CONTINUE_COMMAND] : []),
   ])
-  const fixedInjected = opts.injected
   return async (input) => {
     // Every explicit command keeps its own authority: its expanded template must not be skill-routed. Only a
     // name lca actually injected is marked with that literal name; anything else (a foreign command, or a
     // user-defined command shadowing an lca name) is marked with a synthetic name so the turn still bypasses
     // the router, but no lca command logic ever acts on it.
-    const injected = fixedInjected ?? injectedRegistry.get(deps) ?? fallback
-    const injectedHere = injected.has(input.command)
+    const injectedHere = injectedRegistry.get(deps)?.has(input.command) === true && enabledCommands.has(input.command)
     markCommandTurn(input.sessionID, injectedHere ? input.command : `__foreign:${input.command}`, input.arguments)
     if (!injectedHere) return
     if (input.command === STATUS_COMMAND) return // status only marks the turn; chat.message rewrites the text in place
     if (flowCmdsOn && (FLOW_COMMANDS as readonly string[]).includes(input.command)) return // §5.2/§5.5 state work happens in chat.message (handleCommand below), which then rewrites the text
+    if (continueOn && input.command === CONTINUE_COMMAND) {
+      if (input.arguments.trim() !== "confirm") {
+        recordContinueReceipt(deps, input.sessionID, input.arguments, CONTINUE_CONFIRMATION_PROMPT)
+        return
+      }
+      try {
+        if (!/^[A-Za-z0-9_-]{1,128}$/.test(input.sessionID)) throw new Error("invalid OpenCode session ID")
+        if (runtime.host.identity.engine !== "opencode") throw new Error("the selected owner is not OpenCode")
+        let expectedStore = getOwnedSession(deps.worktree, input.sessionID)
+        let expectedFence = admissionFence(deps.worktree, input.sessionID)
+        const revalidate = () => {
+          if (getOwnedSession(deps.worktree, input.sessionID) !== expectedStore) throw new Error("session attachment changed during explicit Resume")
+          expectedStore?.assertOwner()
+          if (admissionFence(deps.worktree, input.sessionID) !== expectedFence) throw new Error("session authority changed during explicit Resume")
+        }
+        const context = { client: deps.client, sessionID: input.sessionID, directory: deps.directory, worktree: deps.worktree, revalidate }
+        const vendor = await readSDKResumeIdentity(context)
+
+        const store = expectedStore ?? attachHeldAdmission(
+          runtime,
+          input.sessionID,
+          { engine: runtime.host.identity.engine },
+        )
+        expectedStore = store
+        expectedFence = admissionFence(deps.worktree, input.sessionID)
+        if (store.sessionID !== input.sessionID || getOwnedSession(deps.worktree, input.sessionID) !== store) {
+          throw new Error("session attachment is not owned by this process")
+        }
+        store.assertOwner()
+        if (!effectiveHold(deps.worktree, input.sessionID)) {
+          recordContinueReceipt(deps, input.sessionID, input.arguments, "Session is already admitted. No workflow or task was started.")
+          return
+        }
+        const metadata = readSessionMetadata(deps.worktree, input.sessionID)
+        if (!metadata || !metadata.held || metadata.engine !== runtime.host.identity.engine) {
+          throw new Error("held session metadata or engine does not match this owner")
+        }
+        if (queue.isRunning(input.sessionID) || executionActivity(runtime.worktree)) {
+          throw new Error("session execution is not quiescent")
+        }
+        const runState = runtime.runs.status()
+        if (runState.claim || runState.executions.some(execution => !settled(execution))) {
+          throw new Error("session execution claim or intent is not settled")
+        }
+        const checked = readWorkflowChecked(runtime.worktree)
+        if (checked.corrupt) throw new Error("workflow state is corrupt")
+        const workflow = checked.wf?.sessionID === input.sessionID ? checked.wf : null
+        await assertSDKSessionQuiescent(context, vendor)
+        if (!captureSDKSessionLifetime(deps.worktree, input.sessionID, store.epoch, vendor.createdAt)) {
+          throw new Error("OpenCode session lifetime could not be retained; admission remains held")
+        }
+        if (workflow && (workflow.phase === "paused" || workflow.stopIntent)) {
+          // A pause resumes only through the workflow Resume: every precondition is checked, the explicit
+          // `/continue confirm` is the human choice, and everything is rechecked inside the commit.
+          if (workflow.stopIntent?.kind === "cancel") throw new Error("workflow cancellation is pending")
+          // A reviewing pause would re-enter `reviewing` and need a review dispatch, which a command hook cannot host
+          // (A3). Refuse before any commit so the workflow stays paused; resume it from the TUI/CLI or /cancel it.
+          if (workflow.pausedFrom?.phase === "reviewing") throw new Error("a pause taken in reviewing resumes only from the TUI or CLI; the workflow stays paused")
+          const outcome = await resumePaused(runtime, input.sessionID, workflow.lastSeq, {
+            async preflight() {
+              // OpenCode /continue dispatches nothing (the model is driven by the user's next turn), so host control
+              // preflight is not an admission for this command; the boot epoch still gates it.
+              runtime.linuxAdmission?.assertBootEpoch()
+            },
+            fence: () => admissionFence(deps.worktree, input.sessionID),
+            choose: async () => true,
+          })
+          if (outcome.kind !== "resumed") throw new Error(outcome.kind === "refused" ? `resume refused (${outcome.precondition}): ${outcome.reason}` : "resume kept held")
+          recordContinueReceipt(deps, input.sessionID, input.arguments, CONTINUE_PAUSED_RESUMED_RECEIPT)
+          return
+        }
+        resumeAdmission(runtime, input.sessionID, workflow?.lastSeq)
+        recordContinueReceipt(deps, input.sessionID, input.arguments, CONTINUE_RESUMED_RECEIPT)
+        deps.log("/continue acknowledged explicit owner Resume", {
+          sessionID: input.sessionID,
+          epoch: store.epoch,
+          workflowID: workflow?.id,
+          workflowRevision: workflow?.lastSeq,
+        })
+      } catch (error) {
+        recordContinueReceipt(deps, input.sessionID, input.arguments, CONTINUE_HELD_RECEIPT)
+        deps.log("/continue remains held", { sessionID: input.sessionID, error: (error as Error)?.message ?? String(error) })
+      }
+      return
+    }
     if (!stopOn || input.command !== STOP_COMMAND) return
     const { sessionID } = input
     try {
-      writeJsonAtomic(abortPath(deps.worktree, sessionID), { reason: "user_stop", at: Date.now(), arguments: input.arguments })
+      const epoch = holdOwnedAdmission(deps.worktree, sessionID, "user_stop")
       const prev = readModeState(deps.worktree, sessionID)
-      writeModeState(deps.worktree, sessionID, { ...EMPTY_MODE, stopReason: "user_stop" })
       const queueWasRunning = queue.isRunning(sessionID)
+      durableWriteJson(abortPath(deps.worktree, sessionID), { reason: "user_stop", at: Date.now(), arguments: "" })
       if (queueWasRunning) {
         // fire-and-forget: a hung abort endpoint must not hang the command hook
         void queue.abort(sessionID, "user_stop").catch((e: unknown) => deps.log("/stop: queue abort failed", { sessionID, error: String(e) }))
-      } else {
-        // nothing running: settle open tasks of an interrupted run so no resume is offered later
+      } else if (canCancelOpenQueue(runtime, queueWasRunning)) {
+        // Open tasks are settled only when no queue, execution activity, claim or unsettled intent remains.
         queue.cancelOpen(sessionID, "user_stop")
       }
-      deps.log("/stop", { sessionID, previousMode: prev.mode, wasActive: prev.active, queueWasRunning })
+      writeModeState(deps.worktree, sessionID, { ...EMPTY_MODE, stopReason: "user_stop" })
+      deps.log("/stop", { sessionID, epoch, previousMode: prev.mode, wasActive: prev.active, queueWasRunning })
     } catch (e) {
       deps.log("/stop failed", { sessionID, error: (e as Error).message })
     }

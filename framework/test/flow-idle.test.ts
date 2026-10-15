@@ -5,35 +5,72 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { createEventHook } from "../src/hooks/event.ts"
 import { createToolAfterHook } from "../src/hooks/tool-after.ts"
-import { createChatMessageHook } from "../src/hooks/chat-message.ts"
+import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { createIdleLoop, CONTINUE_PROMPT, EXECUTING_RESUME_PROMPT, NUDGE_PROMPT } from "../src/loop/idle.ts"
 import { currentOwner } from "../src/flow/owner.ts"
-import { newWorkflow, readWorkflow, workflowPath, writeWorkflow, type Workflow, withFlowTransaction } from "../src/flow/state.ts"
-import { startWorkflow } from "../src/flow/runtime.ts"
+import { newWorkflow, readEvents, readWorkflow, workflowPath, type Workflow, withFlowTransaction } from "../src/flow/state.ts"
+import { writeWorkflow } from "./commit-fixture.ts"
+import { requestStop, startWorkflow, stopHeartbeat } from "../src/flow/runtime.ts"
+import { beginStageReservation } from "../src/hosts/runtime.ts"
 import { addTasks, ledgerPath, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
 import { EMPTY_MODE, readModeState, writeModeState, type ModeState } from "../src/state/store.ts"
 import { hasFlowSuffix, hasModeSuffix } from "../src/modes/instructions.ts"
-import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
+import { createNativeToolFixture } from "./native-tool-fixture.ts"
+import { admitFixtureSession, fakeClient, makeDeps, releaseFixtureSession, tempWorktree, type FakeClient } from "./guards-helpers.ts"
 
 const S = "ses_flow"
 let wt: ReturnType<typeof tempWorktree>
 let client: FakeClient
+let fixtureSession: ReturnType<typeof admitFixtureSession>
+let nativeCallSequence = 0
 
-beforeEach(() => {
+function setupFixture() {
   wt = tempWorktree()
   client = fakeClient({ promptAsync: true })
+  fixtureSession = admitFixtureSession(makeDeps(client, wt.worktree), S)
+}
+
+function resetFixture() {
+  stopHeartbeat()
+  releaseFixtureSession(wt.worktree, fixtureSession)
+  wt.cleanup()
+  setupFixture()
+}
+
+beforeEach(() => setupFixture())
+afterEach(() => {
+  stopHeartbeat()
+  releaseFixtureSession(wt.worktree, fixtureSession)
+  wt.cleanup()
 })
-afterEach(() => wt.cleanup())
 
 function putWorkflow(patch: Record<string, unknown> = {}): Workflow {
-  const wf = { ...newWorkflow(S, currentOwner(), "command", "do the thing", "opencode"), ...patch }
+  const wf = { ...newWorkflow(S, currentOwner(Date.now(), fixtureSession.epoch), "command", "do the thing", "opencode"), ...patch }
   return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf as Workflow))
 }
 
 const idleEvent = (sessionID = S) => ({ event: { type: "session.idle", properties: { sessionID } } as any })
 const prompts = () => client.calls.filter((c) => c.method === "promptAsync" || c.method === "prompt")
 const promptTexts = () => prompts().map((c) => (c.args as any).body.parts[0].text)
+
+async function nativeFixture(deps: ReturnType<typeof makeDeps>, sessionID = S) {
+  const native = await createNativeToolFixture(deps, { sessionID })
+  await native.acceptUserTurn()
+  return native
+}
+
+function primeNativeToolCall(native: Awaited<ReturnType<typeof nativeFixture>>, tool: string, args: Record<string, unknown>) {
+  return native.primeCall({ tool, args, callID: `flow_idle_fixture_${++nativeCallSequence}` })
+}
+
+async function deliverNativeUserText(deps: ReturnType<typeof makeDeps>, text: string) {
+  const native = await createNativeToolFixture(deps, { sessionID: S })
+  const turn = await native.deliverUserTurn({ text })
+  const part = turn.parts.find((candidate) => candidate.type === "text")
+  if (!part || part.type !== "text") throw new Error("native user turn did not return a text part")
+  return part
+}
 
 function deletedEvent(sessionID = S) {
   return {
@@ -53,16 +90,23 @@ for (const [label, engine] of [
   ["malformed", { engine: "opencode" }],
 ] as const) {
   test(`${label} workflow engine prevents idle settlement and session deletion`, async () => {
+    const deps = makeDeps(client, wt.worktree)
+    const native = await nativeFixture(deps)
     const wf = putWorkflow({ engine, phase: "executing", taskIds: ["t1"] })
     const { ledger } = addTasks(readLedger(wt.worktree, S), [{ title: "a" }], Date.now(), { id: wf.id, planSha: "s" })
     writeLedger(wt.worktree, { ...ledger, tasks: ledger.tasks.map(task => ({ ...task, status: "done" as const })) })
     const workflowBefore = readFileSync(workflowPath(wt.worktree))
     const ledgerBefore = readFileSync(ledgerPath(wt.worktree, S))
-    const deps = makeDeps(client, wt.worktree)
     await createIdleLoop(deps)(S)
-    await createToolAfterHook(deps)(
-      { tool: "delegate", sessionID: S, callID: "c1", args: {} },
-      { title: "delegate", output: "ok", metadata: {} },
+    // An unprovable workflow engine voids the session's admission, so no fresh native turn is accepted and no call can
+    // be minted: the only remaining authority is the turn bound before the change, which is stale.
+    const turn = await native.deliverUserTurn()
+    expect(turn.parts.some(part => part.type === "text" && part.text.includes("LCA session held"))).toBe(true)
+    expect(() => primeNativeToolCall(native, "delegate", { resume: true })).toThrow(/accept a native user turn/)
+    const call = { input: { tool: "delegate", sessionID: S, callID: "flow_idle_unminted_call" }, output: { args: { resume: true } } }
+    await expect(createToolBeforeHook(deps)(call.input, call.output)).rejects.toThrow("lca: OpenCode tool call refused (stale-turn)")
+    await expect(createToolAfterHook(deps)({ ...call.input, args: call.output.args }, { title: "delegate", output: "ok", metadata: {} })).rejects.toThrow(
+      /^lca: OpenCode tool call refused \(/,
     )
     await createEventHook(deps)(deletedEvent())
     expect(workflowBefore.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
@@ -102,8 +146,11 @@ describe("AC0.11 — nudge / stuck / question / reset", () => {
 
   test("last assistant message ends with '?' -> no nudge and no stuck", async () => {
     putWorkflow({ phase: "planning" })
-    client.messages = [{ info: { id: "m1", role: "assistant" }, parts: [{ type: "text", text: "Which directory should the plan touch?" }] }]
-    const idle = createIdleLoop(makeDeps(client, wt.worktree))
+    const deps = makeDeps(client, wt.worktree)
+    const native = await createNativeToolFixture(deps, { sessionID: S })
+    await native.acceptUserTurn()
+    await native.deliverAssistantMessage({ text: "Which directory should the plan touch?" })
+    const idle = createIdleLoop(deps)
     const r = await idle(S)
     expect(r).toEqual({ action: "workflow", wfId: expect.any(String) })
     expect(promptTexts()).toEqual([])
@@ -121,9 +168,7 @@ describe("AC0.11 — nudge / stuck / question / reset", () => {
   test("a user message resets nudges and exits stuck(no_submission) back to planning (T13, via chat.message)", async () => {
     putWorkflow({ phase: "stuck", stuckCause: "no_submission", counters: { code_invalid: 0, review_iterations: 0, user_rejections: 0, nudges: 1 } })
     const deps = makeDeps(client, wt.worktree)
-    const hook = createChatMessageHook(deps)
-    const part: any = { type: "text", text: "here is more context for the plan" }
-    await hook({ sessionID: S, agent: "main" } as any, { message: { id: "m1" } as any, parts: [part] })
+    const part = await deliverNativeUserText(deps, "here is more context for the plan")
     const wf = readWorkflow(wt.worktree)!
     expect(wf.phase).toBe("planning")
     expect(wf.counters.nudges).toBe(0)
@@ -133,9 +178,7 @@ describe("AC0.11 — nudge / stuck / question / reset", () => {
 
   test("no nudge outside planning (e.g. reviewing, pending_approval, executing, stuck(tasks_failed))", async () => {
     for (const patch of [{ phase: "reviewing" }, { phase: "pending_approval" }, { phase: "stuck", stuckCause: "tasks_failed" }]) {
-      wt.cleanup()
-      wt = tempWorktree()
-      client = fakeClient({ promptAsync: true })
+      resetFixture()
       putWorkflow(patch)
       await createIdleLoop(makeDeps(client, wt.worktree))(S)
       expect(promptTexts().filter((t) => t === NUDGE_PROMPT)).toEqual([])
@@ -165,9 +208,7 @@ describe("AC0.12 — precedence", () => {
   test("ulw keyword during planning activates no mode and appends the notice only", async () => {
     const wf = putWorkflow({ phase: "planning" })
     const deps = makeDeps(client, wt.worktree)
-    const hook = createChatMessageHook(deps)
-    const part: any = { type: "text", text: "ultrawork: fix everything" }
-    await hook({ sessionID: S, agent: "main" } as any, { message: { id: "m1" } as any, parts: [part] })
+    const part = await deliverNativeUserText(deps, "ultrawork: fix everything")
     const mode = readModeState(wt.worktree, S)
     expect(mode.active).toBe(false)
     expect(hasModeSuffix(part.text)).toBe(false)
@@ -179,9 +220,7 @@ describe("AC0.12 — precedence", () => {
   test("legacy plan keyword under an active workflow also gets only the notice (no <lca-mode>)", async () => {
     const wf = putWorkflow({ phase: "planning" })
     const deps = makeDeps(client, wt.worktree)
-    const hook = createChatMessageHook(deps)
-    const part: any = { type: "text", text: "plan mode for the refactor" }
-    await hook({ sessionID: S, agent: "main" } as any, { message: { id: "m1" } as any, parts: [part] })
+    const part = await deliverNativeUserText(deps, "plan mode for the refactor")
     expect(hasModeSuffix(part.text)).toBe(false)
     expect(hasFlowSuffix(part.text)).toBe(true)
     expect(part.text).toContain(`plan workflow ${wf.id} is active`)
@@ -191,9 +230,7 @@ describe("AC0.12 — precedence", () => {
     writeModeState(wt.worktree, S, ulw())
     const wf = putWorkflow({ phase: "planning" })
     const deps = makeDeps(client, wt.worktree)
-    const hook = createChatMessageHook(deps)
-    const part: any = { type: "text", text: "stop lca" }
-    await hook({ sessionID: S, agent: "main" } as any, { message: { id: "m1" } as any, parts: [part] })
+    const part = await deliverNativeUserText(deps, "stop lca")
     expect(readModeState(wt.worktree, S).active).toBe(false)
     expect(part.text).toContain(`use /cancel to end plan workflow ${wf.id}`)
     expect(hasModeSuffix(part.text)).toBe(false)
@@ -201,9 +238,7 @@ describe("AC0.12 — precedence", () => {
 
   test("no CONTINUE_PROMPT / offerResume fires in any non-terminal workflow phase, even with open ledger tasks", async () => {
     for (const patch of [{ phase: "planning" }, { phase: "reviewing" }, { phase: "pending_approval" }, { phase: "executing" }, { phase: "stuck", stuckCause: "user_stop" }]) {
-      wt.cleanup()
-      wt = tempWorktree()
-      client = fakeClient({ promptAsync: true })
+      resetFixture()
       const wf = putWorkflow(patch)
       writeModeState(wt.worktree, S, ulw())
       let { ledger } = addTasks(readLedger(wt.worktree, S), [{ title: "a" }, { title: "b" }])
@@ -297,27 +332,102 @@ describe("settle via idle", () => {
   })
 
   test("settle via delegate return (tool.execute.after)", async () => {
+    const deps = makeDeps(client, wt.worktree)
+    const native = await nativeFixture(deps)
     const wf = putWorkflow({ phase: "executing", taskIds: ["t1"] })
     const { ledger } = addTasks(readLedger(wt.worktree, S), [{ title: "a" }], Date.now(), { id: wf.id, planSha: "s" })
     writeLedger(wt.worktree, { ...ledger, tasks: ledger.tasks.map((t) => ({ ...t, status: "done" as const })) })
-    const deps = makeDeps(client, wt.worktree)
     const hook = createToolAfterHook(deps)
-    await hook({ tool: "delegate", sessionID: S, callID: "c1", args: {} } as any, { title: "delegate", output: "ok", metadata: {} } as any)
-    expect(readWorkflow(wt.worktree)!.phase).toBe("done")
+    const call = primeNativeToolCall(native, "delegate", { resume: true })
+    await createToolBeforeHook(deps)(call.input, call.output)
+    await hook(call.input, { title: "delegate", output: "ok", metadata: {} })
+    const completedWorkflow = readWorkflow(wt.worktree)!
+    const completedEvents = readEvents(wt.worktree, wf.id)
+    const completedLedger = readLedger(wt.worktree, S)
+    expect(completedWorkflow.phase).toBe("done")
+    await expect(hook(call.input, { title: "delegate", output: "ok", metadata: {} })).rejects.toThrow(
+      "lca: OpenCode tool call refused (completed-call)",
+    )
+    expect(readWorkflow(wt.worktree)).toEqual(completedWorkflow)
+    expect(readEvents(wt.worktree, wf.id)).toEqual(completedEvents)
+    expect(readLedger(wt.worktree, S)).toEqual(completedLedger)
   })
 
   test("delegate return in a non-owning session does not settle another session's workflow", async () => {
+    const deps = makeDeps(client, wt.worktree)
+    const otherOwner = admitFixtureSession(deps, "ses_other")
+    const native = await nativeFixture(deps, "ses_other")
     const wf = putWorkflow({ phase: "executing", taskIds: ["t1"] })
     const { ledger } = addTasks(readLedger(wt.worktree, S), [{ title: "a" }], Date.now(), { id: wf.id, planSha: "s" })
     writeLedger(wt.worktree, { ...ledger, tasks: ledger.tasks.map((t) => ({ ...t, status: "done" as const })) })
-    const deps = makeDeps(client, wt.worktree)
-    const hook = createToolAfterHook(deps)
-    await hook({ tool: "delegate", sessionID: "ses_other", callID: "c1", args: {} } as any, { title: "delegate", output: "ok", metadata: {} } as any)
-    expect(readWorkflow(wt.worktree)!.phase).toBe("executing")
+    try {
+      const call = primeNativeToolCall(native, "delegate", { resume: true })
+      await createToolBeforeHook(deps)(call.input, call.output)
+      await createToolAfterHook(deps)(call.input, { title: "delegate", output: "ok", metadata: {} })
+      expect(readWorkflow(wt.worktree)!.phase).toBe("executing")
+    } finally {
+      releaseFixtureSession(wt.worktree, otherOwner)
+    }
   })
 })
 
-describe("session.deleted -> cancelled (before removeSessionDir)", () => {
+describe("stop observers through idle (P5b)", () => {
+  const nonTransitions = (id: string) => readEvents(wt.worktree, id).filter(e => e.type === "transition").map(e => String(e.data?.event))
+
+  test("a pending pause is settled by idle (held branch) only after the blocker is released, with no ordinary settle or prompt", async () => {
+    const deps = makeDeps(client, wt.worktree)
+    const runtime = getOpenCodeRuntime(deps)
+    const wf = putWorkflow({ phase: "executing", stage: "unit" })
+    const reservation = beginStageReservation(wt.worktree, S)
+    expect(requestStop(runtime, S, "pause", "p", { workflowID: wf.id }).result.ok).toBe(true)
+    const idle = createIdleLoop(deps)
+    expect(await idle(S)).toMatchObject({ action: "ignored", why: "held" })
+    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "executing", stopIntent: { kind: "pause" } })
+    reservation()
+    expect(await idle(S)).toMatchObject({ action: "ignored", why: "held" })
+    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "paused" })
+    expect(nonTransitions(wf.id)).not.toContain("settle_ok")
+    expect(prompts()).toHaveLength(0)
+  })
+
+  test("a pending cancel is settled by idle once the blocker is released; held safety never runs review_aborted or settle_ok", async () => {
+    const deps = makeDeps(client, wt.worktree)
+    const runtime = getOpenCodeRuntime(deps)
+    const wf = putWorkflow({ phase: "reviewing", stage: "review" })
+    const reservation = beginStageReservation(wt.worktree, S)
+    expect(requestStop(runtime, S, "cancel", "c", { workflowID: wf.id }).result.ok).toBe(true)
+    await createIdleLoop(deps)(S)
+    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "reviewing", stopIntent: { kind: "cancel" } })
+    reservation()
+    await createIdleLoop(deps)(S)
+    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "cancelled", stopIntent: null })
+    expect(nonTransitions(wf.id)).not.toContain("review_aborted")
+  })
+
+  test("an ordinary idle with all tasks done does not settle while a pause is pending", async () => {
+    const deps = makeDeps(client, wt.worktree)
+    const runtime = getOpenCodeRuntime(deps)
+    const wf = putWorkflow({ phase: "executing", stage: "unit" })
+    const { ledger } = addTasks(readLedger(wt.worktree, S), [{ title: "a" }], Date.now(), { id: wf.id, planSha: "p" })
+    writeLedger(wt.worktree, { ...ledger, tasks: ledger.tasks.map(t => ({ ...t, status: "done" as const })) })
+    const reservation = beginStageReservation(wt.worktree, S)
+    requestStop(runtime, S, "pause", "p", { workflowID: wf.id })
+    reservation()
+    await createIdleLoop(deps)(S)
+    expect(readWorkflow(wt.worktree)!.phase).toBe("paused")
+    expect(nonTransitions(wf.id)).not.toContain("settle_ok")
+  })
+})
+
+describe("session.deleted -> cancelled with retained session state", () => {
+  beforeEach(async () => {
+    const info = deletedEvent().event.properties.info
+    ;(client.session as any).get = async () => ({ data: info })
+    await createEventHook(makeDeps(client, wt.worktree))({
+      event: { type: "session.created", properties: { info } },
+    } as any)
+  })
+
   test("a held workflow transaction prevents session-directory cleanup", async () => {
     putWorkflow()
     writeLedger(wt.worktree, readLedger(wt.worktree, S))
@@ -340,12 +450,14 @@ describe("session.deleted -> cancelled (before removeSessionDir)", () => {
     const ledgerBefore = readFileSync(ledgerPath(wt.worktree, S))
     const deps = makeDeps(client, wt.worktree)
     const runtime = getOpenCodeRuntime(deps)
-    runtime.runs.claim(S, runtime.instance, process.pid)
+    const claim = runtime.runs.claim(S, runtime.instance, process.pid)
     await createEventHook(deps)(deletedEvent())
-    expect(readWorkflow(wt.worktree)?.phase).toBe("cancelled")
+    // Intended P5b change (T19 removed): an unreleased claim is a blocker, so deletion commits a cancel intent only.
+    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "planning", stopIntent: expect.objectContaining({ kind: "cancel" }) })
     expect(runtime.runs.status().claim).toBeDefined()
     expect(ledgerBefore.equals(readFileSync(ledgerPath(wt.worktree, S)))).toBe(true)
     expect(client.calls.filter(call => call.method === "abort")).toEqual([])
+    runtime.runs.release(claim)
   })
 
   test("deleting the owning session cancels its non-terminal workflow", async () => {

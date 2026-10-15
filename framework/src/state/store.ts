@@ -300,9 +300,6 @@ export function writeJsonAtomic(path: string, data: unknown): void {
   renameSync(tmp, path)
 }
 
-export function removeSessionDir(worktree: string, sessionID: string): void {
-  rmSync(sessionDir(worktree, sessionID), { recursive: true, force: true })
-}
 
 export type ModeState = {
   mode: Mode
@@ -362,17 +359,17 @@ export function readDirectoryBounded(path: string, maxEntries: number): { entrie
   }
 }
 
-/** Read and parse at most maxBytes without creating, renaming, or otherwise mutating state. */
-export function readBoundedJson(path: string, maxBytes: number): BoundedJson {
+/** Read at most maxBytes without creating, renaming, or otherwise mutating state. Missing file gives `bytes: undefined`. */
+export function readBoundedBytes(path: string, maxBytes: number): { bytes: Buffer | undefined; bytesRead: number } {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new TypeError("invalid JSON read limit")
   let fd: number
   try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK) }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { value: undefined, bytesRead: 0 }
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { bytes: undefined, bytesRead: 0 }
     throw withBytesRead(error, 0)
   }
   let bytesRead = 0
-  let result: BoundedJson | undefined
+  let result: { bytes: Buffer | undefined; bytesRead: number } | undefined
   let failure: Error | undefined
   try {
     const initial = fstatSync(fd)
@@ -387,8 +384,7 @@ export function readBoundedJson(path: string, maxBytes: number): BoundedJson {
     // A writer may have extended the file after the initial size check. The
     // fixed-size buffer enforces the byte cap; fstat detects such growth.
     if (fstatSync(fd).size > maxBytes) throw Object.assign(new Error("oversize"), { code: "oversize" })
-    const value = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8")) as unknown
-    result = { value, bytesRead }
+    result = { bytes: Buffer.from(buffer.subarray(0, bytesRead)), bytesRead }
   } catch (error) {
     failure = withBytesRead(error, bytesRead)
   }
@@ -396,6 +392,14 @@ export function readBoundedJson(path: string, maxBytes: number): BoundedJson {
   catch (error) { if (!failure) failure = withBytesRead(error, bytesRead) }
   if (failure) throw failure
   return result!
+}
+
+/** Read and parse at most maxBytes without creating, renaming, or otherwise mutating state. */
+export function readBoundedJson(path: string, maxBytes: number): BoundedJson {
+  const { bytes, bytesRead } = readBoundedBytes(path, maxBytes)
+  if (bytes === undefined) return { value: undefined, bytesRead: 0 }
+  try { return { value: JSON.parse(bytes.toString("utf8")) as unknown, bytesRead } }
+  catch (error) { throw withBytesRead(error, bytesRead) }
 }
 
 export const EMPTY_MODE: ModeState = {

@@ -1,5 +1,11 @@
 import { CLI_TOOL_NAMES, type CliToolName } from "./cli-tools.ts"
-import type { ExecutionRole } from "./types.ts"
+import { EXECUTION_ROLES, type ExecutionRole } from "./types.ts"
+import type { Phase } from "../workflows/types.ts"
+
+/** Exhaustive over Phase: adding a phase without deciding whether a final summary may report it fails typecheck. */
+const FINAL_PHASES: Record<Phase, true> = {
+  planning: true, reviewing: true, pending_approval: true, executing: true, stuck: true, paused: true, done: true, cancelled: true,
+}
 
 export type CliTaskStatus = "pending" | "running" | "done" | "failed" | "cancelled"
 
@@ -8,8 +14,8 @@ export type CliProgressTask = { id: string; status: CliTaskStatus; title?: strin
 export type CliHostActivity =
   | { kind: "model-started"; role: ExecutionRole; execution: number }
   | { kind: "model-returned"; role: ExecutionRole; execution: number; status: "completed" | "failed" | "cancelled" | "unresolved" | "incomplete" }
-  | { kind: "tool-started"; role: ExecutionRole; execution: number; tool: CliToolName }
-  | { kind: "tool-finished"; role: ExecutionRole; execution: number; tool: CliToolName; ok: boolean }
+  | { kind: "tool-started"; role: ExecutionRole; execution: number; taskID: string; executionID: string; callID: string; tool: CliToolName }
+  | { kind: "tool-finished"; role: ExecutionRole; execution: number; taskID: string; executionID: string; callID: string; tool: CliToolName; outcome: "succeeded" | "failed" | "denied"; ok: boolean }
 
 export type CliProgressFinal = {
   workflowID?: string
@@ -37,12 +43,10 @@ export type CliProgressPresenter = CliProgressSink & {
   error: () => void
 }
 
+export type CliProgressPresenterOptions = { toolLines?: boolean }
+
 const TASK_STATUSES: readonly CliTaskStatus[] = ["pending", "running", "done", "failed", "cancelled"]
-const EXECUTION_ROLES: readonly ExecutionRole[] = [
-  "main", "worker", "reviewer", "data-analyst", "data-verifier", "ontology-evolver", "answer-judge",
-]
 const MODEL_STATUSES = ["completed", "failed", "cancelled", "unresolved", "incomplete"] as const
-const WORKFLOW_PHASES = ["planning", "reviewing", "pending_approval", "executing", "stuck", "done", "cancelled"] as const
 const MAX_TRACKED_TASKS = 1024
 const MAX_SEEN_ACTIVITIES = 256
 const MAX_BUFFERED_LINES = 32
@@ -79,6 +83,10 @@ function activityOrdinal(value: unknown): value is number {
   return Number.isSafeInteger(value) && typeof value === "number" && value > 0
 }
 
+function activityIdentifier(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 1024
+}
+
 function status(value: unknown): value is CliTaskStatus {
   return typeof value === "string" && TASK_STATUSES.includes(value as CliTaskStatus)
 }
@@ -92,15 +100,67 @@ function roleName(role: ExecutionRole): string {
     case "data-verifier": return "Data verifier"
     case "ontology-evolver": return "Ontology evolver"
     case "answer-judge": return "Answer judge"
+    case "interviewer": return "Interviewer"
+    case "planner": return "Planner"
+    case "architect": return "Architect"
+    case "critic": return "Critic"
+    case "researcher": return "Researcher"
+    case "contrarian": return "Contrarian"
+    case "simplifier": return "Simplifier"
+  }
+}
+
+function validatedHostActivity(value: unknown): CliHostActivity | undefined {
+  if (!isRecord(value) || !EXECUTION_ROLES.includes(value.role as ExecutionRole) || !activityOrdinal(value.execution)) return
+  const role = value.role as ExecutionRole
+  const execution = value.execution
+  switch (value.kind) {
+    case "model-started":
+      return Object.freeze({ kind: "model-started", role, execution })
+    case "model-returned":
+      if (typeof value.status === "string" && MODEL_STATUSES.includes(value.status as (typeof MODEL_STATUSES)[number])) {
+        return Object.freeze({ kind: "model-returned", role, execution, status: value.status as (typeof MODEL_STATUSES)[number] })
+      }
+      return
+    case "tool-started":
+      if (!CLI_TOOL_NAMES.includes(value.tool as CliToolName) || !activityIdentifier(value.taskID) ||
+          !activityIdentifier(value.executionID) || !activityIdentifier(value.callID)) return
+      return Object.freeze({
+        kind: "tool-started", role, execution, taskID: value.taskID,
+        executionID: value.executionID, callID: value.callID, tool: value.tool as CliToolName,
+      })
+    case "tool-finished":
+      if (!CLI_TOOL_NAMES.includes(value.tool as CliToolName) || !activityIdentifier(value.taskID) ||
+          !activityIdentifier(value.executionID) || !activityIdentifier(value.callID) || typeof value.ok !== "boolean" ||
+          (value.outcome !== "succeeded" && value.outcome !== "failed" && value.outcome !== "denied") ||
+          (value.outcome === "succeeded") !== value.ok) return
+      return Object.freeze({
+        kind: "tool-finished", role, execution, taskID: value.taskID,
+        executionID: value.executionID, callID: value.callID, tool: value.tool as CliToolName,
+        outcome: value.outcome, ok: value.ok,
+      })
+    default:
+      return
   }
 }
 
 /** Append-only, line-oriented progress output. It accepts only fixed event vocabularies and bounded identifiers. */
-export function createCliProgressPresenter(write: (text: string) => void): CliProgressPresenter {
+export function createCliProgressPresenter(
+  write: (text: string) => void,
+  observe?: (activity: CliHostActivity) => void,
+  options: CliProgressPresenterOptions = {},
+): CliProgressPresenter {
   if (typeof write !== "function") throw new TypeError("CLI progress writer must be a function")
+  if ((observe !== undefined && typeof observe !== "function") || !options || typeof options !== "object" ||
+      (options.toolLines !== undefined && typeof options.toolLines !== "boolean")) {
+    throw new TypeError("invalid CLI progress presenter options")
+  }
+  const toolLines = options.toolLines !== false
 
   const tasks = new Map<string, { status: CliTaskStatus; attempt?: number }>()
   const seen = new Set<string>()
+  const startedToolCalls = new Set<string>()
+  const finishedToolCalls = new Set<string>()
   const buffered: string[] = []
   let suspended = false
   let planningWaitActive = false
@@ -139,10 +199,11 @@ export function createCliProgressPresenter(write: (text: string) => void): CliPr
     }
   }
 
-  const host = (activity: CliHostActivity): void => {
-    if (!isRecord(activity) || !EXECUTION_ROLES.includes(activity.role as ExecutionRole) ||
-        !activityOrdinal(activity.execution)) return
-    const label = roleName(activity.role as ExecutionRole)
+  const host = (value: CliHostActivity): void => {
+    const activity = validatedHostActivity(value)
+    if (!activity) return
+    try { observe?.(activity) } catch { /* Observers are observational and never change execution. */ }
+    const label = roleName(activity.role)
     const keySuffix = `${activity.execution}:${activity.role}`
     if (activity.kind === "model-started") {
       if (activity.role === "main" && planningWaitActive) return
@@ -162,16 +223,19 @@ export function createCliProgressPresenter(write: (text: string) => void): CliPr
       }
       return
     }
-    if (!CLI_TOOL_NAMES.includes(activity.tool)) return
+    if (!toolLines) return
+    const callKey = JSON.stringify([activity.executionID, activity.callID])
     if (activity.kind === "tool-started") {
-      once(`tool-started:${keySuffix}:${activity.tool}`, `[activity] ${label} started ${activity.tool} tool.`)
+      if (startedToolCalls.has(callKey)) return
+      startedToolCalls.add(callKey)
+      output(`[activity] ${label} started ${activity.tool} tool.`)
       return
     }
-    if (activity.kind === "tool-finished" && typeof activity.ok === "boolean") {
-      const outcome = activity.ok ? "finished" : "failed"
-      const prefix = activity.ok ? "[activity]" : "[error]"
-      once(`tool-finished:${keySuffix}:${activity.tool}:${activity.ok}`, `${prefix} ${label} ${outcome} ${activity.tool} tool.`)
-    }
+    if (activity.kind !== "tool-finished" || finishedToolCalls.has(callKey)) return
+    finishedToolCalls.add(callKey)
+    const outcome = activity.outcome === "succeeded" ? "finished" : activity.outcome
+    const prefix = activity.ok ? "[activity]" : "[error]"
+    output(`${prefix} ${label} ${outcome} ${activity.tool} tool.`)
   }
 
   const queue = (message: string, fields?: Record<string, unknown>): void => {
@@ -266,7 +330,7 @@ export function createCliProgressPresenter(write: (text: string) => void): CliPr
       once("cancel-requested", "[progress] Cancellation requested; outcome is not yet settled.")
     },
     final(summary) {
-      if (!summary || !WORKFLOW_PHASES.includes(summary.phase as (typeof WORKFLOW_PHASES)[number]) ||
+      if (!summary || !Object.hasOwn(FINAL_PHASES, summary.phase) ||
           !boundedCount(summary.done) || !boundedCount(summary.failed) || !boundedCount(summary.cancelled) ||
           (summary.skipped !== undefined && typeof summary.skipped !== "string")) return
       const skipped = summary.skipped ? "; skipped work" : ""

@@ -1,5 +1,5 @@
 // Regression tests for the second critical review (2026-09-23): gaming detection, autoload-file protection,
-// snapshot hardening, verify allowlist tightening, resume-on-message, /stop settlement, session-deleted discard.
+// snapshot hardening, verify allowlist tightening, resume-on-message, /stop settlement, retained session end.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs"
@@ -10,22 +10,44 @@ import { createQueue, getQueue } from "../src/orchestration/queue.ts"
 import { createSnapshotStore } from "../src/orchestration/snapshot.ts"
 import { startShell } from "../src/orchestration/shell.ts"
 import { createDelegateTool } from "../src/tools/delegate.ts"
-import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { createCommandHook, STOP_COMMAND } from "../src/hooks/command.ts"
+import { createConfigHook } from "../src/hooks/config.ts"
 import { createEventHook } from "../src/hooks/event.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { addTasks, emptyLedger, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
 import { abortPath, sessionDir, stateBase, stateRoot, writeJsonAtomic } from "../src/state/store.ts"
-import { fakeClient, GIT_TEST_ENV, makeDeps, tempGitWorktree, tempWorktree, verifyScript, waitFor, type FakeClient } from "./guards-helpers.ts"
+import { getOwnedSession, readSessionMetadata, replaySession } from "../src/sessions/store.ts"
+import { createNativeToolFixture } from "./native-tool-fixture.ts"
+import { admitFixtureSession, fakeClient, GIT_TEST_ENV, makeDeps, releaseFixtureSession, tempGitWorktree, tempWorktree, verifyScript, waitFor, type FakeClient } from "./guards-helpers.ts"
 
 const S = "ses_main"
 let wt: ReturnType<typeof tempGitWorktree>
 let client: FakeClient
+let fixtureSessions: Array<ReturnType<typeof admitFixtureSession>>
 beforeEach(() => {
   wt = tempGitWorktree({ "README.md": "fixture\n" })
   client = fakeClient({ promptAsync: true })
+  fixtureSessions = []
 })
-afterEach(() => wt.cleanup())
+afterEach(() => {
+  for (const store of fixtureSessions.splice(0)) releaseFixtureSession(wt.worktree, store)
+  wt.cleanup()
+})
+
+function admit(deps: ReturnType<typeof makeDeps>) {
+  const store = admitFixtureSession(deps, S)
+  fixtureSessions.push(store)
+  return store
+}
+
+async function userTurn(deps: ReturnType<typeof makeDeps>, text: string) {
+  if (fixtureSessions.length === 0) admit(deps)
+  const native = await createNativeToolFixture(deps, { sessionID: S })
+  const turn = await native.deliverUserTurn({ text })
+  const output = turn.parts.find((part) => part.type === "text")
+  if (!output || output.type !== "text") throw new Error("native user turn did not return a text part")
+  return output
+}
 const write = (name: string, content: string) => {
   mkdirSync(join(wt.worktree, name, ".."), { recursive: true })
   writeFileSync(join(wt.worktree, name), content)
@@ -330,16 +352,15 @@ describe("delegate refusals and auto-resume", () => {
   })
 })
 
-describe("resume offer on the next user message; /stop settles; session.deleted discards", () => {
+describe("resume offer on the next user message; /stop settles; session.deleted retains", () => {
   test("chat.message attaches the resume offer once when open tasks exist (also with a mode suffix)", async () => {
     const deps = makeDeps(client, wt.worktree)
+    admit(deps)
     writeLedger(wt.worktree, addTasks(emptyLedger(S), [{ title: "a" }, { title: "b" }]).ledger)
-    const part: any = { type: "text", text: "status?" }
-    await createChatMessageHook(deps)({ sessionID: S, agent: "main" }, { message: {} as any, parts: [part] })
+    const part = await userTurn(deps, "status?")
     expect(part.text).toContain("<lca-resume>")
     expect(part.text).toContain("resume: true")
-    const again: any = { type: "text", text: "ulw: and now more" }
-    await createChatMessageHook(deps)({ sessionID: S, agent: "main" }, { message: {} as any, parts: [again] })
+    const again = await userTurn(deps, "ulw: and now more")
     expect(again.text).not.toContain("<lca-resume>")
     expect(again.text).toContain('<lca-mode name="ulw">')
     expect(readLedger(wt.worktree, S).resumeNotifiedFor).toEqual(["t1", "t2"])
@@ -347,18 +368,31 @@ describe("resume offer on the next user message; /stop settles; session.deleted 
 
   test("/stop with no queue running cancels open tasks so nothing is offered later", async () => {
     const deps = makeDeps(client, wt.worktree)
+    admit(deps)
+    await createConfigHook(deps)({})
     writeLedger(wt.worktree, addTasks(emptyLedger(S), [{ title: "a" }]).ledger)
     await createCommandHook(deps)({ command: STOP_COMMAND, sessionID: S, arguments: "" }, { parts: [] })
     expect(readLedger(wt.worktree, S).tasks[0]!.status).toBe("cancelled")
-    const part: any = { type: "text", text: "ok" }
-    await createChatMessageHook(deps)({ sessionID: S, agent: "main" }, { message: {} as any, parts: [part] })
+    const part = await userTurn(deps, "ok")
     expect(part.text).not.toContain("<lca-resume>")
   })
 
-  test("session.deleted while the queue runs: abort + the state dir is not resurrected", async () => {
+  test("session.deleted while the queue runs: abort, retain evidence and never replay", async () => {
     const deps = makeDeps(client, wt.worktree, noReview)
     const runtime = getOpenCodeRuntime(deps)
     const q = getQueue(runtime)
+    const owner = admit(deps)
+    const eventHook = createEventHook(deps)
+    await createNativeToolFixture(deps, { sessionID: S })
+    const lookup = await (client.session as FakeClient["session"] & {
+      get(options: { path: { id: string }; query: { directory: string } }): Promise<{ data?: unknown }>
+    }).get({ path: { id: S }, query: { directory: wt.worktree } })
+    const sdkSession = lookup.data
+    if (!sdkSession) throw new Error("native SDK fixture did not expose its authoritative session")
+    await eventHook({ event: { type: "session.created", properties: { info: sdkSession } } } as any)
+    expect(getOwnedSession(wt.worktree, S)).toBe(owner)
+    const transcriptStore = getOwnedSession(wt.worktree, S)!
+    transcriptStore.append("user", { text: "keep this history" }, "review2-transcript")
     let started = false
     client.replies.worker = { text: "x", run: () => ((started = true), new Promise<void>(() => {})) }
     q.add(S, [{ title: "a" }, { title: "b" }])
@@ -366,7 +400,7 @@ describe("resume offer on the next user message; /stop settles; session.deleted 
     await waitFor(() => started)
     const completion = q.completion(S)
     expect(completion).toBeDefined()
-    await createEventHook(deps)({ event: { type: "session.deleted", properties: { info: { id: S } } } } as any)
+    await eventHook({ event: { type: "session.deleted", properties: { info: { id: S } } } } as any)
     const result = await completion!
     expect(result).toMatchObject({ taskIds: ["t1", "t2"], done: 0, failed: 0, cancelled: 2, aborted: true })
     expect(result.done + result.failed + result.cancelled).toBeLessThanOrEqual(result.taskIds.length)
@@ -378,7 +412,19 @@ describe("resume offer on the next user message; /stop settles; session.deleted 
       terminal: { outcome: "cancelled" }, reconciliation: { outcome: "terminal", quiescent: true },
     })
     await running
-    expect(existsSync(sessionDir(wt.worktree, S))).toBe(false)
-    expect(existsSync(join(wt.worktree, ".lca/handoffs", S))).toBe(false)
+    expect(existsSync(sessionDir(wt.worktree, S))).toBe(true)
+    expect(readSessionMetadata(wt.worktree, S)?.held).toBe(true)
+    expect(replaySession(wt.worktree, S)).toMatchObject({
+      complete: true,
+      records: expect.arrayContaining([expect.objectContaining({ eventID: "review2-transcript" })]),
+    })
+    expect(getOwnedSession(wt.worktree, S)).toBeUndefined()
+    const workerPromptCount = prompts("worker").length
+
+    await eventHook({ event: { type: "session.deleted", properties: { info: { id: S } } } } as any)
+    const replay = await q.run(S)
+    expect(replay.taskIds).toEqual([])
+    expect(prompts("worker")).toHaveLength(workerPromptCount)
+    expect(readLedger(wt.worktree, S).tasks.map(task => task.status)).toEqual(["cancelled", "cancelled"])
   })
 })

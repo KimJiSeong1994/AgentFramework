@@ -6,21 +6,29 @@ import { afterEach, expect, spyOn, test } from "bun:test"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { readForegroundStatus } from "../src/hosts/controller.ts"
 import { currentOwner } from "../src/flow/owner.ts"
-import { applyEventIn, cancelWorkflow, ensureHeartbeat, onSessionDeleted, repairOnLoad, resolveAuthority, stopHeartbeat } from "../src/flow/runtime.ts"
-import {
-  appendEvents, eventsPath, FlowTransactionBusyError, FlowTransactionIntegrityError, type FlowTx,
-  flowDir, newWorkflow, renderArtifact, rotate, withFlowTransaction, workflowPath, writePlanJson, writeWorkflow,
-} from "../src/flow/state.ts"
+import { applyEventIn, ensureHeartbeat, repairOnLoad, resolveAuthority, stopHeartbeat } from "../src/flow/runtime.ts"
+import { appendEvents, eventsPath, FlowTransactionBusyError, FlowTransactionIntegrityError, type FlowTx, flowDir, newWorkflow, renderArtifact, rotate, withFlowTransaction, workflowPath, writePlanJson } from "../src/flow/state.ts"
+import { committedSnapshot, writeWorkflow } from "./commit-fixture.ts"
 import { ledgerPath } from "../src/state/ledger.ts"
-import { fakeClient, makeDeps, tempWorktree } from "./guards-helpers.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
+import { beginExecutionActivity } from "../src/hosts/runtime.ts"
+import { admitFixtureSession, requestCancel, fakeClient, makeDeps, releaseFixtureSession, tempWorktree } from "./guards-helpers.ts"
 
 const worktrees: Array<ReturnType<typeof tempWorktree>> = []
+const fixtureSessions: Array<{ worktree: string; store: ReturnType<typeof admitFixtureSession> }> = []
 function makeWorktree() {
   const wt = tempWorktree()
   worktrees.push(wt)
   return wt
 }
+function admit(deps: ReturnType<typeof makeDeps>, sessionID: string) {
+  const store = admitFixtureSession(deps, sessionID)
+  fixtureSessions.push({ worktree: deps.worktree, store })
+  return store
+}
 afterEach(() => {
+  stopHeartbeat()
+  for (const { worktree, store } of fixtureSessions.splice(0)) releaseFixtureSession(worktree, store)
   for (const wt of worktrees.splice(0)) wt.cleanup()
 })
 
@@ -104,15 +112,14 @@ test("a second process cannot enter the transaction or append events while it is
   const configPath = fileURLToPath(new URL("../src/config.ts", import.meta.url))
   const source = `
 const { withFlowTransaction, appendEvents } = await import(${JSON.stringify(modulePath)});
-const { applyTakeover, cancelWorkflow, repairOnLoad, startWorkflow } = await import(${JSON.stringify(runtimePath)});
+const { requestStopIn, repairOnLoad, startWorkflow } = await import(${JSON.stringify(runtimePath)});
 const { DEFAULT_CONFIG } = await import(${JSON.stringify(configPath)});
 const root = process.env.FLOW_ROOT;
 const deps = { worktree: root, config: DEFAULT_CONFIG, log() {} };
 const wf = (await import(${JSON.stringify(modulePath)})).readWorkflow(root);
 const operations = [
   () => withFlowTransaction(root, tx => appendEvents(tx, [{ wf: "child", type: "forbidden", actor: "code" }])),
-  () => applyTakeover(deps, wf),
-  () => cancelWorkflow(deps, wf, false, () => {}),
+  () => withFlowTransaction(root, tx => requestStopIn(tx, deps, wf.sessionID, "cancel", "x")),
   () => startWorkflow(deps, wf.sessionID, "command", "child", "user_command", "observed-engine"),
   () => repairOnLoad(deps, "observed-engine"),
 ];
@@ -128,7 +135,7 @@ console.log(JSON.stringify(results));`
       env: { ...process.env, FLOW_ROOT: wt.worktree },
     })
     expect(child.status).toBe(0)
-    expect(JSON.parse(child.stdout)).toEqual(Array(5).fill("FlowTransactionBusyError"))
+    expect(JSON.parse(child.stdout)).toEqual(Array(4).fill("FlowTransactionBusyError"))
     expect(readFileSync(workflowPath(wt.worktree)).equals(stateBefore)).toBe(true)
     expect(readFileSync(eventsPath(wt.worktree)).equals(eventsBefore)).toBe(true)
   })
@@ -139,14 +146,22 @@ console.log(JSON.stringify(results));`
 test("a matching-engine cancel remains a successful FlowResult after transaction release", () => {
   const wt = makeWorktree()
   const deps = makeDeps(fakeClient(), wt.worktree)
-  const workflow = { ...newWorkflow("ses_cancel", currentOwner(), "command", "cancel", "observed-engine"), phase: "executing" as const }
+  const sessionID = "ses_cancel"
+  const store = admit(deps, sessionID)
+  const workflow = { ...newWorkflow(sessionID, currentOwner(Date.now(), store.epoch), "command", "cancel", "opencode"), phase: "executing" as const }
+  expect(workflow.owner.instance).toBe(store.epoch)
   withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, workflow))
+  // a registered stage activity keeps the cancel pending (the full predicate, not a caller-supplied boolean)
+  const releaseActivity = beginExecutionActivity(getOpenCodeRuntime(deps), sessionID, "stage", { workflowID: workflow.id, abort: () => { aborts++ } })!
   let aborts = 0
-  const result = cancelWorkflow(deps, workflow, true, () => { aborts++ })
+  const requested = requestCancel(deps, workflow)
+  const result = requested.result
   expect(result.ok).toBe(true)
-  if (result.ok) expect(result.wf.pendingCancel).toBe(true)
+  if (result.ok) expect(result.wf.stopIntent?.kind).toBe("cancel")
   expect(aborts).toBe(1)
-  expect(readFileSync(workflowPath(wt.worktree), "utf8")).toContain('"pendingCancel": true')
+  releaseActivity()
+  // Intended schema change (P5a): pendingCancel is a cancel stopIntent inside the committed snapshot.
+  expect(committedSnapshot(wt.worktree).stopIntent).toMatchObject({ kind: "cancel" })
 })
 
 for (const engineCase of ["foreign", "missing"] as const) {
@@ -165,21 +180,19 @@ for (const engineCase of ["foreign", "missing"] as const) {
     const repair = repairOnLoad(deps, "expected-engine")
     expect(repair?.ok).toBe(false)
     if (repair && !repair.ok) expect(repair.text).toContain("engine identity")
-    const deleted = onSessionDeleted(deps, workflow.sessionID, "expected-engine", true, () => { aborts++ })
-    expect(deleted?.ok).toBe(false)
-    if (deleted && !deleted.ok) expect(deleted.text).toContain("engine identity")
+    const deleted = requestCancel(deps, workflow).result
+    expect(deleted.ok).toBe(false)
+    if (!deleted.ok) expect(deleted.text).toContain("engine identity")
     expect(aborts).toBe(0)
 
-    let tick: (() => void) | undefined
     stopHeartbeat()
-    const timer = spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void) => {
-      tick = callback
+    const timer = spyOn(globalThis, "setInterval").mockImplementation(((_callback: () => void) => {
       return { unref() {} } as unknown as ReturnType<typeof setInterval>
     }) as typeof setInterval)
     const clear = spyOn(globalThis, "clearInterval").mockImplementation((() => {}) as typeof clearInterval)
     try {
       ensureHeartbeat(deps, "expected-engine")
-      tick!()
+      expect(timer).not.toHaveBeenCalled()
       expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
       expect(existsSync(eventsPath(wt.worktree))).toBe(false)
       expect(existsSync(ledgerPath(wt.worktree, workflow.sessionID))).toBe(false)
@@ -209,11 +222,14 @@ test("status is lock-free, engine-free, and nonmutating while a transaction is h
   expect(existsSync(join(flowDir(wt.worktree), "workflow.lock"))).toBe(false)
 })
 
-test("heartbeat skips a busy tick and refreshes the fresh pending-cancel record", () => {
+test("heartbeat skips a busy tick and stops for pending cancellation", () => {
   const wt = makeWorktree()
   const deps = makeDeps(fakeClient(), wt.worktree)
-  const owner = { ...currentOwner(), heartbeatAt: Date.now() - 10_000 }
-  const workflow = { ...newWorkflow("ses_heartbeat", owner, "command", "heartbeat", "observed-engine"), phase: "executing" as const }
+  const sessionID = "ses_heartbeat"
+  const store = admit(deps, sessionID)
+  const owner = currentOwner(Date.now() - 10_000, store.epoch)
+  const workflow = { ...newWorkflow(sessionID, owner, "command", "heartbeat", "opencode"), phase: "executing" as const }
+  expect(workflow.owner.instance).toBe(store.epoch)
   withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, workflow))
   let tick: (() => void) | undefined
   stopHeartbeat()
@@ -223,7 +239,7 @@ test("heartbeat skips a busy tick and refreshes the fresh pending-cancel record"
   }) as typeof setInterval)
   const clear = spyOn(globalThis, "clearInterval").mockImplementation((() => {}) as typeof clearInterval)
   try {
-    ensureHeartbeat(deps, "observed-engine")
+    ensureHeartbeat(deps, "opencode")
     const lock = join(flowDir(wt.worktree), "workflow.lock")
     symlinkSync(JSON.stringify({ pid: 99_999_999, instance: "busy", token: "busy" }), lock)
     const beforeBusyTick = readFileSync(workflowPath(wt.worktree))
@@ -231,15 +247,20 @@ test("heartbeat skips a busy tick and refreshes the fresh pending-cancel record"
     expect(readFileSync(workflowPath(wt.worktree)).equals(beforeBusyTick)).toBe(true)
     unlinkSync(lock)
 
-    const cancelled = cancelWorkflow(deps, workflow, true, () => {})
+    const releaseActivity = beginExecutionActivity(getOpenCodeRuntime(deps), workflow.sessionID, "stage", { workflowID: workflow.id })!
+    const cancelled = requestCancel(deps, workflow).result
+    releaseActivity()
     expect(cancelled.ok).toBe(true)
     if (!cancelled.ok) return
-    const beforeRefresh = JSON.parse(readFileSync(workflowPath(wt.worktree), "utf8")) as typeof workflow
+    const beforeRefresh = committedSnapshot(wt.worktree)
+    const indexBeforeRefresh = readFileSync(workflowPath(wt.worktree))
     tick!()
-    const refreshed = JSON.parse(readFileSync(workflowPath(wt.worktree), "utf8")) as typeof workflow
-    expect(refreshed.pendingCancel).toBe(true)
+    const refreshed = committedSnapshot(wt.worktree)
+    expect(readFileSync(workflowPath(wt.worktree)).equals(indexBeforeRefresh)).toBe(true)
+    expect(refreshed.stopIntent?.kind).toBe("cancel")
     expect(refreshed.phase).toBe("executing")
-    expect(refreshed.owner.heartbeatAt).toBeGreaterThan(beforeRefresh.owner.heartbeatAt)
+    expect(refreshed).toEqual(beforeRefresh)
+    expect(clear).toHaveBeenCalledTimes(1)
   } finally {
     stopHeartbeat()
     clear.mockRestore()

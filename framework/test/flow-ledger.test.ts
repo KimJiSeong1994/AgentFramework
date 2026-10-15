@@ -2,7 +2,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdirSync } from "node:fs"
 import { addTasks, approvePlanTasks, emptyLedger, readLedger, tasksForWorkflow, updateTask, writeLedger, type TaskInput } from "../src/state/ledger.ts"
-import { newWorkflow, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
+import { newWorkflow, withFlowTransaction } from "../src/flow/state.ts"
+import { writeWorkflow } from "./commit-fixture.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { approveWorkflow } from "../src/flow/runtime.ts"
 import { sessionDir } from "../src/state/store.ts"
@@ -143,7 +144,7 @@ describe("runtime.approveWorkflow preconditions (refuse without writes)", () => 
     if (r.ok) {
       expect(r.wf.phase).toBe("executing")
       expect(r.wf.taskIds?.length).toBe(2)
-      expect(r.wf.approval?.planSha).toBe("plan_sha")
+      expect(r.wf.approval?.subject).toEqual({ kind: "plan", id: wf.id, sha256: "plan_sha" })
     }
     const ledger = readLedger(wt.worktree, S)
     expect(tasksForWorkflow(ledger, wf.id).length).toBe(2)

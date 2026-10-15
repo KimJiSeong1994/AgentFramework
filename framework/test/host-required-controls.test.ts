@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { assertHostAdmission, assertRequiredControlStatuses } from "../src/hosts/required-controls.ts"
-import { EXECUTION_ROLES, type ExecutionHost, type ExecutionRole } from "../src/hosts/types.ts"
+import { AdmissionRefusal } from "../src/hosts/required-controls.ts"
+import { EXECUTION_ROLES, WORKFLOW_READ_ONLY_ROLES, type ExecutionHost, type ExecutionRole } from "../src/hosts/types.ts"
 
 const budgetControls = ["boundedInput", "boundedOutput"] as const
 const estimatedBudgetControls = ["estimatedInput", "reactiveOutput"] as const
@@ -21,11 +22,14 @@ const BUDGET_EVIDENCE = {
   workerLimit: 5120,
 } as const
 const commonProfile = "estimated-input-reactive-output-v1" as const
+const readOnlyRoles = new Set<ExecutionRole>([
+  "main", "reviewer", "interviewer", "planner", "architect", "critic", "researcher", "contrarian", "simplifier",
+])
 
 function statuses(role: ExecutionRole): Preflight["controls"] {
   const controls: Preflight["controls"] = Object.fromEntries(common.map(key => [key, "supported" as const]))
   if (role === "worker") controls.serialWorkerLease = "supported"
-  if (role === "main" || role === "reviewer") controls.readOnlyWorktree = "supported"
+  if (readOnlyRoles.has(role)) controls.readOnlyWorktree = "supported"
   return controls
 }
 
@@ -70,6 +74,31 @@ describe("required control status checks", () => {
         }
       }
     }
+  })
+
+  test.each([...WORKFLOW_READ_ONLY_ROLES])("workflow read-only role %s is refused without readOnlyWorktree", role => {
+    const supported = statuses(role)
+    expect(supported.readOnlyWorktree).toBe("supported")
+    expect(() => assertRequiredControlStatuses(supported, role)).not.toThrow()
+    const missing = { ...supported }
+    delete missing.readOnlyWorktree
+    let refusal: unknown
+    try { assertRequiredControlStatuses(missing, role) } catch (error) { refusal = error }
+    expect(refusal).toBeInstanceOf(AdmissionRefusal)
+    expect(refusal).toMatchObject({ name: "AdmissionRefusal", message: "required control statuses unavailable" })
+    for (const value of ["unsupported", "unknown"]) {
+      expect(() => assertRequiredControlStatuses({ ...supported, readOnlyWorktree: value }, role)).toThrow(AdmissionRefusal)
+    }
+    // The shared host admission checks every role, so one role-specific gap makes the whole host inadmissible.
+    const hostControls: Preflight["controls"] = Object.fromEntries(
+      [...common, "serialWorkerLease", "readOnlyWorktree"].map(key => [key, "supported" as const]),
+    )
+    expect(() => assertHostAdmission(preflight(hostControls))).not.toThrow()
+    delete hostControls.readOnlyWorktree
+    let hostRefusal: unknown
+    try { assertHostAdmission(preflight(hostControls)) } catch (error) { hostRefusal = error }
+    expect(hostRefusal).toBeInstanceOf(AdmissionRefusal)
+    expect(hostRefusal).toMatchObject({ message: "required control statuses unavailable" })
   })
 
   test("does not accept inherited values or invoke status getters", () => {

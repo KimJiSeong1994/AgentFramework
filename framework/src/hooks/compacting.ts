@@ -7,6 +7,7 @@ import { readModeState, readSessionInfo, sessionDir, writeJsonAtomic, type ModeS
 import { incompleteTodos, type Todo } from "../guards/todos.ts"
 import { fetchOpenCodeTodos } from "../hosts/opencode-todos.ts"
 import { openTasks, readLedger, type Ledger } from "../state/ledger.ts"
+import { admissionEpoch, effectiveHold, isAdmissionCurrent } from "../sessions/admission.ts"
 
 export const CHECKPOINT_MAX_CHARS = 600
 const PRESERVE = "Preserve: files edited so far, the current task, and unresolved errors."
@@ -50,8 +51,14 @@ export function createCompactingHook(deps: HookDeps): NonNullable<Hooks["experim
     try {
       const agent = readSessionInfo(deps.worktree, input.sessionID)?.agent
       if (agent && agent !== "main") return // worker/reviewer compaction: nothing of ours to preserve
+      const epoch = admissionEpoch(deps.worktree, input.sessionID)
+      if (!epoch || effectiveHold(deps.worktree, input.sessionID)) {
+        output.context.push("LCA session is held. Retained history is not permission to resume work.")
+        return
+      }
       const state = readModeState(deps.worktree, input.sessionID)
       const todos = await fetchOpenCodeTodos(deps.client, input.sessionID, deps.log)
+      if (!isAdmissionCurrent(deps.worktree, input.sessionID, epoch)) return
       const incomplete = incompleteTodos(todos)
       const ledger = readLedger(deps.worktree, input.sessionID)
       const text = buildCheckpoint(state, incomplete, ledger)

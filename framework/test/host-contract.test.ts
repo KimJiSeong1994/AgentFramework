@@ -594,7 +594,7 @@ describe("OpenCode execution host contract", () => {
       const before = readFileSync(statePath)
       expect(await h.runtime.host.reconcile(h.reference)).toMatchObject({ outcome: "unknown", quiescent: false })
       expect(h.calls).toEqual([])
-      expect(policyForOpenCodeSession(h.openCodeDeps, VENDOR_SESSION_ID)).toBeUndefined()
+      expect(() => policyForOpenCodeSession(h.openCodeDeps, VENDOR_SESSION_ID)).toThrow("execution session reference is invalid or ambiguous")
       expect(h.runtime.policy.handlersForSession(VENDOR_SESSION_ID)).toBeUndefined()
       expect(processRiskForSession(h.runtime.runs, VENDOR_SESSION_ID)).toBe(true)
       expect(() => markOpenCodeProcessRiskForSession(h.openCodeDeps, VENDOR_SESSION_ID))
@@ -617,7 +617,7 @@ describe("OpenCode execution host contract", () => {
 
       expect(await h.runtime.host.reconcile(h.reference)).toMatchObject({ outcome: "unknown", quiescent: false })
       expect(h.calls).toEqual([])
-      expect(policyForOpenCodeSession(h.openCodeDeps, VENDOR_SESSION_ID)).toBeUndefined()
+      expect(() => policyForOpenCodeSession(h.openCodeDeps, VENDOR_SESSION_ID)).toThrow("execution session reference is invalid or ambiguous")
       expect(h.runtime.policy.handlersForSession(VENDOR_SESSION_ID)).toBeUndefined()
       expect(processRiskForSession(h.runtime.runs, VENDOR_SESSION_ID)).toBe(true)
       expect(() => markOpenCodeProcessRiskForSession(h.openCodeDeps, VENDOR_SESSION_ID))

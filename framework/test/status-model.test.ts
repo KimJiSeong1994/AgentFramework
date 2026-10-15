@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync } from "node:fs"
+import { createHash } from "node:crypto"
 import { join } from "node:path"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { classifyQueue, renderStatusDetail, renderStatusSnapshot, STATUS_LIMITS, statusBytesRead, statusJson, StatusReadError, type QueueProjection } from "../src/flow/status.ts"
-import { appendEvents as appendEventsTx, eventsPath, flowDir, newWorkflow as createWorkflow, parseWorkflow, readEventsTail, workflowPath, writeWorkflow, withFlowTransaction, type Workflow } from "../src/flow/state.ts"
+import { appendEvents as appendEventsTx, eventsPath, flowDir, newWorkflow as createWorkflow, parseWorkflow, readEventsTail, workflowPath, withFlowTransaction, type Workflow } from "../src/flow/state.ts"
+import { writeWorkflow, publishWorkflow, writeRawSnapshot , committedSnapshotBytes } from "./commit-fixture.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { addTasks, emptyLedger, ledgerPath, parseLedger, updateTask, writeLedger, type LedgerTask } from "../src/state/ledger.ts"
 import { executionRunDirectory, parseModeState, readBoundedJson, stateRoot } from "../src/state/store.ts"
@@ -56,7 +58,7 @@ describe("status v1 model", () => {
 
   test("foreign status reports the actual owner liveness without taking over", () => {
     const deps = setup()
-    const dead = newStatusWorkflow(SESSION, { instance: "dead-instance", pid: 9_999_999, heartbeatAt: 0 }, "command", "request")
+    const dead = newStatusWorkflow(SESSION, { instance: "dead-instance", pid: 9_999_999}, "command", "request")
     writeStatusWorkflow(wt.worktree, dead)
     expect(statusJson(deps, "ses_viewer").workflow?.ownerLive).toBe(false)
     writeLedger(wt.worktree, emptyLedger(SESSION))
@@ -265,11 +267,11 @@ describe("status v1 model", () => {
     mkdirSync(join(stateRoot(wt.worktree), "workflow"), { recursive: true })
     for (const invalid of badWorkflows) {
       expect(() => parseWorkflow(invalid)).toThrow("invalid workflow state")
-      writeFileSync(workflowPath(wt.worktree), JSON.stringify(invalid))
+      writeRawSnapshot(wt.worktree, invalid, { id: workflow.id, sessionID: SESSION })
       expect(() => statusJson(deps, SESSION)).toThrow(expect.objectContaining({ source: "workflow", code: "invalid_state" }))
     }
 
-    writeFileSync(workflowPath(wt.worktree), JSON.stringify(workflow))
+    publishWorkflow(wt.worktree, workflow)
     const created = addTasks(emptyLedger(SESSION), [{ title: "nested fields" }])
     const task = created.added[0]!
     writeLedger(wt.worktree, created.ledger)
@@ -301,7 +303,9 @@ describe("status v1 model", () => {
 
   test("bounds oversize workflow and task identifiers in status output", () => {
     const deps = setup()
-    const workflowID = `wf_${"w".repeat(4096)}`
+    // Intended P5a schema change: workflow and session IDs are path components of the snapshot layout, so they are
+    // bounded to 128 filesystem-safe characters; task IDs remain unbounded input and keep the 4096-char case.
+    const workflowID = `wf_${"w".repeat(125)}`
     writeStatusWorkflow(wt.worktree, { ...newStatusWorkflow(SESSION, currentOwner(), "command", "request"), id: workflowID })
     const created = addTasks(emptyLedger(SESSION), [{ title: "long task id" }])
     const taskID = "t".repeat(4096)
@@ -309,7 +313,7 @@ describe("status v1 model", () => {
     writeLedger(wt.worktree, { ...created.ledger, tasks: [task], running: { taskId: taskID, since: 100 } })
 
     const status = statusJson(deps, SESSION)
-    expect(status.workflow?.id).toBe(workflowID.slice(0, 256))
+    expect(status.workflow?.id).toBe(workflowID)
     expect(status.session.queue.taskId).toBe(taskID.slice(0, 80))
     expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThan(STATUS_LIMITS.detailOutput)
   })
@@ -320,7 +324,7 @@ describe("status v1 model", () => {
     mkdirSync(join(root, "workflow"), { recursive: true })
     writeFileSync(workflowPath(wt.worktree), " ".repeat(STATUS_LIMITS.workflow + 1))
     expect(() => statusJson(deps, SESSION)).toThrow(expect.objectContaining({ source: "workflow", code: "oversize" }))
-    writeFileSync(workflowPath(wt.worktree), JSON.stringify(newStatusWorkflow(SESSION, currentOwner(), "command", "request")))
+    publishWorkflow(wt.worktree, newStatusWorkflow(SESSION, currentOwner(), "command", "request"))
     const modePath = join(root, "sessions", SESSION, "mode.json")
     mkdirSync(join(root, "sessions", SESSION), { recursive: true })
     writeFileSync(modePath, " ".repeat(STATUS_LIMITS.mode + 1))
@@ -407,14 +411,16 @@ describe("status v1 model", () => {
 
   test("full detail output drops events, history, sessions, then tasks with accurate counts", () => {
     const deps = setup()
-    const sessionID = `ses_${"界".repeat(80)}_main`
-    const workflowID = "界".repeat(256)
-    const taskWorkflowID = workflowID
+    const sessionID = `ses_${"s".repeat(100)}_main`
+    const workflowID = `wf_${"w".repeat(125)}`
+    // Task tags are ledger data, not path components, so they keep the original oversized identifier.
+    const taskWorkflowID = "界".repeat(256)
     const planSha = "a".repeat(64)
     const now = Number.MAX_SAFE_INTEGER
     const workflow = {
-      ...newStatusWorkflow(sessionID, { ...currentOwner(), heartbeatAt: now }, "command", "detail cap", now),
+      ...newStatusWorkflow(sessionID, { ...currentOwner()}, "command", "detail cap", now),
       id: workflowID,
+      lastSeq: now, // events at or below the committed revision are admitted; the fixture's tail sits just under it
       phase: "reviewing" as const,
       planRef: { jsonSha: planSha, mdPath: "界".repeat(1024), mdSha: "b".repeat(64), revision: 3 },
       taskIds: [] as string[],
@@ -448,7 +454,7 @@ describe("status v1 model", () => {
 
     const archiveDir = join(flowDir(wt.worktree), "archive")
     mkdirSync(archiveDir, { recursive: true })
-    const archiveIDs = Array.from({ length: STATUS_LIMITS.historyCount }, (_, index) => `wf_${"界".repeat(60)}_${String(index).padStart(2, "0")}`)
+    const archiveIDs = Array.from({ length: STATUS_LIMITS.historyCount }, (_, index) => `wf_${"w".repeat(120)}_${String(index).padStart(2, "0")}`)
     for (const id of archiveIDs) {
       writeFileSync(join(archiveDir, `${id}.json`), JSON.stringify({ ...newStatusWorkflow(sessionID, currentOwner(), "command", "history", now), id }))
     }
@@ -550,6 +556,58 @@ describe("status v1 model", () => {
     expect(status.detail?.sessions).toContainEqual({ id: extraSession, oversize: true })
     expect(JSON.stringify(status.detail)).not.toContain(secret)
     expect(statusBytesRead(status)).toBeLessThan(STATUS_LIMITS.extraLedger)
+  })
+
+  test("generic view: JSON carries kind/stage/revision/stopIntent/artifacts and artifact state is recomputed after tampering", () => {
+    const deps = setup()
+    const body = "rendered plan"
+    const mdPath = ".lca/plans/generic.md"
+    mkdirSync(join(wt.worktree, ".lca/plans"), { recursive: true })
+    writeFileSync(join(wt.worktree, mdPath), body)
+    const mdSha = createHash("sha256").update(body).digest("hex")
+    const workflow = {
+      ...newStatusWorkflow(SESSION, currentOwner(), "command", "generic view"),
+      id: "wf_generic_view", phase: "pending_approval" as const, stage: "decision" as const,
+      planRef: { jsonSha: "a".repeat(64), mdPath, mdSha, revision: 1 },
+      artifacts: [{ key: "absent", path: ".lca/workflows/x/y/absent.md", sha256: "c".repeat(64) }],
+    }
+    writeStatusWorkflow(wt.worktree, workflow)
+    const first = statusJson(deps, SESSION)
+    expect(first.workflow).toMatchObject({ kind: "plan", stage: "decision", revision: 0, stopIntent: null })
+    expect(first.workflow?.artifacts).toEqual([
+      { key: "plan.md", path: mdPath, state: "verified" },
+      { key: "absent", path: ".lca/workflows/x/y/absent.md", state: "incomplete" },
+    ])
+    const text = renderStatusSnapshot(first, SESSION)
+    expect(text).toContain("kind: plan · stage decision · revision 0")
+    expect(text).toContain(`plan.md verified (${mdPath})`)
+    writeFileSync(join(wt.worktree, mdPath), "tampered")
+    expect(statusJson(deps, SESSION).workflow?.artifacts[0]).toEqual({ key: "plan.md", path: mdPath, state: "incomplete" })
+  })
+
+  test("a committed planning-kind envelope renders the generic view and bounds artifact reads (P6a S1)", () => {
+    const deps = setup()
+    const artifacts = Array.from({ length: 20 }, (_, i) => {
+      const path = `.lca/workflows/${SESSION}/wf_gen/a${i}.md`
+      mkdirSync(join(wt.worktree, ".lca/workflows", SESSION, "wf_gen"), { recursive: true })
+      writeFileSync(join(wt.worktree, path), `body ${i}`)
+      return { key: `a${i}`, path, sha256: createHash("sha256").update(`body ${i}`).digest("hex") }
+    })
+    const base = { ...newStatusWorkflow(SESSION, currentOwner(), "command", "x"), id: "wf_gen", kind: "ralplan", stage: "critic", phase: "reviewing", data: {}, artifacts } as unknown as Workflow
+    delete (base as Record<string, unknown>).counters; delete (base as Record<string, unknown>).entry; delete (base as Record<string, unknown>).request
+    publishWorkflow(wt.worktree, base as never)
+    const status = statusJson(deps, SESSION)
+    expect(status.workflow).toMatchObject({ id: "wf_gen", kind: "ralplan", stage: "critic", phase: "reviewing", stopIntent: null, artifactsOmitted: 4 })
+    expect(status.workflow?.counters).toBeUndefined()
+    expect(status.workflow?.artifacts).toHaveLength(16)
+    expect(status.workflow?.artifacts.every(item => item.state === "verified")).toBe(true)
+    const text = renderStatusSnapshot(status, SESSION)
+    expect(text).toContain("kind: ralplan · stage critic · revision 0")
+    expect(text).toContain("(+4 not read)")
+    expect(text).not.toContain("counters:")
+    // an invalid stage/phase pair in a committed planning envelope is still reported, never rendered
+    const bad = { ...base, stage: "question", phase: "reviewing" }
+    expect(() => publishWorkflow(wt.worktree, bad as never)).toThrow("invalid workflow state")
   })
 
   test("default concise status snapshot is rich, bounded to 25 actual lines, and has no detail", () => {
@@ -686,7 +744,7 @@ describe("status v1 model", () => {
     writeFileSync(eventsPath(wt.worktree), "é".repeat(100))
     expect(readEventsTail(wt.worktree, { wfId: wf, limit: 5, maxBytes: 64 })).toMatchObject({ events: [], windowTruncated: true, bytesRead: 64 })
 
-    const largeWorkflow = writeStatusWorkflow(wt.worktree, newStatusWorkflow(SESSION, currentOwner(), "command", "large event tail"))
+    const largeWorkflow = writeStatusWorkflow(wt.worktree, { ...newStatusWorkflow(SESSION, currentOwner(), "command", "large event tail"), lastSeq: 8 })
     writeFileSync(eventsPath(wt.worktree), Buffer.alloc(50 * 1024 * 1024, 0x20))
     const recent = Array.from({ length: 8 }, (_, index) => ({
       seq: index + 1, at: index + 1, wf: largeWorkflow.id, type: `recent-${index + 1}`,
@@ -698,7 +756,7 @@ describe("status v1 model", () => {
     expect(status.events.at(-1)).toEqual({ seq: 8, type: "recent-8" })
     expect(JSON.stringify(status)).not.toContain("malformed-event-target")
     expect(status.freshness.eventsWindowTruncated).toBe(true)
-    expect(statusBytesRead(status)).toBeLessThanOrEqual(readFileSync(workflowPath(wt.worktree)).byteLength + STATUS_LIMITS.events)
+    expect(statusBytesRead(status)).toBeLessThanOrEqual(readFileSync(workflowPath(wt.worktree)).byteLength + committedSnapshotBytes(wt.worktree) + STATUS_LIMITS.events)
     void deps
   })
 })

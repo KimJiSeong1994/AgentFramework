@@ -8,12 +8,14 @@ import { MAIN_AGENT } from "../hooks/tool-before.ts"
 import { flowOn, renderStatus, renderStatusError, StatusReadError } from "../flow/status.ts"
 import { getQueue } from "../orchestration/queue.ts"
 import {
-  activeWorkflow, assertFlowTxWorktree, CorruptWorkflowError, readWorkflowForWrite,
+  activeWorkflow, assertFlowTxWorktree, workflowReadError, readWorkflowForWrite,
   renderArtifact, workflowEngineRefusal, withFlowTransaction, writePlanJson, type Workflow,
 } from "../flow/state.ts"
-import { applyEvent, applyEventIn, flowLimits } from "../flow/runtime.ts"
+import { applyEvent, applyEventIn, flowLimits, resolveAuthorityIn } from "../flow/runtime.ts"
 import { canonicalPlanSha, coercePlan, planMdPath, renderPlanMd, validatePlan, type Plan, type ReviewView } from "../flow/plan.ts"
 import { runPlanReview, type PlanReviewResult } from "../flow/review.ts"
+import { observeStopSettlement } from "../flow/runtime.ts"
+import { beginStageReservation } from "../hosts/runtime.ts"
 import type { FlowEvent } from "../flow/machine.ts"
 import { getOpenCodeRuntime } from "../hosts/opencode-runtime.ts"
 import { LinuxAdmissionRefused } from "../hosts/types.ts"
@@ -50,7 +52,7 @@ function currentWorkflowRefusal(runtime: ReturnType<typeof getOpenCodeRuntime>, 
   return withFlowTransaction(runtime.worktree, (tx) => {
     assertFlowTxWorktree(tx, runtime.worktree)
     const checked = readWorkflowForWrite(tx)
-    if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+    if (checked.corrupt) throw workflowReadError(checked)
     const current = checked.wf
     if (!current) return "lca: workflow changed meanwhile; stop and check /status"
     const refusal = workflowEngineRefusal(current, runtime.host.identity.engine)
@@ -58,6 +60,9 @@ function currentWorkflowRefusal(runtime: ReturnType<typeof getOpenCodeRuntime>, 
     if (current.id !== expected.id || current.lastSeq !== expected.lastSeq || current.phase !== expected.phase || current.engine !== expected.engine) {
       return "lca: workflow changed meanwhile; stop and check /status"
     }
+    const authority = resolveAuthorityIn(tx, runtime, "plan", expected.sessionID, runtime.host.identity.engine, Date.now())
+    if (authority.refuse) return `lca: ${authority.refuse}`
+    if (!authority.wf) return "lca: workflow changed meanwhile; stop and check /status"
     return undefined
   })
 }
@@ -94,6 +99,9 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
           : "lca: no plan workflow is active in this session."
         return { title: "lca_flow: refused", output: text }
       }
+      if (wf.stopIntent || wf.phase === "paused") {
+        return { title: "lca_flow: refused", output: `lca: the workflow is ${wf.stopIntent ? `${wf.stopIntent.kind} pending` : "paused"}; no plan can be submitted.` }
+      }
       if (wf.phase !== "planning") {
         const phase = `${wf.phase}${wf.stuckCause ? `(${wf.stuckCause})` : ""}`
         return { title: "lca_flow: refused", output: `lca: this workflow is not awaiting a plan (phase: ${phase}).` }
@@ -101,6 +109,8 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       if (!args.plan) {
         return { title: "lca_flow: refused", output: 'lca: give a plan: goal, 3-10 steps (title, files, verify), and 1-5 risks.' }
       }
+      const entryRefusal = currentWorkflowRefusal(runtime, wf)
+      if (entryRefusal) return { title: "lca_flow: refused", output: entryRefusal }
 
       const revision = 1 + wf.counters.code_invalid + wf.counters.review_iterations + wf.counters.user_rejections
       const plan: Plan = coercePlan(args.plan, revision)
@@ -132,10 +142,14 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       const jsonSha = canonicalPlanSha(plan)
       const mdPath = planMdPath(wf.id)
       const initialMd = renderPlanMd(wf.id, plan)
+      // reviewing is committed before the review registers its activity: hold a synchronous reservation across the window
+      let releaseReservation: (() => void) | undefined = beginStageReservation(deps.worktree, ctx.sessionID)
+      const releaseOnce = () => { releaseReservation?.(); releaseReservation = undefined }
+      try {
       const submitted = withFlowTransaction(deps.worktree, (tx) => {
         assertFlowTxWorktree(tx, deps.worktree)
         const checked = readWorkflowForWrite(tx)
-        if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+        if (checked.corrupt) throw workflowReadError(checked)
         const current = checked.wf
         const refusal = current && workflowEngineRefusal(current, runtime.host.identity.engine)
         if (refusal) return { ok: false as const, text: refusal, wf: current }
@@ -143,6 +157,10 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
           return { ok: false as const, text: "workflow changed meanwhile; stop and check /status", wf: current }
         }
         if (current.phase !== "planning") return { ok: false as const, text: "workflow is not awaiting a plan", wf: current }
+        const authority = resolveAuthorityIn(tx, runtime, "plan", ctx.sessionID, runtime.host.identity.engine, Date.now())
+        if (authority.refuse || !authority.wf) {
+          return { ok: false as const, text: authority.refuse ?? "workflow changed meanwhile; stop and check /status", wf: current }
+        }
         writePlanJson(tx, current.id, plan)
         const mdSha = renderArtifact(tx, mdPath, initialMd)
         return applyEventIn(tx, runtime, current, "submit_valid", "model_tool", {}, (w) => ({
@@ -158,7 +176,10 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       let admissionRefusal: LinuxAdmissionRefused | undefined
       let result: PlanReviewResult
       try {
-        result = await runPlanReview(runtime, submitted.wf, plan, ctx.abort)
+        // the review registers its own activity synchronously on entry; the reservation hands over there
+        const review = runPlanReview(runtime, submitted.wf, plan, ctx.abort)
+        releaseOnce()
+        result = await review
       } catch (e) {
         if (!(e instanceof LinuxAdmissionRefused) || e.phase !== "admit") throw e
         admissionRefusal = e
@@ -182,13 +203,17 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       const reviewed = withFlowTransaction(deps.worktree, (tx) => {
         assertFlowTxWorktree(tx, deps.worktree)
         const checked = readWorkflowForWrite(tx)
-        if (checked.corrupt) throw new CorruptWorkflowError(checked.corrupt)
+        if (checked.corrupt) throw workflowReadError(checked)
         const current = checked.wf
         const refusal = current && workflowEngineRefusal(current, runtime.host.identity.engine)
         if (refusal) return { ok: false as const, text: refusal, wf: current }
         if (!current || current.id !== submitted.wf.id || current.engine !== submitted.wf.engine ||
             current.lastSeq !== submitted.wf.lastSeq || current.phase !== "reviewing") {
           return { ok: false as const, text: "workflow changed during review", wf: current }
+        }
+        const authority = resolveAuthorityIn(tx, runtime, "plan", ctx.sessionID, runtime.host.identity.engine, Date.now())
+        if (authority.refuse || !authority.wf) {
+          return { ok: false as const, text: authority.refuse ?? "workflow changed during review", wf: current }
         }
         const reviewedMdSha = renderArtifact(tx, mdPath, reviewedMd)
         return applyEventIn(tx, runtime, current, event, "code", {}, (w) => ({
@@ -212,6 +237,10 @@ export function createLcaFlowTool(deps: HookDeps): ToolDefinition {
       return {
         title: "lca_flow: plan needs revision",
         output: `Reviewer asked for changes:\n${findingsText}\nRevise and call lca_flow op:"plan" again.`,
+      }
+      } finally {
+        releaseOnce()
+        observeStopSettlement(runtime, ctx.sessionID, wf.owner.instance, "lca_flow")
       }
     },
   })

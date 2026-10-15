@@ -217,6 +217,25 @@ export function approvePlanTasks(
   return { ledger: { ...r.ledger, resumeNotifiedFor: [...notified] }, added: r.added, cancelledForeign }
 }
 
+/**
+ * Approved unit -> ledger for a non-plan parent (ultragoal/autoresearch). Unlike `approvePlanTasks` it never cancels
+ * anything: any open task not tagged with this exact {parent id, subject sha} refuses the insertion with the ledger
+ * untouched. Idempotent per tag.
+ */
+export function insertUnitTasks(
+  ledger: Ledger,
+  inputs: TaskInput[],
+  tag: WorkflowTag,
+  now = Date.now(),
+): { ok: true; ledger: Ledger; added: LedgerTask[] } | { ok: false; reason: string; taskID: string } {
+  const foreign = ledger.tasks.find((t) => OPEN_STATUSES.has(t.status) && (t.wf?.id !== tag.id || t.wf.planSha !== tag.planSha))
+  if (foreign) return { ok: false, reason: `open task ${foreign.id} is not part of this unit`, taskID: foreign.id }
+  if (ledger.tasks.some((t) => t.wf?.id === tag.id && t.wf.planSha === tag.planSha)) return { ok: true, ledger, added: [] }
+  const r = addTasks(ledger, inputs, now, tag)
+  const notified = new Set([...(r.ledger.resumeNotifiedFor ?? []), ...r.added.map((t) => t.id)])
+  return { ok: true, ledger: { ...r.ledger, resumeNotifiedFor: [...notified] }, added: r.added }
+}
+
 /** Stable hash of (id, status, attempts) — the idle loop's stagnation input for ledger-driven sessions. */
 export function ledgerFingerprint(ledger: Ledger): string {
   const rows = ledger.tasks.map((t) => `${t.id}\u0000${t.status}\u0000${t.attempts}`)

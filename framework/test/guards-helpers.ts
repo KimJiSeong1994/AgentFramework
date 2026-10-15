@@ -1,11 +1,17 @@
 // Test helpers for the guards/loop suites (kept separate from test/helpers.ts, which other suites own): temp worktree, fake SDK client, deps bag.
 import { execFileSync } from "node:child_process"
 import { randomBytes } from "node:crypto"
-import { closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
 import { DEFAULT_CONFIG, type LcaConfig } from "../src/config.ts"
+import { readWorkflow } from "../src/flow/state.ts"
+import { requestStop } from "../src/flow/runtime.ts"
+import type { ExecutionRuntime } from "../src/hosts/types.ts"
+import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
+import { attachAdmission } from "../src/sessions/admission.ts"
+import { getOwnedSession, type SessionStore } from "../src/sessions/store.ts"
 import { executionRunDirectory } from "../src/state/store.ts"
 
 export type Call = { method: string; args: unknown }
@@ -323,7 +329,7 @@ export function tempWorktree(): TempWorktree {
   try {
     const worktreePath = mkdtempSync(join(tmpdir(), "lca-test-"))
     worktree = worktreePath
-    const stateHomePath = mkdtempSync(join(tmpdir(), "lca-state-"))
+    const stateHomePath = realpathSync.native(mkdtempSync(join(tmpdir(), "lca-state-")))
     stateHome = stateHomePath
     stateHomeSelection = selectStateHome(stateHomePath)
     const executionAuthority = tempExecutionAuthority(worktreePath)
@@ -374,6 +380,24 @@ export function makeDeps(client: FakeClient, worktree: string, patch: Partial<Lc
   }
 }
 
+/** Admit only a genuinely new OpenCode session for a live hook fixture. */
+export function admitFixtureSession(deps: HookDeps, sessionID: string): SessionStore {
+  return attachAdmission(getOpenCodeRuntime(deps), sessionID, { engine: "opencode" })
+}
+
+/** Release a quiescent fixture attachment with a proof bound to its current workflow, if any. */
+export function releaseFixtureSession(worktree: string, store: SessionStore): void {
+  if (getOwnedSession(worktree, store.sessionID) !== store) return
+  const workflow = readWorkflow(worktree)
+  const ownedWorkflow = workflow?.sessionID === store.sessionID ? workflow : null
+  store.release({
+    workflowQuiescent: true,
+    evidence: "fixture awaited all session work before teardown",
+    workflowID: ownedWorkflow?.id ?? null,
+    revision: ownedWorkflow?.lastSeq ?? null,
+  })
+}
+
 export function todo(id: string, status: string, content = `task ${id}`) {
   return { id, status, content, priority: "medium" }
 }
@@ -411,4 +435,10 @@ export async function waitFor(fn: () => boolean, timeoutMs = 3000, stepMs = 5): 
 export function verifyScript(worktree: string, name: string, body: string): string {
   writeFileSync(join(worktree, name), body + "\n")
   return `sh ${name}`
+}
+
+/** Cancel through the one stop protocol (requestStop). Settlement is the owner's observers, never this call. */
+export function requestCancel(deps: HookDeps | ExecutionRuntime, wf: { sessionID: string; id: string }, kind: "cancel" | "pause" = "cancel") {
+  const runtime = "host" in deps ? deps : getOpenCodeRuntime(deps)
+  return requestStop(runtime, wf.sessionID, kind, `${kind} requested`, { workflowID: wf.id })
 }

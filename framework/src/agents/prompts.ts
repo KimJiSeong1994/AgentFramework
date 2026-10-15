@@ -2,7 +2,7 @@
 // Target model: Gemma 4 26B MoE (weak instruction following). Short, concrete, numbered rules.
 // Budgets are asserted in test/prompts.test.ts: MAIN <= 1500, WORKER <= 800, REVIEWER <= 600 est. tokens.
 // The prompt is part of the static prefix: never change it mid-session (see report section 3).
-import type { ExecutionRole } from "../hosts/types.ts"
+import type { CONFIG_MODEL_ROLES } from "../hosts/types.ts"
 
 const CODING_CONVENTIONS = `Coding conventions:
 Trace the real flow and callers first; fix shared root causes.
@@ -137,7 +137,7 @@ Output: ONE JSON object and nothing else:
 {"winner": "A" | "B" | "tie", "critical_error": "A" | "B" | null, "reason": "<one sentence>"}
 critical_error names an answer that is clearly wrong for the question (wrong entity or filter, empty or NULL result where data exists, execution failure); null when neither is. A tie is fine when both fit.`
 
-export type LcaAgentName = ExecutionRole
+export type LcaAgentName = (typeof CONFIG_MODEL_ROLES)[number]
 export const DATA_AGENT_NAMES: LcaAgentName[] = ["data-analyst", "data-verifier", "ontology-evolver", "answer-judge"]
 
 /**

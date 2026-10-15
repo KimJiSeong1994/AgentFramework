@@ -1,25 +1,36 @@
 import { createInterface } from "node:readline/promises"
+import type { Subject } from "../workflows/types.ts"
 
 export type OperatorDecision = LocalOperatorDecision
 
-type DecisionFields = {
-  action: "approve" | "reject"
+/** What an operator decision is about; the controller refuses a receipt whose binding is no longer current. */
+export type DecisionBinding = {
+  sessionID: string
   workflowID: string
-  planSha: string
+  expectedRevision: number
+  subject: Subject
+}
+
+type DecisionFields = DecisionBinding & {
+  action: "approve" | "reject"
   reason?: string
 }
 
 class LocalOperatorDecision {
   #brand = true
   readonly action: DecisionFields["action"]
+  readonly sessionID: string
   readonly workflowID: string
-  readonly planSha: string
+  readonly expectedRevision: number
+  readonly subject: Readonly<Subject>
   readonly reason?: string
 
   private constructor(fields: DecisionFields) {
     this.action = fields.action
+    this.sessionID = fields.sessionID
     this.workflowID = fields.workflowID
-    this.planSha = fields.planSha
+    this.expectedRevision = fields.expectedRevision
+    this.subject = Object.freeze({ kind: fields.subject.kind, id: fields.subject.id, sha256: fields.subject.sha256 })
     if (fields.reason !== undefined) this.reason = fields.reason
     Object.freeze(this)
   }
@@ -44,20 +55,24 @@ function issue(fields: DecisionFields): OperatorDecision {
 /** Read explicit operator intent from the real process terminal; receipts cannot be built from caller data. */
 export async function humanDecision(
   action: "approve" | "reject" | "choose",
-  workflowID: string,
-  planSha: string,
+  binding: DecisionBinding,
+  signal?: AbortSignal,
 ): Promise<OperatorDecision> {
   if (!process.stdin.isTTY || !process.stderr.isTTY) throw new Error("local human approval or rejection requires an interactive terminal")
-  const terminal = createInterface({ input: process.stdin, output: process.stderr })
+  // Kernel cooked input owns editing here; readline terminal mode would turn
+  // raw mode back on after the TUI's exclusive reader handoff.
+  const terminal = createInterface({ input: process.stdin, output: process.stderr, terminal: false })
   try {
-    const approve = `APPROVE ${workflowID} ${planSha}`
-    const reject = `REJECT ${workflowID} ${planSha}`
-    const answer = (await terminal.question(`Inspect the saved canonical plan first. Type '${approve}' or '${reject} <reason>': `)).trim()
-    if (answer === approve && action !== "reject") return issue({ action: "approve", workflowID, planSha })
+    const { workflowID } = binding
+    // The typed string keeps its CLI shape: the hash is the subject hash (the canonical plan hash for a plan subject).
+    const approve = `APPROVE ${workflowID} ${binding.subject.sha256}`
+    const reject = `REJECT ${workflowID} ${binding.subject.sha256}`
+    const answer = (await terminal.question(`Inspect the saved canonical plan first. Type '${approve}' or '${reject} <reason>': `, { signal })).trim()
+    if (answer === approve && action !== "reject") return issue({ ...binding, action: "approve" })
     if (answer.startsWith(`${reject} `) && answer.slice(reject.length).trim() && action !== "approve") {
-      return issue({ action: "reject", workflowID, planSha, reason: answer.slice(reject.length).trim() })
+      return issue({ ...binding, action: "reject", reason: answer.slice(reject.length).trim() })
     }
-    throw new Error("local operator decision did not match workflow ID and plan hash")
+    throw new Error("local operator decision did not match workflow ID and subject hash")
   } finally { terminal.close() }
 }
 

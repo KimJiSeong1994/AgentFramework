@@ -4,6 +4,8 @@ import { join } from "node:path"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { stopHeartbeat } from "../src/flow/runtime.ts"
 import { eventsPath, planJsonPath, readWorkflow, workflowPath } from "../src/flow/state.ts"
+import { observeStopSettlement } from "../src/flow/runtime.ts"
+import { rewriteCommitted } from "./commit-fixture.ts"
 import { parseCliArgs, runCli } from "../src/hosts/cli.ts"
 import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
 import { createCliHost } from "../src/hosts/cli-host.ts"
@@ -13,10 +15,11 @@ import { humanDecision } from "../src/hosts/operator.ts"
 import { createPlanConversation } from "../src/hosts/plan-conversation.ts"
 import { createExecutionRuntime } from "../src/hosts/runtime.ts"
 import { EXECUTION_ROLES } from "../src/hosts/types.ts"
-import { executionRunDirectory } from "../src/state/store.ts"
+import { executionRunDirectory, sessionDir } from "../src/state/store.ts"
+import { attachAdmission, detachAdmission, effectiveHold } from "../src/sessions/admission.ts"
 import { ledgerPath, readLedger, writeLedger } from "../src/state/ledger.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
-import { withTerminalLine } from "./operator-helpers.ts"
+import { planBinding, withTerminalLine } from "./operator-helpers.ts"
 
 let wt: ReturnType<typeof tempGitWorktree> | undefined
 let previousXdgConfigHome: string | undefined
@@ -36,7 +39,7 @@ afterEach(() => {
 const fixturePlan = {
   goal: "Update three tracked text values with verified contents",
   steps: ["a", "b", "c"].map(letter => ({ title: `Update ${letter}`, files: [`${letter}.txt`],
-    detail: `Write after-${letter} followed by a newline to ${letter}.txt. Do not alter tests.`, verify: `bun test verify-${letter}.test.ts` })),
+    detail: `Write after-${letter} followed by a newline to ${letter}.txt. Do not alter tests.`, verify: `sh verify-${letter}.test.sh` })),
   risks: ["Unexpected changes must not be accepted"],
 }
 const finalEnvelope = (text: string) => JSON.stringify({ type: "final", text })
@@ -45,7 +48,7 @@ async function pendingCommonWorkflow() {
   const files: Record<string, string> = {}
   for (const letter of ["a", "b", "c"]) {
     files[`${letter}.txt`] = letter === "a" ? "after-a\n" : "before\n"
-    files[`verify-${letter}.test.ts`] = `import {expect,test} from 'bun:test';import{readFileSync}from'node:fs';test('updated ${letter}',()=>expect(readFileSync('${letter}.txt','utf8')).toBe('after-${letter}\\n'));\n`
+    files[`verify-${letter}.test.sh`] = `test "$(cat ${letter}.txt)" = after-${letter}\n`
   }
   wt = tempGitWorktree(files)
   if (!configHomeCaptured) {
@@ -88,14 +91,15 @@ async function pendingCommonWorkflow() {
   }
   const runtime = createExecutionRuntime({ directory: root, worktree: root, config, log() {} }, ({ policy, runs }) =>
     createCliHost({ engine, model, policy, runs, createTransport: transportFactory }), { planningOnlyMain: true })
-  const controller = createForegroundController(runtime)
   const sessionID = "common-recovery-session"
+  const session = attachAdmission(runtime, sessionID, { engine, model })
+  const controller = createForegroundController(runtime)
   const conversation = createPlanConversation(runtime, sessionID)
   const discussed = await conversation.turn("Plan the requested three file changes")
   expect(discussed.plan).toEqual(fixturePlan)
   const submitted = await controller.importPlan(sessionID, "", undefined, { ...fixturePlan, revision: 1 })
   if (!submitted.result.ok) throw new Error(submitted.result.text)
-  return { root, engine, model, sessionID, runtime, controller, workflow: submitted.result.wf, planSha: submitted.planSha,
+  return { root, engine, model, sessionID, session, runtime, controller, workflow: submitted.result.wf, planSha: submitted.planSha,
     responses, dispatched, get cancelCalls() { return cancelCalls }, get reconcileCalls() { return reconcileCalls } }
 }
 
@@ -124,14 +128,14 @@ describe("common CLI controlled workflow", () => {
       const letters = ["a", "b", "c"]
       for (const letter of letters) {
         files[`${letter}.txt`] = "before\n"
-        files[`verify-${letter}.test.ts`] = `import {expect,test} from 'bun:test';import{readFileSync}from'node:fs';test('updated ${letter}',()=>expect(readFileSync('${letter}.txt','utf8')).toBe('after-${letter}\\n'));\n`
+        files[`verify-${letter}.test.sh`] = `test "$(cat ${letter}.txt)" = after-${letter}\n`
       }
       wt = tempGitWorktree(files)
       const root = realpathSync(wt.worktree)
       const plan = {
         goal: "Update the three tracked text values with verified contents",
         steps: letters.map(letter => ({ title: `Update ${letter}`, files: [`${letter}.txt`],
-          detail: `Write after-${letter} followed by a newline to ${letter}.txt. Do not alter tests.`, verify: `bun test verify-${letter}.test.ts` })),
+          detail: `Write after-${letter} followed by a newline to ${letter}.txt. Do not alter tests.`, verify: `sh verify-${letter}.test.sh` })),
         risks: ["Unexpected changes must not be accepted"],
       }
       const final = (text: string) => JSON.stringify({ type: "final", text })
@@ -161,10 +165,11 @@ describe("common CLI controlled workflow", () => {
       const config = structuredClone(DEFAULT_CONFIG)
       config.models = Object.fromEntries(EXECUTION_ROLES.map(role => [role, `${engine}/fixture-model`]))
       config.delegate.max_attempts = 1
+      const sessionID = `common-${engine}`
       const runtime = createExecutionRuntime({ directory: root, worktree: root, config, log() {} }, ({ policy, runs }) =>
         createCliHost({ engine: engine as CliEngine, model: "fixture-model", policy, runs, createTransport: transportFactory }))
+      const session = attachAdmission(runtime, sessionID, { engine, model: "fixture-model" })
       const controller = createForegroundController(runtime)
-      const sessionID = `common-${engine}`
       const conversation = createPlanConversation(runtime, sessionID)
       const discussed = await conversation.turn("Plan the requested three file changes")
       expect(discussed.plan).toEqual(plan)
@@ -176,7 +181,7 @@ describe("common CLI controlled workflow", () => {
       await expect(controller.run(sessionID)).rejects.toThrow()
       expect(dispatched).toHaveLength(2)
       const approval = await withTerminalLine(`APPROVE ${workflow.id} ${submission.planSha}`, () =>
-        humanDecision("approve", workflow.id, submission.planSha))
+        humanDecision("approve", planBinding(sessionID, workflow, submission.planSha)))
       expect(controller.assertRecoveryIdentity(sessionID, workflow.id, submission.planSha).id).toBe(workflow.id)
       expect(controller.decide(approval, sessionID).ok).toBe(true)
       await controller.run(sessionID)
@@ -190,28 +195,71 @@ describe("common CLI controlled workflow", () => {
         expect(execution.profile).toBe("legacy-unowned")
         expect(execution.controlProfile).toBe("estimated-input-reactive-output-v1")
       }
+      expect(await detachAdmission(runtime, sessionID, session.epoch, "test-complete")).toBe(true)
     }, 30_000)
   }
 
   test("common CLI approval and rejection use the explicit owner session, workflow and plan SHA", async () => {
     const approved = await pendingCommonWorkflow()
+    expect(await detachAdmission(approved.runtime, approved.sessionID, approved.session.epoch, "test-cli-recovery")).toBe(true)
     const approval = await withTerminalLine(`APPROVE ${approved.workflow.id} ${approved.planSha}`, () => runCli(parseCliArgs([
       "approve", "--worktree", approved.root, "--engine", approved.engine, "--model", approved.model,
       "--session", approved.sessionID, "--workflow", approved.workflow.id, "--sha", approved.planSha,
-    ])))
+    ]), () => createCliRuntime({ worktree: approved.root, engine: approved.engine, model: approved.model })))
     expect(approval).toBe(`workflow ${approved.workflow.id} executing`)
     expect(readWorkflow(approved.root)?.sessionID).toBe(approved.sessionID)
     wt?.cleanup()
     wt = undefined
 
     const rejected = await pendingCommonWorkflow()
+    expect(await detachAdmission(rejected.runtime, rejected.sessionID, rejected.session.epoch, "test-cli-recovery")).toBe(true)
     const rejection = await withTerminalLine(`REJECT ${rejected.workflow.id} ${rejected.planSha} defer this plan`, () => runCli(parseCliArgs([
       "reject", "--worktree", rejected.root, "--engine", rejected.engine, "--model", rejected.model,
       "--session", rejected.sessionID, "--workflow", rejected.workflow.id, "--sha", rejected.planSha,
-    ])))
+    ]), () => createCliRuntime({ worktree: rejected.root, engine: rejected.engine, model: rejected.model })))
     expect(rejection).toBe(`workflow ${rejected.workflow.id} planning`)
     expect(readWorkflow(rejected.root)?.phase).toBe("planning")
   })
+
+  test("status JSON does not attach, rebind, or repair a restored owner", async () => {
+    const fixture = await pendingCommonWorkflow()
+    expect(await detachAdmission(fixture.runtime, fixture.sessionID, fixture.session.epoch, "test-status-readonly")).toBe(true)
+    const workflowBefore = readFileSync(workflowPath(fixture.root))
+    const metadataBefore = readFileSync(join(sessionDir(fixture.root, fixture.sessionID), "metadata.json"))
+    expect(effectiveHold(fixture.root, fixture.sessionID)).toBe(true)
+
+    const result = await runCli(parseCliArgs(["status", "--worktree", fixture.root, "--session", fixture.sessionID, "--json"]))
+    expect(JSON.parse(result)).toMatchObject({ workflow: { id: fixture.workflow.id } })
+    expect(readFileSync(workflowPath(fixture.root))).toEqual(workflowBefore)
+    expect(readFileSync(join(sessionDir(fixture.root, fixture.sessionID), "metadata.json"))).toEqual(metadataBefore)
+    expect(effectiveHold(fixture.root, fixture.sessionID)).toBe(true)
+  })
+
+  test("restored CLI approval stays held until explicit run and then dispatches against the exact session", async () => {
+    const fixture = await pendingCommonWorkflow()
+    expect(await detachAdmission(fixture.runtime, fixture.sessionID, fixture.session.epoch, "test-explicit-run")).toBe(true)
+    const approval = await withTerminalLine(`APPROVE ${fixture.workflow.id} ${fixture.planSha}`, () => runCli(parseCliArgs([
+      "approve", "--worktree", fixture.root, "--engine", fixture.engine, "--model", fixture.model,
+      "--session", fixture.sessionID, "--workflow", fixture.workflow.id, "--sha", fixture.planSha,
+    ]), () => fixture.runtime))
+    expect(approval).toBe(`workflow ${fixture.workflow.id} executing`)
+    expect(effectiveHold(fixture.root, fixture.sessionID)).toBe(true)
+    const workflowBeforeStatus = readFileSync(workflowPath(fixture.root))
+    const dispatchesBeforeStatus = fixture.dispatched.length
+    await runCli(parseCliArgs(["status", "--worktree", fixture.root, "--session", fixture.sessionID, "--json"]))
+    expect(readFileSync(workflowPath(fixture.root))).toEqual(workflowBeforeStatus)
+    expect(fixture.dispatched).toHaveLength(dispatchesBeforeStatus)
+
+    for (const letter of ["a", "b", "c"]) {
+      fixture.responses.push(JSON.stringify({ type: "tool", name: "write", input: { path: `${letter}.txt`, content: `after-${letter}\n` } }))
+      fixture.responses.push(finalEnvelope("Open issues: none"), finalEnvelope("ACCEPT"))
+    }
+    const result = await runCli(parseCliArgs(["run", "--worktree", fixture.root, "--engine", fixture.engine,
+      "--model", fixture.model, "--session", fixture.sessionID]), () => fixture.runtime)
+    expect(result).toContain(`workflow ${fixture.workflow.id} done`)
+    expect(readWorkflow(fixture.root)?.phase).toBe("done")
+    expect(fixture.dispatched.length).toBeGreaterThan(dispatchesBeforeStatus)
+  }, 15_000)
 
   test("a fresh-process common CLI cancellation settles a pending-approval workflow", async () => {
     const fixture = await pendingCommonWorkflow()
@@ -220,8 +268,12 @@ describe("common CLI controlled workflow", () => {
     const result = await invokeCommonCli(fixture.root, ["cancel", "--worktree", fixture.root,
       "--engine", fixture.engine, "--model", fixture.model, "--session", fixture.sessionID])
     expect(result.exitCode).toBe(0)
-    expect(result.stdout).toContain(`workflow ${fixture.workflow.id} cancelled`)
+    // Fail-closed liveness (architect finding 1): a non-owner process records the intent and never settles from proof it
+    // cannot see; the owning process's observer settles it.
+    expect(result.stdout).toContain(`workflow ${fixture.workflow.id} pending_approval; cancellation requested; execution retirement pending; termination unconfirmed`)
     expect(result.stderr).toBe("")
+    expect(readWorkflow(fixture.root)).toMatchObject({ phase: "pending_approval", stopIntent: { kind: "cancel" } })
+    expect(observeStopSettlement(fixture.runtime, fixture.sessionID, readWorkflow(fixture.root)!.owner.instance, "owner").kind).toBe("settled")
     expect(readWorkflow(fixture.root)?.phase).toBe("cancelled")
     expect(readFileSync(runStatePath)).toEqual(runStateBefore)
   })
@@ -229,7 +281,7 @@ describe("common CLI controlled workflow", () => {
   test("settled resume keeps completed tasks and dispatches only the open tasks", async () => {
     const fixture = await pendingCommonWorkflow()
     const approval = await withTerminalLine(`APPROVE ${fixture.workflow.id} ${fixture.planSha}`, () =>
-      humanDecision("approve", fixture.workflow.id, fixture.planSha))
+      humanDecision("approve", planBinding(fixture.sessionID, fixture.workflow, fixture.planSha)))
     expect(fixture.controller.decide(approval, fixture.sessionID).ok).toBe(true)
     const ledger = readLedger(fixture.root, fixture.sessionID)
     writeLedger(fixture.root, { ...ledger, tasks: ledger.tasks.map((task, index) => index === 0
@@ -254,7 +306,7 @@ describe("common CLI controlled workflow", () => {
   test("common CLI resume fails when the resumed workflow does not finish successfully", async () => {
     const fixture = await pendingCommonWorkflow()
     const approval = await withTerminalLine(`APPROVE ${fixture.workflow.id} ${fixture.planSha}`, () =>
-      humanDecision("approve", fixture.workflow.id, fixture.planSha))
+      humanDecision("approve", planBinding(fixture.sessionID, fixture.workflow, fixture.planSha)))
     expect(fixture.controller.decide(approval, fixture.sessionID).ok).toBe(true)
     fixture.responses.push(
       finalEnvelope("Open issues: unable to complete task"),
@@ -282,8 +334,8 @@ describe("common CLI controlled workflow", () => {
     })
     fixture.runtime.runs.markHostDispatched(claim, executionID)
     const workflow = readWorkflow(fixture.root)!
-    const owner = { instance: "foreign-live-owner", pid: process.pid, heartbeatAt: Date.now() }
-    writeFileSync(workflowPath(fixture.root), JSON.stringify({ ...workflow, owner }))
+    const owner = workflow.owner
+    expect(owner.instance).toBe(fixture.session.epoch)
 
     const statePath = join(executionRunDirectory(fixture.root), "state.json")
     const stateBefore = readFileSync(statePath)
@@ -298,7 +350,7 @@ describe("common CLI controlled workflow", () => {
       const result = await runCli(parseCliArgs(["cancel", "--worktree", fixture.root, "--engine", fixture.engine,
         "--model", fixture.model, "--session", fixture.sessionID]))
       expect(result).toContain("cancellation requested; execution retirement pending")
-      expect(readWorkflow(fixture.root)).toMatchObject({ pendingCancel: true, owner })
+      expect(readWorkflow(fixture.root)).toMatchObject({ stopIntent: expect.objectContaining({ kind: "cancel" }), owner: { instance: owner.instance, pid: owner.pid } })
       expect(fixture.runtime.runs.status().claim).toEqual(claimBefore)
       expect(readFileSync(statePath)).toEqual(stateBefore)
       expect(fixture.cancelCalls).toBe(cancellationCallsBefore)
@@ -324,19 +376,18 @@ describe("common CLI controlled workflow", () => {
     })
     delete runState.claim
     writeFileSync(runStatePath, JSON.stringify(runState))
-    const persistedWorkflow = JSON.parse(readFileSync(workflowPath(fixture.root), "utf8")) as { owner: unknown }
-    persistedWorkflow.owner = { instance: "dead-owner-fixture", pid: 2_147_483_647, heartbeatAt: 0 }
-    writeFileSync(workflowPath(fixture.root), JSON.stringify(persistedWorkflow))
+    rewriteCommitted(fixture.root, { owner: { instance: "dead-owner-fixture", pid: 2_147_483_647 } })
     const stateBefore = readFileSync(runStatePath)
     const artifactsBefore = recoverySnapshot(fixture.root, fixture.sessionID, fixture.workflow.id)
     const cancelsBefore = fixture.cancelCalls
     const reconcilesBefore = fixture.reconcileCalls
 
     expect(() => fixture.controller.cancel(fixture.sessionID)).toThrow("execution unresolved")
-    await expect(fixture.controller.resume(fixture.sessionID)).rejects.toThrow("execution unresolved")
+    await expect(fixture.controller.resume(fixture.sessionID)).rejects.toThrow("workflow owner is not bound to this attachment epoch")
     for (const command of ["cancel", "resume"]) {
       await expect(runCli(parseCliArgs([command, "--worktree", fixture.root, "--engine", fixture.engine,
-        "--model", fixture.model, "--session", fixture.sessionID]))).rejects.toThrow("execution unresolved")
+        "--model", fixture.model, "--session", fixture.sessionID]))).rejects.toThrow(command === "cancel"
+          ? "execution unresolved" : "workflow owner is not bound to this attachment epoch")
     }
     expect(readFileSync(runStatePath)).toEqual(stateBefore)
     expect(recoverySnapshot(fixture.root, fixture.sessionID, fixture.workflow.id)).toEqual(artifactsBefore)
@@ -371,7 +422,7 @@ describe("common CLI controlled workflow", () => {
     const files: Record<string, string> = {}
     for (const letter of letters) {
       files[`${letter}.txt`] = "before\n"
-      files[`verify-${letter}.test.ts`] = `import {expect,test} from 'bun:test';import{readFileSync}from'node:fs';test('updated ${letter}',()=>expect(readFileSync('${letter}.txt','utf8')).toBe('after-${letter}\\n'));\n`
+      files[`verify-${letter}.test.sh`] = `test "$(cat ${letter}.txt)" = after-${letter}\n`
     }
     wt = tempGitWorktree(files)
     const root = realpathSync(wt.worktree)
@@ -388,11 +439,12 @@ describe("common CLI controlled workflow", () => {
     config.models = Object.fromEntries(EXECUTION_ROLES.map(role => [role, "codex/gpt-5.6-sol"]))
     const runtime = createExecutionRuntime({ directory: root, worktree: root, config, log() {} }, ({ policy, runs }) =>
       createCliHost({ engine: "codex", model: "gpt-5.6-sol", policy, runs, createTransport: transportFactory }))
+    const session = attachAdmission(runtime, "codex-admission", { engine: "codex", model: "gpt-5.6-sol" })
     const controller = createForegroundController(runtime)
     const plan = {
       goal: "Update the three tracked text values with verified contents",
       steps: letters.map(letter => ({ title: `Update ${letter}`, files: [`${letter}.txt`],
-        detail: `Write after-${letter} followed by a newline to ${letter}.txt. Do not alter tests.`, verify: `bun test verify-${letter}.test.ts` })),
+        detail: `Write after-${letter} followed by a newline to ${letter}.txt. Do not alter tests.`, verify: `sh verify-${letter}.test.sh` })),
       risks: ["Unexpected changes must not be accepted"],
     }
 
@@ -401,5 +453,6 @@ describe("common CLI controlled workflow", () => {
     expect(dispatched).toHaveLength(0)
     for (const letter of letters) expect(readFileSync(join(root, `${letter}.txt`), "utf8")).toBe("before\n")
     expect(readWorkflow(root)).toBeNull()
+    expect(await detachAdmission(runtime, "codex-admission", session.epoch, "test-host-refusal")).toBe(true)
   }, 30_000)
 })

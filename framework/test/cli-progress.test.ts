@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { createCliProgressPresenter } from "../src/hosts/cli-progress.ts"
+import { createCliProgressPresenter, type CliHostActivity } from "../src/hosts/cli-progress.ts"
 
 function capture() {
   const output: string[] = []
@@ -28,9 +28,11 @@ describe("CLI progress presenter", () => {
     progress.queue("task verify", { task: "t1", ok: true })
     progress.queue("task verify", { task: "t1", ok: true })
     progress.host({ kind: "model-started", role: "worker", execution: 2 })
-    progress.host({ kind: "tool-started", role: "worker", execution: 2, tool: "read" })
-    progress.host({ kind: "tool-started", role: "worker", execution: 2, tool: "read" })
-    progress.host({ kind: "tool-finished", role: "worker", execution: 2, tool: "read", ok: true })
+    progress.host({ kind: "tool-started", role: "worker", execution: 2, taskID: "t1", executionID: "exec-2", callID: "call-1", tool: "read" })
+    progress.host({ kind: "tool-started", role: "worker", execution: 2, taskID: "t1", executionID: "exec-2", callID: "call-2", tool: "read" })
+    progress.host({ kind: "tool-finished", role: "worker", execution: 2, taskID: "t1", executionID: "exec-2", callID: "call-1", tool: "read", outcome: "succeeded", ok: true })
+    progress.host({ kind: "tool-finished", role: "worker", execution: 2, taskID: "t1", executionID: "exec-2", callID: "call-1", tool: "read", outcome: "succeeded", ok: true })
+    progress.host({ kind: "tool-finished", role: "worker", execution: 2, taskID: "t1", executionID: "exec-2", callID: "call-2", tool: "read", outcome: "failed", ok: false })
     progress.host({ kind: "model-returned", role: "reviewer", execution: 3, status: "completed" })
     progress.queue("task finished", { task: "t1", status: "done" })
     progress.queue("task start", { task: "t2", attempt: 1 })
@@ -43,7 +45,9 @@ describe("CLI progress presenter", () => {
     expect(rendered.match(/Planning model response received/g)).toHaveLength(2)
     expect(rendered.match(/t1 running \(attempt 1\)/g)).toHaveLength(1)
     expect(rendered.match(/t1 verification passed/g)).toHaveLength(1)
-    expect(rendered.match(/started read tool/g)).toHaveLength(1)
+    expect(rendered.match(/started read tool/g)).toHaveLength(2)
+    expect(rendered.match(/finished read tool/g)).toHaveLength(1)
+    expect(rendered.match(/failed read tool/g)).toHaveLength(1)
     expect(rendered).toContain("Reviewer model response received.")
     expect(rendered).toContain("[tasks] t1 done.")
     expect(rendered).toContain("[tasks] t1 pending — Read the code carefully.")
@@ -62,7 +66,7 @@ describe("CLI progress presenter", () => {
     progress.queue("queue crashed", { error: secret, prompt: secret })
     progress.queue("task start", { task: `t1\u001b[2J`, attempt: 1 })
     progress.host({ kind: "model-returned", role: "reviewer", execution: 1, status: "failed" })
-    progress.host({ kind: "tool-finished", role: "data-verifier", execution: 2, tool: "grep", ok: false })
+    progress.host({ kind: "tool-finished", role: "data-verifier", execution: 2, taskID: "t1", executionID: "exec-2", callID: "call-1", tool: "grep", outcome: "failed", ok: false })
     progress.final({ phase: `${secret}`, done: 0, failed: 1, cancelled: 0 })
 
     const rendered = output.join("")
@@ -77,6 +81,28 @@ describe("CLI progress presenter", () => {
     expect(rendered).toContain("stopped unexpectedly")
     expect(rendered).toContain("[error] Reviewer model request failed.")
     expect(rendered).toContain("[error] Data verifier failed grep tool.")
+  })
+
+  test("observes validated structured activities without tool lines when disabled", () => {
+    const output: string[] = []
+    const observed: CliHostActivity[] = []
+    const progress = createCliProgressPresenter(text => output.push(text), activity => observed.push(activity), { toolLines: false })
+    const toolStarted: CliHostActivity = {
+      kind: "tool-started", role: "worker", execution: 2, taskID: "t1", executionID: "exec-2", callID: "call-1", tool: "read",
+    }
+    const toolFinished: CliHostActivity = {
+      kind: "tool-finished", role: "worker", execution: 2, taskID: "t1", executionID: "exec-2", callID: "call-1", tool: "read", outcome: "denied", ok: false,
+    }
+    progress.host({ kind: "model-started", role: "worker", execution: 2 })
+    progress.host(toolStarted)
+    progress.host(toolFinished)
+
+    expect(observed).toEqual([
+      { kind: "model-started", role: "worker", execution: 2 },
+      toolStarted,
+      toolFinished,
+    ])
+    expect(output).toEqual(["[activity] Worker model is working.\n"])
   })
 
   test("shows cancel-requested separately from settled task cancellation and buffers during approval", () => {

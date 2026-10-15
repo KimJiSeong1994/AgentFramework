@@ -1,9 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { realpathSync } from "node:fs"
+import { readFileSync, realpathSync } from "node:fs"
 import { DEFAULT_CONFIG } from "../src/config.ts"
+import { newWorkflow, withFlowTransaction, workflowPath } from "../src/flow/state.ts"
+import { writeWorkflow } from "./commit-fixture.ts"
 import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
 import { createCodexProfile } from "../src/hosts/codex-profile.ts"
-import { createPlanConversation } from "../src/hosts/plan-conversation.ts"
+import {
+  createPlanConversation,
+  MAX_PLAN_CONVERSATION_CHARS,
+  MAX_PLAN_CONVERSATION_TURNS,
+  PLAN_RESPONSE_RESERVE_CHARS,
+} from "../src/hosts/plan-conversation.ts"
+import type { ConversationMessage } from "../src/hosts/plan-conversation.ts"
 import { createExecutionRuntime } from "../src/hosts/runtime.ts"
 import type { ExecutionOutcome, ExecutionRequest } from "../src/hosts/types.ts"
 import { tempGitWorktree, waitFor } from "./guards-helpers.ts"
@@ -209,8 +217,111 @@ describe("common planning conversation", () => {
   test("bounds user context before creating any execution", async () => {
     const f = fixture()
     const conversation = createPlanConversation(f.runtime, "chat-budget")
-    await expect(conversation.turn("x".repeat(24_001))).rejects.toThrow("too large")
+    await expect(conversation.turn("x".repeat(MAX_PLAN_CONVERSATION_CHARS - PLAN_RESPONSE_RESERVE_CHARS)))
+      .rejects.toThrow("too large")
     expect(f.requests).toHaveLength(0)
+    expect(f.runtime.runs.status().executions).toHaveLength(0)
     expect(f.runtime.runs.status().claim).toBeUndefined()
+  })
+
+  test("keeps the newest complete pairs when a conversation exceeds 24 turns", async () => {
+    const f = fixture()
+    const conversation = createPlanConversation(f.runtime, "chat-window")
+    for (let turn = 1; turn <= 26; turn++) {
+      await conversation.turn(`turn-${String(turn).padStart(3, "0")}`)
+    }
+
+    const request = f.requests[25]!.text
+    const messages = JSON.parse(request.slice(request.indexOf("Conversation:\n") + "Conversation:\n".length)) as ConversationMessage[]
+    expect(messages).toHaveLength(MAX_PLAN_CONVERSATION_TURNS * 2 - 1)
+    expect(messages[0]).toEqual({ role: "user", text: "turn-003" })
+    expect(messages.at(-1)).toEqual({ role: "user", text: "turn-026" })
+    expect(request).not.toContain("turn-001")
+    expect(request).not.toContain("turn-002")
+  })
+
+  test("bounds restored complete pairs and keeps the pending input in the request", async () => {
+    const f = fixture()
+    const prior = Array.from({ length: 30 }, (_, index) => [
+      { role: "user" as const, text: `restored-${index}` },
+      { role: "assistant" as const, text: `answer-${index}` },
+    ]).flat()
+    const conversation = createPlanConversation(f.runtime, "chat-restored", prior)
+    await conversation.turn("pending restored turn")
+
+    const request = f.requests[0]!.text
+    const messages = JSON.parse(request.slice(request.indexOf("Conversation:\n") + "Conversation:\n".length)) as ConversationMessage[]
+    expect(messages).toHaveLength(MAX_PLAN_CONVERSATION_TURNS * 2 - 1)
+    expect(messages[0]).toEqual({ role: "user", text: "restored-7" })
+    expect(messages.at(-1)).toEqual({ role: "user", text: "pending restored turn" })
+    expect(request.length + PLAN_RESPONSE_RESERVE_CHARS).toBeLessThanOrEqual(MAX_PLAN_CONVERSATION_CHARS)
+  })
+
+  test("refuses an incomplete restored pair before creating an execution", () => {
+    const f = fixture()
+    expect(() => createPlanConversation(f.runtime, "chat-restored-draft", [
+      { role: "user", text: "unfinished draft" },
+    ])).toThrow("complete user/assistant pairs")
+    expect(f.requests).toHaveLength(0)
+    expect(f.runtime.runs.status().executions).toHaveLength(0)
+  })
+
+  test("allows a foreign-session read-only proposal without changing its workflow", async () => {
+    withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow(
+      "workflow-owner",
+      { instance: "foreign-owner", pid: process.pid, heartbeatAt: Date.now() },
+      "command",
+      "Owner's plan request",
+      "another-engine",
+    )))
+    const workflowBefore = readFileSync(workflowPath(wt.worktree))
+    const proposal = {
+      goal: "Review the parser change",
+      steps: [{ title: "Inspect", files: ["src/parser.ts"], detail: "Review behavior", verify: "bun test" }],
+      risks: ["No changes are authorized"],
+    }
+    const f = fixture({ text: JSON.stringify(proposal) })
+
+    const result = await createPlanConversation(f.runtime, "observer-session").turn("Propose a review plan")
+
+    expect(result.plan).toEqual(proposal)
+    expect(f.requests).toHaveLength(1)
+    expect(f.requests[0]!.role).toBe("main")
+    expect(f.requests[0]!.policy.tools.allowed).toEqual(["read", "list", "glob", "grep"])
+    expect(f.requests[0]!.policy.tools.denied).toEqual(expect.arrayContaining(["write", "bash", "delegate", "lca_flow"]))
+    expect(readFileSync(workflowPath(wt.worktree))).toEqual(workflowBefore)
+  })
+
+  test("keeps an owned pending-approval or executing workflow unavailable to conversation", async () => {
+    const f = fixture()
+    const owner = {
+      instance: "owned-instance",
+      pid: process.pid,
+      heartbeatAt: Date.now(),
+    }
+    for (const phase of ["pending_approval", "executing"] as const) {
+      withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, {
+        ...newWorkflow("owned-session", owner, "command", "Owner's plan request", "fixture"),
+        phase,
+      }))
+      const workflowBefore = readFileSync(workflowPath(wt.worktree))
+      await expect(createPlanConversation(f.runtime, "owned-session").turn("Continue conversation"))
+        .rejects.toThrow("another workflow or approval")
+      expect(readFileSync(workflowPath(wt.worktree))).toEqual(workflowBefore)
+    }
+    expect(f.requests).toHaveLength(0)
+    expect(f.runtime.runs.status().executions).toHaveLength(0)
+  })
+
+  test("refuses an oversized response without saving its user-only partial pair", async () => {
+    const f = fixture({ text: "r".repeat(PLAN_RESPONSE_RESERVE_CHARS + 1) })
+    const conversation = createPlanConversation(f.runtime, "chat-response-budget")
+    await expect(conversation.turn("oversized response input")).rejects.toThrow("response budget")
+    await expect(conversation.turn("next input")).rejects.toThrow("response budget")
+    expect(f.requests).toHaveLength(2)
+    const messages = JSON.parse(f.requests[1]!.text.slice(
+      f.requests[1]!.text.indexOf("Conversation:\n") + "Conversation:\n".length,
+    )) as ConversationMessage[]
+    expect(messages).toEqual([{ role: "user", text: "next input" }])
   })
 })

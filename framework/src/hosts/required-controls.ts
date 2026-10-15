@@ -1,4 +1,4 @@
-import { EXECUTION_ROLES, type ControlProfile, type ExecutionHost, type ExecutionRole } from "./types.ts"
+import { EXECUTION_ROLES, isWorkflowReadOnlyRole, type ControlProfile, type ExecutionHost, type ExecutionRole } from "./types.ts"
 
 const LEGACY_BUDGET_CONTROLS = ["boundedInput", "boundedOutput"] as const
 const ESTIMATED_REACTIVE_BUDGET_CONTROLS = ["estimatedInput", "reactiveOutput"] as const
@@ -89,7 +89,7 @@ export function assertRequiredControlStatuses(controls: unknown, role: Execution
   const budgetControls = controlProfile === undefined ? LEGACY_BUDGET_CONTROLS : ESTIMATED_REACTIVE_BUDGET_CONTROLS
   const required: readonly string[] = role === "worker"
     ? [...budgetControls, ...COMMON_REQUIRED_CONTROLS, ...WORKER_CONTROLS]
-    : role === "main" || role === "reviewer"
+    : role === "main" || role === "reviewer" || isWorkflowReadOnlyRole(role)
       ? [...budgetControls, ...COMMON_REQUIRED_CONTROLS, ...MAIN_REVIEWER_CONTROLS]
       : [...budgetControls, ...COMMON_REQUIRED_CONTROLS]
 

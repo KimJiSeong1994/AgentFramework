@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { DEFAULT_CONFIG } from "../src/config.ts"
-import { newWorkflow, writeWorkflow, withFlowTransaction } from "../src/flow/state.ts"
+import { newWorkflow, withFlowTransaction } from "../src/flow/state.ts"
+import { writeWorkflow } from "./commit-fixture.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { clearReviewSession, isReviewSession, markReviewSession, parsePlanVerdict, reviewToolCapProblem, runPlanReview } from "../src/flow/review.ts"
 import { createExecutionRunStore, settled } from "../src/hosts/run-state.ts"
@@ -489,6 +490,21 @@ describe("runPlanReview with neutral runtime", () => {
     expect(await review).toMatchObject({ verdict: "none", note: "aborted" })
     expect(f.calls).toEqual(["prepare", "run", "cancel", "reconcile"])
     expect(f.runs.status().executions[0]).toMatchObject({ fence: { reason: expect.any(String) }, cancel: { acknowledgedAt: expect.any(Number) } })
+    expect(f.runs.status().executions[0]?.terminal).toBeUndefined()
+    expect(f.runs.status().claim).toBeDefined()
+    clearReviewSession("review-child")
+  })
+
+  test("a persisted pause intent aborts a live plan review with the registry abort handle and retains its unproven fence", async () => {
+    const workflow = wf()
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, workflow))
+    const f = fixture({ quiescent: false, run: () => new Promise<ExecutionOutcome>(() => {}) })
+    const review = runPlanReview(f.runtime, workflow, plan())
+    await waitFor(() => f.calls.includes("run"))
+    const intent = { kind: "pause" as const, token: "tok", requestedFrom: { phase: workflow.phase, stage: workflow.stage }, checkpoint: null, reason: "p" }
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...workflow, stopIntent: intent, pausedFrom: intent.requestedFrom }))
+    expect(await review).toMatchObject({ verdict: "none", note: "aborted" })
+    expect(f.calls).toEqual(["prepare", "run", "cancel", "reconcile"])
     expect(f.runs.status().executions[0]?.terminal).toBeUndefined()
     expect(f.runs.status().claim).toBeDefined()
     clearReviewSession("review-child")

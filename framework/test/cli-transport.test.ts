@@ -436,6 +436,7 @@ test.each([
 })
 
 test("Codex uses the owned restricted-read profile and requires completed native turn", async () => {
+  setProcessPlatform("darwin")
   const expectedArgs = codexExpectedArgs()
   const prompt = "codex stdin fixture"
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
@@ -538,6 +539,7 @@ test.each(["preflight-first", "run-first"] as const)("Codex probe cancellation i
 })
 
 test("Codex preflight checks the pinned version without inference and run rechecks before launch", async () => {
+  setProcessPlatform("darwin")
   const profile = createCodexProfile(CODEX_MODEL)
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
@@ -557,6 +559,7 @@ test("Codex preflight checks the pinned version without inference and run rechec
 })
 
 test("Codex refuses an unexpected CLI version before launching inference", async () => {
+  setProcessPlatform("darwin")
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
   installFakeCli("codex", fixtureSource({
@@ -574,6 +577,7 @@ test("Codex refuses an unexpected CLI version before launching inference", async
 })
 
 test("Codex cleanup retries only remaining owned entries after a partial removal", async () => {
+  setProcessPlatform("darwin")
   const profile = createCodexProfile(CODEX_MODEL)
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
@@ -612,6 +616,7 @@ test("Codex cleanup retries only remaining owned entries after a partial removal
 })
 
 test("Codex cleanup preserves a replaced private catalog and reports bounded failure", async () => {
+  setProcessPlatform("darwin")
   const profile = createCodexProfile(CODEX_MODEL)
   const catalogName = `codex-${profile.version}-catalog.json`
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
@@ -646,7 +651,7 @@ test("Codex cleanup preserves a replaced private catalog and reports bounded fai
 
 test("Ollama receives a plain model identifier and returns stdout, not stderr", async () => {
   const prompt = "local stdin fixture"
-  const expectedArgs = ["run", "test-model:tag", "--format", "json", "--nowordwrap", "--hidethinking"]
+  const expectedArgs = ["run", "test-model:tag", "--think=false", "--nowordwrap"]
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
   installFakeCli("local", fixtureSource({
@@ -668,6 +673,7 @@ test.each([
   ["native failure", codexOutput({ type: "item.completed", item: { type: "agent_message", text: "partial" } }, { type: "turn.failed", error: { message: "SECRET diagnostic" } }), "native CLI reported failure"],
   ["tool activity", codexOutput({ type: "item.completed", item: { type: "file_change", changes: [{ path: "source.ts", kind: "update" }] } }), "native tool activity refused"],
 ])("Codex rejects %s without leaking native diagnostics", async (_kind, chunks, expectedError) => {
+  setProcessPlatform("darwin")
   const prompt = "codex failure fixture"
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
@@ -690,7 +696,7 @@ test("output byte cap cancels reactively and returns only bounded text", async (
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
   installFakeCli("local", fixtureSource({
-    expectedArgs: ["run", "test-model:tag", "--format", "json", "--nowordwrap", "--hidethinking"],
+    expectedArgs: ["run", "test-model:tag", "--think=false", "--nowordwrap"],
     prompt: "fixture prompt",
     chunks: ["0123456789"],
     marker,
@@ -711,7 +717,7 @@ test("cleanup preserves a replaced scratch directory and reports bounded failure
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
   installFakeCli("local", fixtureSource({
-    expectedArgs: ["run", "test-model:tag", "--format", "json", "--nowordwrap", "--hidethinking"],
+    expectedArgs: ["run", "test-model:tag", "--think=false", "--nowordwrap"],
     prompt: "fixture prompt",
     chunks: ["response"],
     marker,
@@ -732,7 +738,7 @@ test("late quiescence reconciliation removes the retained owned scratch director
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
   installFakeCli("local", fixtureSource({
-    expectedArgs: ["run", "test-model:tag", "--format", "json", "--nowordwrap", "--hidethinking"],
+    expectedArgs: ["run", "test-model:tag", "--think=false", "--nowordwrap"],
     prompt: "fixture prompt",
     chunks: ["response"],
     marker,
@@ -764,7 +770,7 @@ test("late scratch cleanup preserves an identity-mismatched replacement", async 
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
   installFakeCli("local", fixtureSource({
-    expectedArgs: ["run", "test-model:tag", "--format", "json", "--nowordwrap", "--hidethinking"],
+    expectedArgs: ["run", "test-model:tag", "--think=false", "--nowordwrap"],
     prompt: "fixture prompt",
     chunks: ["response"],
     marker,
@@ -799,7 +805,7 @@ test("pre-run cancellation prevents launch and transport handles cannot replay",
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
   installFakeCli("local", fixtureSource({
-    expectedArgs: ["run", "test-model:tag", "--format", "json", "--nowordwrap", "--hidethinking"],
+    expectedArgs: ["run", "test-model:tag", "--think=false", "--nowordwrap"],
     prompt: "fixture prompt",
     chunks: ["must not run"],
     marker,
@@ -818,7 +824,7 @@ test("running cancellation waits for owned group termination and quiescence", as
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
   installFakeCli("local", fixtureSource({
-    expectedArgs: ["run", "test-model:tag", "--format", "json", "--nowordwrap", "--hidethinking"],
+    expectedArgs: ["run", "test-model:tag", "--think=false", "--nowordwrap"],
     prompt: "fixture prompt",
     chunks: ["running"],
     marker,
@@ -842,7 +848,7 @@ test("model option injection and callback failures are bounded", async () => {
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
   installFakeCli("local", fixtureSource({
-    expectedArgs: ["run", "test-model:tag", "--format", "json", "--nowordwrap", "--hidethinking"],
+    expectedArgs: ["run", "test-model:tag", "--think=false", "--nowordwrap"],
     prompt: "fixture prompt",
     chunks: ["response"],
     marker,

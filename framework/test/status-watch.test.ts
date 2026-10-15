@@ -4,7 +4,8 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { currentOwner } from "../src/flow/owner.ts"
-import { flowDir, newWorkflow as createWorkflow, workflowPath, writeWorkflow, withFlowTransaction, type Workflow } from "../src/flow/state.ts"
+import { flowDir, newWorkflow as createWorkflow, workflowPath, withFlowTransaction, writeHeartbeat, type Workflow } from "../src/flow/state.ts"
+import { writeWorkflow, publishWorkflow } from "./commit-fixture.ts"
 import { addTasks, emptyLedger, ledgerPath, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
 import * as stateStore from "../src/state/store.ts"
 import { stateRoot } from "../src/state/store.ts"
@@ -56,7 +57,7 @@ describe("status watch tick", () => {
     const runtime = setup()
     const state = createStatusWatchState({ sessionID: SESSION })
     writeLedger(wt.worktree, emptyLedger(SESSION, 1000))
-    const wf = newStatusWorkflow(SESSION, { instance: "other-instance", pid: process.pid, heartbeatAt: 1000 }, "command", "request", 1000)
+    const wf = newStatusWorkflow(SESSION, { instance: "other-instance", pid: process.pid}, "command", "request", 1000)
     writeStatusWorkflow(wt.worktree, wf, 1000)
     const initial = watchTick(state, runtime, 1000)
     expect(initial.frame?.status?.workflow?.ownerLive).toBe(true)
@@ -77,7 +78,7 @@ describe("status watch tick", () => {
     const workflow = newStatusWorkflow(SESSION, owner, "command", "request", 1000)
     writeLedger(wt.worktree, emptyLedger(SESSION, 1000))
     writeStatusWorkflow(wt.worktree, workflow, 1000)
-    const liveness = { instance: "watcher", ownerPidAlive: () => true, sessionExists: () => true }
+    const liveness = { instance: "watcher", ownerPidAlive: () => true, epochReleased: () => false }
 
     expect(watchTick(state, runtime, 1000, liveness).frame).toMatchObject({ type: "snapshot", reason: "initial", status: { workflow: { ownerLive: true } } })
     writeFileSync(workflowPath(wt.worktree), "{ invalid json")
@@ -88,7 +89,9 @@ describe("status watch tick", () => {
     expect(crossedThreshold.bytesRead).toBe(0)
     expect(state.status?.workflow?.ownerLive).toBe(true)
 
-    writeFileSync(workflowPath(wt.worktree), JSON.stringify({ ...workflow, updatedAt: 91_002 }))
+    publishWorkflow(wt.worktree, workflow, 91_002)
+    // The sidecar still holds the original beat: staleness is evaluated from it, not from the republished snapshot.
+    withFlowTransaction(wt.worktree, tx => writeHeartbeat(tx, workflow, 1000))
     expect(watchTick(state, runtime, 91_003, liveness).frame).toMatchObject({
       type: "snapshot", reason: "changed", status: { workflow: { sessionID: SESSION, ownerLive: false } },
     })
@@ -106,7 +109,7 @@ describe("status watch tick", () => {
     expect(watchTick(state, runtime, 1001).frame).toMatchObject({ type: "error", error: { source: "workflow", code: "invalid_state" } })
     for (let tick = 3; tick < 10; tick++) expect(watchTick(state, runtime, 1000 + tick).frame).toBeUndefined()
 
-    writeFileSync(workflowPath(wt.worktree), JSON.stringify({ ...workflow, updatedAt: 1010 }))
+    publishWorkflow(wt.worktree, workflow, 1010)
     expect(watchTick(state, runtime, 1010).frame).toMatchObject({ type: "snapshot", reason: "changed" })
   })
 
@@ -114,11 +117,11 @@ describe("status watch tick", () => {
     const runtime = setup()
     const state = createStatusWatchState({ sessionID: SESSION })
     writeLedger(wt.worktree, emptyLedger(SESSION))
-    writeStatusWorkflow(wt.worktree, newStatusWorkflow(SESSION, { instance: "owner", pid: process.pid, heartbeatAt: 1000 }, "command", "request"))
+    writeStatusWorkflow(wt.worktree, newStatusWorkflow(SESSION, { instance: "owner", pid: process.pid}, "command", "request"))
     const failure = new Error("liveness callback bug")
 
     expect(() => watchTick(state, runtime, 1000, {
-      instance: "watcher", sessionExists: () => true, ownerPidAlive: () => { throw failure },
+      instance: "watcher", epochReleased: () => false, ownerPidAlive: () => { throw failure },
     })).toThrow(failure)
     expect(state.errors.size).toBe(0)
   })
@@ -126,11 +129,11 @@ describe("status watch tick", () => {
   test("suppresses heartbeat-only workflow rewrites from watch frames", () => {
     const runtime = setup()
     writeLedger(wt.worktree, emptyLedger(SESSION, 1000))
-    const wf = newStatusWorkflow(SESSION, { ...currentOwner(), heartbeatAt: 1000 }, "command", "request", 1000)
+    const wf = newStatusWorkflow(SESSION, { ...currentOwner()}, "command", "request", 1000)
     writeStatusWorkflow(wt.worktree, wf, 1000)
     const state = createStatusWatchState({ sessionID: SESSION })
     expect(watchTick(state, runtime, 1000).frame?.reason).toBe("initial")
-    writeStatusWorkflow(wt.worktree, { ...wf, owner: { ...wf.owner, heartbeatAt: 1001 } }, 1001)
+    writeStatusWorkflow(wt.worktree, { ...wf, owner: { ...wf.owner} }, 1001)
     const heartbeat = watchTick(state, runtime, 1001)
     expect(heartbeat.frame).toBeUndefined()
     expect(heartbeat.bytesRead).toBeGreaterThan(0)
@@ -139,6 +142,20 @@ describe("status watch tick", () => {
       expect(result.frame).toBeUndefined()
       if (tick === 9) expect(result.bytesRead).toBeGreaterThan(0)
     }
+  })
+
+  test("a heartbeat.json-only tick (sidecar touch, index and snapshot untouched) emits no frame", () => {
+    const runtime = setup()
+    writeLedger(wt.worktree, emptyLedger(SESSION, 1000))
+    const wf = writeStatusWorkflow(wt.worktree, newStatusWorkflow(SESSION, { ...currentOwner() }, "command", "request", 1000), 1000)
+    const state = createStatusWatchState({ sessionID: SESSION })
+    expect(watchTick(state, runtime, 1000).frame?.reason).toBe("initial")
+    const indexBefore = readFileSync(workflowPath(wt.worktree))
+    withFlowTransaction(wt.worktree, tx => writeHeartbeat(tx, wf, 1001))
+    expect(readFileSync(workflowPath(wt.worktree)).equals(indexBefore)).toBe(true)
+    const tick = watchTick(state, runtime, 1001)
+    expect(tick.frame).toBeUndefined()
+    expect(tick.bytesRead).toBeGreaterThan(0)
   })
 
   test("accepts an injectable claim liveness predicate for unchanged-file ticks", () => {
@@ -168,7 +185,7 @@ describe("status watch tick", () => {
     const forced = watchTick(state, runtime, 1010)
     expect(forced.frame).toBeUndefined()
     expect(forced.bytesRead).toBeGreaterThan(0)
-    writeFileSync(workflowPath(wt.worktree), JSON.stringify(newStatusWorkflow(SESSION, currentOwner(), "command", "request", 1002)))
+    publishWorkflow(wt.worktree, newStatusWorkflow(SESSION, currentOwner(), "command", "request", 1002), 1002)
     const recovered = watchTick(state, runtime, 1003)
     expect(recovered.frame).toMatchObject({ type: "snapshot", reason: "changed", status: { workflow: { sessionID: SESSION } } })
     expect(state.errors.size).toBe(0)
@@ -365,7 +382,7 @@ describe("status watch tick", () => {
       mkdirSync(join(stateRoot(wt.worktree), "workflow"), { recursive: true })
       writeFileSync(workflowPath(wt.worktree), "{ invalid json")
       expect(await nextFrame()).toMatchObject({ type: "error", error: { source: "workflow", code: "invalid_state" }, meta: { bytesRead: expect.any(Number) } })
-      writeFileSync(workflowPath(wt.worktree), JSON.stringify(newStatusWorkflow(SESSION, currentOwner(), "command", "repaired")))
+      publishWorkflow(wt.worktree, newStatusWorkflow(SESSION, currentOwner(), "command", "repaired"))
       expect(await nextFrame()).toMatchObject({ type: "snapshot", reason: "changed", status: { workflow: { sessionID: SESSION } } })
 
       child.kill("SIGTERM")

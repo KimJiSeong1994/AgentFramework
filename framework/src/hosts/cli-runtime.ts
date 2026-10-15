@@ -4,7 +4,7 @@ import { createCliHost } from "./cli-host.ts"
 import { createCodexProfile } from "./codex-profile.ts"
 import type { CliEngine } from "./cli-transport.ts"
 import { createExecutionRuntime } from "./runtime.ts"
-import { EXECUTION_ROLES, type ExecutionRuntime } from "./types.ts"
+import { CONFIG_MODEL_ROLES, type ExecutionRuntime } from "./types.ts"
 import type { CliProgressSink } from "./cli-progress.ts"
 
 export type CliRuntimeOptions = { worktree: string; engine: CliEngine; model: string; progress?: CliProgressSink }
@@ -19,7 +19,7 @@ export function createCliRuntime(options: CliRuntimeOptions): ExecutionRuntime {
   const worktree = realpathSync(options.worktree)
   if (!statSync(worktree).isDirectory()) throw new TypeError("invalid CLI worktree")
   const config = structuredClone(loadConfig(worktree))
-  config.models = Object.fromEntries(EXECUTION_ROLES.map(role => [role, `${options.engine}/${options.model}`]))
+  config.models = Object.fromEntries(CONFIG_MODEL_ROLES.map(role => [role, `${options.engine}/${options.model}`]))
   const nativeContext = options.engine === "codex"
     ? (() => {
       const profile = createCodexProfile(options.model)

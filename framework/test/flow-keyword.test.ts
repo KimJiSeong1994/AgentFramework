@@ -2,39 +2,48 @@
 // entry "keyword", actor user_keyword, when flow is on (chat-message.ts, the plan-keyword branch below
 // handleWorkflowTurn). Informational questions are still suppressed unless `force:`/`!`; flow.enabled=false keeps
 // the legacy <lca-mode name="plan"> path untouched; an active workflow in the same session gets a notice only
-// (handleWorkflowTurn); a foreign session's dead owner is replaced via T20 then a fresh workflow starts for this
-// session; a foreign live owner is refused with no mutation.
+// (handleWorkflowTurn); a foreign session's workflow is never replaced, regardless of owner liveness.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdirSync, readFileSync } from "node:fs"
-import { createChatMessageHook } from "../src/hooks/chat-message.ts"
 import { stripModeKeywords } from "../src/modes/detect.ts"
 import { hasFlowSuffix, hasModeSuffix } from "../src/modes/instructions.ts"
-import { activeWorkflow, archivePath, eventsPath, newWorkflow, readEvents, readWorkflow, workflowPath, writeWorkflow, type Workflow, withFlowTransaction } from "../src/flow/state.ts"
+import { activeWorkflow, eventsPath, newWorkflow, readEvents, readWorkflow, workflowPath, type Workflow, withFlowTransaction } from "../src/flow/state.ts"
+import { writeWorkflow } from "./commit-fixture.ts"
 import { currentOwner } from "../src/flow/owner.ts"
+import { stopHeartbeat } from "../src/flow/runtime.ts"
 import { readModeState, sessionDir } from "../src/state/store.ts"
-import { fakeClient, makeDeps, tempWorktree, type FakeClient } from "./guards-helpers.ts"
+import { createNativeToolFixture } from "./native-tool-fixture.ts"
+import { admitFixtureSession, fakeClient, makeDeps, releaseFixtureSession, tempWorktree, type FakeClient } from "./guards-helpers.ts"
 
 const S = "ses_main"
 const OTHER = "ses_other"
 let wt: ReturnType<typeof tempWorktree>
 let client: FakeClient
+let fixtureSession: ReturnType<typeof admitFixtureSession>
 
 beforeEach(() => {
   wt = tempWorktree()
   client = fakeClient()
+  fixtureSession = admitFixtureSession(makeDeps(client, wt.worktree), S)
 })
-afterEach(() => wt.cleanup())
+afterEach(() => {
+  stopHeartbeat()
+  releaseFixtureSession(wt.worktree, fixtureSession)
+  wt.cleanup()
+})
 
 function putWorkflow(sessionID: string, patch: Record<string, unknown> = {}): Workflow {
-  const wf = { ...newWorkflow(sessionID, currentOwner(), "command", "an earlier request", "opencode"), ...patch }
+  const owner = sessionID === S ? currentOwner(Date.now(), fixtureSession.epoch) : currentOwner()
+  const wf = { ...newWorkflow(sessionID, owner, "command", "an earlier request", "opencode"), ...patch }
   return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf as Workflow))
 }
 
 async function sendText(text: string, sessionID = S, deps = makeDeps(client, wt.worktree)): Promise<string> {
-  const hook = createChatMessageHook(deps)
-  const part: any = { type: "text", text }
-  await hook({ sessionID, agent: "main" } as any, { message: {} as any, parts: [part] })
-  return part.text as string
+  const native = await createNativeToolFixture(deps, { sessionID })
+  const { parts } = await native.deliverUserTurn({ text })
+  const output = parts.find((part) => part.type === "text")
+  if (!output || output.type !== "text") throw new Error("native user turn did not return a text part")
+  return output.text
 }
 
 const KEYWORD_MESSAGES: Array<[string, string]> = [
@@ -105,21 +114,35 @@ describe("legacy plan keyword -> §5.3 keyword workflow (D3)", () => {
     expect(after.phase).toBe("planning")
   })
 
-  test("foreign session with a dead owner + keyword: T20 cancels the old workflow (owner_conflict event), then a fresh workflow starts for this session", async () => {
+  test("foreign session with a dead owner + keyword refuses without replacing or dispatching", async () => {
+    mkdirSync(sessionDir(wt.worktree, OTHER), { recursive: true })
     const old = putWorkflow(OTHER, { phase: "planning", owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 } })
-    await sendText("ralplan: add a login button", S)
+    const workflowBefore = readFileSync(workflowPath(wt.worktree))
+    const eventsBefore = (() => {
+      try {
+        return readFileSync(eventsPath(wt.worktree))
+      } catch {
+        return null
+      }
+    })()
+    const callsBefore = client.calls.length
 
-    const archived = JSON.parse(readFileSync(archivePath(wt.worktree, old.id), "utf8")) as Workflow
-    expect(archived.phase).toBe("cancelled")
+    const resultText = await sendText("ralplan: add a login button", S)
 
-    const oldEvents = readEvents(wt.worktree, old.id)
-    expect(oldEvents.some((e) => e.type === "owner_conflict" && e.actor === "code")).toBe(true)
-
-    const wf = readWorkflow(wt.worktree)!
-    expect(wf.id).not.toBe(old.id)
-    expect(wf.sessionID).toBe(S)
-    expect(wf.entry).toBe("keyword")
-    expect(wf.phase).toBe("planning")
+    expect(resultText).toContain(`session ${OTHER}`)
+    expect(resultText).toContain(`/resume ${OTHER}`)
+    expect(readFileSync(workflowPath(wt.worktree))).toEqual(workflowBefore)
+    const eventsAfter = (() => {
+      try {
+        return readFileSync(eventsPath(wt.worktree))
+      } catch {
+        return null
+      }
+    })()
+    expect(eventsAfter).toEqual(eventsBefore)
+    expect(readWorkflow(wt.worktree)?.id).toBe(old.id)
+    expect(readWorkflow(wt.worktree)?.phase).toBe("planning")
+    expect(client.calls.length).toBe(callsBefore)
   })
 
   test("foreign session with a live owner + keyword -> refusal text, no mutation", async () => {
@@ -135,7 +158,9 @@ describe("legacy plan keyword -> §5.3 keyword workflow (D3)", () => {
     })()
 
     const resultText = await sendText("ralplan: add a login button", S)
-    expect(resultText).toContain(`plan workflow ${old.id} is already active in session ${OTHER}`)
+    expect(resultText).toContain(`plan workflow ${old.id}`)
+    expect(resultText).toContain(`session ${OTHER}`)
+    expect(resultText).toContain(`/resume ${OTHER}`)
 
     expect(readFileSync(workflowPath(wt.worktree))).toEqual(wfBefore)
     const evAfter = (() => {
@@ -147,5 +172,6 @@ describe("legacy plan keyword -> §5.3 keyword workflow (D3)", () => {
     })()
     expect(evAfter).toEqual(evBefore)
     expect(readWorkflow(wt.worktree)!.id).toBe(old.id)
+    expect(client.calls.length).toBe(0)
   })
 })

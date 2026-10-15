@@ -2,6 +2,7 @@
 // user message inside an <lca-mode> marker block and never enter the system prompt (static-prefix contract).
 // The long-form procedure lives in .opencode/skills/<mode>/SKILL.md, read on demand.
 import type { LcaConfig, Mode } from "../config.ts"
+import type { Phase } from "../workflows/types.ts"
 
 export type ActiveMode = Exclude<Mode, "none">
 export type SuffixName = ActiveMode | "cancel"
@@ -47,7 +48,7 @@ export function hasModeSuffix(text: string): boolean {
 // ------------------------------------------------------------------------------------------------ plan workflow
 // One suffix per non-terminal §5.2 phase, appended instead of <lca-mode>/<lca-resume> while the session owns a
 // workflow (ralplan §5.6). Each ≤ 250 chars including an optional stuck-cause parenthetical.
-export type FlowPhase = "planning" | "reviewing" | "pending_approval" | "executing" | "stuck"
+export type FlowPhase = Exclude<Phase, "done" | "cancelled">
 
 export const FLOW_INSTRUCTIONS: Record<FlowPhase, string> = {
   planning:
@@ -56,6 +57,7 @@ export const FLOW_INSTRUCTIONS: Record<FlowPhase, string> = {
   pending_approval: "A plan workflow is awaiting user approval. Wait for /approve or /reject. Do not edit files.",
   executing: "A plan workflow is executing delegated tasks. If it stalled, call delegate with resume:true. Do not edit files directly.",
   stuck: "A plan workflow is stuck. Check /status; send a message to resume or /cancel to end it.",
+  paused: "A plan workflow is paused or pausing. Check /status; do not edit files or call delegate. The user resumes with /continue or ends it with /cancel.",
 }
 
 export const FLOW_MARKER_RE = /(?:\n\n)?<lca-flow phase="[a-z_]+">[\s\S]*?<\/lca-flow>/g

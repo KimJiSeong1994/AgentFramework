@@ -1,6 +1,12 @@
 import { spyOn } from "bun:test"
 import * as readline from "node:readline/promises"
 import { PassThrough } from "node:stream"
+import type { DecisionBinding } from "../src/hosts/operator.ts"
+
+/** Plan-subject binding for an operator receipt, bound to the workflow revision the operator inspected. */
+export function planBinding(sessionID: string, wf: { id: string; lastSeq: number }, planSha: string): DecisionBinding {
+  return { sessionID, workflowID: wf.id, expectedRevision: wf.lastSeq, subject: { kind: "plan", id: wf.id, sha256: planSha } }
+}
 
 let active = false
 

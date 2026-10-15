@@ -2,6 +2,7 @@ import {
   CLI_TOOL_NAMES,
   CliToolInputError,
   createCliTools,
+  formatCliReadResult,
   validateCliToolInput,
   type CliToolName,
   type CliToolOutput,
@@ -23,9 +24,14 @@ import type {
   ExecutionRequest,
   ExecutionRole,
 } from "./types.ts"
-import { EXECUTION_ROLES } from "./types.ts"
+import { EXECUTION_ROLES, isWorkflowReadOnlyRole } from "./types.ts"
 import type { ExecutionRunStore } from "./run-state.ts"
 import type { CliHostActivity } from "./cli-progress.ts"
+import { awaitSkillPermission, type SkillPermissionPermit } from "../skills/broker.ts"
+import {
+  assertSkillExecution, consumeSkillToolEffect, finishSkillInvocation, prepareSkillToolCall,
+  readSkillToolSnapshot, revalidateSkillToolEffect, skillExecutionSignal,
+} from "../skills/context.ts"
 
 const CONTROL_PROFILE = "estimated-input-reactive-output-v1" as const
 const MAIN_INPUT_LIMIT = 8192
@@ -113,19 +119,27 @@ function deterministicJson(text: string): boolean {
   return validate(root, 0)
 }
 
-function parseEnvelope(output: string): Envelope | undefined {
+function parseEnvelope(output: string, allowUnwrappedFinal = false): Envelope | undefined {
   if (typeof output !== "string" || Buffer.byteLength(output, "utf8") > MAX_NATIVE_RESPONSE_BYTES) return undefined
   let body = output.trim()
+  if (!body) return undefined
   if (body.startsWith("```")) {
     const match = /^```json[ \t]*\r?\n([\s\S]*?)\r?\n```$/i.exec(body)
     if (!match) return undefined
     body = match[1]!
   }
-  if (!deterministicJson(body)) return undefined
+  if (!deterministicJson(body)) {
+    return allowUnwrappedFinal && !body.startsWith("{") && !body.startsWith("[") ? { type: "final", text: body } : undefined
+  }
   let parsed: unknown
   try { parsed = JSON.parse(body) }
-  catch { return undefined }
-  if (!isRecord(parsed) || typeof parsed.type !== "string") return undefined
+  catch { return allowUnwrappedFinal ? { type: "final", text: body } : undefined }
+  if (!isRecord(parsed)) return allowUnwrappedFinal && Array.isArray(parsed) ? { type: "final", text: body } : undefined
+  if (typeof parsed.type !== "string") return allowUnwrappedFinal ? { type: "final", text: body } : undefined
+  if (allowUnwrappedFinal && (CLI_TOOL_NAMES as readonly string[]).includes(parsed.type) &&
+      exactKeys(parsed, ["type", "input"]) && isRecord(parsed.input)) {
+    return { type: "tool", name: parsed.type, input: parsed.input }
+  }
   if (parsed.type === "tool" && exactKeys(parsed, ["type", "name", "input"]) &&
       typeof parsed.name === "string" && isRecord(parsed.input)) {
     return { type: "tool", name: parsed.name, input: parsed.input }
@@ -133,6 +147,11 @@ function parseEnvelope(output: string): Envelope | undefined {
   if (parsed.type === "final" && exactKeys(parsed, ["type", "text"]) && typeof parsed.text === "string") {
     return { type: "final", text: parsed.text }
   }
+  // Ollama local models often obey the workflow's inner schema or return a plain worker report instead of the transport
+  // wrapper. Treat unwrapped output as final text and its exact known-tool shorthand as a normal policy-checked call;
+  // malformed or unknown tool shapes still fail closed.
+  if (allowUnwrappedFinal && parsed.type !== "tool" && parsed.type !== "final" &&
+      !(CLI_TOOL_NAMES as readonly string[]).includes(parsed.type) && !Object.hasOwn(parsed, "input")) return { type: "final", text: body }
   return undefined
 }
 
@@ -194,8 +213,9 @@ function fitHistory(base: string, value: readonly TranscriptExchange[], limit: n
   }
 }
 
-function roleInputLimit(role: ExecutionRole): number {
-  return role === "main" ? MAIN_INPUT_LIMIT : WORKER_INPUT_LIMIT
+/** Workflow read-only roles carry plan/spec context, so they use the main limit (B1); every legacy role keeps its limit. */
+export function roleInputLimit(role: ExecutionRole): number {
+  return role === "main" || isWorkflowReadOnlyRole(role) ? MAIN_INPUT_LIMIT : WORKER_INPUT_LIMIT
 }
 
 function buildBasePrompt(request: ExecutionRequest, available: readonly CliToolName[]): string {
@@ -429,6 +449,9 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
         handlers: Object.freeze({ ...rawRequest.handlers }),
       })
       assertFixedPolicy(request)
+      assertSkillExecution(request)
+      const toolWaitAbort = new AbortController()
+      const skillSignal = skillExecutionSignal(request, toolWaitAbort.signal)
       const initial = checkLease(request)
       const reference: ExecutionReference = Object.freeze({ executionID: request.executionID })
       let runPromise: Promise<ExecutionOutcome> | undefined
@@ -442,6 +465,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
       const outputLimit = Math.min(MAX_TOTAL_OUTPUT_BYTES, Math.max(0, request.policy.maxOutputTokens * 4))
       const fixedLease = Object.freeze(initial.lease)
       const cancelOwnedTurn = (reason: string): void => {
+        toolWaitAbort.abort()
         const owned = currentTransport
         if (!owned) return
         const now = Date.now()
@@ -487,12 +511,17 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             if (result.requested) {
               cancelled = true
               cancelReason = "execution cancelled"
+              toolWaitAbort.abort()
             }
             return result
           }
           cancelled = true
           cancelReason = "execution cancelled"
-          if (!runPromise) return { requested: true, acknowledged: true, terminal: true, quiescent: true, evidence: "cancellation prevented model dispatch" }
+          toolWaitAbort.abort()
+          if (!runPromise) {
+            finishSkillInvocation(request.skillContext)
+            return { requested: true, acknowledged: true, terminal: true, quiescent: true, evidence: "cancellation prevented model dispatch" }
+          }
           return { requested: true, acknowledged: true, terminal: false, quiescent: false, evidence: "no native turn is active; subsequent turns are prevented" }
         },
         async reconcile() {
@@ -532,6 +561,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               const lease = checkLease(request, fixedLease)
               if (lease.state !== "active") throw new Error("execution is no longer active")
               assertFixedPolicy(request)
+              assertSkillExecution(request)
             },
           })
           const basePrompt = buildBasePrompt(request, tools.available)
@@ -546,6 +576,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
             if (Date.now() >= request.deadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed before the next model turn" })
             assertFixedPolicy(request)
+            assertSkillExecution(request)
             const lease = checkLease(request, fixedLease)
             if (lease.state === "cancelled") return setFinal({ status: "cancelled", error: "execution cancellation requested" })
             const fitted = fitHistory(basePrompt, history, inputLimit, nativeInstructionTokens)
@@ -700,47 +731,145 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             if (finalTextDecision.cancel) return setFinal({ status: "cancelled", error: "execution cancelled by LCA policy" })
             const afterInference = checkLease(request, fixedLease)
             if (afterInference.state === "cancelled") return setFinal({ status: "cancelled", error: "execution cancellation requested" })
-            const envelope = parseEnvelope(native.text)
+            const envelope = parseEnvelope(native.text, options.engine === "local")
             if (!envelope) return setFinal({ status: "failed", error: "malformed CLI response; no fallback execution was attempted" })
             if (envelope.type === "final") return setFinal({ status: "completed", text: envelope.text })
             if (!CLI_TOOL_NAMES.includes(envelope.name as CliToolName)) return setFinal({ status: "failed", error: "unknown LCA tool refused; no fallback execution was attempted" })
-            if (toolCalls >= MAX_TOOL_ROUNDS) return setFinal({ status: "failed", error: "LCA tool round limit reached" })
             const name = envelope.name as CliToolName
+            const callID = `${request.executionID}:tool:${toolCalls + 1}`
+            const activity = {
+              role: request.role,
+              execution: activityExecution,
+              taskID: request.taskID,
+              executionID: request.executionID,
+              callID,
+              tool: name,
+            }
+            observeActivity({ kind: "tool-started" as const, ...activity })
+            let terminalActivitySent = false
+            const finishTool = (outcome: "succeeded" | "failed" | "denied", ok: boolean): void => {
+              if (terminalActivitySent) return
+              terminalActivitySent = true
+              observeActivity({ kind: "tool-finished" as const, ...activity, outcome, ok })
+            }
+            if (toolCalls >= MAX_TOOL_ROUNDS) {
+              finishTool("denied", false)
+              return setFinal({ status: "failed", error: "LCA tool round limit reached" })
+            }
             try { validateCliToolInput(name, envelope.input) }
             catch (error) {
+              finishTool("failed", false)
               if (error instanceof CliToolInputError) return setFinal({ status: "failed", error: "malformed LCA tool input refused" })
               return setFinal({ status: "failed", error: "malformed LCA tool input refused" })
             }
+            if (cancelled) {
+              finishTool("failed", false)
+              return setFinal({ status: "cancelled", error: cancelReason })
+            }
+            let beforeLease: LeaseCheck
+            try { beforeLease = checkLease(request, fixedLease) }
+            catch (error) {
+              finishTool("failed", false)
+              throw error
+            }
+            if (beforeLease.state === "cancelled") {
+              finishTool("failed", false)
+              return setFinal({ status: "cancelled", error: "execution cancellation requested" })
+            }
+            const event = { type: "tool-before" as const, sessionID: callSession, callID, toolID: `lca:${name}`, name, input: envelope.input }
             if (!request.policy.tools.allowed.includes(name) || request.policy.tools.denied.includes(name) ||
                 ((request.role === "main" || request.role === "reviewer") && (name === "write" || name === "edit"))) {
+              finishTool("denied", false)
               return setFinal({ status: "failed", error: "LCA tool denied by role policy before effects" })
             }
-            if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-            const beforeLease = checkLease(request, fixedLease)
-            if (beforeLease.state === "cancelled") return setFinal({ status: "cancelled", error: "execution cancellation requested" })
-            const callID = `${request.executionID}:tool:${toolCalls + 1}`
-            const event = { type: "tool-before" as const, sessionID: callSession, callID, toolID: `lca:${name}`, name, input: envelope.input }
             let decision: ReturnType<ExecutionPolicyHandlers["beforeTool"]>
-            try { decision = request.handlers.beforeTool(event) }
-            catch { return setFinal({ status: "failed", error: "LCA pre-execution tool policy failed closed" }) }
-            if (!decision.allow) return setFinal({ status: "failed", error: "LCA pre-execution tool policy denied the tool" })
-            const canonicalAssistant = JSON.stringify({ type: "tool", name, input: envelope.input })
-            const prospective = fitHistory(basePrompt, [...history, { assistant: canonicalAssistant, ok: true, result: "" }], inputLimit, nativeInstructionTokens)
-            if (!prospective) return setFinal({ status: "failed", error: "tool call would exceed the estimated input budget; no effect was performed" })
-            history.splice(0, history.length, ...prospective)
-            if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-            const beforeEffect = checkLease(request, fixedLease)
-            if (beforeEffect.state === "cancelled") return setFinal({ status: "cancelled", error: "execution cancellation requested" })
-            assertFixedPolicy(request)
-
-            let output: CliToolOutput
-            observeActivity({ kind: "tool-started", role: request.role, execution: activityExecution, tool: name })
-            try { output = tools.execute(name, envelope.input) }
+            try {
+              if (request.skillContext !== undefined) {
+                await prepareSkillToolCall(request, event, skillSignal, () => tools.validate(name, envelope.input))
+              }
+              decision = request.handlers.beforeTool(event)
+            }
             catch {
-              observeActivity({ kind: "tool-finished", role: request.role, execution: activityExecution, tool: name, ok: false })
+              finishTool("failed", false)
+              if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+              return setFinal({ status: "failed", error: "LCA pre-execution tool policy failed closed" })
+            }
+            let permit: SkillPermissionPermit | undefined
+            if (request.skillContext !== undefined && !decision.allow && decision.holdTicket) {
+              permit = await awaitSkillPermission(decision.holdTicket, { signal: skillSignal })
+              if (cancelled) {
+                finishTool("denied", false)
+                return setFinal({ status: "cancelled", error: cancelReason })
+              }
+            }
+            let allowed: boolean
+            try { allowed = decision.allow || permit !== undefined }
+            catch {
+              finishTool("failed", false)
+              return setFinal({ status: "failed", error: "LCA pre-execution tool policy failed closed" })
+            }
+            if (!allowed) {
+              finishTool("denied", false)
+              return setFinal({ status: "failed", error: "LCA pre-execution tool policy denied the tool" })
+            }
+            try {
+              if (request.skillContext !== undefined) await revalidateSkillToolEffect(request, event, skillSignal)
+            }
+            catch {
+              finishTool("denied", false)
+              if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+              return setFinal({ status: "failed", error: "LCA skill context changed before tool effects" })
+            }
+            const canonicalAssistant = JSON.stringify({ type: "tool", name, input: envelope.input })
+            let prospective: TranscriptExchange[] | undefined
+            try { prospective = fitHistory(basePrompt, [...history, { assistant: canonicalAssistant, ok: true, result: "" }], inputLimit, nativeInstructionTokens) }
+            catch (error) {
+              finishTool("failed", false)
+              throw error
+            }
+            if (!prospective) {
+              finishTool("failed", false)
+              return setFinal({ status: "failed", error: "tool call would exceed the estimated input budget; no effect was performed" })
+            }
+            history.splice(0, history.length, ...prospective)
+            if (cancelled) {
+              finishTool("failed", false)
+              return setFinal({ status: "cancelled", error: cancelReason })
+            }
+            let beforeEffect: LeaseCheck
+            try { beforeEffect = checkLease(request, fixedLease) }
+            catch (error) {
+              finishTool("failed", false)
+              throw error
+            }
+            if (beforeEffect.state === "cancelled") {
+              finishTool("failed", false)
+              return setFinal({ status: "cancelled", error: "execution cancellation requested" })
+            }
+            try { assertFixedPolicy(request) }
+            catch (error) {
+              finishTool("failed", false)
+              throw error
+            }
+
+            let snapshot: Uint8Array | undefined
+            try {
+              consumeSkillToolEffect(request, event, permit)
+              snapshot = readSkillToolSnapshot(request, event)
+            }
+            catch {
+              finishTool("denied", false)
+              if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+              return setFinal({ status: "failed", error: "LCA skill permission was not current at effect admission" })
+            }
+            let output: CliToolOutput
+            try { output = snapshot === undefined ? tools.execute(name, envelope.input) : formatCliReadResult(snapshot, envelope.input) }
+            catch {
+              finishTool("failed", false)
               return setFinal({ status: "failed", error: "LCA tool input or implementation failed closed" })
             }
-            observeActivity({ kind: "tool-finished", role: request.role, execution: activityExecution, tool: name, ok: output.ok })
+            // This reports the tool effect itself; later result-policy failures are separate execution failures.
+            finishTool(output.ok ? "succeeded" : "failed", output.ok)
             const resultEvent = {
               type: "tool-result" as const,
               sessionID: callSession,
@@ -766,6 +895,8 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
           if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
           return setFinal({ status: "failed", error: error instanceof Error && error.message === "current execution lease changed"
             ? "current execution lease changed; execution stopped" : "CLI host execution failed closed" })
+        } finally {
+          finishSkillInvocation(request.skillContext)
         }
       }
 

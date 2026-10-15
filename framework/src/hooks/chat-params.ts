@@ -9,7 +9,8 @@ import type { Model } from "@opencode-ai/sdk"
 import type { HookDeps } from "./types.ts"
 import { assertModelSelectionMatches, effectiveOutputLimit } from "../config.ts"
 import { getOpenCodeRuntime, policyForOpenCodeSession } from "../hosts/opencode-runtime.ts"
-import { EXECUTION_ROLES, type ExecutionRole } from "../hosts/types.ts"
+import { EXECUTION_ROLES, isWorkflowReadOnlyRole, type ExecutionRole } from "../hosts/types.ts"
+import { getOwnedSession } from "../sessions/store.ts"
 
 function isRole(agent: string): agent is ExecutionRole {
   return (EXECUTION_ROLES as readonly string[]).includes(agent)
@@ -35,10 +36,17 @@ export function createChatParamsHook(deps: HookDeps): NonNullable<Hooks["chat.pa
   const policy = getOpenCodeRuntime(deps).policy
   return async (input, output) => {
     const agent = input.agent
-    if (!isRole(agent)) return // not an lca agent: leave OpenCode defaults alone
-
     policyForOpenCodeSession(deps, input.sessionID)
     const bound = policy.snapshotForSession(input.sessionID)
+    if (!isRole(agent)) {
+      if (bound || getOwnedSession(deps.worktree, input.sessionID)) {
+        throw new Error("lca: unknown role cannot dispatch in an owned session")
+      }
+      return
+    }
+    if (isWorkflowReadOnlyRole(agent) && !bound) {
+      throw new Error("lca: workflow roles require a code-owned execution binding")
+    }
     const snapshot = bound ?? policy.resolve(agent)
     if (snapshot.role !== agent) throw new Error(`Session ${input.sessionID} has a ${snapshot.role} policy but OpenCode selected ${agent}`)
     const providerID = input.provider?.info?.id ?? input.model.providerID

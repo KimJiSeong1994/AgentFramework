@@ -6,7 +6,7 @@ import { RepetitionDetector } from "../guards/repetition.ts"
 import { trimToolOutput } from "../guards/trim.ts"
 import { appendHint, recoveryHint } from "../guards/recover.ts"
 import { readModeState, writeModeState } from "../state/store.ts"
-import type { ExecutionPolicy, ExecutionPolicyHandlers, ExecutionPolicySnapshot, ExecutionRequest, ExecutionRole } from "./types.ts"
+import { EXECUTION_ROLES, EXECUTION_TOOL_NAMES, isWorkflowReadOnlyRole, type ExecutionPolicy, type ExecutionPolicyHandlers, type ExecutionPolicySnapshot, type ExecutionRequest, type ExecutionRole } from "./types.ts"
 
 export const PATH_TOOLS: ReadonlySet<string> = new Set(["glob", "grep", "list", "read", "bash"])
 
@@ -20,7 +20,7 @@ export function relativizePaths(text: string, roots: string[]): string {
 export const ERROR_OUTPUT = /^\s*(Error\b|error:|✗|Failed\b)/
 export function isErrorOutput(output: string): boolean { return ERROR_OUTPUT.test(output ?? "") }
 
-const KNOWN_TOOLS = ["read", "glob", "grep", "list", "bash", "write", "edit", "patch", "apply_patch", "multiedit", "webfetch", "skill", "todowrite", "todoread", "delegate", "lca_flow", "db_query", "schema_lookup", "task"]
+const KNOWN_TOOLS: readonly string[] = EXECUTION_TOOL_NAMES
 const REVIEW_TOOLS = ["read", "glob", "grep", "list"]
 const PLANNING_MAIN_TOOLS: readonly string[] = Object.freeze(["read", "list", "glob", "grep"])
 const PLANNING_MAIN_PROMPT = "You are the planning role of the common LCA terminal. Discuss the request, inspect files with read-only tools, and create a concrete plan when asked. Never modify files, run commands, execute or approve plans, or delegate work. Do not imply work was executed."
@@ -28,6 +28,13 @@ const SYSTEM: Record<ExecutionRole, string> = {
   main: "", worker: WORKER_PROMPT, reviewer: REVIEWER_PROMPT,
   "data-analyst": DATA_ANALYST_PROMPT, "data-verifier": DATA_VERIFIER_PROMPT,
   "ontology-evolver": AGENT_DEFS["ontology-evolver"].prompt!, "answer-judge": AGENT_DEFS["answer-judge"].prompt!,
+  interviewer: "You are LCA's interviewer. Clarify requirements, constraints, ambiguities, and acceptance criteria. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
+  planner: "You are LCA's planner. Produce a concrete, dependency-aware plan with verifiable acceptance criteria. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
+  architect: "You are LCA's architect. Assess architecture, invariants, integration risks, and maintainability against evidence. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
+  critic: "You are LCA's critic. Evaluate the supplied proposal against its requirements and identify concrete blockers or a justified verdict. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
+  researcher: "You are LCA's researcher. Gather evidence and distinguish observations, hypotheses, and limitations. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
+  contrarian: "You are LCA's contrarian. Challenge assumptions and develop evidence-backed counterarguments and failure cases. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
+  simplifier: "You are LCA's simplifier. Identify the smallest complete solution and remove unnecessary proposed complexity without weakening requirements. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
 }
 
 export type ExecutionPolicyOptions = {
@@ -53,17 +60,19 @@ export function createExecutionPolicy(config: Readonly<LcaConfig>, options: Exec
   const snapshots = new Map<ExecutionRole, ExecutionPolicySnapshot>()
   const sessions = new Map<string, ExecutionPolicyHandlers>()
   const sessionSnapshots = new Map<string, ExecutionPolicySnapshot>()
-  for (const role of Object.keys(SYSTEM) as ExecutionRole[]) {
-    const agent = AGENT_DEFS[role]
-    const denied = new Set(agent.denied_tools)
+  for (const role of EXECUTION_ROLES) {
+    const workflowReadOnly = isWorkflowReadOnlyRole(role)
+    const agent = isWorkflowReadOnlyRole(role) ? undefined : AGENT_DEFS[role]
+    const denied = new Set(agent?.denied_tools ?? [])
     const planningMain = role === "main" && planningOnlyMain
-    if (planningMain) {
+    if (planningMain || workflowReadOnly) {
       for (const tool of KNOWN_TOOLS) if (!PLANNING_MAIN_TOOLS.includes(tool)) denied.add(tool)
     }
-    const allowed = planningMain
+    const allowed = planningMain || workflowReadOnly
       ? [...PLANNING_MAIN_TOOLS]
       : role === "reviewer" ? REVIEW_TOOLS : KNOWN_TOOLS.filter((tool) => !denied.has(tool))
-    const model = config.models[role] ? parseModelSelection(config.models[role]!) : undefined
+    const modelSpec = workflowReadOnly ? config.models.main ?? config.models.worker : config.models[role]
+    const model = modelSpec ? parseModelSelection(modelSpec) : undefined
     const system = role !== "main"
       ? SYSTEM[role]
       : planningMain
@@ -71,7 +80,7 @@ export function createExecutionPolicy(config: Readonly<LcaConfig>, options: Exec
         : mainPrompt(!config.disabled_hooks.includes("tool.delegate"), config.data.backend !== "none" && !config.disabled_hooks.includes("tool.data"), config.flow.enabled && !config.disabled_hooks.includes("flow"))
     const resolved: Omit<ExecutionPolicySnapshot, "id"> = {
       role, ...(model ? { model: Object.freeze(model) } : {}),
-      maxOutputTokens: config.max_output[role] ?? config.max_output.worker,
+      maxOutputTokens: isWorkflowReadOnlyRole(role) ? config.max_output.worker : config.max_output[role] ?? config.max_output.worker,
       tools: Object.freeze({ allowed: Object.freeze([...allowed]), denied: Object.freeze([...new Set([...denied, ...(role === "reviewer" ? KNOWN_TOOLS.filter((t) => !REVIEW_TOOLS.includes(t)) : [])])]) }),
       system: Object.freeze([system]),
       ...(nativeContext ? { nativeContext } : {}),
@@ -105,7 +114,7 @@ export function createExecutionPolicy(config: Readonly<LcaConfig>, options: Exec
           while (callInputs.size > 1000) callInputs.delete(callInputs.keys().next().value!)
           if (request.role === "reviewer" && !REVIEW_TOOLS.includes(event.name)) return { allow: false, reason: `lca: reviewer tool ${event.name} is not read-only` }
           if (planningOnlyMain && request.role === "main" && !policy.tools.allowed.includes(event.name)) return { allow: false, reason: `lca: tool ${event.name} is not allowed for planning-only main` }
-          if ((request.role === "worker" || request.role === "reviewer") && !policy.tools.allowed.includes(event.name)) return { allow: false, reason: `lca: tool ${event.name} is not allowed for ${request.role}` }
+          if (!policy.tools.allowed.includes(event.name) || policy.tools.denied.includes(event.name)) return { allow: false, reason: `lca: tool ${event.name} is not allowed for ${request.role}` }
           if (!config.disabled_hooks.includes("guard.repeat")) {
             const check = repeat.check(event.sessionID, event.name, event.input, event.callID)
             if (check.blocked) return { allow: false, reason: repeatBlockMessage(event.name, check.count, check.lastError) }

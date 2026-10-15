@@ -1,24 +1,33 @@
 #!/usr/bin/env bun
 import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs"
-import { resolve } from "node:path"
+import { isAbsolute, relative, resolve, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import { loadConfig } from "../config.ts"
 import { renderStatusDetail, renderStatusSnapshot, StatusReadError, statusJson } from "../flow/status.ts"
-import { readWorkflow } from "../flow/state.ts"
+import { readWorkflow, workflowEngineRefusal, type Workflow } from "../flow/state.ts"
+import type { WorkflowEnvelope } from "../workflows/types.ts"
 import type { HookDeps } from "../hooks/types.ts"
 import { getOpenCodeRuntime } from "./opencode-runtime.ts"
 import { createForegroundController } from "./controller.ts"
-import { humanDecision } from "./operator.ts"
+import { incompleteArtifactSummary } from "../workflows/artifacts.ts"
+import { humanDecision, type DecisionBinding } from "./operator.ts"
 import { createCliRuntime } from "./cli-runtime.ts"
 import type { CliEngine } from "./cli-transport.ts"
 import { AdmissionRefusal, assertHostAdmission } from "./required-controls.ts"
-import { LinuxAdmissionRefused, type FlowRuntime } from "./types.ts"
+import { LinuxAdmissionRefused, type ExecutionRuntime, type FlowRuntime } from "./types.ts"
 import { InteractiveLaunchError, launchInteractive, parseInteractiveArgs } from "./interactive.ts"
 import { createStatusWatchState, watchTick } from "./status-watch.ts"
+import { admissionEpoch, admissionFence, attachAdmission, detachAdmission, effectiveHold, isAdmissionCurrent, resumeAdmission } from "../sessions/admission.ts"
+import type { SessionStore } from "../sessions/store.ts"
+import { getOwnedSession, readSessionMetadata } from "../sessions/store.ts"
+import { assertSDKSessionQuiescent, readSDKResumeIdentity } from "../sessions/sdk-quiescence.ts"
+import { captureSDKSessionLifetime } from "../sessions/sdk-transcript.ts"
+import { assertNever, isCancelPending, stopDisplay } from "../workflows/types.ts"
 
-const COMMANDS = new Set(["status", "import", "approve", "reject", "run", "resume", "cancel"])
-const COMMON_RECOVERY_COMMANDS = new Set(["approve", "reject", "resume", "cancel"])
+const COMMANDS = new Set(["status", "import", "approve", "reject", "run", "resume", "pause", "cancel"])
+const COMMON_RECOVERY_COMMANDS = new Set(["approve", "reject", "resume", "pause", "cancel", "run"])
+const HOST_POLICY_MISMATCH = "host policy identity evidence is absent or mismatched; recovery refused"
 type CliArgs = { command: string; worktree: string; server?: string; session?: string; plan?: string; workflow?: string; sha?: string; engine: "opencode" | CliEngine; model?: string; json: boolean; detail: boolean; watch: boolean; interval: number }
 
 export class CliUsageError extends Error {
@@ -43,6 +52,18 @@ not OpenCode. The model picker lists bounded native choices when available; expl
 also accepted. In chat, /model shows the current selection and picker, /model <engine> <native-id>
 switches directly, and /help lists local commands. A switch requires no active workflow, valid
 workflow state and settled execution ownership, and starts a new conversation context. Plans require a separate local human approval.
+LCA workflows (chat only; each start is a submitted /skill: command, and invoking a name is not consent to execute):
+  /skill:deep-interview <request>   code-owned interview: topology, panels, closure, restatement, verified spec.md (available)
+  /skill:ralplan <request>          consensus planning: planner, architect, critic, same-plan-hash join (available)
+  /skill:ultragoal <objective>      goal ledger execution: every unit needs APPROVE-UNIT before queue work
+  /skill:autoresearch <mission>     local research mission: every experiment needs RUN before verifier commands
+  /finish                           early-exit request for an interview (round 3+, above threshold; closure still runs)
+A verified interview spec connects to ralplan in the same live session; consensus never executes anything on its own
+("execution pending"). Workflow choices are inline lists. Fake-model tests are not live-model proof.
+Supported terminals default to a full-screen transcript, status line and composer (minimum 80x24).
+LCA_TUI=0 forces readline; unsupported terminals fall back with a notice. NO_COLOR disables styling.
+Enter sends, enhanced Shift+Enter/Ctrl+J inserts a newline, Escape cancels, and a second Ctrl+C
+strictly within 500ms requests shutdown. Busy turns can be queued with macOS Alt+Q / Linux Alt+Enter.
 
 Commands:
   status   --worktree PATH [--session ID] [--json] [--detail] [--watch [--interval 1..60]]
@@ -50,13 +71,16 @@ Commands:
   approve  --worktree PATH --server URL --workflow ID --sha SHA
   reject   --worktree PATH --server URL --workflow ID --sha SHA
   run      --worktree PATH --server URL (--plan PATH | --session ID)
-  resume   --worktree PATH --server URL --session ID
+  resume   --worktree PATH --server URL --session ID   (a paused workflow asks Keep/Resume on a terminal)
+  pause    --worktree PATH --server URL --session ID   (request; "pausing — termination unconfirmed" until proof)
   cancel   --worktree PATH --server URL --session ID
 
-Common-engine workflow recovery (no server; exact original engine, model and session required):
+Common-engine workflow commands (no server; exact original engine, model and session required):
+  run      --worktree PATH --engine local|codex|claude --model ID --session ID [--plan PATH]
   approve  --worktree PATH --engine local|codex|claude --model ID --session ID --workflow ID --sha SHA
   reject   --worktree PATH --engine local|codex|claude --model ID --session ID --workflow ID --sha SHA
   resume   --worktree PATH --engine local|codex|claude --model ID --session ID
+  pause    --worktree PATH --engine local|codex|claude --model ID --session ID
   cancel   --worktree PATH --engine local|codex|claude --model ID --session ID
 
 Status reads local workflow state without an engine or server. OpenCode mutations still require the local service.
@@ -139,9 +163,9 @@ export function parseCliArgs(argv: string[]): CliArgs {
   if (commonRecovery) {
     if (fields["--server"]) throw new CliUsageError("common-engine recovery does not accept --server")
     if (!fields["--model"]) throw new CliUsageError("common-engine recovery requires --model")
-    if (!fields["--session"]) throw new CliUsageError("common-engine recovery requires --session")
+    if (!fields["--session"]) throw new CliUsageError("common-engine workflow command requires --model and --session")
   } else if (fields["--model"]) {
-    throw usageError("--model is only available for common-engine recovery commands")
+    throw usageError("--model is only available for common-engine workflow commands")
   }
   if (command !== "status" && !commonRecovery && !fields["--server"]) {
     throw new CliUsageError("--server must name an already-running local OpenCode service")
@@ -152,7 +176,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
   if ((command === "approve" || command === "reject") && (!fields["--workflow"] || !fields["--sha"])) {
     throw new CliUsageError("approve and reject require --workflow and --sha")
   }
-  if (!commonRecovery && command === "cancel" && !fields["--session"]) throw new CliUsageError("cancel requires --session")
+  if (!commonRecovery && (command === "cancel" || command === "pause") && !fields["--session"]) throw new CliUsageError(`${command} requires --session`)
   if (!commonRecovery && command === "resume" && !fields["--session"]) throw new CliUsageError("resume requires --session")
   if (command === "run" && !fields["--session"] && !fields["--plan"]) {
     throw new CliUsageError("run requires --plan or --session")
@@ -279,6 +303,231 @@ async function runStatusWatch(args: CliArgs, runtime: FlowRuntime): Promise<void
   })
 }
 
+async function withCliSession<T>(
+  runtime: ExecutionRuntime,
+  args: CliArgs,
+  sessionID: string,
+  action: (store: SessionStore) => Promise<T>,
+): Promise<T> {
+  const store = attachAdmission(runtime, sessionID, {
+    engine: runtime.host.identity.engine,
+    ...(args.model ? { model: args.model } : {}),
+  })
+  let actionFailed = false
+  try { return await action(store) }
+  catch (error) {
+    actionFailed = true
+    throw error
+  }
+  finally {
+    const detached = await detachAdmission(runtime, sessionID, store.epoch, "cli_command_exit")
+    if (!detached && !actionFailed) throw new Error("CLI session attachment remains held because release quiescence was not proven")
+  }
+}
+
+async function resumeCliSession(runtime: ExecutionRuntime, sessionID: string, store: SessionStore, revision?: number, client?: OpencodeClient): Promise<SessionStore> {
+  if (effectiveHold(runtime.worktree, sessionID)) {
+    let vendorCreatedAt: number | undefined
+    if (runtime.host.identity.engine === "opencode") {
+      if (!client) throw new Error("OpenCode native quiescence proof is required")
+      const fence = admissionFence(runtime.worktree, sessionID)
+      const revalidate = () => {
+        store.assertOwner()
+        if (getOwnedSession(runtime.worktree, sessionID) !== store || admissionFence(runtime.worktree, sessionID) !== fence) {
+          throw new Error("session authority changed during explicit Resume")
+        }
+      }
+      const context = { client, sessionID, directory: runtime.directory, worktree: runtime.worktree, revalidate }
+      const vendor = await readSDKResumeIdentity(context)
+      await assertSDKSessionQuiescent(context, vendor)
+      vendorCreatedAt = vendor.createdAt
+    }
+    if (vendorCreatedAt !== undefined && !captureSDKSessionLifetime(runtime.worktree, sessionID, store.epoch, vendorCreatedAt)) {
+      throw new Error("OpenCode session lifetime could not be retained; admission remains held")
+    }
+    return resumeAdmission(runtime, sessionID, revision)
+  }
+  const epoch = admissionEpoch(runtime.worktree, sessionID)
+  if (epoch !== store.epoch || !isAdmissionCurrent(runtime.worktree, sessionID, epoch)) {
+    throw new Error("session attachment is held; explicit owner Resume is required")
+  }
+  if (revision !== undefined) {
+    const current = readWorkflow(runtime.worktree)
+    if (!current || current.sessionID !== sessionID || current.lastSeq !== revision) {
+      throw new Error("workflow revision changed; explicit resume refused")
+    }
+  }
+  return store
+}
+
+function confirmationWorkflow(
+  controller: ReturnType<typeof createForegroundController>,
+  runtime: ExecutionRuntime,
+  sessionID: string,
+  expectedID?: string,
+  expectedSha?: string,
+): Workflow | null {
+  const persisted = readWorkflow(runtime.worktree)
+  if (!persisted || persisted.sessionID !== sessionID) {
+    if (expectedID !== undefined) throw new Error("no workflow owned by this session")
+    return null
+  }
+  if (expectedID !== undefined && persisted.id !== expectedID) throw new Error("decision workflow ID or plan hash does not match")
+  const confirmed = controller.assertRecoveryIdentity(sessionID, persisted.id, expectedSha, false, true)
+  if (confirmed.lastSeq !== persisted.lastSeq || confirmed.id !== persisted.id || confirmed.sessionID !== sessionID) {
+    throw new Error("workflow revision changed; explicit owner confirmation refused")
+  }
+  return confirmed
+}
+
+/** Explicit human Keep/Resume for a settled pause. Needs a real terminal; anything but RESUME keeps the hold. */
+async function pausedResumeText(controller: ReturnType<typeof createForegroundController>, sessionID: string): Promise<string> {
+  const outcome = await controller.resumePaused(sessionID, async (view) => {
+    if (!process.stdin.isTTY || !process.stderr.isTTY) throw new Error("resuming a paused workflow requires an interactive terminal")
+    console.error(`lca: paused from ${view.pausedFrom.phase}/${view.pausedFrom.stage}; residual ${view.residual.join(", ") || "none"}; done ${view.done.join(", ") || "none"}${view.worktreeChanged ? "; worktree changed since the pause" : ""}; attempt ${view.attempt}`)
+    const { createInterface } = await import("node:readline/promises")
+    const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: false })
+    try { return (await rl.question("Type RESUME to resume the residual work; anything else keeps the hold: ")).trim() === "RESUME" }
+    finally { rl.close() }
+  })
+  return outcome.kept
+    ? `workflow ${outcome.workflow.id} ${outcome.workflow.phase}; kept held, no work started`
+    : `workflow ${outcome.workflow.id} ${outcome.workflow.phase}; resumed (attempt ${outcome.view.attempt})`
+}
+
+/** CLI approve/reject syntax maps the canonical plan hash to the plan subject, bound to the revision the operator inspected. */
+function planBinding(sessionID: string, wf: Pick<Workflow, "id" | "lastSeq">, planSha: string): DecisionBinding {
+  return { sessionID, workflowID: wf.id, expectedRevision: wf.lastSeq, subject: { kind: "plan", id: wf.id, sha256: planSha } }
+}
+
+function validateCliOwnerIdentity(runtime: ExecutionRuntime, sessionID: string, model: string): void {
+  const workflow = readWorkflow(runtime.worktree)
+  if (!workflow || workflow.sessionID !== sessionID) throw new Error("no workflow owned by this session")
+  const refusal = workflowEngineRefusal(workflow, runtime.host.identity.engine)
+  if (refusal) throw new Error(refusal)
+  const metadata = readSessionMetadata(runtime.worktree, sessionID)
+  if (metadata && metadata.engine !== runtime.host.identity.engine) throw new Error("host engine identity mismatch; recovery refused")
+  if (metadata && metadata.model !== model) throw new Error(HOST_POLICY_MISMATCH)
+}
+
+function readCliPlan(root: string, path: string): unknown {
+  const source = realpathSync(resolve(root, path))
+  const rel = relative(root, source)
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error("plan source must be inside the canonical worktree")
+  }
+  return JSON.parse(readFileSync(source, "utf8")) as unknown
+}
+
+function completedRunText(result: Awaited<ReturnType<ReturnType<typeof createForegroundController>["run"]>>, worktree: string): string {
+  const incomplete = incompleteArtifactSummary(worktree, result.workflow)
+  return `workflow ${result.workflow.id} ${result.workflow.phase}; done ${result.run.done}, failed ${result.run.failed}, cancelled ${result.run.cancelled}${result.run.skipped ? `; ${result.run.skipped}` : ""}${incomplete ? `; ${incomplete}` : ""}`
+}
+
+/** Stop result text. `paused` only for a settled pause; a pending stop says termination is unconfirmed. */
+function stopText(wf: WorkflowEnvelope): string {
+  const display = stopDisplay(wf)
+  switch (display) {
+    case "pausing": return `workflow ${wf.id} ${wf.phase}; pause requested; termination unconfirmed`
+    case "paused": return `workflow ${wf.id} paused (from ${wf.pausedFrom?.phase ?? wf.phase})`
+    case "cancelling": return `workflow ${wf.id} ${wf.phase}; cancellation requested; execution retirement pending; termination unconfirmed`
+    case "none": return `workflow ${wf.id} ${wf.phase}`
+    default: return assertNever(display, "stop display")
+  }
+}
+
+async function runCommonCommand(args: CliArgs, runtime: ExecutionRuntime): Promise<string> {
+  const sessionID = args.session!
+  const controller = createForegroundController(runtime)
+
+  // Cancellation is deliberately a safety request, not an attachment or takeover operation.
+  if (args.command === "pause") {
+    const result = controller.pause(sessionID)
+    if (!result.ok) throw new Error(result.text)
+    return stopText(result.wf)
+  }
+  if (args.command === "cancel") {
+    const result = controller.cancel(sessionID)
+    if (!result.ok) throw new Error(result.text)
+    return stopText(result.wf)
+  }
+
+  if (args.command !== "run" || !args.plan) validateCliOwnerIdentity(runtime, sessionID, args.model!)
+  else if (readWorkflow(runtime.worktree)?.sessionID === sessionID) {
+    throw new Error("an existing workflow must be explicitly resumed or approved before a new plan is submitted")
+  }
+
+  return withCliSession(runtime, args, sessionID, async store => {
+    if (args.command === "approve" || args.command === "reject") {
+      const workflowID = args.workflow!
+      const planSha = args.sha!
+      const before = confirmationWorkflow(controller, runtime, sessionID, workflowID, planSha)
+      if (!before || before.phase !== "pending_approval") throw new Error("no plan awaiting approval")
+      const decision = await humanDecision(args.command, planBinding(sessionID, before, planSha))
+      if (runtime.linuxAdmission) runtime.linuxAdmission.assertBootEpoch()
+      const after = confirmationWorkflow(controller, runtime, sessionID, workflowID, planSha)
+      if (!after || after.lastSeq !== before.lastSeq) throw new Error("workflow revision changed during operator decision")
+      await resumeCliSession(runtime, sessionID, store, after.lastSeq)
+      const result = controller.decide(decision, sessionID)
+      if (!result.ok) throw new Error(result.text)
+      return `workflow ${result.wf.id} ${result.wf.phase}`
+    }
+
+    if (args.command === "run" && args.plan) {
+      if (!process.stdin.isTTY || !process.stderr.isTTY) {
+        throw new Error("local human approval or rejection requires an interactive terminal")
+      }
+      const parsed = readCliPlan(runtime.worktree, args.plan)
+      controller.validateImportedPlan(parsed, sessionID)
+      const preflight = await runtime.host.preflight(runtime.host.identity.profile)
+      assertHostAdmission(preflight)
+      if (runtime.linuxAdmission) runtime.linuxAdmission.assertBootEpoch()
+      await resumeCliSession(runtime, sessionID, store)
+      const submitted = await controller.importPlan(sessionID, args.plan, undefined, parsed)
+      if (!submitted.result.ok || submitted.result.wf.phase !== "pending_approval") {
+        throw new Error("plan did not reach pending operator approval")
+      }
+      console.error(`lca: inspect ${submitted.result.wf.planRef?.mdPath ?? "saved canonical plan"}; workflow ${submitted.result.wf.id}; sha ${submitted.planSha}`)
+      const decision = await humanDecision("choose", planBinding(sessionID, submitted.result.wf, submitted.planSha))
+      if (runtime.linuxAdmission) runtime.linuxAdmission.assertBootEpoch()
+      const current = confirmationWorkflow(controller, runtime, sessionID, submitted.result.wf.id, submitted.planSha)
+      if (!current || current.lastSeq !== submitted.result.wf.lastSeq) {
+        throw new Error("workflow revision changed during operator decision")
+      }
+      const decided = controller.decide(decision, sessionID)
+      if (!decided.ok) throw new Error(decided.text)
+      if (decision.action === "reject") return `workflow ${decided.wf.id} ${decided.wf.phase}; rejected by local operator`
+      const result = await controller.run(sessionID)
+      return completedRunText(result, runtime.worktree)
+    }
+
+    const before = confirmationWorkflow(controller, runtime, sessionID)
+    if (before && isCancelPending(before)) throw new Error("workflow cancellation is pending")
+    if (before?.phase === "paused" && args.command === "resume") return pausedResumeText(controller, sessionID)
+    if (!before || before.phase !== "executing") throw new Error("no approved workflow to run")
+    const admitted = await resumeCliSession(runtime, sessionID, store, before.lastSeq)
+    if (admitted.epoch !== store.epoch) throw new Error("session attachment epoch changed")
+
+    const abort = new AbortController()
+    const stop = () => abort.abort()
+    process.on("SIGINT", stop)
+    process.on("SIGTERM", stop)
+    try {
+      const result = args.command === "resume"
+        ? await controller.resume(sessionID, abort.signal)
+        : await controller.run(sessionID, abort.signal)
+      if (args.command === "resume" && (result.workflow.phase !== "done" || result.run.failed > 0 || result.run.cancelled > 0 ||
+        result.run.aborted || result.run.refused || result.run.skipped || result.run.noSnapshot)) {
+        throw new Error("common-engine resume incomplete; inspect read-only status")
+      }
+      return completedRunText(result, runtime.worktree)
+    } finally {
+      process.off("SIGINT", stop)
+      process.off("SIGTERM", stop)
+    }
+  })
+}
+
 /** Status is engine-free; OpenCode uses its local service, while common recovery uses the selected CLI runtime. */
 export async function runCli(
   args: CliArgs,
@@ -297,45 +546,16 @@ export async function runCli(
     return args.detail ? `${text}\n${renderStatusDetail(status)}` : text
   }
   if (args.engine !== "opencode" && COMMON_RECOVERY_COMMANDS.has(args.command)) {
-    if (args.server !== undefined) throw new CliUsageError("common-engine recovery does not accept --server")
-    if (!args.model || !args.session) throw new CliUsageError("common-engine recovery requires explicit --model and --session")
+    if (args.server !== undefined) throw new CliUsageError("common-engine workflow commands do not accept --server")
+    if (!args.model || !args.session) throw new CliUsageError("common-engine workflow command requires explicit --model and --session")
     if ((args.command === "approve" || args.command === "reject") &&
       (!args.workflow || !args.sha)) throw new CliUsageError("approve and reject require --workflow and --sha")
-    if ((args.command === "approve" || args.command === "reject") &&
+    if (((args.command === "approve" || args.command === "reject") || (args.command === "run" && args.plan)) &&
       (!process.stdin.isTTY || !process.stderr.isTTY)) {
       throw new Error("local human approval or rejection requires an interactive terminal")
     }
     const runtime = cliRuntimeFactory({ worktree: root, engine: args.engine, model: args.model })
-    const controller = createForegroundController(runtime)
-    if (args.command === "approve" || args.command === "reject") {
-      const workflowID = args.workflow!
-      const planSha = args.sha!
-      controller.assertRecoveryIdentity(args.session, workflowID, planSha)
-      const decision = await humanDecision(args.command, workflowID, planSha)
-      const result = controller.decide(decision, args.session)
-      if (!result.ok) throw new Error(result.text)
-      return `workflow ${result.wf.id} ${result.wf.phase}`
-    }
-    if (args.command === "cancel") {
-      const result = controller.cancel(args.session)
-      if (!result.ok) throw new Error(result.text)
-      return `workflow ${result.wf.id} ${result.wf.phase}${result.wf.pendingCancel ? "; cancellation requested; execution retirement pending" : ""}`
-    }
-    const abort = new AbortController()
-    const stop = () => abort.abort()
-    process.on("SIGINT", stop)
-    process.on("SIGTERM", stop)
-    try {
-      const result = await controller.resume(args.session, abort.signal)
-      if (result.workflow.phase !== "done" || result.run.failed > 0 || result.run.cancelled > 0 ||
-        result.run.aborted || result.run.refused || result.run.skipped || result.run.noSnapshot) {
-        throw new Error("common-engine resume incomplete; inspect read-only status")
-      }
-      return `workflow ${result.workflow.id} ${result.workflow.phase}; done ${result.run.done}, failed ${result.run.failed}, cancelled ${result.run.cancelled}${result.run.skipped ? `; ${result.run.skipped}` : ""}`
-    } finally {
-      process.off("SIGINT", stop)
-      process.off("SIGTERM", stop)
-    }
+    return runCommonCommand(args, runtime)
   }
   const server = localServer(args.server!)
   if (args.engine !== "opencode") throw new Error("native coding profile is not admitted for this engine")
@@ -352,32 +572,59 @@ export async function runCli(
   const runtime = getOpenCodeRuntime(deps)
   runtime.linuxAdmission?.assertBootEpoch()
   const controller = createForegroundController(runtime)
+  if (args.command === "pause") {
+    const result = controller.pause(args.session!)
+    if (!result.ok) throw new Error(result.text)
+    return stopText(result.wf)
+  }
+  if (args.command === "cancel") {
+    const result = controller.cancel(args.session!)
+    if (!result.ok) throw new Error(result.text)
+    return stopText(result.wf)
+  }
   if (args.command === "import") {
     const session = await client.session.get({ path: { id: args.session! }, query: { directory: root } })
     if (session.error || !session.data || realpathSync(session.data.directory) !== root) throw new Error("parent session is absent from the source worktree")
-    const result = await controller.importPlan(args.session!, args.plan!)
-    if (!result.result.ok) throw new Error(result.result.text)
-    return `workflow ${result.result.wf.id} ${result.result.wf.phase}; plan_sha ${result.planSha}; inspect ${result.result.wf.planRef?.mdPath ?? "saved plan"}`
-  }
-  if (args.command === "approve" || args.command === "reject") {
-    const decision = await humanDecision(args.command, args.workflow!, args.sha!)
-    const result = controller.decide(decision)
-    if (!result.ok) throw new Error(result.text)
-    return `workflow ${result.wf.id} ${result.wf.phase}`
-  }
-  const abort = new AbortController()
-  const stop = () => abort.abort()
-  process.on("SIGINT", stop)
-  process.on("SIGTERM", stop)
-  try {
-  if (args.command === "run" && args.plan) {
-    const source = realpathSync(resolve(root, args.plan))
-    if (!source.startsWith(`${root}/`)) throw new Error("plan source must be inside the canonical worktree")
-    const parsed = JSON.parse(readFileSync(source, "utf8")) as unknown
+    const parsed = readCliPlan(root, args.plan!)
     controller.validateImportedPlan(parsed, args.session)
     const preflight = await runtime.host.preflight(runtime.host.identity.profile)
     assertHostAdmission(preflight)
-    if (abort.signal.aborted) throw new Error("run cancelled before parent session creation")
+    return withCliSession(runtime, args, args.session!, async store => {
+      const existing = readWorkflow(root)
+      if (store.metadata.held && existing?.sessionID === args.session!) {
+        const confirmed = confirmationWorkflow(controller, runtime, args.session!, existing.id)
+        await resumeCliSession(runtime, args.session!, store, confirmed?.lastSeq, client)
+      } else if (store.metadata.held) {
+        await resumeCliSession(runtime, args.session!, store, undefined, client)
+      }
+      const result = await controller.importPlan(args.session!, args.plan!, undefined, parsed)
+      if (!result.result.ok) throw new Error(result.result.text)
+      return `workflow ${result.result.wf.id} ${result.result.wf.phase}; plan_sha ${result.planSha}; inspect ${result.result.wf.planRef?.mdPath ?? "saved plan"}`
+    })
+  }
+  if (args.command === "approve" || args.command === "reject") {
+    const sessionID = args.session ?? readWorkflow(root)?.sessionID
+    if (!sessionID) throw new Error("no workflow session for operator decision")
+    return withCliSession(runtime, args, sessionID, async store => {
+      const workflowID = args.workflow!
+      const planSha = args.sha!
+      const before = confirmationWorkflow(controller, runtime, sessionID, workflowID, planSha)
+      if (!before || before.phase !== "pending_approval") throw new Error("no plan awaiting approval")
+      const decision = await humanDecision(args.command as "approve" | "reject", planBinding(sessionID, before, planSha))
+      runtime.linuxAdmission?.assertBootEpoch()
+      const after = confirmationWorkflow(controller, runtime, sessionID, workflowID, planSha)
+      if (!after || after.lastSeq !== before.lastSeq) throw new Error("workflow revision changed during operator decision")
+      await resumeCliSession(runtime, sessionID, store, after.lastSeq, client)
+      const result = controller.decide(decision, sessionID)
+      if (!result.ok) throw new Error(result.text)
+      return `workflow ${result.wf.id} ${result.wf.phase}`
+    })
+  }
+  if (args.command === "run" && args.plan) {
+    const parsed = readCliPlan(root, args.plan)
+    controller.validateImportedPlan(parsed, args.session)
+    const preflight = await runtime.host.preflight(runtime.host.identity.profile)
+    assertHostAdmission(preflight)
     const existing = readWorkflow(root)
     let sessionID = args.session ?? (existing?.phase === "planning" ? existing.sessionID : undefined)
     if (!sessionID) {
@@ -385,31 +632,61 @@ export async function runCli(
       if (created.error || !created.data?.id) throw new Error("could not create an inert parent session")
       sessionID = created.data.id
     }
-    const submitted = await controller.importPlan(sessionID, args.plan, abort.signal, parsed)
-    if (abort.signal.aborted) throw new Error("run cancelled before operator decision")
-    if (!submitted.result.ok || submitted.result.wf.phase !== "pending_approval") {
-      throw new Error("plan did not reach pending operator approval")
+    return withCliSession(runtime, args, sessionID, async store => {
+      if (store.metadata.held && existing?.sessionID === sessionID) {
+        const confirmed = confirmationWorkflow(controller, runtime, sessionID, existing.id)
+        await resumeCliSession(runtime, sessionID, store, confirmed?.lastSeq, client)
+      } else if (store.metadata.held) {
+        if (existing?.sessionID === sessionID) throw new Error("restored workflow requires its explicit owner command")
+        await resumeCliSession(runtime, sessionID, store, undefined, client)
+      }
+      const abort = new AbortController()
+      const stop = () => abort.abort()
+      process.on("SIGINT", stop)
+      process.on("SIGTERM", stop)
+      try {
+        const submitted = await controller.importPlan(sessionID, args.plan!, abort.signal, parsed)
+        if (abort.signal.aborted) throw new Error("run cancelled before operator decision")
+        if (!submitted.result.ok || submitted.result.wf.phase !== "pending_approval") {
+          throw new Error("plan did not reach pending operator approval")
+        }
+        console.error(`lca: inspect ${submitted.result.wf.planRef?.mdPath ?? "saved canonical plan"}; workflow ${submitted.result.wf.id}; sha ${submitted.planSha}`)
+        const decision = await humanDecision("choose", planBinding(sessionID, submitted.result.wf, submitted.planSha))
+        runtime.linuxAdmission?.assertBootEpoch()
+        const current = confirmationWorkflow(controller, runtime, sessionID, submitted.result.wf.id, submitted.planSha)
+        if (!current || current.lastSeq !== submitted.result.wf.lastSeq) throw new Error("workflow revision changed during operator decision")
+        const decided = controller.decide(decision, sessionID)
+        if (!decided.ok) throw new Error(decided.text)
+        if (decision.action === "reject") return `workflow ${decided.wf.id} ${decided.wf.phase}; rejected by local operator`
+        return completedRunText(await controller.run(sessionID, abort.signal), root)
+      } finally {
+        process.off("SIGINT", stop)
+        process.off("SIGTERM", stop)
+      }
+    })
+  }
+
+  const sessionID = args.session
+  if (!sessionID) throw new CliUsageError(`${args.command} requires --session`)
+  return withCliSession(runtime, args, sessionID, async store => {
+    const before = confirmationWorkflow(controller, runtime, sessionID)
+    if (before && isCancelPending(before)) throw new Error("workflow cancellation is pending")
+    if (before?.phase === "paused" && args.command === "resume") return pausedResumeText(controller, sessionID)
+    if (!before || before.phase !== "executing") throw new Error("no approved workflow to run")
+    await resumeCliSession(runtime, sessionID, store, before.lastSeq, client)
+    const abort = new AbortController()
+    const stop = () => abort.abort()
+    process.on("SIGINT", stop)
+    process.on("SIGTERM", stop)
+    try {
+      return completedRunText(args.command === "resume"
+        ? await controller.resume(sessionID, abort.signal)
+        : await controller.run(sessionID, abort.signal), root)
+    } finally {
+      process.off("SIGINT", stop)
+      process.off("SIGTERM", stop)
     }
-    console.error(`lca: inspect ${submitted.result.wf.planRef?.mdPath ?? "saved canonical plan"}; workflow ${submitted.result.wf.id}; sha ${submitted.planSha}`)
-    const choice = await humanDecision("choose", submitted.result.wf.id, submitted.planSha)
-    const decided = controller.decide(choice)
-    if (!decided.ok) throw new Error(decided.text)
-    if (choice.action === "reject") return `workflow ${decided.wf.id} ${decided.wf.phase}; rejected by local operator`
-    args = { ...args, session: sessionID }
-  }
-  const sessionID = args.command === "resume" ? args.session : args.session ?? readWorkflow(root)?.sessionID
-  if (!sessionID) throw new Error("no workflow session to resume")
-  if (args.command === "cancel") {
-    const result = controller.cancel(sessionID)
-    if (!result.ok) throw new Error(result.text)
-    return `workflow ${result.wf.id} ${result.wf.phase}${result.wf.pendingCancel ? "; cancellation requested; execution retirement pending" : ""}`
-  }
-    const result = args.command === "resume" ? await controller.resume(sessionID, abort.signal) : await controller.run(sessionID, abort.signal)
-    return `workflow ${result.workflow.id} ${result.workflow.phase}; done ${result.run.done}, failed ${result.run.failed}, cancelled ${result.run.cancelled}${result.run.skipped ? `; ${result.run.skipped}` : ""}`
-  } finally {
-    process.off("SIGINT", stop)
-    process.off("SIGTERM", stop)
-  }
+  })
 }
 
 function failCli(error: unknown, command?: string): void {

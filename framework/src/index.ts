@@ -13,16 +13,23 @@ import { createChatMessageHook } from "./hooks/chat-message.ts"
 import { createToolBeforeHook } from "./hooks/tool-before.ts"
 import { createToolAfterHook } from "./hooks/tool-after.ts"
 import { createEventHook } from "./hooks/event.ts"
+import { admissionEpoch, effectiveHold, isAdmissionCurrent } from "./sessions/admission.ts"
+export { admissionEpoch, isAdmissionCurrent }
 import { createCompactingHook } from "./hooks/compacting.ts"
 import { APPROVE_COMMAND, APPROVE_TEMPLATE, createCommandHook } from "./hooks/command.ts"
 import { createDelegateTool } from "./tools/delegate.ts"
 import { createDbQueryTool } from "./tools/db-query.ts"
 import { createSchemaLookupTool } from "./tools/schema-lookup.ts"
 import { createLcaFlowTool } from "./tools/lca-flow.ts"
+import { createSkillTool } from "./tools/skill.ts"
 import { flowOn } from "./flow/status.ts"
 import { repairOnLoad } from "./flow/runtime.ts"
 import { getQueue } from "./orchestration/queue.ts"
 import { getOpenCodeRuntime } from "./hosts/opencode-runtime.ts"
+import {
+  assertOpenCodeSystemHeaders, assertOpenCodeSystemMessages, assertOpenCodeSystemParams,
+  createOpenCodeSystemTransformHook,
+} from "./hosts/opencode-system.ts"
 import { initializeSkillObservation } from "./telemetry/skill-observer.ts"
 import { activeWorkflow, workflowEngineRefusal } from "./flow/state.ts"
 
@@ -78,6 +85,11 @@ export const LcaPlugin: Plugin = async (input) => {
     const workflow = activeWorkflow(deps.worktree)
     const refusal = workflow && workflowEngineRefusal(workflow, runtime.host.identity.engine)
     if (refusal) log("repairOnLoad skipped: workflow engine identity refused", { reason: refusal })
+    else if (workflow && effectiveHold(deps.worktree, workflow.sessionID)) {
+      // Held: only stop-event safety settlement of a recorded intent; never ordinary repair.
+      log("repairOnLoad: session admission is held; stop safety settlement only", { sessionID: workflow.sessionID })
+      repairOnLoad(runtime, runtime.host.identity.engine, (sessionID) => getQueue(runtime).isRunning(sessionID))
+    }
     else repairOnLoad(runtime, runtime.host.identity.engine, (sessionID) => getQueue(runtime).isRunning(sessionID))
   } catch (e) {
     log("repairOnLoad failed", { error: (e as Error).message })
@@ -94,14 +106,24 @@ export const LcaPlugin: Plugin = async (input) => {
       }
     } : configHook
   }
-  if (enabled(config, "chat.params")) hooks["chat.params"] = createChatParamsHook(deps)
-  // Observation-only registration must not activate legacy mode/session handling.
-  if (enabled(config, "mode.detect") || flowOn(config) || config.skill_observation?.enabled === true) hooks["chat.message"] = createChatMessageHook(deps)
+  const paramsHook = enabled(config, "chat.params") ? createChatParamsHook(deps) : undefined
+  hooks["chat.params"] = async (input, output) => {
+    assertOpenCodeSystemParams(deps, input)
+    await paramsHook?.(input, output)
+    assertOpenCodeSystemParams(deps, input)
+  }
+  hooks["chat.headers"] = async input => { assertOpenCodeSystemHeaders(deps, input) }
+  hooks["experimental.chat.system.transform"] = createOpenCodeSystemTransformHook(deps)
+  hooks["experimental.chat.messages.transform"] = async (_input, output) => {
+    assertOpenCodeSystemMessages(deps, output.messages)
+  }
+  // Session admission and durable history are core; optional mode behavior remains gated inside the hook.
+  hooks["chat.message"] = createChatMessageHook(deps)
   hooks["tool.execute.before"] = createToolBeforeHook(deps)
   hooks["tool.execute.after"] = createToolAfterHook(deps)
   hooks.event = createEventHook(deps)
   if (enabled(config, "compaction.checkpoint")) hooks["experimental.session.compacting"] = createCompactingHook(deps)
-  hooks.tool = {}
+  hooks.tool = { skill: createSkillTool(deps) }
   if (enabled(config, "tool.delegate")) hooks.tool.delegate = createDelegateTool(deps)
   if (config.data.backend !== "none" && enabled(config, "tool.data")) {
     hooks.tool.db_query = createDbQueryTool(deps)
@@ -113,9 +135,7 @@ export const LcaPlugin: Plugin = async (input) => {
   const stopOn = enabled(config, "command.stop")
   const statusOn = flowOn(config) && enabled(config, "command.status")
   const flowCmdsOn = flowOn(config)
-  if (stopOn || statusOn || flowCmdsOn || enabled(config, "mode.detect")) {
-    hooks["command.execute.before"] = createCommandHook(deps, { stop: stopOn, status: statusOn, flow: flowCmdsOn })
-  }
+  hooks["command.execute.before"] = createCommandHook(deps, { stop: stopOn, status: statusOn, flow: flowCmdsOn })
   return hooks
 }
 

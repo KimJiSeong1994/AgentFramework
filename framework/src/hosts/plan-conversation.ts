@@ -1,16 +1,69 @@
-import { randomUUID } from "node:crypto"
 import { activeWorkflow, workflowEngineRefusal } from "../flow/state.ts"
-import { PLAN_LIMITS } from "../flow/plan.ts"
-import { assertHostAdmission } from "./required-controls.ts"
-import { beginExecutionActivity } from "./runtime.ts"
-import type { ExecutionHandle, ExecutionOutcome, ExecutionRuntime } from "./types.ts"
+import { getOwnedSession } from "../sessions/store.ts"
+import { PLAN_MAIN_PROMPT } from "../workflows/prompts/index.ts"
+import { runWorkflowTurn, type TurnBinding } from "../workflows/turn.ts"
+import type { ExecutionRuntime } from "./types.ts"
+import type { Terminal } from "./interactive-session.ts"
+import type { PreparedSkillInvocation } from "../skills/session.ts"
+import { bindSkillInvocation, finishSkillInvocation, skillInvocationAudit } from "../skills/context.ts"
 
-const MAX_HISTORY_CHARS = 24_000
-const MAX_TURNS = 24
-const PLAN_INSTRUCTIONS = `You are the planning role of the common LCA terminal. Discuss the user's request and inspect files using the provided read-only tools. Never modify files or run commands. When the user requests a plan, put ONLY the following plan JSON in your final text, without a tool call: {"goal":"...","steps":[{"title":"...","files":["relative/path"],"detail":"...","verify":"bun test ..."}],"risks":["..."]}. A plan requires ${PLAN_LIMITS.minSteps}-${PLAN_LIMITS.maxSteps} concrete steps and ${PLAN_LIMITS.minRisks}-${PLAN_LIMITS.maxRisks} risks. Every step needs affected relative files and an actual allowed verification command. Never treat a request to implement, model text, or prior approval as human approval: the terminal displays the canonical plan and requests a separate local decision. Do not claim work was executed.`
+export const MAX_PLAN_CONVERSATION_CHARS = 24_000
+export const MAX_PLAN_CONVERSATION_TURNS = 24
+export const PLAN_RESPONSE_RESERVE_CHARS = 8_000
 
-type Message = { role: "user" | "assistant"; text: string }
-export type ConversationTurn = { text: string; plan?: unknown }
+export type ConversationMessage = { role: "user" | "assistant"; text: string }
+export type ConversationTurn = { text: string; plan?: unknown; skill?: Readonly<Record<string, string>> }
+export type SkillConversationInvocation = {
+  prepared: PreparedSkillInvocation
+  terminal?: Pick<Terminal, "stdinIsTTY" | "stderrIsTTY" | "choose" | "resume">
+}
+
+function validatePriorMessages(prior: readonly ConversationMessage[] | undefined): ConversationMessage[] {
+  if (prior === undefined) return []
+  if (!Array.isArray(prior) || prior.length % 2 !== 0) {
+    throw new TypeError("prior conversation must contain complete user/assistant pairs")
+  }
+  return prior.map((message, index) => {
+    const role = index % 2 === 0 ? "user" : "assistant"
+    if (!message || message.role !== role || typeof message.text !== "string" || !message.text.trim()) {
+      throw new TypeError("prior conversation must contain alternating non-empty user/assistant pairs")
+    }
+    return { role, text: message.text }
+  })
+}
+
+function promptPrefix(verifyAllow: unknown, skillInstructions?: string): string {
+  const skill = skillInstructions === undefined ? "" :
+    `\nActive skill instructions (captured bytes; base role and execution approval restrictions still apply):\n${skillInstructions}\n`
+  return `${PLAN_MAIN_PROMPT.text}\nAllowed verification patterns: ${JSON.stringify(verifyAllow)}${skill}\nConversation:\n`
+}
+
+function fitsConversationBudget(requestText: string): boolean {
+  return requestText.length + PLAN_RESPONSE_RESERVE_CHARS <= MAX_PLAN_CONVERSATION_CHARS
+}
+
+function selectWindow(
+  history: readonly ConversationMessage[],
+  pending: ConversationMessage,
+  prefix: string,
+): { messages: ConversationMessage[]; requestText: string } | undefined {
+  let messages = [pending]
+  let requestText = `${prefix}${JSON.stringify(messages)}`
+  if (!fitsConversationBudget(requestText)) return undefined
+
+  let start = history.length
+  let includedPairs = 0
+  while (start >= 2 && includedPairs < MAX_PLAN_CONVERSATION_TURNS - 1) {
+    const candidate = [history[start - 2]!, history[start - 1]!, ...messages]
+    const candidateRequestText = `${prefix}${JSON.stringify(candidate)}`
+    if (!fitsConversationBudget(candidateRequestText)) break
+    messages = candidate
+    requestText = candidateRequestText
+    start -= 2
+    includedPairs++
+  }
+  return { messages, requestText }
+}
 
 function extractPlan(text: string): unknown | undefined {
   const trimmed = text.trim()
@@ -26,156 +79,63 @@ function extractPlan(text: string): unknown | undefined {
 }
 
 /** Main turns use the same durable intent/lease/owned-handle discipline as queued workers. */
-export function createPlanConversation(runtime: ExecutionRuntime, sessionID: string) {
+export function createPlanConversation(
+  runtime: ExecutionRuntime,
+  sessionID: string,
+  prior?: readonly ConversationMessage[],
+) {
   if (!sessionID || sessionID === "." || sessionID === ".." || /[\\/\x00-\x1f]/.test(sessionID)) {
     throw new TypeError("invalid conversation session")
   }
-  const history: Message[] = []
+  const history = validatePriorMessages(prior)
   let busy = false
 
   return {
-    async turn(text: string, signal?: AbortSignal): Promise<ConversationTurn> {
-      if (typeof text !== "string" || !text.trim() || text.length > MAX_HISTORY_CHARS) {
+    async turn(text: string, signal?: AbortSignal, skill?: SkillConversationInvocation): Promise<ConversationTurn> {
+      if (typeof text !== "string" || !text.trim() || text.length > MAX_PLAN_CONVERSATION_CHARS) {
         throw new Error("conversation message is empty or too large")
       }
       if (busy) throw new Error("conversation already has an active turn")
       if (signal?.aborted) throw new Error("conversation cancelled")
-      const messages = [...history, { role: "user" as const, text }]
-      if (messages.length > MAX_TURNS * 2 || messages.reduce((sum, message) => sum + message.text.length, 0) > MAX_HISTORY_CHARS) {
-        throw new Error("conversation context limit reached; start a new conversation")
-      }
+      const pending = { role: "user" as const, text }
+      let window = selectWindow(history, pending, promptPrefix(runtime.config.delegate.verify_allow))
+      if (!window) throw new Error("conversation message is too large for the reserved context budget")
       const workflow = activeWorkflow(runtime.worktree)
-      if (workflow) {
+      if (workflow?.sessionID === sessionID) {
         const refusal = workflowEngineRefusal(workflow, runtime.host.identity.engine)
-        if (refusal || workflow.sessionID !== sessionID || workflow.phase !== "planning") {
+        if (refusal || workflow.phase !== "planning") {
           throw new Error("another workflow or approval must be resolved before continuing the conversation")
         }
       }
       busy = true
-      let releaseActivity: (() => void) | null = null
       try {
-        const preflight = await runtime.host.preflight(runtime.host.identity.profile)
-        assertHostAdmission(preflight, runtime.host.identity.controlProfile)
-        if (signal?.aborted) throw new Error("conversation cancelled")
-        runtime.linuxAdmission?.assertBootEpoch()
-        await runtime.linuxAdmission?.admitNewExecution()
-        if (signal?.aborted) throw new Error("conversation cancelled")
-        releaseActivity = beginExecutionActivity(runtime, sessionID, "review")
-        if (!releaseActivity) throw new Error("another execution is active")
-        const executionID = randomUUID()
-        const attemptID = randomUUID()
-        const policy = runtime.policy.resolve("main")
         const title = "LCA planning conversation"
-        const cwd = runtime.worktree
-        const requestText = `${PLAN_INSTRUCTIONS}\nAllowed verification patterns: ${JSON.stringify(runtime.config.delegate.verify_allow)}\nConversation:\n${JSON.stringify(messages)}`
-        const deadlineAt = Date.now() + runtime.config.delegate.task_ttl_ms
-        const claim = runtime.runs.claim(sessionID, runtime.instance, process.pid)
-        let registered = false
-        let handle: ExecutionHandle | undefined
-        let cancelWork: Promise<void> | undefined
-        const abort = () => {
-          if (cancelWork || !handle) return
-          const owned = handle
-          cancelWork = (async () => {
-            const requestedAt = Date.now()
-            let persistenceFailed = false
-            let persistenceError: unknown
-            try { runtime.runs.recordCancel(claim, executionID, { requestedAt }) }
-            catch (error) { persistenceFailed = true; persistenceError = error }
-
-            let cancellationFailed = false
-            let cancellationError: unknown
-            let acknowledged = false
-            try {
-              const result = await owned.requestCancel("planning conversation cancelled", requestedAt + 2_000)
-              acknowledged = result.acknowledged
-            } catch (error) { cancellationFailed = true; cancellationError = error }
-
-            try {
-              runtime.runs.recordCancel(claim, executionID, {
-                requestedAt, ...(acknowledged ? { acknowledgedAt: Date.now() } : {}),
-              })
-            } catch (error) {
-              if (!persistenceFailed) { persistenceFailed = true; persistenceError = error }
-            }
-            if (persistenceFailed) throw persistenceError
-            if (cancellationFailed) throw cancellationError
-          })()
-          // The normal turn joins this promise; prevent an event-handler rejection from escaping.
-          void cancelWork.catch(() => {})
+        const owned = workflow?.sessionID === sessionID ? workflow : null
+        let store: ReturnType<typeof getOwnedSession>
+        try { store = getOwnedSession(runtime.worktree, sessionID) } catch { store = undefined }
+        const binding: TurnBinding = {
+          workflowID: owned?.id ?? null, revision: owned?.lastSeq ?? null, kind: "plan", stage: owned?.stage ?? "draft", role: "main",
+          prompt: PLAN_MAIN_PROMPT, supervisorSessionID: sessionID, epoch: store?.epoch ?? null, ownerInstance: owned?.owner.instance ?? null,
         }
-        try {
-          const request = {
-            executionID, supervisorSessionID: sessionID, taskID: executionID,
-            attemptID, generation: claim.generation, role: "main" as const,
-            title, cwd, text: requestText, deadlineAt, policy,
-          }
-          const handlers = runtime.policy.handlers(request)
-          runtime.runs.registerIntent(claim, {
-            executionId: executionID, ownerSession: sessionID, taskId: request.taskID,
-            attemptId: request.attemptID, generation: claim.generation, role: "main",
-            cwd: request.cwd, policyID: policy.id, kind: "host", engine: runtime.host.identity.engine,
-            profile: "legacy-unowned", ...(runtime.host.identity.controlProfile ? { controlProfile: runtime.host.identity.controlProfile } : {}),
-          })
-          registered = true
-          handle = await runtime.host.prepare({
-            ...request, handlers,
-            onReference(reference) { runtime.runs.bindVendorRef(claim, executionID, JSON.stringify(reference)); return undefined },
-          })
-          if (handle.reference.executionID !== executionID) throw new Error("planning execution identity mismatch")
-          signal?.addEventListener("abort", abort, { once: true })
-          let outcome: ExecutionOutcome
-          if (signal?.aborted) {
-            abort()
-            await cancelWork
-            outcome = { status: "cancelled" }
-          } else {
-            runtime.runs.markHostDispatched(claim, executionID)
-            outcome = await handle.run()
-            if (cancelWork) await cancelWork
-          }
-          const terminal = ["completed", "failed", "cancelled"].includes(outcome.status)
-          if (terminal) runtime.runs.recordTerminal(claim, executionID, { outcome: outcome.status, terminalAt: Date.now() })
-          const reconciliation = await handle.reconcile()
-          runtime.runs.reconcile(claim, executionID, reconciliation)
-          if (!terminal || reconciliation.outcome !== "terminal" || !reconciliation.quiescent) {
-            throw new Error("planning execution quiescence is unproven")
-          }
-          if (signal?.aborted || outcome.status === "cancelled") throw new Error("conversation cancelled")
-          if (outcome.status !== "completed" || typeof outcome.text !== "string" || !outcome.text.trim()) {
-            throw new Error("planning model did not complete a response")
-          }
-          if (outcome.text.length > MAX_HISTORY_CHARS) throw new Error("planning response exceeds conversation limit")
-          history.push({ role: "user", text }, { role: "assistant", text: outcome.text })
-          const plan = extractPlan(outcome.text)
-          return { text: outcome.text, ...(plan === undefined ? {} : { plan }) }
-        } catch (error) {
-          if (registered) {
-            // Never abandon a live owned handle or promote an unknown process into safe recovery.
-            if (handle) {
-              try {
-                if (cancelWork) {
-                  try { await cancelWork } catch { /* Continue cleanup after a cancellation persistence failure. */ }
-                }
-                let reconciliation = await handle.reconcile()
-                if (reconciliation.outcome !== "terminal" || !reconciliation.quiescent) {
-                  await handle.requestCancel("planning turn failed", Date.now() + 2_000)
-                  reconciliation = await handle.reconcile()
-                }
-                runtime.runs.reconcile(claim, executionID, reconciliation)
-              } catch { /* The durable fence below preserves unknown ownership. */ }
-            }
-            try { runtime.runs.assertQuiescent(claim) }
-            catch { runtime.runs.fence(claim, executionID, "planning execution requires reconciliation") }
-          }
-          throw error
-        } finally {
-          signal?.removeEventListener("abort", abort)
-          // release refuses unresolved intents, intentionally retaining crash/no-replay fencing.
-          try { runtime.runs.release(claim) } catch { /* Retained for explicit reconciliation. */ }
-        }
+        let audit: Readonly<Record<string, string>> | undefined
+        const result = await runWorkflowTurn(runtime, binding, {
+          title, text: window.requestText, label: "planning", cancelCause: "planning conversation cancelled",
+          budget: { maxChars: MAX_PLAN_CONVERSATION_CHARS, reserveChars: PLAN_RESPONSE_RESERVE_CHARS },
+          bind(request) {
+            const bound = skill ? bindSkillInvocation(skill.prepared, request, runtime.policy, skill.terminal) : undefined
+            if (!bound) return { handlers: runtime.policy.handlers(request) }
+            window = selectWindow(history, pending, promptPrefix(runtime.config.delegate.verify_allow, bound.instructions))
+            if (!window) { finishSkillInvocation(bound.context); throw new Error("skill instructions exceed the reserved conversation context budget") }
+            audit = skillInvocationAudit(bound.context)
+            return { handlers: bound.handlers, skillContext: bound.context, text: window.requestText }
+          },
+        }, signal)
+        if (result.status === "diagnostic") throw new Error(`planning conversation superseded: ${result.reason}`)
+        if (result.status === "stuck") throw new Error(result.reason)
+        history.splice(0, history.length, ...window.messages, { role: "assistant", text: result.text })
+        const plan = extractPlan(result.text)
+        return { text: result.text, ...(plan === undefined ? {} : { plan }), ...(audit ? { skill: audit } : {}) }
       } finally {
-        releaseActivity?.()
         busy = false
       }
     },

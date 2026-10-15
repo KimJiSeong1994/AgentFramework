@@ -10,6 +10,7 @@ import { stateRoot } from "../state/store.ts"
 import { createExecutionRunStore, type ExecutionRunStore } from "./run-state.ts"
 import { createExecutionPolicy, type ExecutionPolicyOptions } from "./tool-policy.ts"
 import { inspectLinuxVerifierProfile, linuxBootEpochMatches } from "./linux-domain.ts"
+import { firstSkillPermissionActivity } from "../skills/activity.ts"
 import {
   LinuxAdmissionRefused,
   type ExecutionHost,
@@ -119,13 +120,68 @@ export function createExecutionRuntime(
   }
 }
 
-type Activity = { token: symbol; sessionID: string; kind: "queue" | "review" }
+export type ActivityKind = "queue" | "review" | "stage" | "experiment"
+type Activity = { token: symbol; sessionID: string; kind: ActivityKind; workflowID?: string; abort?: (cause: string) => void }
 const active = new Map<string, Activity>()
+/** Synchronous stage reservations taken before `reviewing` is committed and released when the review begins or is refused. */
+const reservations = new Map<string, Map<symbol, string>>()
+
+function canonical(worktree: string): string | undefined {
+  try { return realpathSync.native(worktree) } catch { return undefined }
+}
+
+/** Read-only local activity evidence; missing filesystem identity is not quiescence. */
+export function executionActivity(worktree: string): { sessionID: string; kind: Activity["kind"] | "permission" } | null {
+  const key = realpathSync.native(worktree)
+  const entry = active.get(key)
+  if (entry) return { sessionID: entry.sessionID, kind: entry.kind }
+  const permission = firstSkillPermissionActivity(key)
+  return permission ? { sessionID: permission.sessionID, kind: "permission" } : null
+}
+
+/** True while a registry activity or a stage reservation exists for this session. Unresolvable worktrees fail closed. */
+export function sessionActivityBlocker(worktree: string, sessionID: string): string | undefined {
+  const key = canonical(worktree)
+  if (!key) return "worktree identity is unavailable"
+  const entry = active.get(key)
+  if (entry?.sessionID === sessionID) return `${entry.kind} activity is still active`
+  for (const owner of reservations.get(key)?.values() ?? []) if (owner === sessionID) return "stage reservation is still active"
+  return undefined
+}
+
+/** Reserve the stage window synchronously; the returned release is idempotent. */
+export function beginStageReservation(worktree: string, sessionID: string): () => void {
+  const key = canonical(worktree)
+  if (!key) throw new Error("worktree identity is unavailable")
+  const token = Symbol("stage-reservation")
+  let held = reservations.get(key)
+  if (!held) reservations.set(key, held = new Map())
+  held.set(token, sessionID)
+  return () => {
+    const current = reservations.get(key)
+    current?.delete(token)
+    if (current?.size === 0) reservations.delete(key)
+  }
+}
+
+/** Ask the registered activity for this session to abort with the stop cause. Returns whether a handle was invoked. */
+export function abortSessionActivities(worktree: string, sessionID: string, cause: string): boolean {
+  const key = canonical(worktree)
+  const entry = key ? active.get(key) : undefined
+  if (!entry || entry.sessionID !== sessionID || !entry.abort) return false
+  entry.abort(cause)
+  return true
+}
 
 /** Serialize queue and advisory review in one process before either changes a ledger.
  * Cross-process exclusivity and crash recovery remain the run store's responsibility.
  */
-export function beginExecutionActivity(runtime: ExecutionRuntime, sessionID: string, kind: Activity["kind"]): (() => void) | null {
+export function beginExecutionActivity(
+  runtime: ExecutionRuntime,
+  sessionID: string,
+  kind: ActivityKind,
+  options: { workflowID?: string; abort?: (cause: string) => void } = {},
+): (() => void) | null {
   let key: string
   try {
     key = realpathSync.native(runtime.worktree)
@@ -133,9 +189,13 @@ export function beginExecutionActivity(runtime: ExecutionRuntime, sessionID: str
   } catch {
     return null
   }
-  if (active.has(key)) return null
+  try {
+    if (active.has(key) || firstSkillPermissionActivity(key)) return null
+  } catch {
+    return null
+  }
   const token = Symbol(kind)
-  active.set(key, { token, sessionID, kind })
+  active.set(key, { token, sessionID, kind, ...(options.workflowID ? { workflowID: options.workflowID } : {}), ...(options.abort ? { abort: options.abort } : {}) })
   return () => {
     if (active.get(key)?.token === token) active.delete(key)
   }

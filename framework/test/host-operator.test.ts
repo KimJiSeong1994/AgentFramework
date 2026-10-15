@@ -5,24 +5,26 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { expect, test } from "bun:test"
 import { consumeOperatorDecision, humanDecision } from "../src/hosts/operator.ts"
-import { withTerminalLine } from "./operator-helpers.ts"
+import { planBinding, withTerminalLine } from "./operator-helpers.ts"
 
 const workflowID = "wf_operator_receipt"
 const planSha = "sha_operator_receipt"
+const sessionID = "ses_operator_receipt"
+const binding = planBinding(sessionID, { id: workflowID, lastSeq: 7 }, planSha)
 
 function readWith(line: string, mode: "approve" | "reject" | "choose" = "choose") {
-  return withTerminalLine(line, () => humanDecision(mode, workflowID, planSha))
+  return withTerminalLine(line, () => humanDecision(mode, binding))
 }
 
 test("terminal reader issues immutable, one-shot receipts for exact approval and rejection lines", async () => {
   const approved = await readWith(`APPROVE ${workflowID} ${planSha}`, "approve")
-  expect(approved).toMatchObject({ action: "approve", workflowID, planSha })
+  expect(approved).toMatchObject({ action: "approve", sessionID, workflowID, expectedRevision: 7, subject: { kind: "plan", id: workflowID, sha256: planSha } })
   expect(Object.isFrozen(approved)).toBe(true)
   expect(consumeOperatorDecision(approved)).toBe(approved)
   expect(() => consumeOperatorDecision(approved)).toThrow("terminal reader")
 
   const rejected = await readWith(`REJECT ${workflowID} ${planSha} because details are missing`, "reject")
-  expect(rejected).toMatchObject({ action: "reject", workflowID, planSha, reason: "because details are missing" })
+  expect(rejected).toMatchObject({ action: "reject", sessionID, workflowID, expectedRevision: 7, subject: { kind: "plan", id: workflowID, sha256: planSha }, reason: "because details are missing" })
   expect(consumeOperatorDecision(rejected)).toBe(rejected)
 })
 
@@ -37,7 +39,7 @@ test("choose accepts either exact line; forced modes reject the opposite and mal
 })
 
 test("plain marker objects, spreads, and JSON copies cannot be consumed", async () => {
-  const marker = { source: "local_human", action: "approve", workflowID, planSha }
+  const marker = { source: "local_human", action: "approve", ...binding }
   expect(() => consumeOperatorDecision(marker)).toThrow("terminal reader")
 
   const receipt = await readWith(`APPROVE ${workflowID} ${planSha}`)
@@ -56,7 +58,7 @@ test.skipIf(!hasPythonPty)("real pseudo-terminal subprocess issues a terminal-bo
   const operatorPath = fileURLToPath(new URL("../src/hosts/operator.ts", import.meta.url))
   const source = `
 const { humanDecision, consumeOperatorDecision } = await import(${JSON.stringify(operatorPath)});
-const receipt = await humanDecision("approve", "wf_pty", "sha_pty");
+const receipt = await humanDecision("approve", { sessionID: "ses_pty", workflowID: "wf_pty", expectedRevision: 3, subject: { kind: "plan", id: "wf_pty", sha256: "sha_pty" } });
 console.log("RESULT:" + JSON.stringify(consumeOperatorDecision(receipt)));
 `
   const harness = `
@@ -114,7 +116,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
     const match = result.stdout.match(/RESULT:(\{[^\r\n]+\})/)
     expect(match).not.toBeNull()
     expect(JSON.parse(match![1]!)).toMatchObject({
-      action: "approve", workflowID: "wf_pty", planSha: "sha_pty",
+      action: "approve", sessionID: "ses_pty", workflowID: "wf_pty", expectedRevision: 3, subject: { kind: "plan", id: "wf_pty", sha256: "sha_pty" },
     })
   } finally {
     rmSync(cwd, { recursive: true, force: true })

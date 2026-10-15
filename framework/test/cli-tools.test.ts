@@ -3,6 +3,8 @@ import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync,
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { createCliTools } from "../src/hosts/cli-tools.ts"
+import { WORKFLOW_READ_ONLY_ROLES } from "../src/hosts/types.ts"
+import { FdTree } from "../src/skills/fd-tree.ts"
 
 let root: string
 let outside: string
@@ -29,6 +31,24 @@ afterEach(() => {
 })
 
 describe("scoped CLI file tools", () => {
+  test("workflow roles cannot gain writes from a broader caller-supplied allowlist", () => {
+    writeFileSync(join(root, "existing.txt"), "original")
+    for (const role of WORKFLOW_READ_ONLY_ROLES) {
+      let effects = 0
+      const scoped = createCliTools({
+        root, role, allowed: ["read", "list", "glob", "grep", "write", "edit"], denied: [],
+        beforeEffect() { effects++ },
+      })
+      expect(scoped.execute("write", { path: "new.txt", content: "forbidden" }).ok).toBe(false)
+      expect(scoped.execute("edit", { path: "existing.txt", oldText: "original", newText: "forbidden" }).ok).toBe(false)
+      expect(effects).toBe(0)
+      expect(existsSync(join(root, "new.txt"))).toBe(false)
+      expect(readFileSync(join(root, "existing.txt"), "utf8")).toBe("original")
+      expect(scoped.execute("read", { path: "existing.txt" })).toEqual({ ok: true, text: "original" })
+    }
+    expect(() => createCliTools({ root, role: "unknown" as never, allowed: ["write"], denied: [] })).toThrow("invalid CLI tool scope")
+  })
+
   test("root listing, read, glob, and grep work with bounded local results", () => {
     mkdirSync(join(root, "src"))
     writeFileSync(join(root, "src/example.ts"), "const marker = 'needle'\nsecond line\n")
@@ -38,6 +58,51 @@ describe("scoped CLI file tools", () => {
     expect(text(tools.execute("glob", { pattern: "src/**/*.ts" }))).toContain("src/example.ts")
     expect(text(tools.execute("grep", { pattern: "needle", path: "src" }))).toContain('"line":1')
     expect(text(tools.execute("grep", { pattern: "needle", path: "src/example.ts" }))).toContain("needle")
+  })
+
+  test("directory names stay on the retained descriptor when a target is replaced immediately after open", () => {
+    const target = join(root, "target")
+    const renamed = join(root, "target-held")
+    mkdirSync(target)
+    writeFileSync(join(target, "authorized.txt"), "inside")
+    writeFileSync(join(outside, "external-only.txt"), "must not enumerate")
+    expect(tools.validate("list", { path: "target" })).toBe(true)
+
+    const originalOpen = FdTree.prototype.openDirectoryRelative
+    let replaced = false
+    FdTree.prototype.openDirectoryRelative = function (this: FdTree, relativePath: string) {
+      const directory = originalOpen.call(this, relativePath)
+      if (!replaced && relativePath === "target") {
+        renameSync(target, renamed)
+        symlinkSync(outside, target)
+        replaced = true
+      }
+      return directory
+    }
+    let result: ReturnType<typeof tools.execute>
+    try {
+      result = tools.execute("list", { path: "target" })
+    } finally {
+      FdTree.prototype.openDirectoryRelative = originalOpen
+    }
+    expect(replaced).toBe(true)
+    expect(result!.ok).toBe(false)
+    expect(text(result!)).not.toContain("external-only.txt")
+  })
+
+  test("validation is metadata-only for dynamic ignore rules but refuses statically ignored paths", () => {
+    mkdirSync(join(root, "ignored-by-rule"))
+    writeFileSync(join(root, "ignored-by-rule", "private.txt"), "private")
+    writeFileSync(join(root, ".gitignore"), "ignored-by-rule/\n")
+
+    expect(tools.validate("list", { path: "ignored-by-rule" })).toBe(true)
+    expect(tools.validate("grep", { pattern: "private", path: "ignored-by-rule" })).toBe(true)
+    expect(tools.validate("list", { path: "node_modules" })).toBe(false)
+    expect(tools.validate("glob", { pattern: "**/.git/**" })).toBe(false)
+
+    const result = tools.execute("list", { path: "ignored-by-rule" })
+    expect(result.ok).toBe(false)
+    expect(text(result)).not.toContain("private.txt")
   })
 
   test("list, glob, and grep mark result-capped output as partial", () => {

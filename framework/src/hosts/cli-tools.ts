@@ -4,15 +4,16 @@ import {
   fstatSync,
   ftruncateSync,
   fsyncSync,
-  opendirSync,
   openSync,
   readSync,
   realpathSync,
   writeSync,
+  type BigIntStats,
 } from "node:fs"
 import { performance } from "node:perf_hooks"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
-import { EXECUTION_ROLES, type ExecutionRole } from "./types.ts"
+import { EXECUTION_ROLES, roleAllowsCliWrites, type ExecutionRole } from "./types.ts"
+import { FdTree, fdStatKind, type FdDirectory, type FdEntry } from "../skills/fd-tree.ts"
 
 export const CLI_TOOL_NAMES = ["read", "list", "glob", "grep", "write", "edit"] as const
 export type CliToolName = (typeof CLI_TOOL_NAMES)[number]
@@ -36,6 +37,7 @@ export type CliToolsOptions = {
 
 export type CliTools = {
   readonly available: readonly CliToolName[]
+  validate(name: string, input: unknown): boolean
   execute(name: string, input: unknown): CliToolOutput
 }
 
@@ -66,7 +68,7 @@ const CREDENTIAL_FILES = new Set([
 type IgnoreRule = { base: string; pattern: string; negate: boolean; directoryOnly: boolean; matcher: Bun.Glob }
 type WalkEntry = { path: string; directory: boolean }
 type ScanResult = { entries: WalkEntry[]; partial: boolean }
-type RootIdentity = { dev: number; ino: number }
+type RootIdentity = { dev: bigint; ino: bigint }
 
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value)
@@ -129,7 +131,7 @@ function normalizeToolPath(input: string): string {
 
 function isProtectedOrCredentialPath(path: string): boolean {
   const segments = path.split(/[\\/]+/).filter(Boolean).map(part => part.toLowerCase())
-  if (segments.some(part => PROTECTED_DIRECTORIES.has(part) || CREDENTIAL_DIRECTORIES.has(part))) return true
+  if (segments.some(part => IGNORED_DIRECTORIES.has(part) || CREDENTIAL_DIRECTORIES.has(part))) return true
   const file = segments.at(-1) ?? ""
   return CREDENTIAL_FILES.has(file) || /^\.env(?:\.|$)/i.test(file) ||
     /(?:^|[._-])(?:credentials?|secrets?)(?:[._-]|$)/i.test(file) ||
@@ -150,7 +152,7 @@ function directoryOpenFlags(): number {
   return constants.O_RDONLY | constants.O_DIRECTORY | noFollowFlags(0)
 }
 
-function sameRoot(stat: ReturnType<typeof fstatSync>, identity: RootIdentity): boolean {
+function sameRoot(stat: BigIntStats, identity: RootIdentity): boolean {
   return stat.isDirectory() && stat.dev === identity.dev && stat.ino === identity.ino
 }
 
@@ -159,7 +161,7 @@ function openRootDirectory(root: string, identity?: RootIdentity): number {
   if (process.platform === "darwin") {
     const fd = openSync(root, directoryOpenFlags())
     try {
-      if (identity && !sameRoot(fstatSync(fd), identity)) throw new Error("root")
+      if (identity && !sameRoot(fstatSync(fd, { bigint: true }), identity)) throw new Error("root")
       return fd
     } catch (error) {
       closeSync(fd)
@@ -176,7 +178,7 @@ function openRootDirectory(root: string, identity?: RootIdentity): number {
       fd = next
       closeSync(previous)
     }
-    if (identity && !sameRoot(fstatSync(fd), identity)) throw new Error("root")
+    if (identity && !sameRoot(fstatSync(fd, { bigint: true }), identity)) throw new Error("root")
     return fd
   } catch (error) {
     try { closeSync(fd) } catch { /* descriptor was already closed */ }
@@ -232,7 +234,7 @@ function openScopedTarget(
 function assertRootIdentity(root: string, identity: RootIdentity): void {
   const fd = openRootDirectory(root, identity)
   try {
-    if (!sameRoot(fstatSync(fd), identity)) throw new Error("root")
+    if (!sameRoot(fstatSync(fd, { bigint: true }), identity)) throw new Error("root")
   } finally {
     closeSync(fd)
   }
@@ -452,11 +454,14 @@ function scan(
   identity: RootIdentity,
   shouldStop?: () => boolean,
 ): ScanResult {
-  // Directory names remain path-enumerated; candidate contents are reopened through the descriptor-safe path below.
   const result: WalkEntry[] = []
   let visited = 0
   let partial = false
-  const visit = (absolute: string, relativeDirectory: string, rules: readonly IgnoreRule[], depth: number): void => {
+  let tree: FdTree
+  try { tree = FdTree.openRoot(root, identity) }
+  catch { return { entries: result, partial: true } }
+
+  const visit = (directory: FdDirectory, relativeDirectory: string, rules: readonly IgnoreRule[], depth: number): void => {
     if (shouldStop?.()) {
       partial = true
       return
@@ -465,34 +470,25 @@ function scan(
       partial = true
       return
     }
-    let directory
-    try { directory = opendirSync(absolute) }
-    catch {
-      partial = true
-      return
-    }
-    const childDirectories: Array<{ path: string; relative: string; rules: IgnoreRule[] }> = []
+    const childDirectories: Array<{ entry: FdEntry; relative: string; rules: IgnoreRule[] }> = []
     try {
-      for (;;) {
+      for (const entry of tree.list(directory)) {
         if (shouldStop?.()) {
           partial = true
           break
         }
-        const entry = directory.readSync()
-        if (!entry) break
         if (++visited > MAX_TRAVERSED_ENTRIES) {
           partial = true
           break
         }
         const rel = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name
-        if (entry.isSymbolicLink()) continue
-        const isDirectory = entry.isDirectory()
-        if (!isDirectory && !entry.isFile()) continue
+        const kind = fdStatKind(entry.stat)
+        const isDirectory = kind === "directory"
+        if (!isDirectory && kind !== "file") continue
         if (shouldIgnore(rel, isDirectory, rules)) continue
-        const absolutePath = join(absolute, entry.name)
         result.push({ path: rel, directory: isDirectory })
         if (isDirectory) childDirectories.push({
-          path: absolutePath,
+          entry,
           relative: rel,
           rules: [...rules, ...parseIgnoreRules(root, rel, identity)],
         })
@@ -502,7 +498,6 @@ function scan(
         }
       }
     } catch { partial = true }
-    finally { try { directory.closeSync() } catch { /* already closed */ } }
     childDirectories.sort((a, b) => a.relative.localeCompare(b.relative))
     for (const child of childDirectories) {
       if (shouldStop?.()) {
@@ -513,55 +508,77 @@ function scan(
         partial = true
         break
       }
-      visit(child.path, child.relative, child.rules, depth + 1)
+      const checkpoint = tree.checkpoint()
+      try {
+        const childDirectory = tree.openDirectoryAt(directory, child.entry)
+        visit(childDirectory, child.relative, child.rules, depth + 1)
+        tree.assertStableSince(checkpoint)
+      } catch { partial = true }
+      finally {
+        try { tree.releaseSince(checkpoint) } catch { partial = true }
+      }
     }
   }
-  visit(start ? join(root, start) : root, start, seedRules, 0)
+  try {
+    const startDirectory = tree.openDirectoryRelative(start)
+    visit(startDirectory, start, seedRules, 0)
+    tree.assertStable()
+  } catch {
+    partial = true
+  } finally {
+    try { tree.close() } catch { partial = true }
+  }
   return { entries: result.sort((a, b) => a.path.localeCompare(b.path)), partial }
 }
 
 function listDirectory(root: string, relativePath: string, identity: RootIdentity): CliToolOutput {
+  let tree: FdTree | undefined
   try {
-    const target = checkedDirectoryPath(root, relativePath, identity)
+    tree = FdTree.openRoot(root, identity)
+    const directory = tree.openDirectoryRelative(relativePath)
+    const target = resolve(root, relativePath || ".")
     const rules = rulesForDirectory(root, relativePath, identity)
     if (ignoredTarget(root, target, true, identity)) {
       return { ok: false, error: "Tool refused: ignored directory is unavailable." }
     }
     const entries: Array<{ name: string; type: "directory" | "file" }> = []
-    // opendirSync cannot enumerate through /dev/fd on Darwin; filenames retain a path-race residual.
-    const directory = opendirSync(target)
     let visited = 0
     let partial = false
-    try {
-      for (;;) {
-        const entry = directory.readSync()
-        if (!entry) break
-        if (++visited > MAX_TRAVERSED_ENTRIES) {
-          partial = true
-          break
-        }
-        if (entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) continue
-        if (shouldIgnore(relativePath ? `${relativePath}/${entry.name}` : entry.name, entry.isDirectory(), rules)) continue
-        entries.push({ name: entry.name, type: entry.isDirectory() ? "directory" : "file" })
+    for (const entry of tree.list(directory)) {
+      if (++visited > MAX_TRAVERSED_ENTRIES) {
+        partial = true
+        break
       }
-    } finally { try { directory.closeSync() } catch { /* already closed */ } }
+      const kind = fdStatKind(entry.stat)
+      if (kind !== "directory" && kind !== "file") continue
+      if (shouldIgnore(relativePath ? `${relativePath}/${entry.name}` : entry.name, kind === "directory", rules)) continue
+      entries.push({ name: entry.name, type: kind })
+    }
+    tree.assertStable()
     entries.sort((a, b) => a.name.localeCompare(b.name))
     partial ||= entries.length > MAX_RESULTS
     return { ok: true, text: safeOutput(JSON.stringify(entries.slice(0, MAX_RESULTS)), partial) }
   } catch (error) {
     return publicFailure(error)
+  } finally {
+    try { tree?.close() } catch { /* preserve the operation result */ }
   }
+}
+
+export function formatCliReadResult(bytes: Uint8Array, input: Record<string, unknown>): CliToolOutput {
+  validateCliToolInput("read", input)
+  if (bytes.byteLength > MAX_READ_BYTES) return publicFailure(new Error("size"))
+  const contents = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf8")
+  const start = (input.startLine as number | undefined) ?? 1
+  const count = (input.maxLines as number | undefined) ?? 200
+  const lines = contents.split(/\r?\n/)
+  return { ok: true, text: safeOutput(lines.slice(start - 1, start - 1 + count).join("\n")) }
 }
 
 function readFileTool(root: string, input: Record<string, unknown>, identity: RootIdentity): CliToolOutput {
   try {
     const relativePath = normalizeToolPath(input.path as string)
-    const contents = readTarget(root, relativePath, identity).toString("utf8")
-    const start = (input.startLine as number | undefined) ?? 1
-    const count = (input.maxLines as number | undefined) ?? 200
-    const lines = contents.split(/\r?\n/)
-    const selected = lines.slice(start - 1, start - 1 + count).join("\n")
-    return { ok: true, text: safeOutput(selected) }
+    return formatCliReadResult(readTarget(root, relativePath, identity), input)
   } catch (error) {
     return publicFailure(error)
   }
@@ -728,7 +745,7 @@ export function createCliTools(options: CliToolsOptions): CliTools {
     root = realpathSync(options.root)
     const rootFd = openRootDirectory(root)
     try {
-      const stat = fstatSync(rootFd)
+      const stat = fstatSync(rootFd, { bigint: true })
       if (!stat.isDirectory()) throw new Error("root")
       rootIdentity = { dev: stat.dev, ino: stat.ino }
     } finally {
@@ -737,12 +754,37 @@ export function createCliTools(options: CliToolsOptions): CliTools {
   } catch {
     throw new Error("CLI tool worktree is unavailable")
   }
-  const readOnly = options.role === "main" || options.role === "reviewer"
+  const readOnly = !roleAllowsCliWrites(options.role)
   const available = CLI_TOOL_NAMES.filter(name => options.allowed.includes(name) && !options.denied.includes(name) &&
     !(readOnly && (name === "write" || name === "edit")))
   const availableSet = new Set<string>(available)
   return {
     available: Object.freeze(available),
+    validate(name, input) {
+      if (!availableSet.has(name)) return false
+      try {
+        validateCliToolInput(name, input)
+        assertRootIdentity(root, rootIdentity)
+        if (name === "glob") normalizeToolPath(input.pattern as string)
+        const relativePath = normalizeToolPath(name === "glob" ? "." : (input.path as string | undefined) ?? ".")
+        let fd: number
+        try {
+          fd = openScopedTarget(root, relativePath, constants.O_RDONLY | constants.O_NONBLOCK, rootIdentity)
+        } catch (error) {
+          if (name !== "write" || !relativePath || !hasErrorCode(error, "ENOENT")) return false
+          const parent = normalizeToolPath(dirname(relativePath))
+          const parentFd = openScopedTarget(root, parent, directoryOpenFlags(), rootIdentity)
+          try { return fstatSync(parentFd).isDirectory() }
+          finally { closeSync(parentFd) }
+        }
+        try {
+          const stat = fstatSync(fd)
+          if (name === "list" || name === "glob") return stat.isDirectory()
+          if (name === "grep") return stat.isDirectory() || stat.isFile() && stat.nlink === 1 && stat.size <= MAX_GREP_FILE_BYTES
+          return stat.isFile() && stat.nlink === 1 && stat.size <= MAX_READ_BYTES
+        } finally { closeSync(fd) }
+      } catch { return false }
+    },
     execute(name, input) {
       if (!CLI_TOOL_NAMES.includes(name as CliToolName) || !availableSet.has(name)) {
         return { ok: false, error: "Tool refused: this LCA tool is not allowed for the execution role." }

@@ -1,0 +1,94 @@
+Workflow provenance and license notice
+======================================
+
+Scope and parity boundary
+-------------------------
+This attribution identifies the pinned Gajae Code workflow/composer sources used as reference material for the framework port. Source-derived behavior is described by `framework/test/fixtures/gjc-keys-8cd17c0.json`; the fixture records GJC reference behavior only and does not assert that the current framework workflow port is already identical. The P5a stage-prompt provenance entry below covers the LCA-authored `src/workflows/prompts/` files.
+
+Pinned GJC source references
+----------------------------
+All paths below are relative to the frozen GJC reference checkout at commit `8cd17c0f636d3c541c0c2af184e01709b0e6f2c1`. Hashes are SHA-256 over the exact source bytes in that checkout.
+
+- `packages/coding-agent/src/modes/interactive-mode.ts` — `InputController` construction and workflow context `clearEditor()` delegation, lines 790-800 and 2117-2119; SHA-256 `dc4e3bf49ec43aa8ac4676e4bfa9eb83e00b5d9760d3da2ccdbbef861b0d9df9`.
+- `packages/coding-agent/src/modes/controllers/input-controller.ts` — workflow Escape/clear handlers, queue dispatch, and Ctrl+C timing, lines 660-730, 806-809, and 1281-1289; SHA-256 `592f65da072622b4dd98984b2bdb876e312bbcdf7a5cd1d88a2a1cbc2511ac10`.
+- `packages/coding-agent/src/modes/components/custom-editor.ts` — workflow editor callbacks, key dispatch, Escape priority, and Caps Lock handling, lines 80-120, 300-312, and 399-477; SHA-256 `f168b4716cdf1cb37dc23422a709cd4bd40968e17d402dcf9eb876ae975cd28b`.
+- `packages/coding-agent/src/config/keybindings.ts` — platform-dependent queue key defaults and app action bindings, lines 70-80 and 92-158; SHA-256 `86b62f2257e3e918982fbeb2e376419192d8e44952a452207a0a93ff0dc944d3`.
+- `packages/coding-agent/src/modes/utils/ui-helpers.ts` — foreground composer clear behavior, lines 981-989; SHA-256 `865c93518a35e3547869a9d0116b21a190a5c20c9625c43d9329b771250627b3`.
+
+The workflow source is GJC code under GJC's MIT license. The key parser and text measurement dependencies are separately attributed in `framework/src/tui/ATTRIBUTION`; that file documents the oh-my-pi vendoring and GJC-local modifications, plus the OpenTUI reference-only citation. Those TUI attributions do not turn these workflow source references into claims of copied or unmodified upstream code.
+
+P5a stage prompts (`src/workflows/prompts/`)
+--------------------------------------------
+- `plan-main.ts` (prompt id `plan.main`) is LCA-authored text moved verbatim from `src/hosts/plan-conversation.ts`; it is not copied from GJC. The only GJC influence is the pinned plan-then-separate-human-approval shape recorded in `test/fixtures/gjc-keys-8cd17c0.json`.
+- `summarize.ts` is LCA-authored. It holds the read-only context summarizers for the single budget-overflow retry: one per kind (`workflow.summarize` plan/main, `di.summarize` deep-interview/interviewer, `ralplan.summarize` ralplan/planner), so the summary turn runs under a role its kind may schedule.
+- Prompts are immutable frozen descriptors bound by SHA-256 (`prompt.ts`). They contain no executable GJC instructions, skill bodies or tool grants; workflow SKILL material stays a small descriptor and is never composer-expanded into a bounded turn.
+- `turn.ts` generalizes the LCA planning-conversation intent lifecycle; no GJC source bytes are included. The pinned GJC references above remain reference-only.
+
+P6b autoresearch stage prompts (`src/workflows/prompts/autoresearch.ts`) and engine (`src/workflows/autoresearch*.ts`)
+------------------------------------------------------------------------------------------------------------------------
+Prompt ids: `ar.intake`, `ar.hypothesis`, `ar.evidence`, `ar.evidence.data`, `ar.experiment`, `ar.evaluate` (plus `ar.summarize`).
+- LCA-authored text; no GJC bytes are copied and no phrase is quoted. Reference material consulted, from the frozen checkout `8cd17c0f636d3c541c0c2af184e01709b0e6f2c1`: `packages/coding-agent/src/defaults/gjc/skills/autoresearch/SKILL.md` (SHA-256 `babcb5bea9cfad5985364ff2be56884b4da42b3496d25bc20d688612e44d13fa`): the single goal-directed mission that ends on one structured verdict with status, evidence, caveats and evaluator (line 23), the rule that benchmark limitations are recorded as caveats rather than product edits (line 103), the baseline / keep / discard / crash / checks_failed run discipline with invalid runs excluded (lines 107 and 115) and the bounded iteration budget. The ideas are MIT-licensed under the notice above; they are cited here, not copied.
+- LCA deliberately differs: evidence comes only from the repository and local data (no web search, no search service, no Python kernel); commands run only through the framework verifier after a typed `RUN <workflow> <sha>` receipt for that exact experiment (a changed command or parameter changes the hash and needs a new receipt; an identical approved subject may re-run); run statuses and metrics are computed by code from verifier output and never by a model; a run that changes the repository is invalid and restored; ten automatic iterations is a hard cap that adds a caveat and prepares no eleventh experiment; verdict.json is assembled by code, its evidence is limited to verified run files and verification receipts, and a conclusive verdict needs at least one valid run and a critic OKAY. The reference's runtime commands, notebook kernel and CLI are not used.
+- Prompts are immutable frozen descriptors bound by SHA-256 (`prompt.ts`) and contain no executable instructions, skill bodies or tool grants.
+
+Pinned GJC license source:
+https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/8cd17c0f636d3c541c0c2af184e01709b0e6f2c1/LICENSE
+
+Pinned GJC LICENSE Git blob SHA-1: `16eb3fc020a9dbefb165d2fb1d4597d2203c44bd`.
+Frozen checkout LICENSE SHA-256: `a6625a82edf7b97e90ccd713c16fc6a3cee8cd8978752b638b34a488154cb0f1`.
+
+Complete Gajae Code MIT license notice
+--------------------------------------
+
+MIT License
+
+Copyright (c) 2025-2026 Yeachan-Heo and Gajae Code Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+P6a ralplan stage prompts (`src/workflows/prompts/ralplan.ts`)
+--------------------------------------------------------------
+Prompt ids: `ralplan.planner`, `ralplan.revision`, `ralplan.architect`, `ralplan.critic` (plus the existing `ralplan.summarize`).
+- LCA-authored text; no GJC bytes are copied. The only influence is the consensus shape of the pinned GJC `packages/coding-agent/src/defaults/gjc/skills/ralplan/SKILL.md` (SHA-256 `ed4441940c6bf433c104c435989d5d5fdba123813f59727dd6988a9145287d0e`, frozen checkout `8cd17c0f636d3c541c0c2af184e01709b0e6f2c1`): planner -> independent pass-1 review -> review join gate (lines 74-79: Architect `CLEAR`/`APPROVE` and Critic `OKAY` on the same plan, else revision) -> revision, pass 2+ Architect then Critic (lines 81, 126), five-opener cap and its terminal best-plan result (lines 99-100, 128-132), and the reviewer vocabularies CLEAR/WATCH/BLOCK, APPROVE/COMMENT/REQUEST_CHANGES and OKAY/ITERATE/REJECT. Those ideas are MIT-licensed under the notice above; they are cited here, not reproduced.
+- LCA deliberately differs: reviewers return one typed JSON stage event, code (never the model) writes artifacts and receipts, consensus is re-derived from disk on the same plan hash, a cap is a terminal PLANNING-STUCK with the best plan and no handoff, and planning complete is never execution (no dispatch, no approval, no ledger task). The reference's runtime commands, state files and tool-driven persistence are not used.
+- Prompts are immutable frozen descriptors bound by SHA-256 (`prompt.ts`) and contain no executable instructions, skill bodies or tool grants.
+
+P6a deep-interview stage prompts (`src/workflows/prompts/deep-interview.*.ts`)
+-------------------------------------------------------------------------------
+Prompt ids: `di.interviewer.topology`, `di.interviewer.question`, `di.scorer` (interviewer role, its own frozen prompt), `di.panel.researcher`, `di.panel.contrarian`, `di.panel.simplifier`, `di.panel.architect`, `di.closure`, `di.restate`, `di.crystallize` (plus the existing `di.summarize`). Shared wording lives in `deep-interview.rules.ts`.
+- LCA-authored text; no GJC bytes are copied, no phrase is quoted. Reference material consulted, all from the frozen checkout `8cd17c0f636d3c541c0c2af184e01709b0e6f2c1`:
+  - `packages/coding-agent/src/defaults/gjc/skills/deep-interview/SKILL.md` (SHA-256 `393cfea2d61963d8f40751cbb9c62088d6d81d49e95ad1c8044ef8a8bb3ceea9`): the dimension clarity formulas (lines 478-479; the numeric weights .35/.25/.25/.15 and .40/.30/.30 are facts, computed by LCA code, never by a prompt), the topology gate (lines 239-241), the one-question-per-round rule, the milestone bands and panel triggers (lines 612-637), early exit from round 3 (lines 606, 958), the 100-round cap (line 608), closure and restate gates (lines 657-665) and the spec metadata fields (lines 679-700).
+  - `packages/coding-agent/src/defaults/gjc/skills/deep-interview/lateral-review-panel.md` (SHA-256 `df1c0660fcbb21be43c400de9e8485c7a10a67e5754d35b4c3eac20c4d71f1a1`): the researcher / contrarian / simplifier / architect lenses and the finding / rationale / suggested options / confidence response shape.
+  The ideas are MIT-licensed under the notice above; they are cited here, not copied.
+- LCA deliberately differs: the scorer returns clarity dimensions only and code computes ambiguity, band and panel requirements; every required persona must leave a receipt bound to the round and input hash, and a missing, failed or malformed record after two attempts blocks the interview (the reference falls back silently, LCA does not); panels run sequentially in independent context; `/finish` records an early exit but never bypasses panels, closure or the restatement; nothing in this workflow executes, approves or hands off by itself.
+- Prompts are immutable frozen descriptors bound by SHA-256 (`prompt.ts`) and contain no executable instructions, skill bodies or tool grants.
+
+P6a dispatch, handoff and host (`src/hosts/workflow-session.ts`, `src/hosts/interactive-session.ts`, `src/tui/app.ts`)
+----------------------------------------------------------------------------------------------------------------------
+- LCA-authored; no GJC bytes are copied and no GJC code, path, command or process is used at runtime. The pinned GJC skills above are reference material for the stage shapes only and are cited, not vendored.
+- Complete prompt inventory covered by this notice (every `StagePrompt` id exported by `src/workflows/prompts/`): `plan.main`, `workflow.summarize`, `di.summarize`, `ralplan.summarize`, `di.interviewer.topology`, `di.interviewer.question`, `di.scorer`, `di.panel.researcher`, `di.panel.contrarian`, `di.panel.simplifier`, `di.panel.architect`, `di.closure`, `di.restate`, `di.crystallize`, `ralplan.planner`, `ralplan.revision`, `ralplan.architect`, `ralplan.critic`, `ug.summarize`, `ar.summarize`, `ar.intake`, `ar.hypothesis`, `ar.evidence`, `ar.evidence.data`, `ar.experiment`, `ar.evaluate`, `ug.decompose`, `ug.unit_plan`, `ug.unit_review`, `ug.final_review`. `test/bundled-workflow-boundary.test.ts` fails if an exported prompt id is missing from this list.
+- Small framework/skills descriptors (`PROTECTED_WORKFLOWS` in `src/skills/roots.ts`) are discovery-only metadata. They are never composer-expanded into a bounded turn and never carry stage instructions; a workflow starts only through the builtin descriptor's own handler, so a project or home skill of the same name cannot redirect, shadow or supply instructions for it.
+- LCA deliberately differs from the reference: invoking a name is a start request and never consent to execute; the deep-interview to ralplan connection is one code-owned `commitHandoff` with lineage that is refused while the session is held, a stop is pending or the session is not the owner; consensus ends at "execution pending" and cannot start anything.
+
+P6b ultragoal stage prompts (`src/workflows/prompts/ultragoal.ts`)
+------------------------------------------------------------------
+Prompt ids: `ug.decompose`, `ug.unit_plan`, `ug.unit_review`, `ug.final_review` (plus `ug.summarize`).
+- LCA-authored text; no GJC bytes are copied and no phrase is quoted. Reference material consulted, from the frozen checkout `8cd17c0f636d3c541c0c2af184e01709b0e6f2c1`: `packages/coding-agent/src/defaults/gjc/skills/ultragoal/SKILL.md` (SHA-256 `9eeb1ec267a80de12cf03ae6c31c6b19f5a6a50cc51126b0075112edb4ea0f32`): durable goal list plus a proof stream as the source of completion rather than agent prose (lines 14), the per-story give-up budget with its default of 10 (lines 21-22), the sequential story checkpoint loop with complete / failed / blocked outcomes (lines 126-134) and the freshness-scoped receipts rule that final aggregate completion needs fresh proof for every required goal (lines 312-315). The ideas are MIT-licensed under the notice above; they are cited here, not copied.
+- LCA deliberately differs: a goal list is fixed once (1 to 10 goals) and every goal needs a checkpoint that code re-verifies from disk (goals.json, the approval receipt, the verification receipt and the unit documents) before the workflow can be done, so a critic OKAY or worker prose is never sufficient; a unit runs only after a typed `APPROVE-UNIT <workflow> <sha>` receipt for that exact unit (a ralplan execute confirmation authorizes the handoff only); verification is the code-run verify command of each step, never a worker claim; ten continuations without progress block the goal and leave the workflow stuck with its evidence. The reference's runtime commands, goal tool, ledger file and CLI are not used.
+- Prompts are immutable frozen descriptors bound by SHA-256 (`prompt.ts`) and contain no executable instructions, skill bodies or tool grants.

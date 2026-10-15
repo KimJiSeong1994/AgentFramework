@@ -367,7 +367,9 @@ function nativeArgv(engine: CliEngine, model: string, scratch: string, codexStat
       "-c", "mcp_servers={}", "-",
     ]
   }
-  return ["run", model, "--format", "json", "--nowordwrap", "--hidethinking"]
+  // Disable reasoning at generation time instead of hiding it. `--hidethinking` can discard the entire response when
+  // a reasoning model never emits a post-thinking channel, leaving a successful Ollama process with an empty answer.
+  return ["run", model, "--think=false", "--nowordwrap"]
 }
 
 function prefixByUtf8Bytes(value: string, maxBytes: number): string {

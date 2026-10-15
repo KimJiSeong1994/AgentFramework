@@ -75,6 +75,9 @@ export function createDelegateTool(deps: HookDeps): ToolDefinition {
       if (active?.sessionID === sessionID) {
         const refusal = workflowEngineRefusal(active, runtime.host.identity.engine)
         if (refusal) throw new Error(`lca: ${refusal}`)
+        if (active.stopIntent || active.phase === "paused") {
+          throw new Error(`lca: the workflow is ${active.stopIntent ? `${active.stopIntent.kind} pending` : "paused"}; do not call delegate.`)
+        }
       }
 
       const tasks = args.tasks ?? []

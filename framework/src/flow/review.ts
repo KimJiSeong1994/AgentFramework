@@ -6,10 +6,12 @@ import { randomUUID } from "node:crypto"
 import { LinuxAdmissionRefused, type ExecutionHandle, type ExecutionOutcome, type ExecutionRuntime } from "../hosts/types.ts"
 import { assertPreparedHostReference, hostReferenceHasVendorID } from "../hosts/run-state.ts"
 import { beginExecutionActivity } from "../hosts/runtime.ts"
+import { adoptForeignStop, observeStopSettlement } from "./runtime.ts"
 import { estimateTokens } from "../tokens.ts"
 import { getQueue } from "../orchestration/queue.ts"
 import { renderPlanMd, type Plan } from "./plan.ts"
 import { readWorkflow, type Workflow } from "./state.ts"
+import { isCancelPending, isPausePending } from "../workflows/types.ts"
 
 /** <= 350 est. tokens (asserted in test and by doctor D12c); the rendered plan is appended after this and capped separately. */
 export const PLAN_REVIEW_TEMPLATE = `Review this plan before it goes to the user for approval. You are read-only: never edit, write or run commands.
@@ -93,9 +95,9 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
   runtime.linuxAdmission?.assertBootEpoch()
   if (getQueue(runtime).isRunning(wf.sessionID)) return { verdict: "none", findings: [] }
   if (signal?.aborted) return { verdict: "none", findings: [], note: "aborted" }
-  const releaseActivity = beginExecutionActivity(runtime, wf.sessionID, "review")
-  if (!releaseActivity) return { verdict: "none", findings: [] }
   const abortController = new AbortController()
+  const releaseActivity = beginExecutionActivity(runtime, wf.sessionID, "review", { workflowID: wf.id, abort: () => abortController.abort() })
+  if (!releaseActivity) return { verdict: "none", findings: [] }
   const reviewSignal = abortController.signal
   const forwardAbort = () => abortController.abort()
   if (signal) {
@@ -165,7 +167,8 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
       let current: ReturnType<typeof readWorkflow>
       try { current = readWorkflow(runtime.worktree) }
       catch { return }
-      if (current?.id !== wf.id || current.sessionID !== wf.sessionID || !(current.pendingCancel || current.phase === "cancelled")) return
+      if (current?.id !== wf.id || current.sessionID !== wf.sessionID || !(isCancelPending(current) || isPausePending(current) || current.phase === "cancelled")) return
+      if (current.stopIntent) adoptForeignStop(runtime, { sessionID: wf.sessionID })
       abortController.abort()
       if (workflowCancelTimer) clearInterval(workflowCancelTimer)
     }
@@ -303,6 +306,8 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
       if (workflowCancelTimer) clearInterval(workflowCancelTimer)
       if (signal) signal.removeEventListener("abort", forwardAbort)
       releaseActivity()
+      // Settle only a recorded stop, after the activity is released (the registry is part of the proof).
+      observeStopSettlement(runtime, wf.sessionID, wf.owner.instance, "review")
     }
   }
 }

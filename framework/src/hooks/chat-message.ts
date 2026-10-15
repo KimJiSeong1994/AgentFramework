@@ -1,19 +1,35 @@
 // chat.message hook: mode keyword detection -> mode state -> instruction suffix on the user message.
-// This is the only place dynamic text enters the conversation; the system prompt is never touched.
+// User-turn text stays in parts; the system transform uses only its separately bound immutable role policy.
 import type { Hooks } from "@opencode-ai/plugin"
 import type { Part, TextPart } from "@opencode-ai/sdk"
-import { existsSync } from "node:fs"
+import { existsSync, realpathSync } from "node:fs"
+import { isAbsolute, relative, sep } from "node:path"
 import type { HookDeps } from "./types.ts"
-import { EMPTY_MODE, clearAbort, readAbort, readJson, readModeState, sessionInfoPath, writeJsonAtomic, writeModeState } from "../state/store.ts"
+import { EMPTY_MODE, readAbort, readJson, readModeState, sessionDir, sessionInfoPath, writeJsonAtomic, writeModeState } from "../state/store.ts"
 import type { ModeState, SessionInfo } from "../state/store.ts"
 import { detectMode, stripModeKeywords } from "../modes/detect.ts"
 import { openTasks, readLedger } from "../state/ledger.ts"
 import { markResumeOffered, resumeMessage } from "../loop/idle.ts"
+import {
+  admissionEpoch, attachAdmission, captureAdmissionLease, effectiveHold, holdAdmission,
+  isAdmissionCurrent, isAdmissionLeaseCurrent, type AdmissionLease,
+} from "../sessions/admission.ts"
+import { getOwnedSession, inspectCurrentSessionAttachment } from "../sessions/store.ts"
+import {
+  authenticatedSDKSessionIdentity, canCaptureSDKUserMessage, captureSDKSessionLifetime,
+  capturedUserMessageEpoch, hasSDKSessionCreationObservation, persistMainUserMessage,
+  waitForPendingSDKSessionCreation,
+} from "../sessions/sdk-transcript.ts"
 import { getQueue } from "../orchestration/queue.ts"
-import { getOpenCodeRuntime } from "../hosts/opencode-runtime.ts"
+import { getOpenCodeRuntime, policyBindingForOpenCodeSession } from "../hosts/opencode-runtime.ts"
+import {
+  bindOpenCodeSystemTurn, captureOpenCodeToolTurn, reserveOpenCodeSystemTurn, UnsafeOpenCodeSystemChannel,
+} from "../hosts/opencode-system.ts"
+import { initializeOpenCodeSkillSession, OpenCodeSkillRefused } from "../skills/opencode.ts"
 import { createOpenCodeSkillPermissionSource } from "../hosts/opencode-skill-source.ts"
 import { enabled } from "./types.ts"
 import { flowSuffix, modeSuffix, type FlowPhase } from "../modes/instructions.ts"
+import { assertNever } from "../workflows/types.ts"
 import { hasLcaMarker, stripForgedMarkers } from "../modes/markers.ts"
 import type { ActiveMode } from "../modes/instructions.ts"
 import { createSkillRouter } from "../routing/router.ts"
@@ -21,21 +37,32 @@ import { recordRoutingAdvice } from "../telemetry/routing.ts"
 import { observeSkillTurn, observationConfigGeneration } from "../telemetry/skill-observer.ts"
 import { consumeCommandTurn } from "./command-turns.ts"
 import {
-  APPROVE_COMMAND, APPROVE_TEMPLATE, CANCEL_COMMAND, CANCEL_TEMPLATE, FLOW_COMMANDS, PLAN_COMMAND, PLAN_TEMPLATE,
-  REJECT_COMMAND, REJECT_TEMPLATE_PREFIX, REJECT_TEMPLATE_SUFFIX, STATUS_COMMAND,
+  APPROVE_COMMAND, APPROVE_TEMPLATE, CANCEL_COMMAND, CANCEL_TEMPLATE, CONTINUE_COMMAND, CONTINUE_HELD_RECEIPT,
+  consumeContinueReceipt, FLOW_COMMANDS, PLAN_COMMAND, PLAN_TEMPLATE,
+  REJECT_COMMAND, REJECT_TEMPLATE_PREFIX, REJECT_TEMPLATE_SUFFIX, STATUS_COMMAND, STOP_COMMAND,
 } from "./command.ts"
 import { flowOn, renderStatus, renderStatusError, StatusReadError } from "../flow/status.ts"
-import { activeWorkflow, fileSha, planJsonPath, readWorkflow, workflowEngineRefusal, type Workflow } from "../flow/state.ts"
-import { applyEvent, approveWorkflow, cancelWorkflow, resolveAuthority, startWorkflow } from "../flow/runtime.ts"
+import { verifyArtifact } from "../workflows/artifacts.ts"
+import { activeWorkflow, planJsonPath, readWorkflow, workflowEngineRefusal, type Workflow } from "../flow/state.ts"
+import { applyEvent, approveWorkflow, observeStopSettlement, requestStop, resolveAuthority, startWorkflow } from "../flow/runtime.ts"
 import { canonicalPlanSha, coercePlan, planMdPath, planToTasks } from "../flow/plan.ts"
 import type { TaskInput } from "../state/ledger.ts"
 
 function lastUserText(parts: Part[]): TextPart | undefined {
   for (let i = parts.length - 1; i >= 0; i--) {
     const p = parts[i]
-    if (p && p.type === "text" && !p.synthetic) return p
+    if (p && p.type === "text" && !p.synthetic && !p.ignored) return p
   }
   return undefined
+}
+
+function refuseUserText(parts: Part[], reason: string): void {
+  const part = lastUserText(parts)
+  if (!part) return
+  part.text = reason
+  part.synthetic = false
+  part.ignored = false
+  parts.splice(0, parts.length, part)
 }
 
 /**
@@ -61,7 +88,15 @@ function markSuffixed(p: TextPart): void {
 
 /** §5.2/§5.6: the workflow phase a suffix is rendered for (stuck folds into "stuck"). */
 function suffixPhase(wf: Workflow): FlowPhase {
-  return wf.phase === "stuck" ? "stuck" : (wf.phase as FlowPhase)
+  switch (wf.phase) {
+    case "planning": case "reviewing": case "pending_approval": case "executing": case "stuck": case "paused":
+      return wf.phase
+    case "done": case "cancelled":
+      // Terminal workflows never own a turn; the stuck text is the safest read-only fallback.
+      return "stuck"
+    default:
+      return assertNever(wf.phase, "workflow phase")
+  }
 }
 
 export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.message"]> {
@@ -84,22 +119,207 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     return workflowEngineRefusal(workflow, runtime.host.identity.engine)
   }
 
+  async function authenticateMainSessionTurn(
+    sessionID: string,
+    messageID: string,
+    expectedLease?: AdmissionLease,
+  ): Promise<{ epoch: string; createdAt?: number; lease: AdmissionLease } | undefined> {
+    if (!await waitForPendingSDKSessionCreation(worktree, sessionID)) return undefined
+    const storeBefore = getOwnedSession(worktree, sessionID)
+    const epochBefore = admissionEpoch(worktree, sessionID)
+    if (expectedLease && !isAdmissionLeaseCurrent(worktree, sessionID, expectedLease)) return undefined
+    if (storeBefore && (!epochBefore || storeBefore.epoch !== epochBefore || !expectedLease ||
+        !isAdmissionCurrent(worktree, sessionID, epochBefore) || !isAdmissionLeaseCurrent(worktree, sessionID, expectedLease))) return undefined
+    const canonicalWorktree = canonicalDirectory(worktree)
+    const expectedDirectory = canonicalDirectory(deps.directory)
+    if (!canonicalWorktree || !expectedDirectory) return undefined
+    const directoryFromWorktree = relative(canonicalWorktree, expectedDirectory)
+    if (directoryFromWorktree === ".." || directoryFromWorktree.startsWith(`..${sep}`) || isAbsolute(directoryFromWorktree)) return undefined
+    if (storeBefore) {
+      const identity = authenticatedSDKSessionIdentity(worktree, sessionID)
+      if (identity && (identity.directory !== expectedDirectory || identity.parentID !== undefined)) return undefined
+      return { epoch: epochBefore!, lease: expectedLease!, ...(identity ? { createdAt: identity.createdAt } : {}) }
+    }
+
+    const initialIdentity = authenticatedSDKSessionIdentity(worktree, sessionID)
+    if (!initialIdentity || initialIdentity.directory !== expectedDirectory || initialIdentity.parentID !== undefined ||
+        !hasSDKSessionCreationObservation(worktree, sessionID, initialIdentity)) return undefined
+    if (!canCaptureSDKUserMessage(worktree, sessionID, messageID)) return undefined
+
+    const initialSessionDirectoryExists = existsSync(sessionDir(worktree, sessionID))
+    const initialWorkflowOwned = readWorkflow(worktree)?.sessionID === sessionID
+    const initialAttachment = inspectCurrentSessionAttachment(worktree, sessionID)
+    if (initialSessionDirectoryExists || initialWorkflowOwned || initialAttachment?.state === "attached") return undefined
+
+    const freshBindingIsUnchanged = () => getOwnedSession(worktree, sessionID) === storeBefore &&
+      admissionEpoch(worktree, sessionID) === epochBefore &&
+      existsSync(sessionDir(worktree, sessionID)) === initialSessionDirectoryExists &&
+      (readWorkflow(worktree)?.sessionID === sessionID) === initialWorkflowOwned &&
+      inspectCurrentSessionAttachment(worktree, sessionID)?.state !== "attached" &&
+      authenticatedSDKSessionIdentity(worktree, sessionID) !== undefined &&
+      JSON.stringify(authenticatedSDKSessionIdentity(worktree, sessionID)) === JSON.stringify(initialIdentity) &&
+      hasSDKSessionCreationObservation(worktree, sessionID, initialIdentity) &&
+      canCaptureSDKUserMessage(worktree, sessionID, messageID)
+
+    const lookup = await deps.client.session.get({ path: { id: sessionID }, query: { directory: deps.directory } })
+    const vendor = lookup.data as { id?: unknown; directory?: unknown; parentID?: unknown; time?: { created?: unknown; updated?: unknown } } | undefined
+    const matchesCreation = (candidate: typeof vendor): boolean => !!candidate && candidate.id === sessionID &&
+      canonicalDirectory(candidate.directory) === expectedDirectory && candidate.parentID === undefined &&
+      candidate.time?.created === initialIdentity.createdAt && typeof candidate.time.updated === "number" &&
+      Number.isFinite(candidate.time.updated) && candidate.time.updated >= initialIdentity.createdAt
+    if (!freshBindingIsUnchanged() || lookup.error || !matchesCreation(vendor)) return undefined
+
+    const history = await deps.client.session.messages({
+      path: { id: sessionID }, query: { directory: deps.directory },
+    })
+    if (!freshBindingIsUnchanged() || history.error || !Array.isArray(history.data) || history.data.length !== 0) return undefined
+
+    const confirmed = await deps.client.session.get({ path: { id: sessionID }, query: { directory: deps.directory } })
+    const confirmedVendor = confirmed.data as typeof vendor
+    if (!freshBindingIsUnchanged() || confirmed.error || !matchesCreation(confirmedVendor) ||
+        confirmedVendor?.time?.updated !== vendor?.time?.updated) return undefined
+
+    const store = attachAdmission(runtime, sessionID, { engine: runtime.host.identity.engine })
+    const epoch = admissionEpoch(worktree, sessionID)
+    if (!epoch || store.epoch !== epoch || getOwnedSession(worktree, sessionID) !== store || !isAdmissionCurrent(worktree, sessionID, epoch)) return undefined
+    const lease = captureAdmissionLease(worktree, sessionID)
+    if (!lease || !isAdmissionLeaseCurrent(worktree, sessionID, lease)) return undefined
+    return { epoch, createdAt: initialIdentity.createdAt, lease }
+  }
+
+  function attachHeldFreshSessionIfUnowned(sessionID: string): void {
+    if (getOwnedSession(worktree, sessionID) || admissionEpoch(worktree, sessionID) ||
+        inspectCurrentSessionAttachment(worktree, sessionID)?.state === "attached") return
+    try { attachAdmission(runtime, sessionID, { engine: runtime.host.identity.engine }, { startHeld: true }) }
+    catch (error) {
+      log("chat.message: refused SDK session could not be attached held", {
+        sessionID,
+        error: (error as Error)?.message ?? String(error),
+      })
+    }
+  }
+
   return async (input, output) => {
     const textPart = lastUserText(output.parts)
     const replay = !!textPart && alreadySuffixed(textPart)
+    const commandTurn = consumeCommandTurn(input.sessionID)
+    const receiptOnly = commandTurn?.name === STATUS_COMMAND || commandTurn?.name === CONTINUE_COMMAND ||
+      commandTurn?.name === STOP_COMMAND
     try {
-      const routed = await handle(input, output, !replay)
-      if (!replay && !routed && lastUserText(output.parts)) observeSkillTurn(deps, {
+      let systemAdmissionLease = reserveOpenCodeSystemTurn(deps, input.sessionID, output.message.id)
+      let epoch = admissionEpoch(worktree, input.sessionID)
+      let vendorCreatedAt = authenticatedSDKSessionIdentity(worktree, input.sessionID)?.createdAt
+      const child = policyBindingForOpenCodeSession(deps, input.sessionID)
+      const mainUser = !child && output.message.role === "user" && output.message.sessionID === input.sessionID &&
+        output.message.agent === "main" && (input.agent === undefined || input.agent === "main")
+      const originalText = mainUser
+        ? output.parts.filter((part): part is TextPart => part.type === "text" && !part.synthetic && !part.ignored).map(part => part.text).join("")
+        : ""
+      if (mainUser && originalText.length > 0 && !receiptOnly) {
+        let admission: { epoch: string; createdAt?: number; lease: AdmissionLease } | undefined
+        try { admission = await authenticateMainSessionTurn(input.sessionID, output.message.id, systemAdmissionLease) }
+        catch (error) { log("chat.message: main SDK session authentication failed", { sessionID: input.sessionID, error: (error as Error)?.message ?? String(error) }) }
+        if (!admission) {
+          attachHeldFreshSessionIfUnowned(input.sessionID)
+          refuseUserText(output.parts, "LCA session held: this OpenCode session is not a fresh authenticated main session; explicit owner Resume is required.")
+          return
+        }
+        epoch = admission.epoch
+        vendorCreatedAt = admission.createdAt
+        systemAdmissionLease = admission.lease
+      }
+      const parentEpoch = mainUser ? capturedUserMessageEpoch(worktree, input.sessionID, output.message.id) : undefined
+      if (mainUser && ((parentEpoch !== undefined && parentEpoch !== epoch) || (replay && parentEpoch === undefined))) {
+        refuseUserText(output.parts, "LCA ignored a stale user message; no work was dispatched.")
+        return
+      }
+      if (epoch && mainUser && originalText.length > 0 && !replay) {
+        const persisted = persistMainUserMessage(worktree, input.sessionID, output.message.id, originalText, epoch)
+        if (persisted.status === "stale") {
+          refuseUserText(output.parts, "LCA ignored a stale user message; no work was dispatched.")
+          return
+        }
+        if (persisted.status === "failed") {
+          try {
+            log("chat.message: SDK transcript persistence failed", {
+              sessionID: input.sessionID,
+              messageID: output.message.id,
+              error: (persisted.error as Error)?.message ?? String(persisted.error),
+              ...(persisted.holdError === undefined ? {} : { holdError: (persisted.holdError as Error)?.message ?? String(persisted.holdError) }),
+            })
+          } catch {}
+          refuseUserText(output.parts, "LCA session held: the user message could not be durably recorded; this request was refused.")
+          let stillOwned = false
+          try {
+            stillOwned = getOwnedSession(worktree, input.sessionID)?.epoch === epoch
+          } catch {}
+          if (stillOwned) {
+            try {
+              await deps.client.session.abort({ path: { id: input.sessionID } })
+            } catch (error) {
+              try {
+                log("chat.message: SDK transcript failure abort failed", {
+                  sessionID: input.sessionID,
+                  error: (error as Error)?.message ?? String(error),
+                })
+              } catch {}
+            }
+          }
+          return
+        }
+        if (!captureSDKSessionLifetime(worktree, input.sessionID, epoch, vendorCreatedAt)) {
+          let heldCurrentOwner = false
+          try {
+            const store = getOwnedSession(worktree, input.sessionID)
+            if (store?.epoch === epoch && admissionEpoch(worktree, input.sessionID) === epoch) {
+              holdAdmission(worktree, input.sessionID, "sdk_session_lifetime_unavailable")
+              heldCurrentOwner = true
+            }
+          } catch (error) {
+            log("chat.message: session lifetime capture failed to hold owner", {
+              sessionID: input.sessionID,
+              error: (error as Error)?.message ?? String(error),
+            })
+          }
+          refuseUserText(output.parts, "LCA session held: this SDK session lifetime could not be retained; this request was refused.")
+          if (heldCurrentOwner) {
+            try { await deps.client.session.abort({ path: { id: input.sessionID } }) }
+            catch (error) {
+              log("chat.message: session lifetime capture abort failed", {
+                sessionID: input.sessionID,
+                error: (error as Error)?.message ?? String(error),
+              })
+            }
+          }
+          return
+        }
+      }
+      if (!receiptOnly) {
+        bindOpenCodeSystemTurn(deps, input, output, systemAdmissionLease)
+        const turn = captureOpenCodeToolTurn(deps, input.sessionID)
+        if (turn?.policy.tools.allowed.includes("skill") && !turn.policy.tools.denied.includes("skill")) {
+          await initializeOpenCodeSkillSession(deps, turn)
+        }
+        if (turn?.kind === "child") return
+      }
+      const routed = await handle(input, output, !replay, commandTurn)
+      if (epoch && isAdmissionCurrent(worktree, input.sessionID, epoch) && !replay && !routed && lastUserText(output.parts)) observeSkillTurn(deps, {
         sessionID: input.sessionID, messageID: output.message.id, role: "user", phase: "pending",
         routerExposure: "bypass", routerEligibility: "ineligible",
       })
     } catch (e) {
+      if (e instanceof UnsafeOpenCodeSystemChannel || e instanceof OpenCodeSkillRefused) throw e
       // a read-only state dir must never break message handling
       log("chat.message hook error", { sessionID: input.sessionID, error: (e as Error).message })
     }
   }
 
-  async function handle(input: Parameters<NonNullable<Hooks["chat.message"]>>[0], output: Parameters<NonNullable<Hooks["chat.message"]>>[1], recordTurn: boolean) {
+  async function handle(
+    input: Parameters<NonNullable<Hooks["chat.message"]>>[0],
+    output: Parameters<NonNullable<Hooks["chat.message"]>>[1],
+    recordTurn: boolean,
+    commandTurn: ReturnType<typeof consumeCommandTurn>,
+  ) {
     const { sessionID } = input
     const now = Date.now()
     if (config.skill_observation?.enabled === true && enabled(config, "tool.history") && recordTurn && lastUserText(output.parts)) {
@@ -133,27 +353,14 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       log("chat.message: session info write failed", { sessionID, error: (e as Error).message })
     }
 
-    // Consumed on every turn (before any early return, any agent) so a mark never outlives its own command turn.
-    const commandTurn = consumeCommandTurn(sessionID)
     // `/status` (M0 step 3, ARCH-08): rewrite the command's own text part in place with the code-rendered status.
-    // §5.3: /status never mutates for a foreign session (read-only); the owning session with a dead owner takes
-    // over first via resolveAuthority, then renders exactly like the live-owner cell.
+    // Status is observation only, including a dead or restored same-session owner.
     if (commandTurn?.name === STATUS_COMMAND) {
       const part = lastUserText(output.parts)
       if (part) {
-        let takeoverFailed = false
-        try {
-          const workflow = readWorkflow(worktree)
-          const refusal = workflow && workflowEngineRefusal(workflow, runtime.host.identity.engine)
-          if (refusal) log("/status takeover skipped: workflow engine identity refused", { sessionID, reason: refusal })
-          else resolveAuthority(runtime, "status", sessionID, runtime.host.identity.engine)
-        } catch {
-          takeoverFailed = true
-          log("chat.message: /status owner takeover failed", { sessionID, source: "workflow", code: "takeover_failed" })
-        }
         try {
           part.text = renderStatus(runtime, sessionID, queue.isRunning(sessionID)) +
-            (takeoverFailed ? "\nowner takeover failed" : "") + "\n\nReply only: ok"
+            (effectiveHold(worktree, sessionID) ? "\nSession held; explicit owner Resume required." : "") + "\n\nReply only: ok"
           log("chat.message: /status rendered", { sessionID })
         } catch (error) {
           if (error instanceof StatusReadError) {
@@ -169,14 +376,20 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       }
       return
     }
+    if (commandTurn?.name === CONTINUE_COMMAND) {
+      const part = lastUserText(output.parts)
+      if (part) part.text = consumeContinueReceipt(deps, sessionID, commandTurn.data ?? "") ?? CONTINUE_HELD_RECEIPT
+      else log("chat.message: /continue had no user text part", { sessionID })
+      return
+    }
     // M1 /plan /approve /reject /cancel: the state work (§5.2/§5.3/§5.5) happens here, in the command turn, then
     // the command's own template text is rewritten in place with the outcome (same ARCH-08 pattern as /status).
     // Approval is only ever reachable through this branch for an lca-injected `approve` command turn: prose
     // "/approve"/"approved" anywhere else never reaches approveWorkflow.
     const messageRole = (output.message as { role?: string }).role
-    // Interactive command actions require explicit user-message provenance. Noninteractive direct hook fixtures
-    // without role metadata retain their legacy command behavior.
-    const userCommandTurn = messageRole === "user" || (!deps.interactive && messageRole === undefined)
+    const userCommandText = lastUserText(output.parts)
+    const userCommandTurn = messageRole === "user" && output.message.sessionID === sessionID &&
+      output.message.agent === "main" && (input.agent === undefined || input.agent === "main") && !!userCommandText?.text.trim()
     if (commandTurn && userCommandTurn && flowOn(config) && (FLOW_COMMANDS as readonly string[]).includes(commandTurn.name)) {
       const part = lastUserText(output.parts)
       if (part) handleFlowCommand(sessionID, commandTurn.name, commandTurn.data ?? "", part)
@@ -222,6 +435,12 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     isUserMessage: boolean,
   ) {
     const { sessionID } = input
+    const epoch = admissionEpoch(worktree, sessionID)
+    const admitted = () => epoch !== undefined && admissionEpoch(worktree, sessionID) === epoch && !effectiveHold(worktree, sessionID)
+    if (!admitted()) {
+      part.text += "\n\nLCA session held: retained history is read-only; an explicit owner Resume is required before work."
+      return
+    }
 
     // §5.6: while this session owns a non-terminal plan workflow, legacy mode keywords/router/resume are all
     // superseded by the workflow suffix. Handled entirely here, before any legacy detection runs, D4/AC0.8.
@@ -288,11 +507,6 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     const detection = detectMode(part.text)
     const originalText = part.text
     log("chat.message: detection", { sessionID, agent: input.agent, detection, chars: part.text.length })
-    // A genuine new user message (not the /stop text) lifts a user_stop marker so the next delegate call may run.
-    if (!(detection && "cancel" in detection) && readAbort(worktree, sessionID)?.reason === "user_stop") {
-      clearAbort(worktree, sessionID)
-      log("user_stop marker cleared by a new user message", { sessionID })
-    }
     if (detection && "cancel" in detection) {
       const prev = readModeState(worktree, sessionID)
       writeModeState(worktree, sessionID, { ...EMPTY_MODE, stopReason: "user_cancel" })
@@ -304,8 +518,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     // D3: with flow on, the legacy plan keywords ("plan mode", "ralplan", "hyperplan", "계획부터", "계획 모드") map
     // to §5.3 as /plan with entry "keyword": same sanitizer/informational-suppression/force: as detectMode already
     // applied above, request = stripModeKeywords(text), actor user_keyword. No legacy plan mode state is written.
-    // An active workflow in a DIFFERENT session is not "no workflow" for T1/T20 purposes; resolveAuthority handles
-    // that (owning-session takeover / foreign dead-owner T20 then T1, or a same-session-live refusal).
+    // A foreign nonterminal workflow blocks new work even after its process dies.
     if (detection && detection.mode === "plan" && flowOn(config)) {
       const refusal = persistedWorkflowRefusal()
       if (refusal) {
@@ -345,7 +558,6 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
         updatedAt: now,
       }
       writeModeState(worktree, sessionID, state)
-      if (clearAbort(worktree, sessionID)) log("mode activation cleared a stale abort marker", { sessionID })
       part.text += resume + modeSuffix(mode, undefined, deps.config)
       log("mode activated", {
         sessionID,
@@ -364,6 +576,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       // Explicit commands and existing continuation offers retain their own authority.
       if (input.agent !== "main" || resume || commandTurn || originalText.trimStart().startsWith("/") || readAbort(worktree, sessionID)) return
       const recommendation = await router.recommend(sessionID, messageID, originalText)
+      if (!admitted()) return
       let adviceInserted = false
       if (config.skill_router.mode === "suggest" && recommendation.skill) {
         part.text += `\n\n<lca-skill-advice>Potentially relevant skill: ${recommendation.skill}. This is optional advice, not a request to load a skill, change mode, or execute work. Preserve the user's explicit choices and existing authorization requirements.</lca-skill-advice>`
@@ -389,6 +602,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
   }
 
   function resumeSuffix(sessionID: string): string {
+    if (effectiveHold(worktree, sessionID)) return ""
     try {
       if (!enabled(config, "tool.delegate") || queue.isRunning(sessionID)) return ""
       const ledger = readLedger(worktree, sessionID)
@@ -477,6 +691,10 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       log(`chat.message: /${command} refused`, { sessionID, reason: persistedRefusal })
       return
     }
+    if (command !== CANCEL_COMMAND && effectiveHold(worktree, sessionID)) {
+      part.text = "LCA session held: explicit owner Resume required; no workflow was changed."
+      return
+    }
     if (command === PLAN_COMMAND) {
       const a = resolveAuthority(runtime, "plan", sessionID, runtime.host.identity.engine, now)
       if (a.refuse) {
@@ -522,7 +740,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
           log("chat.message: /approve plan read failed", { sessionID, error: (e as Error).message })
         }
       }
-      const mdShaOk = !!wf.planRef && fileSha(worktree, planMdPath(wf.id)) === wf.planRef.mdSha
+      const mdShaOk = !!wf.planRef && verifyArtifact(worktree, { key: "plan.md", path: planMdPath(wf.id), sha256: wf.planRef.mdSha }).state === "verified"
       const current = readWorkflow(worktree)
       const currentRefusal = current && workflowEngineRefusal(current, runtime.host.identity.engine)
       if (currentRefusal) {
@@ -577,12 +795,18 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
         return
       }
       const queueRunning = queue.isRunning(wf.sessionID)
-      const r = cancelWorkflow(runtime, wf, queueRunning, () => {
-        void queue.abort(wf.sessionID, "workflow_cancel").catch((e: unknown) => log("/cancel: queue abort failed", { sessionID, error: String(e) }))
-      })
+      const requested = requestStop(runtime, wf.sessionID, "cancel", "cancel requested", { workflowID: wf.id, expectedRevision: wf.lastSeq })
+      const r = requested.result
+      if (r.ok) void requested.quiesce.then(() => observeStopSettlement(runtime, wf.sessionID, wf.owner.instance, "command"))
       part.text = r.ok ? CANCEL_TEMPLATE : r.text
       log("chat.message: /cancel", { sessionID, ok: r.ok, queueRunning })
       return
     }
   }
+}
+
+function canonicalDirectory(path: unknown): string | undefined {
+  if (typeof path !== "string" || path.length === 0) return undefined
+  try { return realpathSync.native(path) }
+  catch { return undefined }
 }

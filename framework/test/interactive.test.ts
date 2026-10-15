@@ -1,19 +1,32 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import { createHash, randomUUID } from "node:crypto"
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { launchInteractive, parseInteractiveArgs, validModelID, type InteractiveDependencies, type Terminal } from "../src/hosts/interactive.ts"
+import type { TerminalControl } from "../src/hosts/interactive-session.ts"
 import type { ModelCatalog } from "../src/hosts/model-catalog.ts"
-import { newWorkflow, workflowPath } from "../src/flow/state.ts"
+import { newWorkflow, withFlowTransaction, workflowPath } from "../src/flow/state.ts"
+import { publishWorkflow, writeWorkflow } from "./commit-fixture.ts"
+import { currentOwner } from "../src/flow/owner.ts"
+import { readSessionCommitted } from "../src/workflows/commit.ts"
 import { AdmissionRefusal } from "../src/hosts/required-controls.ts"
 import type { ForegroundController } from "../src/hosts/controller.ts"
 import type { ExecutionRuntime } from "../src/hosts/types.ts"
 import type { CliProgressSink } from "../src/hosts/cli-progress.ts"
+import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
+import { bindSkillInvocation, finishSkillInvocation, skillInvocationAudit } from "../src/skills/context.ts"
+import { SkillSession, type SkillCatalog } from "../src/skills/session.ts"
 import { humanDecision, type OperatorDecision } from "../src/hosts/operator.ts"
-import { withTerminalLine } from "./operator-helpers.ts"
+import { planBinding, withTerminalLine } from "./operator-helpers.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
+import { DEFAULT_CONFIG } from "../src/config.ts"
+import { inspectSessionAttachment, openSession, replaySession, readSessionMetadata, type ReplayOptions, type ReplayResult } from "../src/sessions/store.ts"
+import { sessionDir } from "../src/state/store.ts"
+import type { ConversationMessage, SkillConversationInvocation } from "../src/hosts/plan-conversation.ts"
 
 let wt: ReturnType<typeof tempGitWorktree>
-beforeEach(() => { wt = tempGitWorktree() })
+let harnessSequence = 0
+beforeEach(() => { wt = tempGitWorktree(); harnessSequence = 0 })
 afterEach(() => wt.cleanup())
 
 type HarnessOptions = {
@@ -24,6 +37,7 @@ type HarnessOptions = {
   gitTopLevel?: string | undefined
   beforeRead?: (prompt: string, signal?: AbortSignal) => void
   beforeWrite?: (text: string) => void
+  choose?: (title: string, choices: readonly string[], signal: AbortSignal) => Promise<number | undefined>
   beforeRun?: (signal?: AbortSignal) => void
   validatePlan?: (plan: unknown) => void
   runResult?: { phase: string; done: number; failed: number; cancelled: number }
@@ -42,6 +56,7 @@ type HarnessOptions = {
 }
 
 function harness(options: HarnessOptions = {}) {
+  const sessionPrefix = harnessSequence++ === 0 ? "fixture-session" : `fixture-run-${harnessSequence}`
   const lines = [...(options.lines ?? [])]
   const workflowID = options.workflowID ?? "wf_fixture"
   const calls: {
@@ -61,9 +76,21 @@ function harness(options: HarnessOptions = {}) {
     decision?: OperatorDecision
     approvalRequest?: { action: Parameters<typeof humanDecision>[0]; workflowID: string; planSha: string }
     runCount: number
+    controllerStatusCalls: number
+    controllerCancelCalls: number
     signalListeners: Map<string, Set<() => void>>
+    choices: Array<{ title: string; values: readonly string[] }>
+    skillCatalogs: SkillCatalog[]
+    catalogSessions: Array<string | undefined>
+    control?: (action: TerminalControl) => void
     progressSinks: CliProgressSink[]
-  } = { prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, signalListeners: new Map(), progressSinks: [] }
+    boundSessions: string[]
+    transcriptSources: Array<(options: ReplayOptions) => ReplayResult>
+    queueAdmissions: boolean[]
+    controllerCreations: number
+    conversationRestores: Array<{ sessionID: string; prior?: readonly ConversationMessage[] }>
+  } = { prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), choices: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [] }
+  let boundSessionID: string | undefined
 
   let releaseRun: (() => void) | undefined
   const runGate = options.deferRun ? new Promise<void>(resolve => { releaseRun = resolve }) : undefined
@@ -77,10 +104,22 @@ function harness(options: HarnessOptions = {}) {
       if (signal?.aborted) return undefined
       return lines.shift()
     },
+    ...(options.choose ? { choose: async (title: string, values: readonly string[], signal: AbortSignal) => {
+      calls.choices.push({ title, values })
+      return options.choose!(title, values, signal)
+    } } : {}),
+    controls: handler => { calls.control = handler },
+    queueAdmission: allowed => { calls.queueAdmissions.push(allowed) },
+    sessionChanged: () => { calls.events.push("sessionChanged") },
+    skillCatalog: catalog => { calls.skillCatalogs.push(catalog); calls.catalogSessions.push(boundSessionID) },
+    bindSession: sessionID => { boundSessionID = sessionID; calls.boundSessions.push(sessionID) },
+    transcriptSource: source => { calls.transcriptSources.push(source) },
     write: (text) => { calls.output.push(text); options.beforeWrite?.(text) },
     close: () => { calls.events.push("terminal.close") },
   }
   const controller = {
+    status() { calls.controllerStatusCalls++; return "Fixture session status" },
+    cancel() { calls.controllerCancelCalls++; return { ok: true, text: "cancelled" } },
     validateImportedPlan(plan: unknown) {
       calls.events.push("validate")
       calls.validationAttempts.push(plan)
@@ -96,6 +135,7 @@ function harness(options: HarnessOptions = {}) {
           text: options.importResult?.text ?? "",
           wf: {
             id: workflowID,
+            lastSeq: 11,
             phase: options.importResult?.phase ?? "pending_approval",
             planRef: { mdPath: `.lca/plans/${workflowID}.md` },
           },
@@ -123,7 +163,7 @@ function harness(options: HarnessOptions = {}) {
       options.beforeRun?.(signal)
       await runGate
       return {
-        workflow: { id: workflowID, phase: options.runResult?.phase ?? "done" },
+        workflow: { id: workflowID, phase: options.runResult?.phase ?? "done", artifacts: [] },
         run: { done: options.runResult?.done ?? 1, failed: options.runResult?.failed ?? 0, cancelled: options.runResult?.cancelled ?? 0, skipped: 0 },
       } as unknown as Awaited<ReturnType<ForegroundController["run"]>>
     },
@@ -142,6 +182,11 @@ function harness(options: HarnessOptions = {}) {
       if (progress) calls.progressSinks.push(progress)
       return {
         worktree,
+        directory: worktree,
+        instance: "interactive-test-runtime",
+        host: { identity: { engine, profile: "interactive-fixture" } },
+        config: structuredClone(DEFAULT_CONFIG),
+        log() {},
         selectedEngine: engine,
         selectedModel: model,
         progress,
@@ -154,11 +199,12 @@ function harness(options: HarnessOptions = {}) {
         },
       } as unknown as ExecutionRuntime
     },
-    admitRuntime: async () => {},
-    createConversation: (runtime, sessionID) => {
+    admitRuntime: async () => { calls.events.push("admitRuntime") },
+    createConversation: (runtime, sessionID, prior) => {
       calls.events.push("conversation")
       calls.sessionID = sessionID
       calls.sessionIDs.push(sessionID)
+      calls.conversationRestores.push({ sessionID, ...(prior ? { prior } : {}) })
       const selectedRuntime = runtime as ExecutionRuntime & { selectedEngine: string; selectedModel: string; progress?: CliProgressSink }
       if (options.failConversationFor?.(selectedRuntime.selectedEngine, selectedRuntime.selectedModel)) {
         throw new Error("fixture conversation setup failed")
@@ -177,11 +223,11 @@ function harness(options: HarnessOptions = {}) {
         },
       }
     },
-    createController: () => controller,
-    humanDecision: async (action, workflowID, planSha) => {
+    createController: () => { calls.controllerCreations++; return controller },
+    humanDecision: async (action, binding) => {
       calls.events.push("humanDecision")
-      calls.approvalRequest = { action, workflowID, planSha }
-      return { action: options.decision ?? "approve", workflowID, planSha } as unknown as OperatorDecision
+      calls.approvalRequest = { action, workflowID: binding.workflowID, planSha: binding.subject.sha256 }
+      return { action: options.decision ?? "approve", ...binding } as unknown as OperatorDecision
     },
     discoverModels: async (engine, worktree) => {
       calls.discoveries.push({ engine, worktree })
@@ -195,7 +241,7 @@ function harness(options: HarnessOptions = {}) {
     },
     randomUUID: (() => {
       let sequence = 0
-      return () => sequence++ === 0 ? "fixture-session" : `fixture-session-${sequence}`
+      return () => sequence++ === 0 ? sessionPrefix : `${sessionPrefix}-${sequence}`
     })(),
     signals: {
       on: (signal, listener) => {
@@ -216,6 +262,53 @@ function harness(options: HarnessOptions = {}) {
   }
 }
 
+function useRealSkillCoordinator(h: ReturnType<typeof harness>) {
+  const handoffs: Array<{ text: string; sessionID: string; invocation?: SkillConversationInvocation }> = []
+  const requestedRoot = realpathSync.native(wt.worktree)
+  const gitRoot = h.deps.gitTopLevel?.(requestedRoot)
+  if (!gitRoot) throw new Error("skill coordinator fixture requires a real Git worktree root")
+  const projectRoot = realpathSync.native(gitRoot)
+  wt.worktree = projectRoot
+  h.deps.cwd = projectRoot
+  h.deps.gitTopLevel = () => projectRoot
+  h.deps.createRuntime = options => createCliRuntime(options)
+  // Keep host preflight independent of installed external CLIs; admission itself remains the coordinator's real attachAdmission path.
+  h.deps.admitRuntime = async () => {}
+  h.deps.createConversation = (runtime, sessionID) => ({
+    turn: async (text, signal, invocation) => {
+      if (signal?.aborted) throw new Error("test turn cancelled")
+      h.calls.events.push("turn")
+      h.calls.turns.push(text)
+      handoffs.push({ text, sessionID, ...(invocation ? { invocation } : {}) })
+      if (!invocation) return { text: "Acknowledged." }
+      const binding = bindSkillInvocation(invocation.prepared, {
+        executionID: randomUUID(), supervisorSessionID: sessionID, taskID: randomUUID(), attemptID: randomUUID(),
+        generation: 1, role: "main", title: "Interactive skill test", cwd: runtime.worktree,
+        text, deadlineAt: Date.now() + 60_000, policy: runtime.policy.resolve("main"),
+      }, runtime.policy, invocation.terminal)
+      try { return { text: "Skill response.", skill: skillInvocationAudit(binding.context) } }
+      finally { finishSkillInvocation(binding.context) }
+    },
+  })
+  return handoffs
+}
+
+function retainedSDKHistory(sessionID = "sdk-retained-history", includeTool = false) {
+  const owner = openSession(wt.worktree, sessionID, { engine: "opencode" })
+  owner.append("user", { text: "history from a deleted SDK session" })
+  owner.append("assistant", { text: "retained LCA reply" })
+  if (includeTool) {
+    const activity = { executionID: "sdk-execution", callID: "sdk-call", taskID: "t1", name: "read", role: "worker" }
+    owner.append("tool-start", { ...activity, outcome: "running" })
+    owner.append("tool-result", { ...activity, outcome: "succeeded" })
+  }
+  return owner
+}
+
+function releaseTestSession(store: ReturnType<typeof openSession>): void {
+  store.release({ workflowQuiescent: true, evidence: "test owner cleanup", workflowID: null, revision: null })
+}
+
 const proposedPlan = {
   goal: "Do the requested work",
   steps: [
@@ -229,6 +322,350 @@ const proposedPlan = {
 const unsafeTerminalControls = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
 
 describe("interactive terminal", () => {
+  test("lists catalog metadata and explicitly dispatches only an ordinary skill with a safe source audit", async () => {
+    const directory = join(wt.worktree, ".agents", "skills", "inspect")
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(join(directory, "SKILL.md"), "---\nname: inspect\ndescription: Inspect this project\nallowed-tools: [read]\n---\nUNIQUE_SKILL_SOURCE_BYTES\n")
+    const invalid = join(wt.worktree, ".agents", "skills", "broken")
+    mkdirSync(invalid, { recursive: true })
+    writeFileSync(join(invalid, "SKILL.md"), "not valid skill metadata\n")
+    const h = harness({
+      lines: ["/skills", "/skill:inspect inspect data.txt", "/quit"],
+      choose: async () => 0,
+    })
+    const handoffs = useRealSkillCoordinator(h)
+
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+
+    expect(h.calls.catalogSessions[0]).toBe("lca-fixture-session")
+    expect(h.calls.skillCatalogs.length).toBeGreaterThanOrEqual(2)
+    expect(h.calls.skillCatalogs[0]?.entries.some(entry => entry.descriptor.name === "inspect" && entry.classification === "custom")).toBe(true)
+    expect(h.calls.output.join("")).toContain("/skill:inspect · project · custom · Inspect this project")
+    expect(h.calls.output.join("")).toContain("Refused project broken · invalid-metadata")
+
+    expect(h.calls.turns).toEqual(["/skill:inspect inspect data.txt"])
+    expect(handoffs).toHaveLength(1)
+    expect(handoffs[0]?.invocation?.prepared.name).toBe("inspect")
+    expect(handoffs[0]?.invocation?.terminal?.stdinIsTTY).toBe(true)
+    const replay = replaySession(wt.worktree, "lca-fixture-session", { order: "asc" })
+    const audit = replay.records.find(record => record.kind === "notice" && String(record.data.text).startsWith("Skill invocation audit "))
+    expect(audit?.data.text).toContain('"userSeq":')
+    expect(audit?.data.text).toContain('"assistantSeq":')
+    expect(audit?.data.text).toContain('"name":"inspect"')
+    expect(audit?.data.text).not.toContain("canonicalSource")
+    expect(JSON.stringify(replay.records)).not.toContain("UNIQUE_SKILL_SOURCE_BYTES")
+    expect(JSON.stringify(replay.records)).not.toContain(join(directory, "SKILL.md"))
+  })
+
+  test("a declined or dismissed skill-source choice never dispatches a conversation turn", async () => {
+    const directory = join(wt.worktree, ".agents", "skills", "inspect")
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(join(directory, "SKILL.md"), "---\nname: inspect\ndescription: Inspect this project\n---\nRead-only source instructions.\n")
+    const h = harness({ lines: ["/skill:inspect inspect files", "/quit"], choose: async () => undefined })
+    useRealSkillCoordinator(h)
+
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+
+    expect(h.calls.choices).toHaveLength(1)
+    expect(h.calls.turns).toEqual([])
+    const replay = replaySession(wt.worktree, "lca-fixture-session", { order: "asc" })
+    expect(replay.records.some(record => record.kind === "user" && record.data.text === "/skill:inspect inspect files")).toBe(true)
+    expect(replay.records.some(record => record.kind === "assistant")).toBe(false)
+    expect(replay.records.some(record => record.kind === "notice" && String(record.data.text).startsWith("Skill invocation audit "))).toBe(false)
+  })
+
+  test("cancellation owns pending source consent and a late answer cannot dispatch after a session switch", async () => {
+    const directory = join(wt.worktree, ".agents", "skills", "inspect")
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(join(directory, "SKILL.md"), "---\nname: inspect\ndescription: Inspect this project\n---\nRead-only source instructions.\n")
+    let entered!: () => void
+    let lateAnswer!: (value: number) => void
+    let choiceCount = 0
+    const choiceStarted = new Promise<void>(resolve => { entered = resolve })
+    const h = harness({
+      lines: ["/skill:inspect before switch", "/new", "/skill:inspect after switch", "/quit"],
+      choose: (_title, _values, signal) => {
+        choiceCount++
+        if (choiceCount > 1) return Promise.resolve(0)
+        return new Promise(resolve => {
+          lateAnswer = resolve
+          signal.addEventListener("abort", () => resolve(undefined), { once: true })
+          entered()
+        })
+      },
+    })
+    const handoffs = useRealSkillCoordinator(h)
+    const operation = launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+    await choiceStarted
+    h.calls.control?.("cancel")
+    lateAnswer(0)
+    await operation
+
+    expect(choiceCount).toBe(2)
+    expect(h.calls.turns).toEqual(["/skill:inspect after switch"])
+    expect(handoffs.map(handoff => handoff.sessionID)).toEqual(["lca-fixture-session-2"])
+    expect(replaySession(wt.worktree, "lca-fixture-session", { order: "asc" }).records.some(record => record.kind === "assistant")).toBe(false)
+    expect(replaySession(wt.worktree, "lca-fixture-session-2", { order: "asc" }).records.some(record => record.kind === "assistant")).toBe(true)
+  })
+
+  test("source grants do not survive switching to a new foreground session", async () => {
+    const directory = join(wt.worktree, ".agents", "skills", "inspect")
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(join(directory, "SKILL.md"), "---\nname: inspect\ndescription: Inspect this project\n---\nRead-only source instructions.\n")
+    let choices = 0
+    const h = harness({
+      lines: ["/skill:inspect first request", "/new", "/skill:inspect second request", "/quit"],
+      choose: async () => { choices++; return 0 },
+    })
+    useRealSkillCoordinator(h)
+
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+
+    expect(h.calls.turns).toEqual(["/skill:inspect first request", "/skill:inspect second request"])
+    expect(choices).toBe(2)
+  })
+
+  test("lists and revokes source grants without dispatching extra model turns", async () => {
+    const directory = join(wt.worktree, ".agents", "skills", "inspect")
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(join(directory, "SKILL.md"), "---\nname: inspect\ndescription: Inspect this project\nallowed-tools: [read]\n---\nPrivate source instructions.\n")
+    let choices = 0
+    const h = harness({
+      lines: ["/skill:inspect first", "/skills grants", "/skills revoke inspect", "/skills grants", "/skill:inspect again", "/quit"],
+      choose: async () => { choices++; return 0 },
+    })
+    useRealSkillCoordinator(h)
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+    expect(h.calls.turns).toEqual(["/skill:inspect first", "/skill:inspect again"])
+    expect(choices).toBe(2)
+    expect(h.calls.output.join("")).toContain("Revoked 1 session skill grant(s) for inspect")
+    expect(h.calls.output.join("")).toContain("No session skill grants.")
+    expect(h.calls.output.join("")).not.toContain("Private source instructions.")
+    const rows = h.calls.output.join("").split("\n").filter(line => line.startsWith("lca-fixture-session · inspect · "))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatch(/^lca-fixture-session · inspect · project · custom · [0-9a-f]{64} · read$/u)
+  })
+
+  test("revoking while a skill invocation is in flight cancels it with the real failure and never reports a stopped label", async () => {
+    const directory = join(wt.worktree, ".agents", "skills", "inspect")
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(join(directory, "SKILL.md"), "---\nname: inspect\ndescription: Inspect this project\nallowed-tools: [read]\n---\nIN_FLIGHT_SKILL_BYTES\n")
+    const h = harness({ lines: ["/skill:inspect long request", "/quit"], choose: async () => 0 })
+    useRealSkillCoordinator(h)
+    const register = SkillSession.prototype.registerInvocationCancellation
+    let owner: SkillSession | undefined
+    let inFlight: AbortSignal | undefined
+    const spy = spyOn(SkillSession.prototype, "registerInvocationCancellation").mockImplementation(function (this: SkillSession, name, revision, controller) {
+      owner = this
+      inFlight = controller.signal
+      return register.call(this, name, revision, controller)
+    })
+    let revoked: number | undefined
+    let grantsAfterRevoke: number | undefined
+    let signalAbortedAfterRevoke: boolean | undefined
+    h.deps.createConversation = (runtime, sessionID) => ({
+      turn: async (text, _signal, invocation) => {
+        h.calls.turns.push(text)
+        const binding = bindSkillInvocation(invocation!.prepared, {
+          executionID: randomUUID(), supervisorSessionID: sessionID, taskID: randomUUID(), attemptID: randomUUID(),
+          generation: 1, role: "main", title: "Interactive skill test", cwd: runtime.worktree,
+          text, deadlineAt: Date.now() + 60_000, policy: runtime.policy.resolve("main"),
+        }, runtime.policy, invocation!.terminal)
+        try {
+          expect(owner?.listGrants()).toHaveLength(1)
+          expect(inFlight?.aborted).toBe(false)
+          revoked = owner!.revoke("inspect")
+          grantsAfterRevoke = owner!.listGrants().length
+          signalAbortedAfterRevoke = inFlight!.aborted
+          // A revoked invocation is no longer an authentic current context.
+          expect(() => skillInvocationAudit(binding.context)).toThrow()
+          throw new Error("conversation cancelled")
+        } finally { finishSkillInvocation(binding.context) }
+      },
+    })
+    try {
+      await expect(launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)).rejects.toThrow("conversation cancelled")
+    } finally { spy.mockRestore() }
+
+    expect(revoked).toBe(1)
+    expect(grantsAfterRevoke).toBe(0)
+    expect(signalAbortedAfterRevoke).toBe(true)
+    const output = h.calls.output.join("")
+    expect(output).not.toContain("stopped")
+    expect(output).not.toContain("termination proof")
+    expect(output).not.toContain("IN_FLIGHT_SKILL_BYTES")
+    const replay = replaySession(wt.worktree, "lca-fixture-session", { order: "asc" })
+    expect(replay.records.some(record => record.kind === "assistant")).toBe(false)
+    expect(replay.records.some(record => record.kind === "notice" && String(record.data.text).startsWith("Skill invocation audit "))).toBe(false)
+  })
+
+  test("deleted upstream SDK session restores only retained LCA history without creating an SDK runtime", async () => {
+    const writer = retainedSDKHistory()
+    const metadataPath = join(sessionDir(wt.worktree, writer.sessionID), "metadata.json")
+    const metadataBefore = readFileSync(metadataPath)
+    const h = harness({ lines: [`/resume ${writer.sessionID}`, "/status", "/quit"] })
+
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "fixture" }, h.deps)
+
+    expect(h.calls.output.join("")).toContain(`Retained SDK session ${writer.sessionID} · read-only history`)
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.events.filter(event => event === "admitRuntime")).toHaveLength(1)
+    expect(h.calls.controllerCreations).toBe(1)
+    expect(h.calls.controllerStatusCalls).toBe(0)
+    expect(h.calls.controllerCancelCalls).toBe(0)
+    expect(h.calls.conversationRestores).toHaveLength(1)
+    expect(h.calls.discoveries).toHaveLength(0)
+    expect(h.calls.runCount).toBe(0)
+    expect(h.calls.boundSessions.at(-1)).toBe(writer.sessionID)
+    const restored = h.calls.transcriptSources.at(-1)?.({ order: "asc" })
+    expect(restored?.records.map(record => record.data.text)).toEqual(["history from a deleted SDK session", "retained LCA reply"])
+    expect(readFileSync(metadataPath)).toEqual(metadataBefore)
+    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")?.held).toBe(true)
+    writer.assertOwner()
+    releaseTestSession(writer)
+  })
+
+  test("retained SDK history never adopts an existing writer in this process", async () => {
+    const writer = retainedSDKHistory("sdk-live-writer")
+    const metadataPath = join(sessionDir(wt.worktree, writer.sessionID), "metadata.json")
+    const metadataBefore = readFileSync(metadataPath)
+    const attachmentBefore = inspectSessionAttachment(wt.worktree, writer.sessionID, writer.epoch)
+    expect(attachmentBefore?.state).toBe("attached")
+    const h = harness({ lines: [`/resume ${writer.sessionID}`, "/quit"] })
+
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.controllerCreations).toBe(1)
+    expect(h.calls.controllerStatusCalls).toBe(0)
+    expect(h.calls.controllerCancelCalls).toBe(0)
+    expect(h.calls.conversationRestores).toHaveLength(1)
+    expect(h.calls.discoveries).toHaveLength(0)
+    expect(h.calls.runCount).toBe(0)
+    expect(readFileSync(metadataPath)).toEqual(metadataBefore)
+    expect(inspectSessionAttachment(wt.worktree, writer.sessionID, writer.epoch)).toEqual(attachmentBefore)
+    writer.assertOwner()
+    expect(writer.append("notice", { text: "upstream writer still owns this session" }).data.text)
+      .toBe("upstream writer still owns this session")
+    releaseTestSession(writer)
+  })
+
+  test("read-only SDK history blocks work commands and /new starts an isolated CLI session", async () => {
+    const writer = retainedSDKHistory("sdk-blocked-commands", true)
+    const metadataPath = join(sessionDir(wt.worktree, writer.sessionID), "metadata.json")
+    const metadataBefore = readFileSync(metadataPath)
+    const h = harness({ lines: [
+      `/resume ${writer.sessionID}`, "must not be sent", "/continue", "/cancel", "/model", "/plan change it",
+      "/status", "/search history", "/expand 1", "/skills", "/sessions", "/new", "fresh CLI message", "/quit",
+    ] })
+
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "fixture" }, h.deps)
+
+    expect(h.calls.turns).toEqual(["fresh CLI message"])
+    expect(h.calls.turnBindings).toMatchObject([{ sessionID: "lca-fixture-session-2", text: "fresh CLI message" }])
+    expect(h.calls.runtimes).toHaveLength(2)
+    expect(h.calls.runtimes.every(runtime => runtime.engine === "codex")).toBe(true)
+    expect(h.calls.controllerCreations).toBe(2)
+    expect(h.calls.controllerStatusCalls).toBe(0)
+    expect(h.calls.controllerCancelCalls).toBe(0)
+    expect(h.calls.discoveries).toHaveLength(0)
+    expect(h.calls.runCount).toBe(0)
+    expect(h.calls.conversationRestores).toHaveLength(2)
+    expect(h.calls.conversationRestores[1]).toEqual({ sessionID: "lca-fixture-session-2" })
+    expect(readSessionMetadata(wt.worktree, "lca-fixture-session-2")).toMatchObject({ engine: "codex", model: "fixture" })
+    expect(readFileSync(metadataPath)).toEqual(metadataBefore)
+    expect(h.calls.output.join("")).toContain(`Retained SDK session ${writer.sessionID} · read-only history`)
+    expect(h.calls.output.join("")).toContain("command or message was not applied")
+    expect(h.calls.output.join("")).toContain("Skill catalog is unavailable in retained read-only SDK history")
+    expect(h.calls.output.join("")).toContain("tool-start ·")
+    expect(h.calls.queueAdmissions).toContain(false)
+    expect(h.calls.events.filter(event => event === "sessionChanged").length).toBeGreaterThanOrEqual(2)
+    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")?.held).toBe(true)
+    writer.assertOwner()
+    releaseTestSession(writer)
+  })
+
+  test("unsettled CLI ownership refuses switching into retained SDK history", async () => {
+    const writer = retainedSDKHistory("sdk-blocked-by-cli-owner")
+    const metadataPath = join(sessionDir(wt.worktree, writer.sessionID), "metadata.json")
+    const metadataBefore = readFileSync(metadataPath)
+    const h = harness({
+      lines: [`/resume ${writer.sessionID}`, "/quit"],
+      executionStatus: {
+        generation: 1,
+        claim: { ownerSession: "lca-fixture-session", instance: "unsettled-owner", pid: process.pid, generation: 1 },
+        executions: [],
+      },
+    })
+
+    await launchInteractive({ worktree: wt.worktree, engine: "claude", model: "fixture" }, h.deps)
+
+    expect(h.calls.output.join("")).toContain("execution ownership is unresolved")
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.boundSessions.at(-1)).toBe("lca-fixture-session")
+    expect(readFileSync(metadataPath)).toEqual(metadataBefore)
+    expect(inspectSessionAttachment(wt.worktree, writer.sessionID, writer.epoch)?.state).toBe("attached")
+    writer.assertOwner()
+    releaseTestSession(writer)
+  })
+
+  test("switching sessions retains transcript and restored drafts never dispatch without Resume", async () => {
+    const h = harness({ lines: ["first retained message", "/new", "second retained message", "/resume lca-fixture-session", "held message", "/quit"] })
+    let admissions = 0
+    h.deps.admitRuntime = async () => {
+      if (++admissions > 2) throw AdmissionRefusal.hostIncompatible()
+    }
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "fixture" }, h.deps)
+    expect(h.calls.turns).toEqual(["first retained message", "second retained message"])
+    const first = replaySession(wt.worktree, "lca-fixture-session")
+    const second = replaySession(wt.worktree, "lca-fixture-session-2")
+    expect(first.complete).toBe(true)
+    expect(second.complete).toBe(true)
+    expect(first.records.filter(record => record.kind === "user").map(record => record.data.text)).toEqual(["first retained message"])
+    expect(second.records.filter(record => record.kind === "user").map(record => record.data.text)).toEqual(["second retained message"])
+    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")?.held).toBe(true)
+    expect(h.calls.output.join("")).toContain("Restored session held")
+    expect(admissions).toBe(2)
+  })
+
+  test("restore prints the retained workflow id, phase, path, sha256 and an [artifacts] line recomputed from disk", async () => {
+    const mdPath = ".lca/plans/retained.md"
+    mkdirSync(join(wt.worktree, ".lca/plans"), { recursive: true })
+    writeFileSync(join(wt.worktree, mdPath), "original")
+    const mdSha = createHash("sha256").update("original").digest("hex")
+    const retained = publishWorkflow(wt.worktree, {
+      ...newWorkflow("lca-fixture-session", currentOwner(), "command", "retained", "codex"),
+      id: "wf_retained_restore", phase: "cancelled", stage: "terminal",
+      planRef: { jsonSha: "a".repeat(64), mdPath, mdSha, revision: 1 },
+    })
+    writeFileSync(join(wt.worktree, mdPath), "tampered after the session ended")
+    const h = harness({ lines: ["first retained message", "/new", "second retained message", "/resume lca-fixture-session", "/quit"] })
+    let admissions = 0
+    h.deps.admitRuntime = async () => { if (++admissions > 2) throw AdmissionRefusal.hostIncompatible() }
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "fixture" }, h.deps)
+    const output = h.calls.output.join("")
+    const committed = readSessionCommitted(wt.worktree, "lca-fixture-session")!
+    expect(committed.wf.id).toBe(retained.id)
+    expect(output).toContain(`[workflow] wf_retained_restore cancelled · ${committed.path} · sha256 ${committed.sha256}`)
+    expect(output).toMatch(/\[artifacts\] artifacts incomplete: plan\.md \(\.lca\/plans\/retained\.md: hash mismatch\)/)
+  })
+
+  test("restored history remains readable when explicit Resume host preflight refuses", async () => {
+    const h = harness({ lines: ["retained", "/new", "/resume lca-fixture-session", "/continue", "RESUME", "not dispatched", "/quit"] })
+    let admissions = 0
+    h.deps.admitRuntime = async () => {
+      if (++admissions > 2) throw AdmissionRefusal.hostIncompatible()
+    }
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "fixture" }, h.deps)
+    expect(admissions).toBe(3)
+    expect(h.calls.turns).toEqual(["retained"])
+    expect(h.calls.runCount).toBe(0)
+    expect(h.calls.output.join("")).toContain("Restored session held")
+    expect(h.calls.output.join("")).toContain("Resume refused or incomplete:")
+    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")?.held).toBe(true)
+    expect(replaySession(wt.worktree, "lca-fixture-session").records.some(record => record.kind === "user" && record.data.text === "retained")).toBe(true)
+  })
+
   test("writes shared picker and message chrome before single-line readline prompts", async () => {
     const chrome: string[] = []
     const h = harness({
@@ -276,12 +713,12 @@ describe("interactive terminal", () => {
       lines: ["/quit"],
       beforeWrite(text) {
         if (!text.startsWith("\n── codex")) return
-        h.calls.progressSinks[0]!.host({ kind: "tool-started", role: "worker", execution: 1, tool: "read" })
+        h.calls.progressSinks[0]!.host({ kind: "tool-started", role: "worker", execution: 1, executionID: "exec1", callID: "call1", taskID: "t1", tool: "read" })
         expect(h.calls.output.join("")).not.toContain("[activity] Worker")
       },
       beforeRead() {
         expect(h.calls.output.join("")).not.toContain("[activity] Worker")
-        h.calls.progressSinks[0]!.host({ kind: "tool-finished", role: "worker", execution: 1, tool: "read", ok: true })
+        h.calls.progressSinks[0]!.host({ kind: "tool-finished", role: "worker", execution: 1, executionID: "exec1", callID: "call1", taskID: "t1", tool: "read", ok: true, outcome: "succeeded" })
         expect(h.calls.output.join("")).not.toContain("[activity] Worker")
       },
     })
@@ -400,6 +837,53 @@ describe("interactive terminal", () => {
     }
   })
 
+  describe("B7 Ctrl+Z and SIGCONT", () => {
+    const SID = "lca-fixture-session"
+    function putStopped(settled: boolean) {
+      const wf = {
+        ...newWorkflow(SID, currentOwner(), "command", "stop fixture", "interactive-fixture"),
+        phase: (settled ? "paused" : "executing") as "paused" | "executing", stage: "unit" as const,
+        stopIntent: { kind: "pause" as const, token: "tok", requestedFrom: { phase: "executing" as const, stage: "unit" }, checkpoint: null, reason: "p" },
+        pausedFrom: { phase: "executing" as const, stage: "unit" },
+      }
+      withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, wf))
+    }
+    for (const settled of [true, false]) {
+      test(`Ctrl+Z ${settled ? "suspends only after the pause is settled" : "is refused while the pause is unconfirmed"}`, async () => {
+        putStopped(settled)
+        const kill = spyOn(process, "kill").mockImplementation((() => true) as never)
+        try {
+          let fired = false
+          const h = harness({ lines: ["local", "llama3.2", "/status"], beforeRead: (prompt) => {
+            if (!fired && prompt.startsWith("You>")) { fired = true; h.calls.control?.("suspend") }
+          } })
+          ;(h.deps.terminal as { fullscreen?: boolean }).fullscreen = true
+          await launchInteractive({ worktree: wt.worktree }, h.deps)
+          const stops = kill.mock.calls.filter(call => call[1] === "SIGSTOP")
+          if (settled) expect(stops).toHaveLength(1)
+          else {
+            expect(stops).toHaveLength(0)
+            expect(h.calls.output.join("")).toContain("Suspension refused: pause/termination remains unconfirmed.")
+          }
+        } finally { kill.mockRestore() }
+      })
+    }
+
+    test("SIGCONT redraws the Keep/Resume decision for a settled pause and takes no action", async () => {
+      putStopped(true)
+      let fired = false
+      const h = harness({ lines: ["local", "llama3.2", "/status"], beforeRead: (prompt) => {
+        if (!fired && prompt.startsWith("You>")) { fired = true; for (const listener of h.calls.signalListeners.get("SIGCONT") ?? []) listener() }
+      } })
+      ;(h.deps.terminal as { fullscreen?: boolean }).fullscreen = true // SIGTSTP/SIGCONT handlers exist only for the full-screen TUI
+      await launchInteractive({ worktree: wt.worktree }, h.deps)
+      const text = h.calls.output.join("")
+      expect(text).toContain("Terminal resumed; no work was automatically restarted.")
+      expect(text).toContain("Kept held; /continue offers Keep or Resume.")
+      expect(h.calls.runCount).toBe(0)
+    })
+  })
+
   test("/cancel in chat never executes a plan; signal listeners are removed", async () => {
     const h = harness({ lines: ["local", "llama3.2", "hello", "/cancel"], turns: [{ text: "Hello." }] })
     expect((await launchInteractive({ worktree: wt.worktree }, h.deps)).code).toBe(0)
@@ -466,6 +950,7 @@ describe("interactive terminal", () => {
           kind: "tool-started",
           role: "worker",
           execution: 1,
+          executionID: "exec1", callID: "call1", taskID: "t1",
           tool: selection.engine === "local" ? "write" : "read",
         })
       },
@@ -481,7 +966,10 @@ describe("interactive terminal", () => {
     ])
     expect(h.calls.discoveries).toEqual([])
     expect(h.calls.progressSinks).toHaveLength(2)
-    expect(h.calls.progressSinks[0]).toBe(h.calls.progressSinks[1])
+    expect(h.calls.progressSinks[0]).not.toBe(h.calls.progressSinks[1])
+    const beforeStaleCallback = [...h.calls.output]
+    h.calls.progressSinks[0]!.host({ kind: "tool-started", role: "worker", execution: 2, executionID: "old-execution", callID: "old-call", taskID: "t1", tool: "read" })
+    expect(h.calls.output).toEqual(beforeStaleCallback)
     expect(h.calls.output.filter(line => line.startsWith("[activity] Worker"))).toEqual([
       "[activity] Worker started write tool.\n",
     ])
@@ -574,21 +1062,24 @@ describe("interactive terminal", () => {
 
   test("active workflow and corrupt workflow state refuse model switching", async () => {
     const path = workflowPath(wt.worktree)
-    mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, JSON.stringify(newWorkflow("another-session",
-      { instance: "fixture", pid: process.pid, heartbeatAt: Date.now() }, "command", "active plan", "codex")))
+    withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow("another-session",
+      { instance: "fixture", pid: process.pid }, "command", "active plan", "codex")))
     const active = harness({ lines: ["/model local qwen3:8b", "hello", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, active.deps)
     expect(active.calls.runtimes).toHaveLength(1)
-    expect(active.calls.turnBindings[0]?.engine).toBe("codex")
+    expect(active.calls.runtimes[0]?.engine).toBe("codex")
+    expect(active.calls.turnBindings).toEqual([])
+    expect(active.calls.imported).toBeUndefined()
     expect(active.calls.output.join("")).toContain("resolve the active workflow first")
+    expect(active.calls.output.join("")).toContain("workflow belongs to another-session")
+    expect(active.calls.output.join("")).toContain("No new workflow can start here")
 
     writeFileSync(path, "{")
     const corrupt = harness({ lines: ["/model local qwen3:8b", "hello", "/quit"] })
-    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, corrupt.deps)
+    await expect(launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, corrupt.deps)).rejects.toThrow("workflow state is corrupt")
     expect(corrupt.calls.runtimes).toHaveLength(1)
-    expect(corrupt.calls.turnBindings[0]?.engine).toBe("codex")
-    expect(corrupt.calls.output.join("")).toContain("workflow state is corrupt")
+    expect(corrupt.calls.runtimes[0]?.engine).toBe("codex")
+    expect(corrupt.calls.turnBindings).toEqual([])
   })
 
   test("unresolved execution claims or intents refuse switching", async () => {
@@ -610,7 +1101,8 @@ describe("interactive terminal", () => {
       })
       await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
       expect(h.calls.runtimes).toHaveLength(1)
-      expect(h.calls.turnBindings[0]?.engine).toBe("codex")
+      expect(h.calls.runtimes[0]?.engine).toBe("codex")
+      expect(h.calls.turnBindings).toEqual([])
       expect(h.calls.output.join("")).toContain("execution ownership is unresolved")
     }
   })
@@ -701,8 +1193,8 @@ describe("interactive terminal", () => {
 
     progress.queue("task start", { task: "t1", attempt: 1 })
     progress.host({ kind: "model-started", role: "reviewer", execution: 1 })
-    progress.host({ kind: "tool-started", role: "reviewer", execution: 1, tool: "read" })
-    progress.host({ kind: "tool-finished", role: "reviewer", execution: 1, tool: "read", ok: true })
+    progress.host({ kind: "tool-started", role: "reviewer", execution: 1, executionID: "exec1", callID: "call1", taskID: "t1", tool: "read" })
+    progress.host({ kind: "tool-finished", role: "reviewer", execution: 1, executionID: "exec1", callID: "call1", taskID: "t1", tool: "read", ok: true, outcome: "succeeded" })
     progress.host({ kind: "model-returned", role: "reviewer", execution: 1, status: "completed" })
     progress.queue("task verify", { task: "t1", ok: false, output: "PRIVATE_VERIFIER_OUTPUT_9a37" })
     progress.queue("task attempt failed", { task: "t1", attempt: 1 })
@@ -800,10 +1292,10 @@ describe("interactive terminal", () => {
       renderedPlan: `# Canonical plan remains\n\nPlan text remains 日本語. ${injection}\n`,
       planSha,
     })
-    h.deps.humanDecision = async (action, workflowID, sha) => {
+    h.deps.humanDecision = async (action, binding) => {
       h.calls.events.push("humanDecision")
-      h.calls.approvalRequest = { action, workflowID, planSha: sha }
-      return withTerminalLine(`APPROVE ${workflowID} ${sha}`, () => humanDecision(action, workflowID, sha))
+      h.calls.approvalRequest = { action, workflowID: binding.workflowID, planSha: binding.subject.sha256 }
+      return withTerminalLine(`APPROVE ${binding.workflowID} ${binding.subject.sha256}`, () => humanDecision(action, binding))
     }
 
     const result = await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
@@ -821,7 +1313,7 @@ describe("interactive terminal", () => {
     expect(output).not.toContain(injection)
     expect(h.calls.imported).toEqual({ ...proposedPlan, revision: 1 })
     expect(h.calls.approvalRequest).toEqual({ action: "choose", workflowID: "wf_fixture", planSha })
-    expect(h.calls.decision).toMatchObject({ action: "approve", workflowID: "wf_fixture", planSha })
+    expect(h.calls.decision).toMatchObject({ action: "approve", workflowID: "wf_fixture", expectedRevision: 11, subject: { kind: "plan", id: "wf_fixture", sha256: planSha } })
     expect(h.calls.runCount).toBe(1)
   })
 
@@ -835,9 +1327,9 @@ describe("interactive terminal", () => {
       turns: [{ text: "Plan draft.", plan: proposedPlan }],
       planSha: "canonical-sha-fixture",
     })
-    h.deps.humanDecision = async (action, workflowID, planSha) => {
+    h.deps.humanDecision = async (action, binding) => {
       h.calls.events.push("humanDecision")
-      h.calls.approvalRequest = { action, workflowID, planSha }
+      h.calls.approvalRequest = { action, workflowID: binding.workflowID, planSha: binding.subject.sha256 }
       markDecisionStarted()
       return decisionResult
     }
@@ -849,6 +1341,7 @@ describe("interactive terminal", () => {
       kind: "tool-started",
       role: "worker",
       execution: 1,
+      executionID: "exec1", callID: "call1", taskID: "t1",
       tool: "read",
     })
     expect(h.calls.output).toEqual(outputWhileWaiting)
@@ -856,11 +1349,11 @@ describe("interactive terminal", () => {
     expect(h.calls.output.join("")).toContain("Plan SHA: canonical-sha-fixture")
 
     resolveDecision(await withTerminalLine("APPROVE wf_fixture canonical-sha-fixture",
-      () => humanDecision("choose", "wf_fixture", "canonical-sha-fixture")))
+      () => humanDecision("choose", planBinding(h.calls.sessionIDs[0]!, { id: "wf_fixture", lastSeq: 0 }, "canonical-sha-fixture"))))
     expect(await operation).toEqual({ code: 0 })
     expect(h.calls.output).toContain("[activity] Worker started read tool.\n")
     expect(h.calls.approvalRequest).toEqual({ action: "choose", workflowID: "wf_fixture", planSha: "canonical-sha-fixture" })
-    expect(h.calls.decision).toMatchObject({ action: "approve", workflowID: "wf_fixture", planSha: "canonical-sha-fixture" })
+    expect(h.calls.decision).toMatchObject({ action: "approve", workflowID: "wf_fixture", subject: { kind: "plan", id: "wf_fixture", sha256: "canonical-sha-fixture" } })
     expect(h.calls.runCount).toBe(1)
   })
 
