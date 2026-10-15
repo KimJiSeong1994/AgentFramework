@@ -30,11 +30,12 @@ import { AdmissionRefusal, assertHostAdmission } from "./required-controls.ts"
 import { boundedTerminalDiagnostic, terminalSafeText } from "./terminal-text.ts"
 import { createWorkflowHost, requestWorkflowStop, type WorkflowHost } from "./workflow-session.ts"
 import { startRefusal } from "../workflows/registry.ts"
+import { ModelRequestError } from "../workflows/turn.ts"
 import { beginExecutionActivity } from "./runtime.ts"
 import { settled, type ExecutionRunStatus } from "./run-state.ts"
 import { LinuxAdmissionRefused, type ExecutionRuntime } from "./types.ts"
 import type { ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
-import { interactiveHelp } from "./interactive-actions.ts"
+import { commandInsertion, interactiveActions, interactiveHelp, type InteractiveContext } from "./interactive-actions.ts"
 
 export type CliEngine = CliRuntimeOptions["engine"]
 export type InteractiveArgs = { worktree: string; engine?: CliEngine; model?: string }
@@ -46,6 +47,8 @@ export type Terminal = {
   stderrIsTTY: boolean
   fullscreen?: boolean
   presentation?: () => InputPresentation
+  actionContext?: (context: InteractiveContext) => void
+  setDraft?: (draft: string) => void
   readInput?: (input: { title: string; hint: string; prompt: string; kind: "chat" | "selection" }, signal: AbortSignal) => Promise<string | undefined>
   choose?: (title: string, choices: readonly string[], signal: AbortSignal, presentation?: ChoicePresentation) => Promise<number | undefined>
   controls?: (handler: (action: TerminalControl) => void) => void
@@ -208,6 +211,58 @@ function defaultGitTopLevel(directory: string): string | undefined {
 
 export function createReadlineTerminal(): Terminal {
   let reader: ReturnType<typeof createInterface> | undefined
+  let inputClosed = false
+  const read = (prompt: string, signal?: AbortSignal, cancelOnEscape = false): Promise<string | undefined> => {
+    if (signal?.aborted || inputClosed) return Promise.resolve(undefined)
+    if (!reader) {
+      const created = createInterface({ input: process.stdin, output: process.stderr, terminal: process.stderr.isTTY === true })
+      reader = created
+      created.once("close", () => {
+        if (reader === created) {
+          reader = undefined
+          inputClosed = true
+        }
+      })
+    }
+    const activeReader = reader
+    if (!activeReader) return Promise.resolve(undefined)
+    const keypressInput = process.stdin as unknown as {
+      on: (event: "keypress", listener: (text: string, key: { name?: string }) => void) => unknown
+      off: (event: "keypress", listener: (text: string, key: { name?: string }) => void) => unknown
+    }
+    return new Promise(resolveLine => {
+      let settled = false
+      const finish = (line: string | undefined, discardReader = false) => {
+        if (settled) return
+        settled = true
+        activeReader.off("line", onLine)
+        activeReader.off("close", onClose)
+        activeReader.off("SIGINT", onReadlineInterrupt)
+        if (cancelOnEscape) keypressInput.off("keypress", onKeypress)
+        signal?.removeEventListener("abort", onAbort)
+        if (discardReader && reader === activeReader) {
+          reader = undefined
+          activeReader.close()
+        }
+        resolveLine(line)
+      }
+      const onLine = (line: string) => finish(line)
+      const onClose = () => finish(undefined)
+      const onReadlineInterrupt = () => finish(undefined)
+      const onAbort = () => finish(undefined)
+      const onKeypress = (_text: string, key: { name?: string }) => {
+        if (key.name === "escape") finish(undefined, true)
+      }
+      activeReader.once("line", onLine)
+      activeReader.once("close", onClose)
+      activeReader.once("SIGINT", onReadlineInterrupt)
+      if (cancelOnEscape) keypressInput.on("keypress", onKeypress)
+      signal?.addEventListener("abort", onAbort, { once: true })
+      if (signal?.aborted) return finish(undefined)
+      activeReader.setPrompt(prompt)
+      activeReader.prompt()
+    })
+  }
   const terminal: Terminal = {
     stdinIsTTY: process.stdin.isTTY === true,
     stderrIsTTY: process.stderr.isTTY === true,
@@ -218,33 +273,13 @@ export function createReadlineTerminal(): Terminal {
         { NO_COLOR: process.env.NO_COLOR, TERM: process.env.TERM },
       ),
     }),
-    readLine(prompt, signal) {
-      if (signal?.aborted) return Promise.resolve(undefined)
-      reader ??= createInterface({ input: process.stdin, output: process.stderr, terminal: process.stderr.isTTY === true })
-      return new Promise((resolveLine) => {
-        let settled = false
-        const finish = (line: string | undefined) => {
-          if (settled) return
-          settled = true
-          reader?.off("line", onLine)
-          reader?.off("close", onClose)
-          reader?.off("SIGINT", onReadlineInterrupt)
-          signal?.removeEventListener("abort", onAbort)
-          resolveLine(line)
-        }
-        const onLine = (line: string) => finish(line)
-        const onClose = () => finish(undefined)
-        const onReadlineInterrupt = () => finish(undefined)
-        const onAbort = () => finish(undefined)
-        reader!.once("line", onLine)
-        reader!.once("close", onClose)
-        reader!.once("SIGINT", onReadlineInterrupt)
-        signal?.addEventListener("abort", onAbort, { once: true })
-        if (signal?.aborted) return finish(undefined)
-        reader!.setPrompt(prompt)
-        reader!.prompt()
-      })
+    readInput(input, signal) {
+      if (signal.aborted || inputClosed) return Promise.resolve(undefined)
+      const rendered = renderInput(input.title, input.hint, input.prompt, terminal.presentation?.())
+      terminal.write(rendered.chrome)
+      return read(rendered.prompt, signal, input.kind === "selection")
     },
+    readLine(prompt, signal) { return read(prompt, signal) },
     async choose(title, choices, signal) {
       if (!choices.length || signal.aborted) return undefined
       const lines = [...terminalSafeText(title).split("\n"), ...choices.map((choice, index) => `  ${index + 1}) ${terminalSafeText(choice)}`)]
@@ -261,6 +296,7 @@ export function createReadlineTerminal(): Terminal {
     },
     write: (text) => { process.stderr.write(text) },
     close: () => {
+      inputClosed = true
       reader?.close()
       reader = undefined
     },
@@ -322,13 +358,26 @@ function readInput(terminal: Terminal, title: string, hint: string, prompt: stri
   return terminal.readLine(rendered.prompt, signal)
 }
 
-async function chooseEngine(terminal: Terminal, signal: AbortSignal): Promise<CliEngine | undefined> {
-  const menu = "Choose an execution engine:\n  1) local  — Ollama CLI\n  2) codex  — Codex CLI\n  3) claude — Claude CLI\n"
+async function chooseEngine(terminal: Terminal, signal: AbortSignal): Promise<CliEngine | null | undefined> {
+  const engines: readonly CliEngine[] = ["local", "codex", "claude"]
+  if (terminal.fullscreen && terminal.choose) {
+    const selected = await terminal.choose("Choose an execution engine", [
+      "local — Ollama CLI", "codex — Codex CLI", "claude — Claude CLI",
+    ], signal, {
+      kind: "picker", purpose: "selection", rows: ["Local Ollama runtime", "Codex CLI runtime", "Claude CLI runtime"],
+      hint: "Enter selects this engine only; Escape or /cancel returns to the composer.",
+    })
+    if (signal.aborted) return undefined
+    return selected === undefined ? null : engines[selected] ?? null
+  }
+  const menu = "Choose an execution engine:\n  1) local  — Ollama CLI\n  2) codex  — Codex CLI\n  3) claude — Claude CLI\nEnter /cancel, Escape or empty input to return.\n"
   terminal.write(menu.trimEnd().split("\n").map(line => inputLine(line, terminal.presentation?.())).join("\n") + "\n")
   while (!signal.aborted) {
     const answer = await readInput(terminal, "Engine selection", "Enter a number or engine name", "Engine [1-3]: ", signal)
-    if (answer === undefined || signal.aborted) return undefined
+    if (signal.aborted) return undefined
+    if (answer === undefined) return null
     const normalized = answer.trim().toLowerCase()
+    if (normalized === "" || normalized === "/cancel" || normalized === "escape") return null
     if (normalized === "1" || normalized === "local") return "local"
     if (normalized === "2" || normalized === "codex") return "codex"
     if (normalized === "3" || normalized === "claude") return "claude"
@@ -337,50 +386,98 @@ async function chooseEngine(terminal: Terminal, signal: AbortSignal): Promise<Cl
   return undefined
 }
 
+type ModelChoice = {
+  value: string | null | undefined
+  discovery: InteractiveViewFacts["discovery"]
+  backToEngine: boolean
+}
+
 async function chooseModel(
   terminal: Terminal,
   engine: CliEngine,
   worktree: string,
   signal: AbortSignal,
   discoverModels: InteractiveDependencies["discoverModels"],
-): Promise<string | null | undefined> {
+): Promise<ModelChoice> {
   let catalog: ModelCatalog
+  let discovery: ModelChoice["discovery"] = "completed"
   try {
     catalog = await discoverModels(engine, worktree, signal)
   } catch {
-    if (signal.aborted) return undefined
+    if (signal.aborted) return { value: undefined, discovery, backToEngine: false }
+    discovery = "failed"
     catalog = { models: [], notice: "Model discovery was unavailable." }
   }
-  if (signal.aborted) return undefined
+  if (signal.aborted) return { value: undefined, discovery, backToEngine: false }
   const models = Array.isArray(catalog?.models)
     ? catalog.models.filter(model => !!model && validModelID(model.id) && typeof model.label === "string")
     : []
   const notice = typeof catalog?.notice === "string" ? catalog.notice : ""
+  if (terminal.fullscreen && terminal.choose) {
+    const entries = [
+      ...models.map(model => ({ kind: "model" as const, value: model.id,
+        label: model.label === model.id ? model.id : `${terminalSafeText(model.label)} - ${model.id}`,
+        detail: model.id })),
+      { kind: "manual" as const, label: "Enter a native model ID", detail: "An entered ID is not proof of model availability." },
+      { kind: "back" as const, label: "Back to engine selection", detail: "Choose a different runtime engine." },
+    ]
+    const selected = await terminal.choose(
+      `Choose a model · ${engine}`,
+      entries.map(entry => entry.label),
+      signal,
+      {
+        kind: "picker", purpose: "selection", rows: entries.map(entry => entry.detail),
+        hint: discovery === "failed"
+          ? "Model list unavailable. Enter an ID manually or cancel."
+          : "Selection does not verify model availability.",
+      },
+    )
+    if (signal.aborted) return { value: undefined, discovery, backToEngine: false }
+    if (selected === undefined) return { value: null, discovery, backToEngine: false }
+    const entry = entries[selected]
+    if (!entry) return { value: null, discovery, backToEngine: false }
+    if (entry.kind === "back") return { value: null, discovery, backToEngine: true }
+    if (entry.kind === "model") return { value: entry.value, discovery, backToEngine: false }
+    while (!signal.aborted) {
+      const answer = await readInput(terminal, `Model ID · ${engine}`, "Enter a native model ID; /cancel or Escape returns.", "Model ID: ", signal)
+      if (signal.aborted) return { value: undefined, discovery, backToEngine: false }
+      if (answer === undefined || answer.trim() === "" || answer.trim().toLowerCase() === "/cancel" || answer.trim().toLowerCase() === "escape") {
+        return { value: null, discovery, backToEngine: false }
+      }
+      const nativeID = answer.startsWith("id:") ? answer.slice(3) : answer
+      if (validModelID(nativeID)) return { value: nativeID, discovery, backToEngine: false }
+      terminal.write("Invalid model ID; use a non-empty native name without whitespace.\n")
+    }
+    return { value: undefined, discovery, backToEngine: false }
+  }
   const presentation = terminal.presentation?.()
   const menu = [
     models.length ? `Model choices for ${engine}:` : `No model choices were discovered for ${engine}.`,
-    ...models.map((model, index) => `  ${index + 1}) ${model.label} — ${model.id}`),
-    ...(notice ? [notice] : []),
+    ...models.map((model, index) => `  ${index + 1}) ${terminalSafeText(model.label)} — ${model.id}`),
+    ...(notice ? [terminalSafeText(notice)] : []),
     "Select a number or native model ID; id:<ID> for numeric IDs.",
-    "Empty input or /cancel cancels selection. No default is selected.",
+    "Enter /back to choose another engine; /cancel, Escape or empty input cancels selection. No default is selected.",
   ]
   terminal.write(menu.map(line => inputLine(line, presentation)).join("\n") + "\n")
   while (!signal.aborted) {
     const prompt = models.length ? `Model [1-${models.length} or native ID]: ` : "Model [native ID]: "
     const answer = await readInput(terminal, `Model selection · ${engine}`, "Enter select · /cancel back · no default", prompt, signal)
-    if (answer === undefined || signal.aborted) return undefined
-    if (answer.trim() === "" || answer.trim() === "/cancel") return null
+    if (signal.aborted) return { value: undefined, discovery, backToEngine: false }
+    if (answer === undefined || answer.trim() === "" || answer.trim() === "/cancel" || answer.trim().toLowerCase() === "escape") {
+      return { value: null, discovery, backToEngine: false }
+    }
+    if (answer.trim() === "/back") return { value: null, discovery, backToEngine: true }
     if (/^[0-9]+$/u.test(answer)) {
       const index = Number(answer)
-      if (index >= 1 && index <= models.length) return models[index - 1]!.id
+      if (index >= 1 && index <= models.length) return { value: models[index - 1]!.id, discovery, backToEngine: false }
       terminal.write("Invalid model choice; select a listed number or enter a native model ID.\n")
       continue
     }
     const nativeID = answer.startsWith("id:") ? answer.slice(3) : answer
-    if (validModelID(nativeID)) return nativeID
+    if (validModelID(nativeID)) return { value: nativeID, discovery, backToEngine: false }
     terminal.write("Invalid model ID; use a non-empty native name without whitespace.\n")
   }
-  return undefined
+  return { value: undefined, discovery, backToEngine: false }
 }
 
 function selectionBanner(worktree: string, engine: CliEngine, model: string, presentation?: InputPresentation, reset = false): string {
@@ -393,8 +490,42 @@ function selectionBanner(worktree: string, engine: CliEngine, model: string, pre
   ].map(line => inputLine(line, presentation)).join("\n") + "\n\n"
 }
 
-function helpText(context: "chat" | "held" | "read-only" = "chat"): string {
+function helpText(context: InteractiveContext = "chat"): string {
   return interactiveHelp(context)
+}
+
+function hasInteractiveAction(context: InteractiveContext, id: string): boolean {
+  return interactiveActions(context).some(action => action.id === id)
+}
+
+function commandDraft(actionSyntax: string, insertion: string): string {
+  return actionSyntax.includes(" <") ? `${insertion} ` : insertion
+}
+
+async function presentHelp(terminal: Terminal, context: InteractiveContext, signal: AbortSignal): Promise<void> {
+  const entries = interactiveActions(context).flatMap(action => {
+    const insertion = commandInsertion(action)
+    return insertion ? [{ action, insertion }] : []
+  })
+  if (terminal.fullscreen && terminal.choose && terminal.setDraft) {
+    const selected = await terminal.choose(
+      "Commands",
+      entries.map(({ action, insertion }) => `${insertion} — ${action.summary}`),
+      signal,
+      {
+        kind: "picker",
+        purpose: "command",
+        rows: entries.map(({ action }) => action.syntax),
+        hint: "Enter inserts only; press Enter again to submit. Escape keeps the draft.",
+      },
+    )
+    if (selected !== undefined) {
+      const entry = entries[selected]
+      if (entry) terminal.setDraft?.(commandDraft(entry.action.syntax, entry.insertion))
+    }
+    return
+  }
+  terminal.write(helpText(context))
 }
 
 function safeSkillAudit(
@@ -484,13 +615,13 @@ export async function runInteractiveSession(
   let skillSession: SkillSession | undefined
   let retainedSDKSessionID: string | undefined
   let retainedViewSelection: { engine: string; model: string } | undefined
-  let persistenceFailure: unknown
+  let persistenceFailed = false
   const visibleWrite = terminal.write.bind(terminal)
   const persist = (kind: TranscriptKind, data: Record<string, unknown>, eventID?: string) => {
-    if (persistenceFailure) throw persistenceFailure
+    if (persistenceFailed) throw new InteractiveLaunchError("Session transcript persistence failed; the session remains held.")
     if (!sessionStore) return undefined
     try { return sessionStore.append(kind, data, eventID) }
-    catch (error) { persistenceFailure = error; abort.abort(); throw error }
+    catch (error) { persistenceFailed = true; abort.abort(); throw error }
   }
   terminal.write = text => { persist("notice", { text }); visibleWrite(text) }
   const showExecution = terminal.executionSnapshot?.bind(terminal)
@@ -528,7 +659,7 @@ export async function runInteractiveSession(
   const progress = createCliProgressPresenter(text => terminal.write(text), activity => {
     if (sessionStore) {
       try { persistToolActivity(sessionStore, activity) }
-      catch (error) { persistenceFailure = error; abort.abort(); throw error }
+      catch (error) { persistenceFailed = true; abort.abort(); throw error }
     }
     terminal.activity?.(activity)
   }, { toolLines: !terminal.activity })
@@ -557,7 +688,7 @@ export async function runInteractiveSession(
   let receivedSignal: SignalName | undefined
   const signalCancel = (signal?: SignalName) => {
     receivedSignal ??= signal
-    try { progress.cancelRequested() } catch (error) { persistenceFailure ??= error }
+    try { progress.cancelRequested() } catch { persistenceFailed = true }
     abort.abort()
   }
   const onSigint = () => signalCancel("SIGINT")
@@ -643,11 +774,94 @@ export async function runInteractiveSession(
         visibleWrite("Skill catalog unavailable; source invocation is disabled for this session.\n")
       }
     }
-    const engine = args.engine ?? await withProgressSuspended(() => chooseEngine(terminal, abort.signal))
-    if (!engine || abort.signal.aborted) return signalExit(receivedSignal)
-    const model = args.model ?? await withProgressSuspended(() => chooseModel(terminal, engine, worktree, abort.signal, deps.discoverModels))
-    if (!model || abort.signal.aborted) return signalExit(receivedSignal)
+    let engine: CliEngine | undefined
+    let model: string | undefined
+    let startupDiscovery: InteractiveViewFacts["discovery"] = "not-observed"
+    if (args.engine !== undefined && args.model !== undefined) {
+      engine = args.engine
+      model = args.model
+    } else {
+      terminal.actionContext?.("unselected")
+      const selectionTitle = args.engine
+        ? `Engine ${args.engine} selected; model unselected`
+        : args.model
+          ? "Model supplied; engine unselected"
+          : "Model not selected"
+      selection: while (!abort.signal.aborted) {
+        const input = await withProgressSuspended(() => readInput(
+          terminal,
+          selectionTitle,
+          "/model choose | /help | /quit",
+          "You> ",
+          abort.signal,
+        ))
+        if (abort.signal.aborted) return signalExit(receivedSignal)
+        if (input === undefined) return { code: 0 }
+        const message = input.trim()
+        if (!message) continue
+        const [command, ...commandArgs] = message.split(/\s+/u)
+        if ((command === "/quit" || command === "/exit") && commandArgs.length === 0) return { code: 0 }
+        if (command === "/help" && hasInteractiveAction("unselected", "help")) {
+          if (commandArgs.length === 0) await presentHelp(terminal, "unselected", abort.signal)
+          else terminal.write("Usage: /help\n")
+          continue
+        }
+        if (["/search", "/expand", "/details", "/theme", "/ascii"].includes(command!)) {
+          terminal.write(`${command} is a local full-screen TUI action; it is unavailable in readline and no model turn was dispatched.\n`)
+          continue
+        }
+        if (command === "/model" && hasInteractiveAction("unselected", "model")) {
+          if (commandArgs.length === 2 && ["local", "codex", "claude"].includes(commandArgs[0]!) && validModelID(commandArgs[1]!)) {
+            engine = commandArgs[0] as CliEngine
+            model = commandArgs[1]!
+            break
+          }
+          if (commandArgs.length !== 0) {
+            terminal.write("Usage: /model or /model <local|codex|claude> <native-id>\n")
+            continue
+          }
+          let nextEngine: CliEngine | null | undefined = args.engine
+          if (!nextEngine) {
+            nextEngine = await withProgressSuspended(() => chooseEngine(terminal, abort.signal))
+            if (abort.signal.aborted) return signalExit(receivedSignal)
+            if (!nextEngine) continue
+          }
+          while (!abort.signal.aborted) {
+            const picked = args.model !== undefined
+              ? { value: args.model, discovery: "not-observed" as const, backToEngine: false }
+              : await withProgressSuspended(() => chooseModel(terminal, nextEngine!, worktree, abort.signal, deps.discoverModels))
+            if (abort.signal.aborted) return signalExit(receivedSignal)
+            if (picked.backToEngine) {
+              nextEngine = await withProgressSuspended(() => chooseEngine(terminal, abort.signal))
+              if (abort.signal.aborted) return signalExit(receivedSignal)
+              if (!nextEngine) break
+              continue
+            }
+            if (picked.value === null) break
+            if (picked.value === undefined) return signalExit(receivedSignal)
+            if (!validModelID(picked.value)) {
+              terminal.write("Invalid model ID; enter a native model name without whitespace.\n")
+              break
+            }
+            engine = nextEngine!
+            model = picked.value
+            startupDiscovery = picked.discovery
+            break selection
+          }
+          if (abort.signal.aborted) return signalExit(receivedSignal)
+          continue
+        }
+        if (message.startsWith("/")) {
+          terminal.write("Unknown local command. Enter /help for usage, or /model to choose an engine and model. Nothing was sent.\n")
+        } else {
+          terminal.write("No model selected; use /model to choose an engine and model. Nothing was sent.\n")
+        }
+      }
+      if (abort.signal.aborted) return signalExit(receivedSignal)
+    }
+    if (!engine || !model || abort.signal.aborted) return signalExit(receivedSignal)
     if (!validModelID(model)) throw new InteractiveLaunchError("invalid model ID; enter a native model name without whitespace")
+    terminal.actionContext?.("chat")
 
     terminal.write("\nNative CLI limitations: input size is estimated and output limits are reactive; these are not strict guarantees. No process or filesystem containment is claimed.\n\n")
     const initialSessionID = defaultSessionID(deps.randomUUID())
@@ -668,7 +882,7 @@ export async function runInteractiveSession(
       conversation: deps.createConversation(initialRuntime, initialSessionID),
     }
     let requestObservation: RequestObservation = { state: "not-observed" }
-    let discoveryObservation: InteractiveViewFacts["discovery"] = args.model ? "not-observed" : "completed"
+    let discoveryObservation: InteractiveViewFacts["discovery"] = startupDiscovery
     const currentViewIdentity = (): ViewIdentity => sessionStore
       ? { mode: "writable", sessionID: selection.sessionID, epoch: sessionStore.epoch }
       : { mode: "retained-read-only", sessionID: retainedSDKSessionID ?? selection.sessionID }
@@ -847,7 +1061,7 @@ export async function runInteractiveSession(
     terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.()))
 
     async function runOwned(resumed: boolean) {
-      if (persistenceFailure) throw persistenceFailure
+      if (persistenceFailed) throw new InteractiveLaunchError("Session transcript persistence failed; the session remains held.")
       if (effectiveHold(worktree, selection.sessionID)) throw new InteractiveLaunchError("Session held; explicit Resume required.")
       const result = resumed
         ? await selection.controller.resume(selection.sessionID, abort.signal)
@@ -890,9 +1104,17 @@ export async function runInteractiveSession(
     }
 
     async function decidePlan(workflow: Workflow, planSha: string, renderedPlan: string, parsedPlan: unknown): Promise<InteractiveExit | undefined> {
-      terminal.write(terminalSafeText(
-        `\n[approval] Inspect the canonical plan below before deciding.\n\nCanonical plan (${workflow.planRef?.mdPath ?? "saved plan"}):\n${renderedPlan}\nPlan SHA: ${planSha}\n`,
-      ))
+      const header = terminalSafeText(`\n[approval] Inspect the canonical plan below before deciding.\n\nCanonical plan (${workflow.planRef?.mdPath ?? "saved plan"}):\n`)
+      const displayPlan = terminalSafeText(renderedPlan)
+      const footer = terminalSafeText(`\nPlan SHA: ${planSha}\n`)
+      persist("canonical-plan", { text: renderedPlan })
+      if (terminal.writeText) {
+        terminal.write(header)
+        terminal.writeText({ provenance: "canonical-plan", text: displayPlan })
+        terminal.write(footer)
+      } else {
+        visibleWrite(`${header}${displayPlan}${footer}`)
+      }
       const chosen = terminal.choose ? await terminal.choose(
         "Execution decision",
         ["Approve", "Reject", "Keep pending"],
@@ -1007,6 +1229,8 @@ export async function runInteractiveSession(
       discovery: InteractiveViewFacts["discovery"] = "not-observed",
     ): Promise<boolean> {
       if (!forceNew && !targetSessionID && nextEngine === selection.engine && nextModel === selection.model) {
+        discoveryObservation = discovery
+        publishView()
         terminal.write("Already using that engine and model; conversation context is unchanged.\n")
         return true
       }
@@ -1279,15 +1503,21 @@ export async function runInteractiveSession(
     }
 
     while (!abort.signal.aborted) {
-      if (persistenceFailure) throw persistenceFailure
+      if (persistenceFailed) throw new InteractiveLaunchError("Session transcript persistence failed; the session remains held.")
+      let actionContext: InteractiveContext = "chat"
       if (retainedSDKSessionID) {
         terminal.queueAdmission?.(false)
+        actionContext = "read-only"
       } else {
         workflowHost.syncStatus()
         const queueState = selection.runtime.runs.status()
         terminal.executionSnapshot?.(queueState, false)
-        terminal.queueAdmission?.(!effectiveHold(worktree, selection.sessionID) && !readAnyWorkflowChecked(worktree).corrupt && !activeAnyWorkflow(worktree) && !queueState.claim && queueState.executions.every(settled))
+        const queueAllowed = !effectiveHold(worktree, selection.sessionID) && !readAnyWorkflowChecked(worktree).corrupt &&
+          !activeAnyWorkflow(worktree) && !queueState.claim && queueState.executions.every(settled)
+        terminal.queueAdmission?.(queueAllowed && requestObservation.state !== "failed")
+        actionContext = queueAllowed ? "chat" : "held"
       }
+      terminal.actionContext?.(actionContext)
       publishView()
       const promptTitle = retainedSDKSessionID
         ? `Retained SDK session ${retainedSDKSessionID} · read-only history`
@@ -1306,8 +1536,8 @@ export async function runInteractiveSession(
         const sessionID = retainedSDKSessionID
         const [command, ...commandArgs] = message.split(/\s+/u)
         if (command === "/quit" || command === "/exit") return { code: 0 }
-        if (command === "/help" && commandArgs.length === 0) {
-          terminal.write(helpText("read-only"))
+        if (command === "/help" && commandArgs.length === 0 && hasInteractiveAction("read-only", "help")) {
+          await presentHelp(terminal, "read-only", abort.signal)
           continue
         }
         if (command === "/sessions" && commandArgs.length === 0) {
@@ -1362,8 +1592,8 @@ export async function runInteractiveSession(
         terminal.write(`${command} is a local full-screen TUI action; it is unavailable in readline and no model turn was dispatched.\n`)
         continue
       }
-      if (command === "/help" && commandArgs.length === 0) {
-        terminal.write(helpText(effectiveHold(worktree, selection.sessionID) ? "held" : "chat"))
+      if (command === "/help" && commandArgs.length === 0 && hasInteractiveAction(actionContext, "help")) {
+        await presentHelp(terminal, actionContext, abort.signal)
         continue
       }
       if (command === "/sessions" && commandArgs.length === 0) {
@@ -1493,20 +1723,38 @@ export async function runInteractiveSession(
         catch (error) { terminal.write(`Resume refused or incomplete: ${boundedTerminalDiagnostic(String(error))}\n`) }
         continue
       }
-      if (command === "/model") {
+      if (command === "/model" && !hasInteractiveAction(actionContext, "model")) {
+        terminal.write("Model selection is unavailable while this session is held; resolve the active workflow first or recover execution ownership. No discovery or switch was attempted.\n")
+        continue
+      }
+      if (command === "/model" && hasInteractiveAction(actionContext, "model")) {
         if (commandArgs.length === 0) {
-          terminal.write(inputLine(`Current selection: ${selection.engine} ${selection.model}`, terminal.presentation?.()) + "\n")
           const guard = acquireSwitchGuard()
           if (!guard.release) {
             terminal.write(guard.refusal ?? "Model switch refused; current selection is unchanged.\n")
             continue
           }
           guard.release()
-          const nextModel = await withProgressSuspended(() => chooseModel(terminal, selection.engine, worktree, abort.signal, deps.discoverModels))
+          let nextEngine = await withProgressSuspended(() => chooseEngine(terminal, abort.signal))
           if (abort.signal.aborted) return signalExit(receivedSignal)
-          if (nextModel === undefined) return { code: 0 }
-          if (nextModel === null) continue
-          if (!await switchSelection(selection.engine, nextModel, undefined, false, "completed")) return signalExit(receivedSignal)
+          if (!nextEngine) continue
+          let switched = false
+          while (!abort.signal.aborted) {
+            const picked = await withProgressSuspended(() => chooseModel(terminal, nextEngine!, worktree, abort.signal, deps.discoverModels))
+            if (abort.signal.aborted) return signalExit(receivedSignal)
+            if (picked.backToEngine) {
+              nextEngine = await withProgressSuspended(() => chooseEngine(terminal, abort.signal))
+              if (abort.signal.aborted) return signalExit(receivedSignal)
+              if (!nextEngine) break
+              continue
+            }
+            if (picked.value === null) break
+            if (picked.value === undefined) return signalExit(receivedSignal)
+            switched = await switchSelection(nextEngine, picked.value, undefined, false, picked.discovery)
+            if (!switched) return signalExit(receivedSignal)
+            break
+          }
+          if (!switched && abort.signal.aborted) return signalExit(receivedSignal)
           continue
         }
         if (commandArgs.length !== 2 || !["local", "codex", "claude"].includes(commandArgs[0]!) ||
@@ -1607,6 +1855,8 @@ export async function runInteractiveSession(
       }
       const turnSelection = selection
       const turnStore: SessionStore | undefined = sessionStore
+      const turnEpoch = turnStore?.epoch
+      const turnWorkflowSnapshot = JSON.stringify(readAnyWorkflowChecked(worktree))
       const turnSkills = skillSession
       const userFact = persist("user", { text: message })
       progress.waiting()
@@ -1618,6 +1868,25 @@ export async function runInteractiveSession(
       let skillInvocation: SkillConversationInvocation | undefined
       let preparedSkill: PreparedSkillInvocation | undefined
       let dispatched = false
+      const modelFailureMayReturnToComposer = (): boolean => {
+        try {
+          if (persistenceFailed || abort.signal.aborted || operationAbort?.signal.aborted || receivedSignal || retainedSDKSessionID || !turnStore || !turnEpoch ||
+              sessionStore !== turnStore || attachedRuntime !== turnSelection.runtime || selection !== turnSelection ||
+              turnStore.sessionID !== turnSelection.sessionID ||
+              turnStore.epoch !== turnEpoch || turnStore.isReleased) return false
+          turnStore.assertOwner()
+          if (turnStore.metadata.held || effectiveHold(worktree, turnStore.sessionID)) return false
+          const state = turnSelection.runtime.runs.status()
+          if (state.claim || state.executions.some(execution => !settled(execution) || !!execution.fence)) return false
+          const workflowState = readAnyWorkflowChecked(worktree)
+          if (workflowState.corrupt || workflowState.legacy || JSON.stringify(workflowState) !== turnWorkflowSnapshot) return false
+          const occupant = activeAnyWorkflow(worktree)
+          if (occupant && (occupant.sessionID !== turnStore.sessionID || occupant.kind !== "plan" || occupant.phase !== "planning")) return false
+          return true
+        } catch {
+          return false
+        }
+      }
       try {
         if (explicitSkill) {
           if (!turnSkills || !turnStore || turnSkills.store !== turnStore) {
@@ -1670,7 +1939,21 @@ export async function runInteractiveSession(
         requestObservation = { state: "completed", operationID: requestID }
         publishView()
       } catch (error) {
-        if (dispatched) {
+        if (dispatched && error instanceof ModelRequestError) {
+          requestObservation = {
+            state: "failed", operationID: requestID,
+            category: { state: "known", value: error.category }, retryable: { state: "unknown" },
+          }
+          publishView()
+          if (modelFailureMayReturnToComposer()) {
+            progress.responseReceived()
+            persist("notice", { text: error.diagnostic, provenance: "error" })
+            if (terminal.writeText) terminal.writeText({ provenance: "error", text: error.diagnostic })
+            else visibleWrite(`[error] ${error.diagnostic}\n`)
+            if (terminal.draftSnapshot?.().draft === "") terminal.setDraft?.(message)
+            continue
+          }
+        } else if (dispatched) {
           requestObservation = { state: "failed", operationID: requestID, category: { state: "unknown" }, retryable: { state: "unknown" } }
           publishView()
         }
@@ -1749,7 +2032,7 @@ export async function runInteractiveSession(
     }
     return signalExit(receivedSignal)
   } catch (error) {
-    if (persistenceFailure) throw persistenceFailure
+    if (persistenceFailed) throw new InteractiveLaunchError("Session transcript persistence failed; the session remains held.")
     if (observedTasks) {
       const finalTasks = readProgressTasks(observedTasks.worktree, observedTasks.sessionID, observedTasks.ids)
       if (finalTasks) progress.taskSnapshot(finalTasks)
@@ -1766,10 +2049,12 @@ export async function runInteractiveSession(
     if (sessionStore && attachedRuntime) {
       try {
         const drafts = terminal.draftSnapshot?.()
-        if (drafts && !persistenceFailure) persist("notice", drafts)
+        if (drafts && !persistenceFailed) persist("notice", drafts)
         await detachAdmission(attachedRuntime, sessionStore.sessionID, sessionStore.epoch, receivedSignal ?? "terminal_exit")
       } catch (error) {
-        visibleWrite(`Session cleanup remains held: ${boundedTerminalDiagnostic(String(error))}\n`)
+        visibleWrite(persistenceFailed
+          ? "Session cleanup remains held after transcript persistence failed.\n"
+          : `Session cleanup remains held: ${boundedTerminalDiagnostic(String(error))}\n`)
       }
     }
     sessionStore = undefined

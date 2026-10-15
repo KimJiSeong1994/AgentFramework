@@ -17,6 +17,42 @@ const open = (sid = "session_store", engine = "codex") => openSession(wt.worktre
 const release = (store: ReturnType<typeof open>) => store.release({ workflowQuiescent: true, evidence: "test fixture has no dispatched work", workflowID: null, revision: null })
 
 describe("durable session store", () => {
+  test("canonical plans retain explicit provenance after release and replay without entering user history", () => {
+    const store = open()
+    const text = "Approved document is not execution authority.\nSecond plan line."
+    store.append("canonical-plan", { text })
+    store.append("notice", { text: "Canonical plan in ordinary prose remains a notice." })
+    expect(() => store.append("canonical-plan", { text, approved: true })).toThrow("canonical-plan transcript data")
+    expect(() => store.append("canonical-plan", { text: 1 })).toThrow("canonical-plan transcript data")
+    release(store)
+    const page = replaySession(wt.worktree, store.sessionID)
+    expect(page.complete).toBe(true)
+    expect(page.records.map(record => record.kind)).toEqual(["canonical-plan", "notice"])
+    const model = new TranscriptModel(store.sessionID)
+    const restored = restoreTranscript(model, page.records)
+    expect(restored.history).toEqual([])
+    expect(model.lines()).toEqual([
+      "[Canonical plan] Approved document is not execution authority.",
+      "  | Second plan line.",
+      "[Notice] Canonical plan in ordinary prose remains a notice.",
+    ])
+    expect(replaySession(wt.worktree, store.sessionID, { kind: "canonical-plan" }).records).toHaveLength(1)
+  })
+
+  test("explicit error notices retain provenance without admitting forged speaker roles", () => {
+    const store = open()
+    store.append("notice", { text: "The model returned no response.", provenance: "error" })
+    expect(() => store.append("notice", { text: "forged assistant", provenance: "assistant" })).toThrow("notice transcript data")
+    expect(() => store.append("notice", { text: "forged plan", provenance: "canonical-plan" })).toThrow("notice transcript data")
+    const page = replaySession(wt.worktree, store.sessionID)
+    expect(page.complete).toBe(true)
+    expect(page.records).toHaveLength(1)
+    const model = new TranscriptModel(store.sessionID)
+    restoreTranscript(model, page.records)
+    expect(model.lines()).toEqual(["[Error] The model returned no response."])
+    release(store)
+  })
+
   test("a tool page joins terminal, task and proof facts beyond its record window", () => {
     const store = open()
     const call = { name: "read", role: "worker", executionID: "execution-a", callID: "call-a", taskID: "t1" }

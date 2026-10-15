@@ -1,7 +1,7 @@
 import type { Terminal, TerminalControl } from "../hosts/interactive-session.ts"
 import { Editor, searchSubmittedHistory } from "./editor.ts"
 import type { InputEvent } from "./keys.ts"
-import { renderFrame, transcriptViewportRows, wrapText } from "./render.ts"
+import { renderFrame, transcriptViewportRows, wrapText, wrapTranscriptLine } from "./render.ts"
 import { TerminalDriver } from "./terminal.ts"
 import { TranscriptModel } from "./transcript-model.ts"
 import type { CliHostActivity } from "../hosts/cli-progress.ts"
@@ -10,8 +10,8 @@ import type { ExecutionRunStatus } from "../hosts/run-state.ts"
 import type { ReplayOptions, ReplayResult } from "../sessions/store.ts"
 import type { SkillCatalog } from "../skills/session.ts"
 import { restoreTranscript } from "./session-transcript.ts"
+import { commandInsertions, type InteractiveContext } from "../hosts/interactive-actions.ts"
 import {
-  commandCompletions,
   formatSkillCompletionRow,
   skillCompletion,
   skillCompletionInsertion,
@@ -32,6 +32,7 @@ type Choice = {
   documentAnchorLine: number
   documentAnchorOffset: number
   windowStart: number
+  filterEditor?: Editor
   finish: (index: number | undefined) => void
 }
 
@@ -52,6 +53,7 @@ export class TuiApp implements Terminal {
   readonly stdinIsTTY = process.stdin.isTTY === true
   readonly stderrIsTTY = process.stderr.isTTY === true
   private readonly editor = new Editor({ platform: process.platform })
+  private readonly overlayControls = new Editor({ platform: process.platform })
   private readonly driver = new TerminalDriver(event => this.input(event), () => this.draw(), () => this.control?.("disconnect"))
   private transcript = new TranscriptModel("selection")
   private transcriptQuery: string | undefined
@@ -72,15 +74,19 @@ export class TuiApp implements Terminal {
   private viewIdentity?: ViewIdentity
   private viewFacts?: InteractiveViewFacts
   private prompt = "You> "
+  private lastSubmittedDraft: string | undefined
+  private lastSubmittedCursor: number | undefined
+  private interactionContext: InteractiveContext = "chat"
   private suspended = false
   private closed = false
   private choiceSettled = false
   private queueAllowed = false
   private detailsVisible = false
   private detailsIndex = 0
+  private readFailure = false
   private themeName: ThemeName = "neutral"
   private asciiChrome = false
-  queueAdmission(allowed: boolean): void { this.queueAllowed = allowed }
+  queueAdmission(allowed: boolean): void { this.queueAllowed = allowed && !this.readFailure }
   workflowStatus(line: string | undefined): void {
     if (this.workflow === line) return
     this.workflow = line
@@ -141,9 +147,8 @@ export class TuiApp implements Terminal {
     this.source = source
     this.editor.historySearchSource = query => {
       try { return searchSubmittedHistory(this.submittedHistory(), query) }
-      catch (error) {
-        this.transcript.append(`History search refused: ${String(error)}`)
-        this.control?.("disconnect")
+      catch {
+        this.quarantineReadFailure()
         return []
       }
     }
@@ -182,11 +187,19 @@ export class TuiApp implements Terminal {
         this.editor.setText(restored.draft)
         if (restored.queued.length) this.transcript.append(`Unsent queued drafts retained (not admitted):\n${restored.queued.map((text, index) => `${index + 1}. ${text}`).join("\n")}`)
       }
-    } catch (error) {
+    } catch {
       this.nextPageOffset = undefined
-      this.transcript.append(`Session read failure: ${String(error)}`)
-      this.control?.("disconnect")
+      this.quarantineReadFailure()
     }
+  }
+  private quarantineReadFailure(): void {
+    if (!this.readFailure) {
+      this.transcript.append({ provenance: "error", text: "Session read failure. New input is blocked; Ctrl+D exits. Active work is not confirmed stopped." })
+    }
+    this.readFailure = true
+    this.queueAllowed = false
+    this.detailsVisible = false
+    this.draw()
   }
   private ordinalFor(executionID: string, callID: string): number {
     const key = JSON.stringify([executionID, callID])
@@ -210,16 +223,29 @@ export class TuiApp implements Terminal {
   private completionDismissed = false
   private completions(): string[] {
     if (this.choice || this.editor.searchState || this.completionDismissed || this.pending?.kind === "selection") return []
-    return commandCompletions(this.editor.text)
+    return commandInsertions(this.editor.text, this.interactionContext)
   }
   private skillCompletions() {
-    if (this.choice || this.editor.searchState || this.completionDismissed || this.pending?.kind === "selection") return undefined
+    if (this.interactionContext === "unselected" || this.choice || this.editor.searchState || this.completionDismissed || this.pending?.kind === "selection") return undefined
     return skillCompletion(this.catalog, this.editor.text)
   }
 
   // The renderer owns terminal escapes; shared coordinator prose stays plain.
   presentation = () => ({ columns: process.stdout.columns, color: false })
   controls(handler: (action: TerminalControl) => void): void { this.control = handler }
+  actionContext(context: InteractiveContext): void {
+    if (this.interactionContext === context) return
+    this.interactionContext = context
+    this.completionIndex = 0
+    this.completionDismissed = false
+    this.draw()
+  }
+  setDraft(draft: string): void {
+    this.editor.setText(draft)
+    this.completionIndex = 0
+    this.completionDismissed = true
+    this.draw()
+  }
   private dimensions() { return { columns: process.stdout.columns || 80, rows: process.stdout.rows || 24 } }
   private separator(): string { return this.asciiChrome ? " | " : " · " }
   private usable(): boolean { const size = this.dimensions(); return size.columns >= 80 && size.rows >= 24 }
@@ -228,16 +254,20 @@ export class TuiApp implements Terminal {
     const { columns, rows } = this.dimensions()
     const viewportRows = transcriptViewportRows({ columns, rows, draft: this.editor.text, cursor: this.editor.cursor, prompt: this.prompt, statusRows: this.currentStatusLines().length })
     const visualRows = this.transcript.lines(this.transcriptQuery)
-      .reduce((total, line) => total + wrapText(line, columns).length, 0)
+      .reduce((total, line) => total + wrapTranscriptLine(line, columns).length, 0)
     return { pageRows: Math.max(1, viewportRows), maximumOffset: Math.max(0, visualRows - viewportRows) }
   }
 
   private currentStatusLines(): string[] {
+    if (this.readFailure) return ["History unavailable | new input blocked", "Ctrl+D exit | active work may remain"]
     const { columns } = this.dimensions()
+    const overlayHint = this.choice?.presentation.kind === "picker"
+      ? `Up/Down move | Enter ${this.choice.presentation.purpose === "command" ? "inserts" : "selects"} | Esc back | Ctrl+D quit`
+      : this.detailsVisible ? "Details | Up/Down move | Enter expands | Esc closes | Ctrl+D quits" : undefined
     return statusLines({
       facts: this.viewFacts,
       workflow: this.workflow,
-      activity: this.transcript.currentTask ?? this.status,
+      activity: overlayHint ?? this.transcript.currentTask ?? this.status,
       search: this.transcriptQuery,
       queued: this.queue.length,
       columns,
@@ -246,10 +276,27 @@ export class TuiApp implements Terminal {
     })
   }
 
+  private pickerMatches(choice: Choice): number[] {
+    const presentation = choice.presentation
+    if (presentation.kind !== "picker") return []
+    const filter = (choice.filterEditor?.text ?? "").toLocaleLowerCase()
+    return choice.values.flatMap((value, index) =>
+      !filter || `${value} ${presentation.rows[index] ?? ""}`
+        .toLocaleLowerCase().includes(filter) ? [index] : [])
+  }
+
   private draw(): void {
     if (this.suspended || this.closed) return
     let lines = this.transcript.lines(this.transcriptQuery)
-    if (this.choice?.presentation.kind === "approval") {
+    if (this.readFailure) {
+      lines = [
+        "[Error] Session read failure",
+        "The retained history could not be read safely.",
+        "New messages, queued input and approval decisions are blocked.",
+        "Ctrl+D exits. Inspect read-only lca status before reopening.",
+        "Active work is not confirmed stopped.",
+      ]
+    } else if (this.choice?.presentation.kind === "approval") {
       const { columns, rows } = this.dimensions()
       const wrapped = documentRows(this.choice.presentation.document, columns)
       const availableRows = Math.max(1, rows - this.choice.values.length - 9)
@@ -287,18 +334,38 @@ export class TuiApp implements Terminal {
           `${this.choice!.windowStart + index === this.choice!.selected ? ">" : " "} ${value}`),
         ...(detail ? [`Selected: ${detail}`] : []),
       ]
+    } else if (this.choice?.presentation.kind === "picker") {
+      const { rows } = this.dimensions()
+      const height = Math.max(1, Math.min(10, rows - 11))
+      const matches = this.pickerMatches(this.choice)
+      if (this.choice.selected >= matches.length) this.choice.selected = Math.max(0, matches.length - 1)
+      this.choice.windowStart = Math.max(0, Math.min(Math.max(0, matches.length - height), this.choice.windowStart))
+      if (this.choice.selected < this.choice.windowStart) this.choice.windowStart = this.choice.selected
+      if (this.choice.selected >= this.choice.windowStart + height) this.choice.windowStart = this.choice.selected - height + 1
+      const end = Math.min(matches.length, this.choice.windowStart + height)
+      const selectedOriginal = matches[this.choice.selected]
+      const selectedDetail = selectedOriginal === undefined ? undefined : this.choice.presentation.rows[selectedOriginal]
+      lines = [
+        this.choice.title,
+        ...(this.choice.presentation.hint ? [this.choice.presentation.hint] : []),
+        `${matches.length} matches${this.separator()}showing ${matches.length ? `${this.choice.windowStart + 1}-${end}` : "0"}`,
+        ...matches.slice(this.choice.windowStart, end).map((original, index) =>
+          `${this.choice!.windowStart + index === this.choice!.selected ? ">" : " "} ${this.choice!.values[original]}`),
+        ...(selectedDetail && selectedDetail !== this.choice.values[selectedOriginal!]
+          ? [`Selected: ${selectedDetail}`] : matches.length ? [] : ["No matching choices."]),
+      ]
     } else if (this.choice) {
       lines.push(this.choice.title, ...this.choice.values.map((value, i) => `${i === this.choice!.selected ? ">" : " "} ${value}`))
     }
-    const search = this.editor.searchState
+    const search = this.readFailure ? undefined : this.editor.searchState
     if (search) {
       const first = Math.max(0, search.selected - 4)
       lines.push("Search input history · Up/Down navigate · Enter selects · Escape cancels",
         ...search.results.slice(first, first + 8).map((value, index) => `${index + first === search.selected ? ">" : " "} ${value}`),
         `${search.results.length ? search.selected + 1 : 0}/${search.results.length} matches`)
     }
-    const skills = this.skillCompletions()
-    const completions = skills ? [] : this.completions()
+    const skills = this.readFailure ? undefined : this.skillCompletions()
+    const completions = this.readFailure || skills ? [] : this.completions()
     if (skills) {
       const { columns, rows } = this.dimensions()
       const viewportRows = transcriptViewportRows({ columns, rows, draft: this.editor.text, cursor: this.editor.cursor, prompt: this.prompt })
@@ -332,12 +399,22 @@ export class TuiApp implements Terminal {
         ...(selected ? selected.lines.slice(0, Math.max(0, maximum - 3)).map(line => `  ${line}`) : []),
       )
     }
-    const overlayVisible = !!this.choice || !!search || !!skills || completions.length > 0
+    const overlayVisible = !!this.choice || !!search || !!skills || completions.length > 0 || this.detailsVisible
+    const home = this.interactionContext === "unselected" && this.transcript.items.length === 0 &&
+      !overlayVisible && !this.choice && !search && !skills && completions.length === 0
+      ? ["LCA is ready; no model is selected.", "Enter /model to choose an engine and model.", "Enter /help for commands, or /quit to leave."]
+      : undefined
     this.driver.write(renderFrame({ ...this.dimensions(), transcript: lines,
-      transcriptOffset: overlayVisible ? 0 : this.scrollOffset,
+      transcriptOffset: overlayVisible || this.readFailure ? 0 : this.scrollOffset,
+      ...(!overlayVisible && !this.readFailure ? {
+        transcriptOlder: this.nextPageOffset !== undefined,
+        transcriptNewer: this.pageOffset > 0,
+      } : {}),
+      ...(home ? { home } : {}),
       status: this.currentStatusLines(),
-      draft: search?.query ?? this.editor.text, cursor: search ? search.query.length : this.editor.cursor,
-      prompt: search ? "History> " : this.prompt,
+      draft: this.choice?.filterEditor?.text ?? search?.query ?? this.editor.text,
+      cursor: this.choice?.filterEditor?.cursor ?? (search ? search.query.length : this.editor.cursor),
+      prompt: this.readFailure ? "Read-only> " : this.choice?.filterEditor ? "Filter> " : search ? "History> " : this.prompt,
       color: process.env.NO_COLOR === undefined,
       theme: resolveTheme(this.themeName),
       ascii: this.asciiChrome,
@@ -345,9 +422,18 @@ export class TuiApp implements Terminal {
   }
 
   private input(event: InputEvent): void {
-    if (this.choiceSettled) return
+    if (this.readFailure) {
+      if (event.type === "key" && event.key === "ctrl+d") this.control?.("quit")
+      else if (event.type === "key" && event.key === "ctrl+c" && this.overlayControls.handle(event) === "shutdown") this.control?.("shutdown")
+      return
+    }
+    if (this.choiceSettled) {
+      if (event.type === "key" && event.key === "ctrl+d") this.control?.("quit")
+      else if (event.type === "key" && event.key === "ctrl+c" && this.overlayControls.handle(event) === "shutdown") this.control?.("shutdown")
+      return
+    }
     const skills = this.skillCompletions()
-    const overlayVisible = !!this.choice || !!this.editor.searchState || !!skills || this.completions().length > 0
+    const overlayVisible = !!this.choice || !!this.editor.searchState || !!skills || this.completions().length > 0 || this.detailsVisible
     if (!overlayVisible && this.usable() && event.type === "key" && (event.key === "pageUp" || event.key === "pageDown" || event.key === "pageup" || event.key === "pagedown")) {
       const { pageRows, maximumOffset } = this.transcriptScrollBounds()
       this.scrollOffset = Math.min(this.scrollOffset, maximumOffset)
@@ -369,11 +455,50 @@ export class TuiApp implements Terminal {
     if (event.type === "key" && event.key === "ctrl+z") { this.control?.("suspend"); return }
     if (!this.usable() && !(event.type === "key" && ["ctrl+c", "ctrl+d", "escape"].includes(event.key))) return
     if (this.choice) {
+      if (event.type === "key" && event.key === "escape") { this.choice.finish(undefined); return }
+      if (event.type === "key" && event.key === "ctrl+d") { this.control?.("quit"); return }
+      if (event.type === "key" && event.key === "ctrl+c") {
+        if (this.overlayControls.handle(event) === "shutdown") this.control?.("shutdown")
+        return
+      }
+      if (this.choice.presentation.kind === "picker") {
+        const matches = this.pickerMatches(this.choice)
+        if (event.type === "text" || event.type === "paste") {
+          const remaining = Math.max(0, 256 - (this.choice.filterEditor?.text.length ?? 0))
+          const text = event.text.replace(/[\r\n\t]/gu, " ").slice(0, remaining)
+          if (event.type === "text") this.choice.filterEditor?.handle({ type: "text", text })
+          else this.choice.filterEditor?.handle({ type: "paste", text })
+          this.choice.selected = 0
+          this.choice.windowStart = 0
+        } else if (event.type === "key") {
+          if (event.key === "enter") {
+            const command = this.choice.filterEditor?.text.trim().toLocaleLowerCase()
+            if (command === "/cancel" || command === "escape") this.choice.finish(undefined)
+            else if (command === "/quit" || command === "/exit") this.control?.("quit")
+            else if (matches.length) this.choice.finish(matches[this.choice.selected]!)
+            else return
+          } else if (event.key === "up" || event.key === "down" || event.key === "tab") {
+            if (matches.length) {
+              const direction = event.key === "up" ? -1 : 1
+              this.choice.selected = (this.choice.selected + direction + matches.length) % matches.length
+            }
+          } else if (event.key === "pageUp" || event.key === "pageup" || event.key === "pageDown" || event.key === "pagedown") {
+            if (matches.length) {
+              const page = Math.max(1, this.dimensions().rows - 11)
+              this.choice.selected = Math.max(0, Math.min(matches.length - 1,
+                this.choice.selected + (event.key.toLowerCase() === "pageup" ? -page : page)))
+            }
+          } else if (["backspace", "delete", "left", "right", "home", "end", "ctrl+a", "ctrl+e"].includes(event.key)) {
+            this.choice.filterEditor?.handle(event)
+            this.choice.selected = 0
+            this.choice.windowStart = 0
+          }
+        }
+        this.draw()
+        return
+      }
       // Paste/text can never answer a choice, much less mint an execution receipt.
       if (event.type !== "key") return
-      if (event.key === "escape") { this.choice.finish(undefined); return }
-      if (event.key === "ctrl+d") { this.control?.("quit"); return }
-      if (event.key === "ctrl+c" && this.editor.handle(event) === "shutdown") { this.control?.("shutdown"); return }
       if (this.choice.presentation.kind === "approval") {
         const { columns, rows } = this.dimensions()
         const wrapped = documentRows(this.choice.presentation.document, columns)
@@ -407,7 +532,33 @@ export class TuiApp implements Terminal {
       this.draw()
       return
     }
+    if (this.detailsVisible) {
+      if (event.type !== "key") return
+      if (event.key === "ctrl+d") { this.control?.("quit"); return }
+      if (event.key === "ctrl+c") {
+        if (this.overlayControls.handle(event) === "shutdown") this.control?.("shutdown")
+        return
+      }
+      const details = this.transcript.details()
+      if (event.key === "escape") this.detailsVisible = false
+      else if (event.key === "up" && details.length) this.detailsIndex = (this.detailsIndex + details.length - 1) % details.length
+      else if (event.key === "down" && details.length) this.detailsIndex = (this.detailsIndex + 1) % details.length
+      else if (event.key === "enter") {
+        const selected = details[this.detailsIndex]
+        if (selected?.expandable) this.transcript.toggle(selected.id)
+      }
+      this.draw()
+      return
+    }
+    if (event.type === "key" && event.key === "escape" && this.pending?.kind === "selection") {
+      this.pending.finish(undefined)
+      return
+    }
     if (skills && event.type === "key") {
+      if (event.key === "ctrl+c") {
+        if (this.overlayControls.handle(event) === "shutdown") this.control?.("shutdown")
+        return
+      }
       if (event.key === "enter" || event.key === "tab") {
         const insertion = skillCompletionInsertion(skills.rows[this.completionIndex])
         if (insertion !== undefined) this.editor.setText(insertion)
@@ -426,6 +577,10 @@ export class TuiApp implements Terminal {
     }
     const completions = this.completions()
     if (completions.length && event.type === "key") {
+      if (event.key === "ctrl+c") {
+        if (this.overlayControls.handle(event) === "shutdown") this.control?.("shutdown")
+        return
+      }
       if (event.key === "enter" || event.key === "tab") {
         this.editor.setText(completions[this.completionIndex % completions.length]! + " ")
         this.completionDismissed = true
@@ -439,24 +594,13 @@ export class TuiApp implements Terminal {
       }
       if (event.key === "escape") { this.completionDismissed = true; this.draw(); return }
     }
-    if (this.detailsVisible && event.type === "key") {
-      const details = this.transcript.details()
-      if (event.key === "escape") this.detailsVisible = false
-      else if (event.key === "up" && details.length) this.detailsIndex = (this.detailsIndex + details.length - 1) % details.length
-      else if (event.key === "down" && details.length) this.detailsIndex = (this.detailsIndex + 1) % details.length
-      else if (event.key === "enter") {
-        const selected = details[this.detailsIndex]
-        if (selected?.expandable) this.transcript.toggle(selected.id)
-      } else return
-      this.draw()
-      return
-    }
     if (event.type === "text" || event.type === "paste") { this.completionDismissed = false; this.completionIndex = 0 }
     const previousDraft = this.editor.text
     const action = this.editor.handle(event)
     if (this.editor.text !== previousDraft) { this.completionDismissed = false; this.completionIndex = 0 }
     if (action === "shutdown") { this.control?.(event.type === "key" && event.key === "ctrl+c" ? "shutdown" : "quit"); return }
     if (action === "cancel") { this.control?.("cancel"); this.draw(); return }
+    if (action === "queue" && this.pending?.kind === "selection") return
     if (action === "submit" || action === "queue") {
       const command = this.editor.text.trim()
       if (this.pending?.kind !== "selection" && (command === "/details" || command === "/ascii" || command.startsWith("/theme ") || command === "/search" || command.startsWith("/search ") || command.startsWith("/expand "))) {
@@ -492,9 +636,17 @@ export class TuiApp implements Terminal {
         this.control?.(command === "/cancel" ? "cancel" : command === "/pause" ? "pause" : "quit")
       } else if (this.pending) {
         if (this.pending.kind === "chat" && !command) return
+        const draft = this.editor.text
+        const cursor = this.editor.cursor
         const text = this.pending.kind === "chat" ? this.editor.submit() : this.editor.text
+        if (this.pending.kind === "chat") {
+          this.lastSubmittedDraft = draft
+          this.lastSubmittedCursor = cursor
+        }
         if (this.pending.kind === "selection") this.editor.setText("")
-        this.transcript.append({ provenance: "user", text })
+        const transientSelection = this.interactionContext === "unselected" &&
+          (command === "/help" || command === "/model" || command.startsWith("/model "))
+        if (!transientSelection) this.transcript.append({ provenance: "user", text })
         this.pending.finish(text)
       } else if (action === "queue" && command) {
         this.queue.push(this.editor.submit())
@@ -508,8 +660,12 @@ export class TuiApp implements Terminal {
   readInput(input: { title: string; hint: string; prompt: string; kind: "chat" | "selection" }, signal: AbortSignal): Promise<string | undefined> {
     if (this.closed || signal.aborted) return Promise.resolve(undefined)
     if (this.pending || this.choice) throw new Error("terminal input already has an owner")
+    const selectionOrigin = input.kind === "selection" ? { text: this.editor.text, cursor: this.editor.cursor } : undefined
+    if (selectionOrigin) this.editor.setText("")
+    this.lastSubmittedDraft = undefined
+    this.lastSubmittedCursor = undefined
     this.choiceSettled = false
-    this.status = `${input.title} · ${input.hint}`
+    this.status = input.kind === "chat" && this.viewFacts ? input.hint : `${input.title} · ${input.hint}`
     this.prompt = input.prompt
     this.resume()
     if (input.kind === "chat" && this.queueAllowed && this.queue.length && this.usable()) {
@@ -524,6 +680,10 @@ export class TuiApp implements Terminal {
         if (this.pending?.finish !== finish) return
         this.pending = undefined
         signal.removeEventListener("abort", aborted)
+        if (text === undefined && selectionOrigin) {
+          this.editor.setText(selectionOrigin.text)
+          this.editor.cursor = selectionOrigin.cursor
+        }
         this.status = text === undefined ? "Input closed" : "LCA · working · Escape cancels"
         resolve(text)
         this.draw()
@@ -544,6 +704,14 @@ export class TuiApp implements Terminal {
     if (this.pending || this.choice || !values.length) throw new Error("invalid terminal choice ownership")
     if (this.editor.searchState) this.editor.handle({ type: "key", key: "escape" })
     this.choiceSettled = false
+    const returnDraft = presentation.kind === "picker" && presentation.purpose === "command"
+      ? this.lastSubmittedDraft ?? ""
+      : undefined
+    const returnCursor = presentation.kind === "picker" && presentation.purpose === "command"
+      ? this.lastSubmittedCursor
+      : undefined
+    this.lastSubmittedDraft = undefined
+    this.lastSubmittedCursor = undefined
     return new Promise(resolve => {
       const abort = () => finish(undefined)
       const finish = (index: number | undefined) => {
@@ -551,20 +719,31 @@ export class TuiApp implements Terminal {
         this.choiceSettled = true
         this.choice = undefined
         signal.removeEventListener("abort", abort)
-        this.transcript.append(`${title}: ${index === undefined ? "No decision (dismissed)" : values[index]}`)
+        if (presentation.kind === "picker") {
+          if (presentation.purpose === "command" && index === undefined) {
+            this.editor.setText(returnDraft ?? "")
+            this.editor.cursor = returnCursor ?? (returnDraft ?? "").length
+            this.completionDismissed = false
+          }
+        } else {
+          this.transcript.append(`${title}: ${index === undefined ? "No decision (dismissed)" : values[index]}`)
+        }
         resolve(index)
         this.draw()
       }
       this.choice = {
         title,
         values,
-        selected: presentation.kind === "generic-list" ? Math.min(values.length - 1, Math.max(0, presentation.initialIndex ?? 0)) : 0,
+        selected: presentation.kind === "generic-list" || presentation.kind === "picker"
+          ? Math.min(values.length - 1, Math.max(0, presentation.initialIndex ?? 0))
+          : 0,
         presentation,
-        focus: presentation.kind === "approval" ? "document" : presentation.kind === "generic-list" ? "list" : "decisions",
+        focus: presentation.kind === "approval" ? "document" : presentation.kind === "generic-list" || presentation.kind === "picker" ? "list" : "decisions",
         documentOffset: 0,
         documentAnchorLine: 0,
         documentAnchorOffset: 0,
         windowStart: 0,
+        ...(presentation.kind === "picker" ? { filterEditor: new Editor({ platform: process.platform }) } : {}),
         finish,
       }
       signal.addEventListener("abort", abort, { once: true })

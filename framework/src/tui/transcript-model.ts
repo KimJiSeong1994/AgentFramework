@@ -3,10 +3,16 @@ import type { CliProgressTask } from "../hosts/cli-progress.ts"
 import { settled, type ExecutionRunStatus } from "../hosts/run-state.ts"
 import type { TranscriptText } from "../hosts/interactive-view.ts"
 
+export type ExecutionDisplay = {
+  state: "not-observed" | "unconfirmed" | "settled" | "historical"
+  fence: boolean
+  claim: boolean
+}
+
 export type TranscriptItem =
   | { kind: "text"; id: string; text: string; provenance: TranscriptText["provenance"] }
   | { kind: "tool"; id: string; ordinal: number; executionID: string; callID: string; taskID: string; name: string; role: string;
-      outcome: "running" | "succeeded" | "failed" | "denied"; expanded: boolean; evidence: string[] }
+      outcome: "running" | "succeeded" | "failed" | "denied"; expanded: boolean; evidence: string[]; execution: ExecutionDisplay }
 export type TranscriptDetail = { id: string; summary: string; lines: string[]; expandable: boolean }
 
 /** Session-scoped facts only. It cannot approve, cancel, or settle execution. */
@@ -64,8 +70,11 @@ export class TranscriptModel {
       else this.historicalTasks.delete(task.id)
     }
   }
-  evidenceSnapshot(executionID: string, evidence: readonly string[]): void {
-    for (const item of this.calls.values()) if (item.executionID === executionID) item.evidence = [...evidence]
+  evidenceSnapshot(executionID: string, evidence: readonly string[], execution: ExecutionDisplay): void {
+    for (const item of this.calls.values()) if (item.executionID === executionID) {
+      item.evidence = [...evidence]
+      item.execution = { ...execution }
+    }
   }
   executionSnapshot(state: ExecutionRunStatus, active: boolean): void {
     for (const item of this.calls.values()) {
@@ -74,6 +83,7 @@ export class TranscriptModel {
       const quiescent = execution.reconciliation?.outcome === "terminal" && execution.reconciliation.quiescent === true ||
         execution.terminal?.quiescentAt !== undefined
       const proven = !!execution.terminal && quiescent && settled(execution) && !state.claim && !active
+      item.execution = { state: proven ? "settled" : "unconfirmed", fence: !!execution.fence, claim: !!state.claim }
       item.evidence = [
         `Execution terminal: ${execution.terminal?.outcome ?? "unconfirmed"}`,
         `Reconciliation: ${execution.reconciliation?.outcome ?? "unobserved"}`,
@@ -101,7 +111,8 @@ export class TranscriptModel {
       if (!Number.isSafeInteger(assignedOrdinal) || assignedOrdinal < 1) throw new Error("invalid transcript tool ordinal")
       this.nextOrdinal = Math.max(this.nextOrdinal, assignedOrdinal)
       item = { kind: "tool", id, ordinal: assignedOrdinal, executionID: activity.executionID, callID: activity.callID,
-        taskID: activity.taskID, name: activity.tool, role: activity.role, outcome: "running", expanded: false, evidence: [] }
+        taskID: activity.taskID, name: activity.tool, role: activity.role, outcome: "running", expanded: false, evidence: [],
+        execution: { state: "not-observed", fence: false, claim: false } }
       this.calls.set(id, item)
       this.entries.push(item)
     }
@@ -142,7 +153,7 @@ export class TranscriptModel {
         const presented = rows.map((row, index) => {
           const fence = /^\s*```/u.test(row)
           const semantic = fenced ? "[code] " : row.startsWith("+") ? "[+] " : row.startsWith("-") ? "[-] " : ""
-          const value = `${index === 0 ? `[${label}] ` : ""}${semantic}${row}`
+          const value = `${index === 0 ? `[${label}] ` : "  | "}${semantic}${row}`
           if (fence) fenced = !fenced
           return value
         })
@@ -151,7 +162,15 @@ export class TranscriptModel {
       const outcome = item.outcome === "running" && this.historicalCalls.has(item.id) ? "running (last recorded; unconfirmed)" : item.outcome
       const task = this.tasks.get(item.taskID)
       const taskStatus = task?.status === "running" && this.historicalTasks.has(item.taskID) ? "running (last recorded)" : task?.status ?? ""
-      const summary = `${item.expanded ? "[-]" : "[+]"} #${item.ordinal} ${item.name} · ${outcome} · task ${task?.title ?? "title unavailable"} · ${item.taskID} ${taskStatus}`
+      const execution = [
+        ...(item.execution.state === "settled" ? [] : [
+          item.execution.state === "historical" ? "execution last recorded" :
+            item.execution.state === "unconfirmed" ? "execution unconfirmed" : "execution not observed",
+        ]),
+        ...(item.execution.fence ? ["fence retained"] : []),
+        ...(item.execution.claim ? ["claim retained"] : []),
+      ]
+      const summary = `${item.expanded ? "[-]" : "[+]"} #${item.ordinal} ${item.name} · call ${outcome}${execution.length ? ` · ${execution.join("; ")}` : ""} · task ${task?.title ?? "title unavailable"} · ${item.taskID} ${taskStatus}`
       return item.expanded ? [summary, `  Call ${item.callID} · execution ${item.executionID} · ${item.role}`, ...item.evidence.map(line => `  ${line}`)] : [summary]
     })
   }

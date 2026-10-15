@@ -36,6 +36,36 @@ const restoredTerminalProof = {
   },
 }
 
+test.skipIf(optionalPrerequisiteSkip)("readline engine and manual-model pickers cancel or exit without starting a runtime", () => {
+  const result = spawnSync(python, [harness, "--readline-pickers-only"], {
+    cwd: framework,
+    encoding: "utf8",
+    env: harnessEnvironment,
+    maxBuffer: 8 * 1024 * 1024,
+    timeout: 60_000,
+  })
+  const diagnostic = [result.stdout, result.stderr, result.error?.message].filter(Boolean).join("\n")
+  expect(result.error, diagnostic).toBeUndefined()
+  expect(result.status, diagnostic).toBe(0)
+  const report = JSON.parse(result.stdout) as {
+    status: string
+    cases: Record<string, { exitCode: number; fixture: Record<string, unknown>; capture: Record<string, unknown> }>
+  }
+  expect(report.status).toBe("passed")
+  expect(Object.keys(report.cases).sort()).toEqual([
+    "engine-cancel", "engine-eof", "engine-escape", "model-cancel", "model-eof", "model-escape",
+  ])
+  for (const [name, result] of Object.entries(report.cases)) {
+    expect(result.exitCode, name).toBe(0)
+    expect(result.fixture, name).toMatchObject({
+      runtimeCreateCount: 0, runtimeAdmissionCount: 0, turnCount: 0, decisionCount: 0, runCount: 0,
+      modelCatalogCallCount: name.startsWith("model-") ? 1 : 0,
+    })
+    expect(result.fixture.error, name).toBeUndefined()
+    expect(result.capture, name).toMatchObject(restoredTerminalProof)
+  }
+}, 75_000)
+
 test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python PTY with truthful workflow evidence", () => {
   const args = [harness]
   const evidencePath = harnessEnvironment.LCA_TUI_PTY_OUT
@@ -454,9 +484,9 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
   expect(report.scenarios.skillRestoreKill.mode).toBe("kill")
 
   const skillToolScope = report.scenarios.skillToolScope
-  expect(skillToolScope.exitCode).toBe(1)
+  expect(skillToolScope.exitCode).toBe(0)
   expect(skillToolScope.fixture).toMatchObject({
-    exitCode: 1,
+    exitCode: 0,
     runtimeCreateCount: 1,
     runtimeAdmissionCount: 1,
     controllerCreateCount: 1,
@@ -503,9 +533,10 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
     { kind: "tool-started", role: "main", tool: "grep", outcome: undefined, ok: undefined },
     { kind: "tool-finished", role: "main", tool: "grep", outcome: "denied", ok: false },
   ])
-  expect(skillToolScope.fixture.error).toBe("Error: planning model did not complete a response")
+  expect(skillToolScope.fixture.error).toBeUndefined()
   expect(skillToolScope.capture).toMatchObject({ ...restoredTerminalProof, onlyResetSgr: true })
   expect(skillToolScope.capture.modeProof).toMatchObject({
+    settledFailureRetainsComposer: true,
     grepEffectBlockedUntilOwnerChoice: true,
     oneGrepExecutedAndSameNextCallRequiresChoice: true,
     realPlanConversationAndExecutionIntent: true,
@@ -584,9 +615,9 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
   })
 
   const skillMainWrite = report.scenarios.skillMainWrite
-  expect(skillMainWrite.exitCode).toBe(1)
+  expect(skillMainWrite.exitCode).toBe(0)
   expect(skillMainWrite.fixture).toMatchObject({
-    exitCode: 1,
+    exitCode: 0,
     runtimeCreateCount: 1,
     runtimeAdmissionCount: 1,
     turnInputs: ["/skill:pty-main-write create scope-write-target.txt"],
@@ -610,9 +641,10 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
     { kind: "tool-started", role: "main", tool: "write", outcome: undefined, ok: undefined },
     { kind: "tool-finished", role: "main", tool: "write", outcome: "denied", ok: false },
   ])
-  expect(skillMainWrite.fixture.error).toBe("Error: planning model did not complete a response")
+  expect(skillMainWrite.fixture.error).toBeUndefined()
   expect(skillMainWrite.capture).toMatchObject({ ...restoredTerminalProof, onlyResetSgr: true })
   expect(skillMainWrite.capture.modeProof).toMatchObject({
+    settledFailureRetainsComposer: true,
     realPlanConversationAndExecutionIntent: true,
     fixedMainRoleDeniedWriteWithoutChooser: true,
     mainPolicyIDUnchanged: true,
@@ -629,8 +661,8 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
   ])
   expect(report.scenarios.approve.capture.modeProof).toMatchObject({
     toolItemsBeforeFilter: [
-      "[+] #1 read · succeeded · task Implement · t1",
-      "[+] #2 read · failed · task Implement · t1",
+      "[+] #1 read · call succeeded · execution not observed · task Implement · t1",
+      "[+] #2 read · call failed · execution not observed · task Implement · t1",
     ],
     expandedCallDetailVisible: true,
     searchReadFailedVisible: true,
