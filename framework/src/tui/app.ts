@@ -17,9 +17,34 @@ import {
   skillCompletionInsertion,
   skillCompletionWindow,
 } from "./skill-completion.ts"
+import { sameViewIdentity, type ChoicePresentation, type InteractiveViewFacts, type TranscriptText, type ViewIdentity } from "../hosts/interactive-view.ts"
+import { statusLines } from "./status-view.ts"
+import { resolveTheme, type ThemeName } from "./theme.ts"
 
 type Pending = { finish: (text: string | undefined) => void; kind: "chat" | "selection" }
-type Choice = { title: string; values: readonly string[]; selected: number; finish: (index: number | undefined) => void }
+type Choice = {
+  title: string
+  values: readonly string[]
+  selected: number
+  presentation: ChoicePresentation
+  focus: "document" | "decisions" | "list"
+  documentOffset: number
+  documentAnchorLine: number
+  documentAnchorOffset: number
+  windowStart: number
+  finish: (index: number | undefined) => void
+}
+
+function documentRows(document: string, columns: number): Array<{ text: string; sourceLine: number; sourceOffset: number }> {
+  return document.split("\n").flatMap((line, sourceLine) => {
+    let sourceOffset = 0
+    return wrapText(line, columns).map(text => {
+      const row = { text, sourceLine, sourceOffset }
+      sourceOffset += text.length
+      return row
+    })
+  })
+}
 
 /** Presentation only: plan validation, receipts and execution belong to the shared coordinator. */
 export class TuiApp implements Terminal {
@@ -44,15 +69,33 @@ export class TuiApp implements Terminal {
   private control?: (action: TerminalControl) => void
   private status = "LCA · selection"
   private workflow: string | undefined
+  private viewIdentity?: ViewIdentity
+  private viewFacts?: InteractiveViewFacts
   private prompt = "You> "
   private suspended = false
   private closed = false
   private choiceSettled = false
   private queueAllowed = false
+  private detailsVisible = false
+  private detailsIndex = 0
+  private themeName: ThemeName = "neutral"
+  private asciiChrome = false
   queueAdmission(allowed: boolean): void { this.queueAllowed = allowed }
   workflowStatus(line: string | undefined): void {
     if (this.workflow === line) return
     this.workflow = line
+    this.draw()
+  }
+  bindView(identity: ViewIdentity): void {
+    if (sameViewIdentity(this.viewIdentity, identity)) return
+    this.viewIdentity = identity
+    this.viewFacts = undefined
+    this.detailsVisible = false
+    this.draw()
+  }
+  viewSnapshot(facts: InteractiveViewFacts): void {
+    if (!sameViewIdentity(this.viewIdentity, facts.identity)) return
+    this.viewFacts = facts
     this.draw()
   }
   skillCatalog(catalog: SkillCatalog): void {
@@ -66,6 +109,9 @@ export class TuiApp implements Terminal {
     this.queue.length = 0
     this.queueAllowed = false
     this.workflow = undefined
+    this.viewIdentity = undefined
+    this.viewFacts = undefined
+    this.detailsVisible = false
     this.catalog = undefined
     this.completionIndex = 0
     this.completionDismissed = false
@@ -75,7 +121,9 @@ export class TuiApp implements Terminal {
     if (this.transcript.sessionID === sessionID) return
     const previous = this.transcript
     this.transcript = new TranscriptModel(sessionID)
-    if (previous.sessionID === "selection") for (const item of previous.items) if (item.kind === "text") this.transcript.append(item.text)
+    if (previous.sessionID === "selection") {
+      for (const item of previous.items) if (item.kind === "text") this.transcript.append({ provenance: item.provenance, text: item.text })
+    }
     this.transcriptQuery = undefined
     this.scrollOffset = 0
     this.pageOffset = 0
@@ -173,20 +221,75 @@ export class TuiApp implements Terminal {
   presentation = () => ({ columns: process.stdout.columns, color: false })
   controls(handler: (action: TerminalControl) => void): void { this.control = handler }
   private dimensions() { return { columns: process.stdout.columns || 80, rows: process.stdout.rows || 24 } }
+  private separator(): string { return this.asciiChrome ? " | " : " · " }
   private usable(): boolean { const size = this.dimensions(); return size.columns >= 80 && size.rows >= 24 }
 
   private transcriptScrollBounds(): { pageRows: number; maximumOffset: number } {
     const { columns, rows } = this.dimensions()
-    const viewportRows = transcriptViewportRows({ columns, rows, draft: this.editor.text, cursor: this.editor.cursor, prompt: this.prompt })
+    const viewportRows = transcriptViewportRows({ columns, rows, draft: this.editor.text, cursor: this.editor.cursor, prompt: this.prompt, statusRows: this.currentStatusLines().length })
     const visualRows = this.transcript.lines(this.transcriptQuery)
       .reduce((total, line) => total + wrapText(line, columns).length, 0)
     return { pageRows: Math.max(1, viewportRows), maximumOffset: Math.max(0, visualRows - viewportRows) }
   }
 
+  private currentStatusLines(): string[] {
+    const { columns } = this.dimensions()
+    return statusLines({
+      facts: this.viewFacts,
+      workflow: this.workflow,
+      activity: this.transcript.currentTask ?? this.status,
+      search: this.transcriptQuery,
+      queued: this.queue.length,
+      columns,
+      ...(!this.usable() ? { notice: "Resize terminal to at least 80x24. Cancellation remains available." } : {}),
+      ascii: this.asciiChrome,
+    })
+  }
+
   private draw(): void {
     if (this.suspended || this.closed) return
-    const lines = this.transcript.lines(this.transcriptQuery)
-    if (this.choice) lines.push(this.choice.title, ...this.choice.values.map((value, i) => `${i === this.choice!.selected ? ">" : " "} ${value}`))
+    let lines = this.transcript.lines(this.transcriptQuery)
+    if (this.choice?.presentation.kind === "approval") {
+      const { columns, rows } = this.dimensions()
+      const wrapped = documentRows(this.choice.presentation.document, columns)
+      const availableRows = Math.max(1, rows - this.choice.values.length - 9)
+      const maximumOffset = Math.max(0, wrapped.length - availableRows)
+      const anchoredOffset = wrapped.findIndex(row =>
+        row.sourceLine > this.choice!.documentAnchorLine ||
+        row.sourceLine === this.choice!.documentAnchorLine && row.sourceOffset >= this.choice!.documentAnchorOffset)
+      this.choice.documentOffset = Math.min(anchoredOffset < 0 ? maximumOffset : anchoredOffset, maximumOffset)
+      const end = Math.min(wrapped.length, this.choice.documentOffset + availableRows)
+      const binding = this.choice.presentation.binding
+      const fixed = (value: string) => wrapText(value, columns)[0] ?? ""
+      lines = [
+        fixed(`${this.choice.title}${this.separator()}${this.choice.focus === "document" ? "document" : "decisions"} focus${this.separator()}Tab switches`),
+        fixed(`source ${binding.path}`),
+        fixed(`session ${binding.sessionID}${this.separator()}workflow ${binding.workflowID}${this.separator()}rev ${binding.expectedRevision}`),
+        fixed(`plan sha256 ${binding.planSha}`),
+        fixed(`Document rows ${wrapped.length ? this.choice.documentOffset + 1 : 0}-${end}/${wrapped.length}${this.separator()}Up/Down scroll${this.separator()}PageUp/PageDown page`),
+        ...wrapped.slice(this.choice.documentOffset, end).map(row => row.text),
+        `Decisions${this.separator()}Enter acts only while decisions are focused${this.separator()}Escape keeps pending`,
+        ...this.choice.values.map((value, index) => `${this.choice!.focus === "decisions" && index === this.choice!.selected ? ">" : " "} ${value}`),
+      ]
+    } else if (this.choice?.presentation.kind === "generic-list") {
+      const { rows } = this.dimensions()
+      const height = Math.max(1, rows - 8)
+      const maximumStart = Math.max(0, this.choice.values.length - height)
+      this.choice.windowStart = Math.max(0, Math.min(maximumStart, this.choice.windowStart))
+      if (this.choice.selected < this.choice.windowStart) this.choice.windowStart = this.choice.selected
+      if (this.choice.selected >= this.choice.windowStart + height) this.choice.windowStart = this.choice.selected - height + 1
+      const end = Math.min(this.choice.values.length, this.choice.windowStart + height)
+      const detail = this.choice.presentation.rows[this.choice.selected]
+      lines = [
+        `${this.choice.title}${this.separator()}Up/Down navigate${this.separator()}PageUp/PageDown page${this.separator()}Enter opens${this.separator()}Escape cancels`,
+        `${this.choice.selected + 1}/${this.choice.values.length}${this.separator()}showing ${this.choice.windowStart + 1}-${end}`,
+        ...this.choice.values.slice(this.choice.windowStart, end).map((value, index) =>
+          `${this.choice!.windowStart + index === this.choice!.selected ? ">" : " "} ${value}`),
+        ...(detail ? [`Selected: ${detail}`] : []),
+      ]
+    } else if (this.choice) {
+      lines.push(this.choice.title, ...this.choice.values.map((value, i) => `${i === this.choice!.selected ? ">" : " "} ${value}`))
+    }
     const search = this.editor.searchState
     if (search) {
       const first = Math.max(0, search.selected - 4)
@@ -217,14 +320,27 @@ export class TuiApp implements Terminal {
     } else if (completions.length) {
       lines.push("Commands · Tab/Enter inserts, Escape dismisses", ...completions.map((value, i) => `${i === this.completionIndex % completions.length ? ">" : " "} ${value}`))
     }
+    if (this.detailsVisible && !this.choice) {
+      const details = this.transcript.details()
+      this.detailsIndex = Math.max(0, Math.min(Math.max(0, details.length - 1), this.detailsIndex))
+      const selected = details[this.detailsIndex]
+      const maximum = Math.max(1, Math.floor(this.dimensions().rows / 3))
+      const detailRows = details.map((detail, index) => `${index === this.detailsIndex ? ">" : " "} ${detail.summary}`)
+      lines.push(
+        `Task/evidence details${this.separator()}${details.length ? `${this.detailsIndex + 1}/${details.length}` : "empty"}${this.separator()}Up/Down${this.separator()}Enter expands${this.separator()}Escape closes`,
+        ...(detailRows.length ? detailRows.slice(Math.max(0, this.detailsIndex - maximum + 3), Math.max(0, this.detailsIndex - maximum + 3) + Math.max(1, maximum - 2)) : ["No task evidence is available."]),
+        ...(selected ? selected.lines.slice(0, Math.max(0, maximum - 3)).map(line => `  ${line}`) : []),
+      )
+    }
     const overlayVisible = !!this.choice || !!search || !!skills || completions.length > 0
     this.driver.write(renderFrame({ ...this.dimensions(), transcript: lines,
       transcriptOffset: overlayVisible ? 0 : this.scrollOffset,
-      status: `${this.transcriptQuery ? `search: ${this.transcriptQuery} · ` : ""}${this.queue.length ? `queued ${this.queue.length} · ` : ""}${this.workflow ? `${this.workflow} · ` : ""}${this.transcript.currentTask ?? this.status}`,
+      status: this.currentStatusLines(),
       draft: search?.query ?? this.editor.text, cursor: search ? search.query.length : this.editor.cursor,
       prompt: search ? "History> " : this.prompt,
       color: process.env.NO_COLOR === undefined,
-      ...(!this.usable() ? { notice: "Resize terminal to at least 80x24. Cancellation remains available." } : {}),
+      theme: resolveTheme(this.themeName),
+      ascii: this.asciiChrome,
     }))
   }
 
@@ -255,12 +371,39 @@ export class TuiApp implements Terminal {
     if (this.choice) {
       // Paste/text can never answer a choice, much less mint an execution receipt.
       if (event.type !== "key") return
-      if (event.key === "up") this.choice.selected = (this.choice.selected + this.choice.values.length - 1) % this.choice.values.length
+      if (event.key === "escape") { this.choice.finish(undefined); return }
+      if (event.key === "ctrl+d") { this.control?.("quit"); return }
+      if (event.key === "ctrl+c" && this.editor.handle(event) === "shutdown") { this.control?.("shutdown"); return }
+      if (this.choice.presentation.kind === "approval") {
+        const { columns, rows } = this.dimensions()
+        const wrapped = documentRows(this.choice.presentation.document, columns)
+        const totalRows = wrapped.length
+        const pageRows = Math.max(1, rows - this.choice.values.length - 9)
+        const maximumOffset = Math.max(0, totalRows - pageRows)
+        if (event.key === "tab") this.choice.focus = this.choice.focus === "document" ? "decisions" : "document"
+        else if (event.key === "pageUp" || event.key === "pageup") this.choice.documentOffset = Math.max(0, this.choice.documentOffset - pageRows)
+        else if (event.key === "pageDown" || event.key === "pagedown") this.choice.documentOffset = Math.min(maximumOffset, this.choice.documentOffset + pageRows)
+        else if (event.key === "up") {
+          if (this.choice.focus === "document") this.choice.documentOffset = Math.max(0, this.choice.documentOffset - 1)
+          else this.choice.selected = (this.choice.selected + this.choice.values.length - 1) % this.choice.values.length
+        } else if (event.key === "down") {
+          if (this.choice.focus === "document") this.choice.documentOffset = Math.min(maximumOffset, this.choice.documentOffset + 1)
+          else this.choice.selected = (this.choice.selected + 1) % this.choice.values.length
+        } else if (event.key === "enter" && this.choice.focus === "decisions") { this.choice.finish(this.choice.selected); return }
+        this.choice.documentAnchorLine = wrapped[this.choice.documentOffset]?.sourceLine ?? this.choice.documentAnchorLine
+        this.choice.documentAnchorOffset = wrapped[this.choice.documentOffset]?.sourceOffset ?? this.choice.documentAnchorOffset
+      } else if (this.choice.presentation.kind === "generic-list") {
+        const height = Math.max(1, this.dimensions().rows - 8)
+        if (event.key === "up") this.choice.selected = (this.choice.selected + this.choice.values.length - 1) % this.choice.values.length
+        else if (event.key === "down" || event.key === "tab") this.choice.selected = (this.choice.selected + 1) % this.choice.values.length
+        else if (event.key === "pageUp" || event.key === "pageup") this.choice.selected = Math.max(0, this.choice.selected - height)
+        else if (event.key === "pageDown" || event.key === "pagedown") this.choice.selected = Math.min(this.choice.values.length - 1, this.choice.selected + height)
+        else if (event.key === "enter") { this.choice.finish(this.choice.selected); return }
+        if (this.choice.selected < this.choice.windowStart) this.choice.windowStart = this.choice.selected
+        if (this.choice.selected >= this.choice.windowStart + height) this.choice.windowStart = Math.max(0, this.choice.selected - height + 1)
+      } else if (event.key === "up") this.choice.selected = (this.choice.selected + this.choice.values.length - 1) % this.choice.values.length
       else if (event.key === "down" || event.key === "tab") this.choice.selected = (this.choice.selected + 1) % this.choice.values.length
       else if (event.key === "enter") { this.choice.finish(this.choice.selected); return }
-      else if (event.key === "escape") { this.choice.finish(undefined); return }
-      else if (event.key === "ctrl+d") { this.control?.("quit"); return }
-      else if (event.key === "ctrl+c" && this.editor.handle(event) === "shutdown") { this.control?.("shutdown"); return }
       this.draw()
       return
     }
@@ -296,6 +439,18 @@ export class TuiApp implements Terminal {
       }
       if (event.key === "escape") { this.completionDismissed = true; this.draw(); return }
     }
+    if (this.detailsVisible && event.type === "key") {
+      const details = this.transcript.details()
+      if (event.key === "escape") this.detailsVisible = false
+      else if (event.key === "up" && details.length) this.detailsIndex = (this.detailsIndex + details.length - 1) % details.length
+      else if (event.key === "down" && details.length) this.detailsIndex = (this.detailsIndex + 1) % details.length
+      else if (event.key === "enter") {
+        const selected = details[this.detailsIndex]
+        if (selected?.expandable) this.transcript.toggle(selected.id)
+      } else return
+      this.draw()
+      return
+    }
     if (event.type === "text" || event.type === "paste") { this.completionDismissed = false; this.completionIndex = 0 }
     const previousDraft = this.editor.text
     const action = this.editor.handle(event)
@@ -304,8 +459,16 @@ export class TuiApp implements Terminal {
     if (action === "cancel") { this.control?.("cancel"); this.draw(); return }
     if (action === "submit" || action === "queue") {
       const command = this.editor.text.trim()
-      if (this.pending?.kind === "chat" && (command === "/search" || command.startsWith("/search ") || command.startsWith("/expand "))) {
-        if (command.startsWith("/expand ")) {
+      if (this.pending?.kind !== "selection" && (command === "/details" || command === "/ascii" || command.startsWith("/theme ") || command === "/search" || command.startsWith("/search ") || command.startsWith("/expand "))) {
+        if (command === "/details") {
+          this.detailsVisible = !this.detailsVisible
+        } else if (command === "/ascii") {
+          this.asciiChrome = !this.asciiChrome
+        } else if (command.startsWith("/theme ")) {
+          const requested = command.slice(7).trim()
+          if (requested === "neutral" || requested === "light" || requested === "dark") this.themeName = requested
+          else this.transcript.append("Usage: /theme <neutral|light|dark>")
+        } else if (command.startsWith("/expand ")) {
           const ordinal = Number(command.slice(8).trim())
           const item = this.transcript.items.find(item => item.kind === "tool" && item.ordinal === ordinal)
           if (Number.isInteger(ordinal) && item?.kind === "tool") {
@@ -331,7 +494,7 @@ export class TuiApp implements Terminal {
         if (this.pending.kind === "chat" && !command) return
         const text = this.pending.kind === "chat" ? this.editor.submit() : this.editor.text
         if (this.pending.kind === "selection") this.editor.setText("")
-        this.transcript.append(`${this.prompt}${text}`)
+        this.transcript.append({ provenance: "user", text })
         this.pending.finish(text)
       } else if (action === "queue" && command) {
         this.queue.push(this.editor.submit())
@@ -351,7 +514,7 @@ export class TuiApp implements Terminal {
     this.resume()
     if (input.kind === "chat" && this.queueAllowed && this.queue.length && this.usable()) {
       const text = this.queue.shift()!
-      this.transcript.append(`${this.prompt}${text}`)
+      this.transcript.append({ provenance: "user", text })
       this.draw()
       return Promise.resolve(text)
     }
@@ -376,7 +539,7 @@ export class TuiApp implements Terminal {
     return this.readInput({ title: "LCA", hint: "Enter select", prompt, kind: "selection" }, signal)
   }
 
-  choose(title: string, values: readonly string[], signal: AbortSignal): Promise<number | undefined> {
+  choose(title: string, values: readonly string[], signal: AbortSignal, presentation: ChoicePresentation = { kind: "plain" }): Promise<number | undefined> {
     if (this.closed || signal.aborted) return Promise.resolve(undefined)
     if (this.pending || this.choice || !values.length) throw new Error("invalid terminal choice ownership")
     if (this.editor.searchState) this.editor.handle({ type: "key", key: "escape" })
@@ -392,18 +555,34 @@ export class TuiApp implements Terminal {
         resolve(index)
         this.draw()
       }
-      this.choice = { title, values, selected: 0, finish }
+      this.choice = {
+        title,
+        values,
+        selected: presentation.kind === "generic-list" ? Math.min(values.length - 1, Math.max(0, presentation.initialIndex ?? 0)) : 0,
+        presentation,
+        focus: presentation.kind === "approval" ? "document" : presentation.kind === "generic-list" ? "list" : "decisions",
+        documentOffset: 0,
+        documentAnchorLine: 0,
+        documentAnchorOffset: 0,
+        windowStart: 0,
+        finish,
+      }
       signal.addEventListener("abort", abort, { once: true })
       this.draw()
     })
   }
 
   write(text: string): void {
-    this.transcript.append(text.replace(/\r\n/g, "\n"))
+    const normalized = text.replace(/\r\n/g, "\n")
+    this.transcript.append({ provenance: "notice", text: normalized })
     if (this.source && this.transcript.items.length > this.pageSize * 2) {
       this.pageOffset = 0
       this.reloadTranscript()
     }
+    this.draw()
+  }
+  writeText(value: TranscriptText): void {
+    this.transcript.append({ ...value, text: value.text.replace(/\r\n/g, "\n") })
     this.draw()
   }
   suspend(): void { this.driver.handoff(); this.suspended = true }

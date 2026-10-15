@@ -629,8 +629,8 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
   ])
   expect(report.scenarios.approve.capture.modeProof).toMatchObject({
     toolItemsBeforeFilter: [
-      "[+] #1 read · succeeded · task t1",
-      "[+] #2 read · failed · task t1",
+      "[+] #1 read · succeeded · task Implement · t1",
+      "[+] #2 read · failed · task Implement · t1",
     ],
     expandedCallDetailVisible: true,
     searchReadFailedVisible: true,

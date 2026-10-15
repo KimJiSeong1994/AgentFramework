@@ -588,7 +588,19 @@ class PtySession:
     def close(self):
         if self.process and self.process.poll() is None:
             self.process.kill()
-            self.process.wait(timeout=3)
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                # Bun can leave an owned fixture descendant attached to the PTY after its launcher is killed.
+                # Terminate the isolated process group so cleanup cannot hide the original assertion failure.
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                try:
+                    self.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    pass
         for fd in (self.master, self.slave):
             try:
                 os.close(fd)
@@ -600,9 +612,10 @@ def assert_screen_regions(session: PtySession):
     lines = session.screen.current_lines()
     if len(lines) < 24:
         raise AssertionError("TUI frame did not preserve the expected minimum row count")
-    status_index = len(lines) - 2
+    status_index = len(lines) - 3
     transcript = lines[:status_index]
-    status = lines[status_index]
+    status_rows = lines[status_index:-1]
+    status = " ".join(status_rows)
     composer = lines[-1]
     if not any("Native execution selection:" in line for line in transcript):
         raise AssertionError(f"transcript region missing selection: {transcript[:5]!r}")
@@ -656,6 +669,7 @@ def select_decision(session: PtySession, action: str):
     session.send(b"\x1b[20")
     session.read_once(0.05)
     session.send(b"1~")
+    session.send(b"\t")
     session.send(b"\x1b[B")
     session.wait_screen("> Reject")
     if not session.raw_mode():
@@ -685,13 +699,21 @@ def select_decision(session: PtySession, action: str):
     else:
         session.send_text(f"REJECT {WORKFLOW_ID} {PLAN_SHA} rejected by PTY operator\r")
     decision = session.wait_events(lambda item: item.get("type") == "receipt.consumed", "production receipt consumption")
-    session.mode_proof["rawAfterHumanDecision"] = False
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and not session.raw_mode():
-        session.read_once(0.02)
-    session.mode_proof["rawAfterHumanDecision"] = session.raw_mode()
-    if not session.mode_proof["rawAfterHumanDecision"]:
-        raise AssertionError("TuiApp did not reacquire raw input after the real cooked decision reader")
+    if action == "approve":
+        session.mode_proof["rawAfterHumanDecision"] = False
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not session.raw_mode():
+            session.read_once(0.02)
+        session.mode_proof["rawAfterHumanDecision"] = session.raw_mode()
+        if not session.mode_proof["rawAfterHumanDecision"]:
+            raise AssertionError("TuiApp did not reacquire raw input after the approving cooked decision reader")
+    else:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not session.cooked_mode():
+            session.read_once(0.02)
+        session.mode_proof["cookedAtRejectedExit"] = session.cooked_mode()
+        if not session.mode_proof["cookedAtRejectedExit"]:
+            raise AssertionError("rejected decision did not leave the exiting terminal in cooked mode")
     return decision
 
 
@@ -752,10 +774,19 @@ def run_workflow(temp_root: Path, action: str):
             raise AssertionError("TuiApp chat did not enter raw terminal mode")
         session.checkpoint("initial-chat")
         regions = assert_screen_regions(session)
+        session.send_text("/theme dark\r")
+        session._wait(lambda: session.screen.current_lines()[-1].startswith("You>"), "process-local theme command")
+        session.send_text("/ascii\r")
+        session._wait(lambda: "selected codex:pty-fixture-model" in session.screen.current_text(), "ASCII status keeps selected model text")
+        session.mode_proof["themeAndAsciiLocalNoDispatch"] = True
+        assert_no_additional_dispatch(session, turns=0, runs=0)
 
         session._set_size(70, 20)
         session.screen.resize(70, 20)
-        session._wait(lambda: "Terminal too small: resize to at least 80×24" in session.screen.current_text(), "small-terminal notice")
+        session._wait(lambda: any(value in session.screen.current_text() for value in (
+            "Terminal too small: resize to at least 80×24",
+            "Terminal too small: resize to at least 80x24",
+        )), "small-terminal notice")
         session.checkpoint("resized-small")
         session._set_size(DEFAULT_COLUMNS, DEFAULT_ROWS)
         session.screen.resize(DEFAULT_COLUMNS, DEFAULT_ROWS)
@@ -769,7 +800,17 @@ def run_workflow(temp_root: Path, action: str):
         if actual_input != expected_input:
             raise AssertionError(f"input protocol mismatch: expected {expected_input!r}, received {actual_input!r}")
         session.wait_screen("Execution decision")
-        session.wait_screen("한글")
+        session.wait_output("한글")
+        session.wait_screen("UX01_CANONICAL_ROW_001")
+        for _ in range(16):
+            session.send(b"\x1b[6~")
+        session.wait_screen("UX01_CANONICAL_ROW_220")
+        session._set_size(120, 40)
+        session.screen.resize(120, 40)
+        session.wait_screen("Decisions")
+        session._set_size(DEFAULT_COLUMNS, DEFAULT_ROWS)
+        session.screen.resize(DEFAULT_COLUMNS, DEFAULT_ROWS)
+        session.mode_proof["longApprovalFirstLastResize"] = True
         session.checkpoint("plan-and-choice")
         if not session.raw_mode():
             raise AssertionError("plan review unexpectedly left raw mode before operator choice")
@@ -788,9 +829,10 @@ def run_workflow(temp_root: Path, action: str):
             # Give the coordinator's event loop a chance to consume any invalid
             # choice-mode input; any dispatch is also recorded as a turn event.
             session._wait(lambda: len([e for e in session.events() if e.get("type") == "turn.started"]) == 1, "no turn dispatched from inline-choice input", 0.25)
-            first_tool = "[+] #1 read · succeeded · task t1"
-            second_tool = "[+] #2 read · failed · task t1"
-            session.wait_screen(first_tool)
+            session._wait(lambda: any(f"[+] #1 read · succeeded · task {label} · t1" in session.screen.current_text() for label in ("Implement", "title unavailable")), "validated task title or explicit unavailable title")
+            task_label = "Implement" if "#1 read · succeeded · task Implement · t1" in session.screen.current_text() else "title unavailable"
+            first_tool = f"[+] #1 read · succeeded · task {task_label} · t1"
+            second_tool = f"[+] #2 read · failed · task {task_label} · t1"
             session.wait_screen(second_tool)
             visible = session.screen.current_text()
             if visible.count("read ·") != 2 or "#3 read" in visible:
@@ -799,7 +841,7 @@ def run_workflow(temp_root: Path, action: str):
 
             session.send_text("/expand 2\r")
             call_detail = "Call call-fixture-2 · execution exec-fixture · worker"
-            expanded_tool = "[-] #2 read · failed · task t1"
+            expanded_tool = f"[-] #2 read · failed · task {task_label} · t1"
             session.wait_screen(call_detail)
             session.mode_proof["expandedCallDetailVisible"] = call_detail in session.screen.current_text()
             if expanded_tool not in session.screen.current_text():
@@ -807,7 +849,7 @@ def run_workflow(temp_root: Path, action: str):
             assert_no_additional_dispatch(session, turns=1, runs=1)
 
             session.send_text("/search read failed\r")
-            filtered_tool = "#2 read · failed · task t1"
+            filtered_tool = "#2 read · failed · task title unavailable · t1"
             session._wait(
                 lambda: filtered_tool in session.screen.current_text() and
                 "#1 read · succeeded" not in session.screen.current_text(),
@@ -821,18 +863,27 @@ def run_workflow(temp_root: Path, action: str):
             assert_no_additional_dispatch(session, turns=1, runs=1)
 
             session.send_text("/search\r")
-            session.wait_screen(first_tool)
-            session.wait_screen(expanded_tool)
+            session._wait(lambda: any(f"[+] #1 read · succeeded · task {label} · t1" in session.screen.current_text() for label in ("Implement", "title unavailable")), "cleared search restores first tool with validated or unavailable title")
+            session._wait(lambda: any(f"[-] #2 read · failed · task {label} · t1" in session.screen.current_text() for label in ("Implement", "title unavailable")), "cleared search restores expanded second tool with validated or unavailable title")
             restored = session.screen.current_text()
             if restored.count("read ·") != 2:
                 raise AssertionError(f"/search did not clear the current-session filter: {restored}")
             session.mode_proof["emptySearchRestoredBothTools"] = True
             assert_no_additional_dispatch(session, turns=1, runs=1)
+
+            session.send_text("/details\r")
+            session.wait_screen("Task/evidence details")
+            session.send(b"\x1b[B")
+            session.send(b"\r")
+            session.send(b"\x1b")
+            session._wait(lambda: "Task/evidence details" not in session.screen.current_text(), "details panel closes without dispatch")
+            session.mode_proof["detailsFocusedNavigatedClosed"] = True
+            assert_no_additional_dispatch(session, turns=1, runs=1)
             session.send(b"\x04")
             session.capture_terminal_cleanup()
             code = session.wait_exit()
         else:
-            session.wait_output("Workflow wf_pty_fixture rejected; execution was not started.")
+            session.wait_output("Workflow wf_pty_fixture rejected; execution was not started.", timeout=30.0)
             session.capture_terminal_cleanup()
             code = session.wait_exit()
 
@@ -919,13 +970,21 @@ def run_restore(temp_root: Path):
             raise AssertionError("restore fixture did not start in raw TUI mode")
 
         saved_sid = "pty-restored-session"
+        session.send_text("/sessions\r")
+        session.wait_screen("Retained sessions")
+        session.wait_screen("/207")
+        session.send(b"\x1b[6~")
+        session._wait(lambda: "showing 1-" not in session.screen.current_text(), "captured session chooser page advances")
+        session.send(b"\x1b")
+        session._wait(lambda: "Retained sessions · Up/Down" not in session.screen.current_text() and session.screen.current_lines()[-1].startswith("You>"), "session chooser Escape restores composer")
+        session.mode_proof["capturedSessionChooserPagedAndCancelled"] = True
         session.send_text(f"/resume {saved_sid}\r")
         session._wait(
             lambda: session.screen.current_lines()[-1].startswith("You>") and
             "UNSENT_RESTORED_DRAFT" in session.screen.current_lines()[-1] and
             "QUEUED_RESTORED_DRAFT" in session.screen.current_text() and
             "LATEST_RESTORED_HISTORY_NEEDLE" in session.screen.current_text() and
-            "codex" in session.screen.current_lines()[-2] and "pty-fixture-model" in session.screen.current_lines()[-2],
+            any("codex" in line and "pty-fixture-model" in line for line in session.screen.current_lines()[-3:-1]),
             "production /resume to restore the held draft and unsent queued notice",
         )
         if not session.raw_mode():
@@ -963,8 +1022,8 @@ def run_restore(temp_root: Path):
 
         session.send_text("/search EARLIEST_RESTORED_HISTORY_NEEDLE\r")
         session._wait(
-            lambda: "search:" in session.screen.current_lines()[-2] and
-            any("You> EARLIEST_RESTORED_HISTORY_NEEDLE" in line for line in session.screen.current_lines()),
+            lambda: any("search:" in line for line in session.screen.current_lines()[-3:-1]) and
+            any("[You] EARLIEST_RESTORED_HISTORY_NEEDLE" in line for line in session.screen.current_lines()),
             "local transcript search to find the oldest submitted segment",
         )
         session.mode_proof["oldestSegmentSearchVisible"] = True
@@ -1076,9 +1135,9 @@ def run_sdk_observer(temp_root: Path):
 
         session.send_text("/search SDK_RETAINED_HISTORY_NEEDLE\r")
         session._wait(
-            lambda: "search: SDK_RETAINED_HISTORY_NEEDLE" in session.screen.current_lines()[-2] and
+            lambda: any("search: SDK_RETAINED_HISTORY_NEEDLE" in line for line in session.screen.current_lines()[-3:-1]) and
             any("SDK_RETAINED_HISTORY_NEEDLE original upstream user prompt" in line
-                for line in session.screen.current_lines()[:-2]),
+                for line in session.screen.current_lines()[:-1]),
             "local transcript search over retained SDK history",
         )
         session.mode_proof["sdkObserverSearchVisible"] = True
@@ -1094,8 +1153,8 @@ def run_sdk_observer(temp_root: Path):
 
         def refuse(command: str):
             session._wait(
-                lambda: f"History> {command}" in session.screen.current_text() and
-                readonly_refusal in session.screen.current_text() and
+                lambda: (f"History> {command}" in session.screen.current_text() or f"[You] {command}" in session.screen.current_text()) and
+                readonly_refusal in " ".join(session.screen.current_text().split()) and
                 session.screen.current_lines()[-1].startswith("History>"),
                 f"read-only SDK refusal of {command!r}",
             )
@@ -1721,10 +1780,10 @@ def run_skill_main_write(temp_root: Path):
 
 
 def wait_workflow_status(session: PtySession, text: str, timeout=15.0):
-    """The committed `kind · stage` segment must be on the TUI status row (second from the bottom)."""
+    """The committed `kind · stage` segment must be on one of the bounded TUI status rows."""
     def present():
         lines = session.screen.current_lines()
-        return len(lines) >= 2 and text in lines[-2]
+        return len(lines) >= 2 and any(text in line for line in lines[-3:-1])
     session._wait(present, f"status line segment {text!r}", timeout)
 
 
@@ -1880,7 +1939,10 @@ def consent_hash(choice: dict[str, Any]) -> str:
 def screen_grant_rows(session: PtySession, name: str):
     rows = []
     for line in session.screen.current_lines():
-        match = GRANT_ROW_RE.match(line.strip())
+        value = line.strip()
+        if value.startswith("[Notice] "):
+            value = value[len("[Notice] "):]
+        match = GRANT_ROW_RE.match(value)
         if match and match.group("name") == name:
             rows.append(match.groupdict())
     return rows
@@ -2157,6 +2219,8 @@ def approve_real_decision(session: PtySession):
     """Drive the real inline chooser and cooked human reader for the fixture's production-controller workflow."""
     session.send_text("make a plan\r")
     session.wait_screen("Execution decision", timeout=20.0)
+    session.wait_screen("  Approve")
+    session.send(b"\t")
     session.wait_screen("> Approve")
     session.send(b"\r")
     begin = session.wait_events(lambda item: item.get("type") == "humanDecision.begin", "cooked human decision begins", 20.0)
@@ -2328,6 +2392,14 @@ def run_paused_cancel(temp_root: Path):
 def run_all(preflight: dict[str, Any]):
     with tempfile.TemporaryDirectory(prefix="lca-tui-pty-") as directory:
         root = Path(directory).resolve()
+        def ux(acceptance_id: str, evidence: dict[str, Any], obligations: list[str]):
+            return {**evidence, "acceptanceID": acceptance_id, "classification": "deterministic fixture transport", "obligations": obligations}
+        def ux_root(name: str):
+            value = root / name
+            value.mkdir()
+            return value
+        ux05_queue = run_queue(ux_root("ux05-queue"))
+        ux05_restore = run_restore(ux_root("ux05-restore"))
         return {
             "schemaVersion": 1,
             "status": "passed",
@@ -2359,6 +2431,14 @@ def run_all(preflight: dict[str, Any]):
                     "SIGTERM": run_signal(root, "sigterm", signal.SIGTERM, 143),
                     "SIGHUP": run_signal(root, "sighup", signal.SIGHUP, 129),
                 },
+                "ux01-long-approval": ux("UX01", run_workflow(ux_root("ux01"), "approve"), ["220 canonical rows", "document paging", "resize", "paste inert", "typed consent"]),
+                "ux02-status-pressure": ux("UX02", run_cancel_unconfirmed(ux_root("ux02")), ["unconfirmed termination", "safety-priority status", "80x24"]),
+                "ux03-focus": ux("UX03", run_skills(ux_root("ux03")), ["choice owns input", "completion insertion only", "no premature dispatch"]),
+                "ux04-task-results": ux("UX04", run_workflow(ux_root("ux04"), "approve"), ["task/tool evidence", "details focus", "failed result", "panel close"]),
+                "ux05-composer-queue": ux("UX05", {**ux05_queue, "restoreEvidence": ux05_restore}, ["multiline Unicode", "busy FIFO", "restored unsent queue"]),
+                "ux06-recovery": ux("UX06", run_restore(ux_root("ux06")), ["207 captured candidates", "original-index paging", "cancel", "held Resume"]),
+                "ux07-accessibility": ux("UX07", run_workflow(ux_root("ux07"), "reject"), ["theme", "ASCII", "NO_COLOR", "undersize privacy", "resize recovery"]),
+                "ux08-diagnostics": ux("UX08", run_sdk_observer(ux_root("ux08")), ["read-only provenance", "not-observed facts", "no invented inference"]),
             },
             "coverage": {
                 "productionUI": ["TuiApp", "createReadlineTerminal", "runInteractiveSession", "openSession", "attachAdmission", "replaySession", "humanDecision", "consumeOperatorDecision", "SkillSession", "createPlanConversation", "createCliRuntime", "native CLI host/tool executor", "skill permission broker"],

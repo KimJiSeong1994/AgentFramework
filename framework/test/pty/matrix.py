@@ -55,6 +55,8 @@ CORE_SCENARIOS = (
     "approve", "reject", "busyFifo", "restore", "sdkObserver", "skills", "readlineSkills", "skillGrants",
     "skillRestoreExit", "skillRestoreKill", "skillToolScope", "skillToolCancel", "skillMainWrite", "workflowDI",
     "pauseResume", "cancelUnconfirmed", "pausedCancel", "ctrlCThresholds", "signals",
+    "ux01-long-approval", "ux02-status-pressure", "ux03-focus", "ux04-task-results",
+    "ux05-composer-queue", "ux06-recovery", "ux07-accessibility", "ux08-diagnostics",
 )
 CORE_SIGNALS = ("SIGINT", "SIGTERM", "SIGHUP")
 SHIFT_ENTER = b"\x1b[13;2u"
@@ -769,6 +771,7 @@ def main() -> int:
         "harness": {"matrixSha256": sha256_file(Path(__file__)), "tuiSha256": sha256_file(args.root / "framework/test/pty/tui.py"),
                     "fixtureSha256": sha256_file(args.root / "framework/test/pty/interactive-fixture.ts")},
         "root": str(args.root), "rootGitHead": source.stdout.strip() or None, "python": platform.python_version(),
+        "candidateSourceHash": os.environ.get("LCA_UX_SOURCE_HASH"),
         "command": [sys.executable, *sys.argv],
     }
     write_json(args.out / "summary.json", summary)

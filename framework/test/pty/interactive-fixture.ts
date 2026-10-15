@@ -417,6 +417,19 @@ async function main(): Promise<void> {
       workflowID: null,
       revision: null,
     })
+    for (let index = 0; index < 205; index += 1) {
+      const candidate = openSession(worktree, `pty-session-candidate-${String(index).padStart(3, "0")}`, {
+        engine: "codex",
+        model: `candidate-model-${index}`,
+      })
+      candidate.release({
+        workflowQuiescent: true,
+        evidence: "PTY captured-session chooser fixture has no workflow or dispatched work",
+        workflowID: null,
+        revision: null,
+      })
+    }
+    report.sessionCandidateCount = 207
     startupStage("restore-seed-released")
   }
   if (scenario === "sdk-observer") {
@@ -453,7 +466,9 @@ async function main(): Promise<void> {
     steps: [{
       title: "Implement",
       files: ["fixture.ts"],
-      detail: "Synthetic fixture step used only to observe terminal progress.",
+      detail: scenario === "approve" || scenario === "reject"
+        ? Array.from({ length: 220 }, (_, index) => `UX01_CANONICAL_ROW_${String(index + 1).padStart(3, "0")}`).join("\n")
+        : "Synthetic fixture step used only to observe terminal progress.",
       verify: "fixture assertion",
     }],
     risks: ["No live engine or filesystem execution is represented."],
@@ -577,6 +592,7 @@ async function main(): Promise<void> {
     async importPlan(_sessionID: string, _sourcePath: string, _signal?: AbortSignal, parsed?: unknown) {
       report.importCount = Number(report.importCount) + 1
       record("plan.imported")
+      const parsedPlan = parsed as { goal?: string; steps?: Array<{ detail?: string }> } | undefined
       return {
         result: {
           ok: true,
@@ -584,7 +600,7 @@ async function main(): Promise<void> {
           wf: { id: WORKFLOW_ID, phase: "pending_approval", planRef: { mdPath: `.lca/plans/${WORKFLOW_ID}.md` } },
         },
         planSha: PLAN_SHA,
-        renderedPlan: `# PTY canonical plan\n\n${(parsed as { goal?: string } | undefined)?.goal ?? "Fixture plan."}\n`,
+        renderedPlan: `# PTY canonical plan\n\n${parsedPlan?.goal ?? "Fixture plan."}\n\n${parsedPlan?.steps?.[0]?.detail ?? ""}\n`,
       } as unknown as Awaited<ReturnType<ForegroundController["importPlan"]>>
     },
     decide(value: unknown) {

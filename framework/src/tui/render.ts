@@ -1,3 +1,5 @@
+import { resolveTheme, semanticStyle, type SemanticToken, type Theme } from "./theme.ts"
+
 type DisplayToken = {
   text: string
   width: number
@@ -357,10 +359,10 @@ function terminalDimension(value: number): number {
   return Number.isFinite(value) ? Math.max(1, Math.floor(value)) : 1
 }
 
-function transcriptRowsFor(rows: number, composerLineCount: number): number {
+function transcriptRowsFor(rows: number, composerLineCount: number, statusRows = 1): number {
   const maxComposerRows = Math.max(1, Math.floor(rows / 3))
   const composerRows = Math.min(composerLineCount, maxComposerRows)
-  return rows - composerRows - 1
+  return rows - composerRows - Math.max(1, Math.min(2, statusRows))
 }
 
 export function transcriptViewportRows(input: {
@@ -369,12 +371,13 @@ export function transcriptViewportRows(input: {
   draft: string
   cursor: number
   prompt?: string
+  statusRows?: number
 }): number {
   const columns = terminalDimension(input.columns)
   const rows = terminalDimension(input.rows)
   if (columns < 80 || rows < 24) return 0
   const composer = layoutComposer(input.draft, input.prompt ?? "> ", columns, input.cursor)
-  return transcriptRowsFor(rows, composer.rows.length)
+  return transcriptRowsFor(rows, composer.rows.length, input.statusRows)
 }
 
 function makeFrame(lines: readonly string[], cursor: CursorPosition): string {
@@ -391,11 +394,13 @@ export function renderFrame(input: {
   rows: number
   transcript: readonly string[]
   transcriptOffset?: number
-  status: string
+  status: string | readonly string[]
   draft: string
   cursor: number
   prompt?: string
   color?: boolean
+  theme?: Theme
+  ascii?: boolean
   notice?: string
 }): string {
   const columns = terminalDimension(input.columns)
@@ -403,15 +408,17 @@ export function renderFrame(input: {
   const frameLines = Array<string>(rows).fill("")
 
   if (columns < 80 || rows < 24) {
-    frameLines[0] = clipToWidth(resizeNotice, columns)
+    frameLines[0] = clipToWidth(input.ascii ? "Terminal too small: resize to at least 80x24" : resizeNotice, columns)
     return makeFrame(frameLines, { line: 0, column: 0 })
   }
 
   const composer = layoutComposer(input.draft, input.prompt ?? "> ", columns, input.cursor)
   const maxComposerRows = Math.max(1, Math.floor(rows / 3))
   const composerRows = Math.min(composer.rows.length, maxComposerRows)
-  const transcriptRows = transcriptRowsFor(rows, composer.rows.length)
-  const composerStart = transcriptRows + 1
+  const requestedStatus = Array.isArray(input.status) ? input.status : [input.status]
+  const statusRows = Math.max(1, Math.min(2, requestedStatus.length))
+  const transcriptRows = transcriptRowsFor(rows, composer.rows.length, statusRows)
+  const composerStart = transcriptRows + statusRows
   const firstVisibleComposerRow = Math.max(
     0,
     Math.min(composer.cursor.line - composerRows + 1, composer.rows.length - composerRows),
@@ -429,7 +436,15 @@ export function renderFrame(input: {
   const transcriptLines: string[] = []
   let visualRowIndex = 0
   for (const entry of input.transcript) {
-    const wrapped = wrapText(entry, columns)
+    const semantic: SemanticToken = entry.startsWith("[Error]") ? "error" :
+      entry.includes("[+] ") ? "diff-add" :
+      entry.includes("[-] ") ? "diff-remove" :
+      entry.includes("[code] ") ? "code" :
+      entry.startsWith("[Assistant]") ? "notice" :
+      entry.startsWith("[Notice]") ? "muted" : "text"
+    const wrapped = wrapText(entry, columns).map(line => input.color === true
+      ? wrapAnsiText(semanticStyle(line, semantic, input.theme ?? resolveTheme(), true), columns)[0] ?? line
+      : line)
     const firstEntryRow = Math.max(0, firstVisibleTranscriptRow - visualRowIndex)
     const endEntryRow = Math.min(wrapped.length, endVisibleTranscriptRow - visualRowIndex)
     if (endEntryRow > firstEntryRow) transcriptLines.push(...wrapped.slice(firstEntryRow, endEntryRow))
@@ -441,22 +456,37 @@ export function renderFrame(input: {
     frameLines[transcriptStart + index] = transcriptLines[index]!
   }
 
-  const rawStatus = input.notice ? `${input.status} | ${input.notice}` : input.status
-  const safeStatus = clipToWidth(oneLineText(rawStatus), columns)
-  if (input.color === true && safeStatus) {
-    const styledStatus = wrapAnsiText(`\x1b[36m${safeStatus}\x1b[0m`, columns)[0] ?? ""
-    frameLines[transcriptRows] = displayAnsiWidth(styledStatus) <= columns ? styledStatus : safeStatus
-  } else {
-    frameLines[transcriptRows] = safeStatus
+  const statusValues = requestedStatus.length ? requestedStatus.slice(0, statusRows) : [""]
+  if (input.notice) statusValues[0] = `${statusValues[0] ?? ""} | ${input.notice}`
+  for (let index = 0; index < statusRows; index += 1) {
+    const safeStatus = clipToWidth(oneLineText(statusValues[index] ?? ""), columns)
+    if (input.color === true && safeStatus) {
+      const styledStatus = wrapAnsiText(semanticStyle(safeStatus, "notice", input.theme ?? resolveTheme(), true), columns)[0] ?? ""
+      frameLines[transcriptRows + index] = displayAnsiWidth(styledStatus) <= columns ? styledStatus : safeStatus
+    } else {
+      frameLines[transcriptRows + index] = safeStatus
+    }
   }
 
   for (let index = 0; index < composerRows; index += 1) {
-    frameLines[composerStart + index] = composer.rows[firstVisibleComposerRow + index]?.text ?? ""
+    const sourceRow = firstVisibleComposerRow + index
+    let text = composer.rows[sourceRow]?.text ?? ""
+    const up = input.ascii ? "^" : "↑"
+    const down = input.ascii ? "v" : "↓"
+    const separator = input.ascii ? " | " : " · "
+    if (index === 0 && firstVisibleComposerRow > 0) text = clipToWidth(`${up} ${firstVisibleComposerRow} hidden${separator}${text}`, columns)
+    if (index === composerRows - 1 && sourceRow + 1 < composer.rows.length) {
+      text = clipToWidth(`${text}${separator}${down} ${composer.rows.length - sourceRow - 1} hidden`, columns)
+    }
+    frameLines[composerStart + index] = text
   }
 
   const cursorRow = composerStart + composer.cursor.line - firstVisibleComposerRow
+  const cursorPrefix = composer.cursor.line === firstVisibleComposerRow && firstVisibleComposerRow > 0
+    ? displayWidth(`${input.ascii ? "^" : "↑"} ${firstVisibleComposerRow} hidden${input.ascii ? " | " : " · "}`)
+    : 0
   return makeFrame(frameLines, {
     line: Math.max(composerStart, Math.min(rows - 1, cursorRow)),
-    column: Math.max(0, Math.min(columns - 1, composer.cursor.column)),
+    column: Math.max(0, Math.min(columns - 1, composer.cursor.column + cursorPrefix)),
   })
 }

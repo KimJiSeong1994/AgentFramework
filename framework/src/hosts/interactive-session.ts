@@ -33,6 +33,8 @@ import { startRefusal } from "../workflows/registry.ts"
 import { beginExecutionActivity } from "./runtime.ts"
 import { settled, type ExecutionRunStatus } from "./run-state.ts"
 import { LinuxAdmissionRefused, type ExecutionRuntime } from "./types.ts"
+import type { ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
+import { interactiveHelp } from "./interactive-actions.ts"
 
 export type CliEngine = CliRuntimeOptions["engine"]
 export type InteractiveArgs = { worktree: string; engine?: CliEngine; model?: string }
@@ -45,7 +47,7 @@ export type Terminal = {
   fullscreen?: boolean
   presentation?: () => InputPresentation
   readInput?: (input: { title: string; hint: string; prompt: string; kind: "chat" | "selection" }, signal: AbortSignal) => Promise<string | undefined>
-  choose?: (title: string, choices: readonly string[], signal: AbortSignal) => Promise<number | undefined>
+  choose?: (title: string, choices: readonly string[], signal: AbortSignal, presentation?: ChoicePresentation) => Promise<number | undefined>
   controls?: (handler: (action: TerminalControl) => void) => void
   queueAdmission?: (allowed: boolean) => void
   activity?: (activity: CliHostActivity) => void
@@ -57,12 +59,15 @@ export type Terminal = {
   skillCatalog?: (catalog: SkillCatalog) => void
   /** Committed `kind · stage · phase` of the live planning workflow in this session, or undefined when none is live. */
   workflowStatus?: (line: string | undefined) => void
+  viewSnapshot?: (facts: InteractiveViewFacts) => void
+  bindView?: (identity: ViewIdentity) => void
   transcriptSource?: (source: (options: ReplayOptions) => ReplayResult) => void
   draftSnapshot?: () => { draft: string; queued: string[] }
   suspend?: () => void
   resume?: () => void
   readLine: (prompt: string, signal?: AbortSignal) => Promise<string | undefined>
   write: (text: string) => void
+  writeText?: (text: TranscriptText) => void
   close: () => void
 }
 
@@ -388,8 +393,8 @@ function selectionBanner(worktree: string, engine: CliEngine, model: string, pre
   ].map(line => inputLine(line, presentation)).join("\n") + "\n\n"
 }
 
-function helpText(): string {
-  return "Local commands: /help, /model, /model <engine> <native-id>, /sessions, /resume <sid>, /new, /status, /continue, /pause, /cancel, /skills, /skills grants, /skills revoke <name>, /skill:<name> [request], /skill:deep-interview <request>, /skill:ralplan <request>, /skill:ultragoal <objective>, /skill:autoresearch <mission> (LCA workflows; /finish ends an interview early), /quit, /exit. TUI: /search <tool/status/task>, /search clears, /expand <item number>, PageUp/PageDown scroll. /plan remains a planning prompt.\n"
+function helpText(context: "chat" | "held" | "read-only" = "chat"): string {
+  return interactiveHelp(context)
 }
 
 function safeSkillAudit(
@@ -478,6 +483,7 @@ export async function runInteractiveSession(
   let attachedRuntime: ExecutionRuntime | undefined
   let skillSession: SkillSession | undefined
   let retainedSDKSessionID: string | undefined
+  let retainedViewSelection: { engine: string; model: string } | undefined
   let persistenceFailure: unknown
   const visibleWrite = terminal.write.bind(terminal)
   const persist = (kind: TranscriptKind, data: Record<string, unknown>, eventID?: string) => {
@@ -661,9 +667,58 @@ export async function runInteractiveSession(
       controller: deps.createController(initialRuntime),
       conversation: deps.createConversation(initialRuntime, initialSessionID),
     }
+    let requestObservation: RequestObservation = { state: "not-observed" }
+    let discoveryObservation: InteractiveViewFacts["discovery"] = args.model ? "not-observed" : "completed"
+    const currentViewIdentity = (): ViewIdentity => sessionStore
+      ? { mode: "writable", sessionID: selection.sessionID, epoch: sessionStore.epoch }
+      : { mode: "retained-read-only", sessionID: retainedSDKSessionID ?? selection.sessionID }
+    let requestSequence = 0
+    const publishView = (): void => {
+      if (!terminal.viewSnapshot) return
+      const identity = currentViewIdentity()
+      let workflow: InteractiveViewFacts["workflow"] = { state: "unknown" }
+      let owner: InteractiveViewFacts["owner"] = "unknown"
+      try {
+        const current = activeAnyWorkflow(worktree)
+        workflow = { state: "known", value: current ? {
+          id: current.id,
+          kind: current.kind,
+          stage: current.stage,
+          phase: current.phase,
+          revision: current.lastSeq,
+        } : null }
+        owner = !current ? "none" : current.sessionID === identity.sessionID ? "current-session" : "foreign"
+      } catch {}
+      let claim: InteractiveViewFacts["claim"] = { state: "unknown" }
+      let fence: InteractiveViewFacts["fence"] = { state: "unknown" }
+      let termination: InteractiveViewFacts["termination"] = "not-observed"
+      try {
+        const state = selection.runtime.runs.status()
+        claim = { state: "known", value: !!state.claim }
+        fence = { state: "known", value: state.executions.some(execution => !!execution.fence) }
+        if (state.executions.some(execution => execution.cancel && !settled(execution))) termination = "unconfirmed"
+        else if (state.executions.some(execution => execution.terminal && settled(execution))) termination = "proven"
+      } catch {}
+      terminal.viewSnapshot({
+        identity,
+        selection: retainedViewSelection ?? { engine: selection.engine, model: selection.model },
+        hold: sessionStore
+          ? { state: "known", value: { held: effectiveHold(worktree, selection.sessionID), ...(sessionStore.metadata.holdReason ? { reason: sessionStore.metadata.holdReason } : {}) } }
+          : { state: "known", value: { held: true, reason: "retained read-only history" } },
+        workflow,
+        owner,
+        claim,
+        fence,
+        termination,
+        discovery: discoveryObservation,
+        request: requestObservation,
+      })
+    }
     const usedSessionIDs = new Set([initialSessionID])
     terminal.bindSession?.(initialSessionID)
+    terminal.bindView?.(currentViewIdentity())
     terminal.transcriptSource?.(options => replaySession(worktree, initialSessionID, options))
+    publishView()
     await bindSkillSession(sessionStore)
     if (abort.signal.aborted) return signalExit(receivedSignal)
     let operationAbort: AbortController | undefined
@@ -838,7 +893,22 @@ export async function runInteractiveSession(
       terminal.write(terminalSafeText(
         `\n[approval] Inspect the canonical plan below before deciding.\n\nCanonical plan (${workflow.planRef?.mdPath ?? "saved plan"}):\n${renderedPlan}\nPlan SHA: ${planSha}\n`,
       ))
-      const chosen = terminal.choose ? await terminal.choose("Execution decision", ["Approve", "Reject", "Keep pending"], abort.signal) : undefined
+      const chosen = terminal.choose ? await terminal.choose(
+        "Execution decision",
+        ["Approve", "Reject", "Keep pending"],
+        abort.signal,
+        {
+          kind: "approval",
+          document: renderedPlan,
+          binding: {
+            sessionID: selection.sessionID,
+            workflowID: workflow.id,
+            expectedRevision: workflow.lastSeq,
+            planSha,
+            path: workflow.planRef?.mdPath ?? "saved plan",
+          },
+        },
+      ) : undefined
       if (terminal.choose && (chosen === undefined || chosen === 2)) {
         holdAdmission(worktree, selection.sessionID, "keep_pending")
         terminal.resume?.()
@@ -872,7 +942,16 @@ export async function runInteractiveSession(
       if (!decided.ok) throw new InteractiveLaunchError("local plan decision could not be applied; inspect read-only status")
       persist("workflow-stage", { workflowID: decided.wf.id, phase: decided.wf.phase, text: `Workflow ${decided.wf.id}: ${decided.wf.phase}` })
       if (decision.action === "reject") {
-        terminal.write(terminalSafeText(`Workflow ${workflow.id} rejected; execution was not started.\n`))
+        const rejected = terminalSafeText(`Workflow ${workflow.id} rejected; execution was not started.\n`)
+        // Rejection exits the full-screen frontend immediately. Leave the alternate screen before writing the
+        // terminal receipt so tmux/SSH transports cannot lose the final frame during process teardown.
+        persist("notice", { text: rejected })
+        if (terminal.fullscreen) {
+          terminal.close()
+          process.stderr.write(rejected)
+        } else {
+          visibleWrite(rejected)
+        }
         return { code: 0 }
       }
       if (decision.action !== "approve") return { code: 1 }
@@ -882,8 +961,9 @@ export async function runInteractiveSession(
       const taskTitles = approvedPlanTitles(parsedPlan)
       observedTasks = { worktree, sessionID: selection.sessionID, ids: taskIDs }
       const currentTasks = readProgressTasks(worktree, selection.sessionID, taskIDs) ?? taskIDs.map(id => ({ id, status: "pending" as const }))
-      progress.tasks(currentTasks.map((task, index) => ({ ...task, title: taskTitles[index] ?? "" })), approvedTasks.total)
-      terminal.taskSnapshot?.(currentTasks)
+      const titledTasks = currentTasks.map((task, index) => ({ ...task, title: taskTitles[index] ?? "" }))
+      progress.tasks(titledTasks, approvedTasks.total)
+      terminal.taskSnapshot?.(titledTasks)
       const result = await runOwned(false)
       if (receivedSignal) return signalExit(receivedSignal)
       if (terminal.fullscreen) return undefined
@@ -919,7 +999,13 @@ export async function runInteractiveSession(
       }
     }
 
-    async function switchSelection(nextEngine: CliEngine, nextModel: string, targetSessionID?: string, forceNew = false): Promise<boolean> {
+    async function switchSelection(
+      nextEngine: CliEngine,
+      nextModel: string,
+      targetSessionID?: string,
+      forceNew = false,
+      discovery: InteractiveViewFacts["discovery"] = "not-observed",
+    ): Promise<boolean> {
       if (!forceNew && !targetSessionID && nextEngine === selection.engine && nextModel === selection.model) {
         terminal.write("Already using that engine and model; conversation context is unchanged.\n")
         return true
@@ -968,10 +1054,15 @@ export async function runInteractiveSession(
         nextProgress.bind(nextStore)
         attachedRuntime = runtime
         retainedSDKSessionID = undefined
+        retainedViewSelection = undefined
+        requestObservation = { state: "not-observed" }
+        discoveryObservation = discovery
         selection = { engine: nextEngine, model: nextModel, sessionID, runtime, controller, conversation }
         usedSessionIDs.add(sessionID)
         terminal.bindSession?.(sessionID)
+        terminal.bindView?.(currentViewIdentity())
         terminal.transcriptSource?.(options => replaySession(worktree, sessionID, options))
+        publishView()
         await bindSkillSession(nextStore)
         if (abort.signal.aborted) return false
         terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.(), true))
@@ -1048,10 +1139,15 @@ export async function runInteractiveSession(
         terminal.skillCatalog?.({ entries: [], refusals: [] })
         terminal.sessionChanged?.()
         retainedSDKSessionID = sessionID
+        retainedViewSelection = { engine: "opencode", model: "retained unknown" }
+        requestObservation = { state: "not-observed" }
+        discoveryObservation = "not-observed"
         terminal.executionSnapshot?.({ generation: 0, executions: [] }, false)
         terminal.taskSnapshot?.([])
         terminal.bindSession?.(sessionID)
+        terminal.bindView?.(currentViewIdentity())
         terminal.transcriptSource?.(options => replaySession(worktree, sessionID, options))
+        publishView()
         terminal.write(`Retained SDK session ${sessionID} · read-only history\n`)
       } catch (error) {
         terminal.write(`Session restore refused: ${boundedTerminalDiagnostic(String(error))}\n`)
@@ -1059,6 +1155,78 @@ export async function runInteractiveSession(
         guard?.release?.()
       }
       return true
+    }
+
+    async function openRetainedSession(
+      sessionID: string,
+      captured?: Pick<SessionCandidate, "engine" | "model">,
+    ): Promise<boolean> {
+      const currentSessionID = retainedSDKSessionID ?? selection.sessionID
+      if (sessionID === currentSessionID) {
+        terminal.write(`Session ${sessionID} is already selected; no work was started.\n`)
+        return true
+      }
+      try {
+        const saved = readSessionMetadata(worktree, sessionID)
+        if (captured && (!saved || saved.engine !== captured.engine || saved.model !== captured.model)) {
+          terminal.write("Session restore refused: the captured target changed or was deleted.\n")
+          return true
+        }
+        if (saved?.engine === "opencode") return switchToRetainedSDKSession(sessionID)
+        if (!saved || !["local", "codex", "claude"].includes(saved.engine) || !saved.model) {
+          terminal.write("Session restore refused: no compatible saved CLI selection.\n")
+          return true
+        }
+        return switchSelection(saved.engine as CliEngine, saved.model, sessionID)
+      } catch (error) {
+        if (!sessionStore) throw error
+        terminal.write(`Session restore refused: ${boundedTerminalDiagnostic(String(error))}\n`)
+        return true
+      }
+    }
+
+    async function chooseRetainedSession(): Promise<boolean> {
+      const inspected = inspectSessions(worktree)
+      if (!inspected.length) {
+        terminal.write("No retained sessions are available.\n")
+        return true
+      }
+      const seen = new Set<string>()
+      if (inspected.some(session => !session.sessionID || seen.has(session.sessionID) || !seen.add(session.sessionID))) {
+        terminal.write("Session list refused: captured candidates have duplicate or invalid stable IDs.\n")
+        return true
+      }
+      const currentSessionID = retainedSDKSessionID ?? selection.sessionID
+      const candidates: readonly SessionCandidate[] = inspected.map(session => ({
+        sessionID: session.sessionID,
+        engine: session.engine,
+        ...(session.model ? { model: session.model } : {}),
+        current: session.sessionID === currentSessionID,
+        state: session.corrupt ? "corrupt" : session.sessionID === retainedSDKSessionID ? "read-only" : session.held ? "held" : "retained",
+        ...(session.corrupt ? { detail: boundedTerminalDiagnostic(session.corrupt) } : {}),
+      }))
+      const labels = candidates.map(candidate =>
+        `${candidate.current ? "current · " : ""}${candidate.sessionID} · ${candidate.engine} ${candidate.model ?? "model unknown"} · ${candidate.state}`)
+      const origin: ViewIdentity = sessionStore
+        ? { mode: "writable", sessionID: selection.sessionID, epoch: sessionStore.epoch }
+        : { mode: "retained-read-only", sessionID: currentSessionID }
+      const chosen = terminal.choose
+        ? await terminal.choose("Retained sessions", labels, abort.signal, { kind: "generic-list", rows: labels, origin })
+        : undefined
+      if (chosen === undefined) return true
+      const candidate = candidates[chosen]
+      if (!candidate) {
+        terminal.write("Session restore refused: captured selection is no longer valid.\n")
+        return true
+      }
+      const currentIdentity: ViewIdentity = sessionStore
+        ? { mode: "writable", sessionID: selection.sessionID, epoch: sessionStore.epoch }
+        : { mode: "retained-read-only", sessionID: retainedSDKSessionID ?? selection.sessionID }
+      if (JSON.stringify(currentIdentity) !== JSON.stringify(origin)) {
+        terminal.write("Session restore refused: the chooser origin changed.\n")
+        return true
+      }
+      return openRetainedSession(candidate.sessionID, candidate)
     }
 
     function showRetainedSearch(sessionID: string, query: string): void {
@@ -1120,6 +1288,7 @@ export async function runInteractiveSession(
         terminal.executionSnapshot?.(queueState, false)
         terminal.queueAdmission?.(!effectiveHold(worktree, selection.sessionID) && !readAnyWorkflowChecked(worktree).corrupt && !activeAnyWorkflow(worktree) && !queueState.claim && queueState.executions.every(settled))
       }
+      publishView()
       const promptTitle = retainedSDKSessionID
         ? `Retained SDK session ${retainedSDKSessionID} · read-only history`
         : `${selection.engine} · ${selection.model}`
@@ -1138,13 +1307,11 @@ export async function runInteractiveSession(
         const [command, ...commandArgs] = message.split(/\s+/u)
         if (command === "/quit" || command === "/exit") return { code: 0 }
         if (command === "/help" && commandArgs.length === 0) {
-          terminal.write(helpText())
+          terminal.write(helpText("read-only"))
           continue
         }
         if (command === "/sessions" && commandArgs.length === 0) {
-          for (const session of inspectSessions(worktree)) {
-            terminal.write(`${session.sessionID} · ${session.engine} ${session.model ?? ""} · ${session.corrupt ? "corrupt; read-only" : session.held ? "held" : "retained"}\n`)
-          }
+          if (!await chooseRetainedSession()) return signalExit(receivedSignal)
           continue
         }
         if (command === "/status" && commandArgs.length === 0) {
@@ -1169,30 +1336,7 @@ export async function runInteractiveSession(
           continue
         }
         if (command === "/resume" && commandArgs.length === 1) {
-          const target = commandArgs[0]!
-          if (target === sessionID) {
-            terminal.write(`Already viewing retained SDK session ${sessionID}; it remains read-only.\n`)
-            continue
-          }
-          let saved: ReturnType<typeof readSessionMetadata>
-          try { saved = readSessionMetadata(worktree, target) }
-          catch (error) {
-            terminal.write(`Session restore refused: ${boundedTerminalDiagnostic(String(error))}\n`)
-            continue
-          }
-          if (!saved) {
-            terminal.write("Session restore refused: retained LCA history is unavailable.\n")
-            continue
-          }
-          if (saved.engine === "opencode") {
-            await switchToRetainedSDKSession(target)
-            continue
-          }
-          if (!["local", "codex", "claude"].includes(saved.engine) || !saved.model) {
-            terminal.write("Session restore refused: no compatible saved CLI selection.\n")
-            continue
-          }
-          if (!await switchSelection(saved.engine as CliEngine, saved.model, target)) return signalExit(receivedSignal)
+          if (!await openRetainedSession(commandArgs[0]!)) return signalExit(receivedSignal)
           continue
         }
         terminal.write(`Retained SDK session ${sessionID} is read-only; command or message was not applied.\n`)
@@ -1214,14 +1358,16 @@ export async function runInteractiveSession(
       }
 
       const [command, ...commandArgs] = message.split(/\s+/u)
+      if (["/search", "/expand", "/details", "/theme", "/ascii"].includes(command!)) {
+        terminal.write(`${command} is a local full-screen TUI action; it is unavailable in readline and no model turn was dispatched.\n`)
+        continue
+      }
       if (command === "/help" && commandArgs.length === 0) {
-        terminal.write(helpText())
+        terminal.write(helpText(effectiveHold(worktree, selection.sessionID) ? "held" : "chat"))
         continue
       }
       if (command === "/sessions" && commandArgs.length === 0) {
-        for (const session of inspectSessions(worktree)) {
-          terminal.write(`${session.sessionID} · ${session.engine} ${session.model ?? ""} · ${session.corrupt ? "corrupt; read-only" : session.held ? "held" : "retained"}\n`)
-        }
+        if (!await chooseRetainedSession()) return signalExit(receivedSignal)
         continue
       }
       if (command === "/skills") {
@@ -1260,26 +1406,7 @@ export async function runInteractiveSession(
         continue
       }
       if (command === "/resume" && commandArgs.length === 1) {
-        const sessionID = commandArgs[0]!
-        if (sessionID === selection.sessionID) {
-          terminal.write("Already in this session; /continue requests an explicit work Resume.\n")
-          continue
-        }
-        try {
-          const saved = readSessionMetadata(worktree, sessionID)
-          if (saved?.engine === "opencode") {
-            if (!await switchToRetainedSDKSession(sessionID)) return signalExit(receivedSignal)
-            continue
-          }
-          if (!saved || !["local", "codex", "claude"].includes(saved.engine) || !saved.model) {
-            terminal.write("Session restore refused: no compatible saved CLI selection.\n")
-            continue
-          }
-          if (!await switchSelection(saved.engine as CliEngine, saved.model, sessionID)) return signalExit(receivedSignal)
-        } catch (error) {
-          if (!sessionStore) throw error
-          terminal.write(`Session restore refused: ${boundedTerminalDiagnostic(String(error))}\n`)
-        }
+        if (!await openRetainedSession(commandArgs[0]!)) return signalExit(receivedSignal)
         continue
       }
       if (command === "/status" && commandArgs.length === 0) {
@@ -1350,6 +1477,7 @@ export async function runInteractiveSession(
           if (abort.signal.aborted) continue
           if (!epoch || sessionStore?.epoch !== epoch) throw new InteractiveLaunchError("Session attachment changed during Resume preflight.")
           sessionStore = resumeAdmission(selection.runtime, selection.sessionID, current?.lastSeq)
+          terminal.bindView?.(currentViewIdentity())
           await refreshSkillCatalog()
           if (current?.phase === "executing") await runOwned(true)
           else if (current?.phase === "pending_approval") {
@@ -1378,7 +1506,7 @@ export async function runInteractiveSession(
           if (abort.signal.aborted) return signalExit(receivedSignal)
           if (nextModel === undefined) return { code: 0 }
           if (nextModel === null) continue
-          if (!await switchSelection(selection.engine, nextModel)) return signalExit(receivedSignal)
+          if (!await switchSelection(selection.engine, nextModel, undefined, false, "completed")) return signalExit(receivedSignal)
           continue
         }
         if (commandArgs.length !== 2 || !["local", "codex", "claude"].includes(commandArgs[0]!) ||
@@ -1483,6 +1611,7 @@ export async function runInteractiveSession(
       const userFact = persist("user", { text: message })
       progress.waiting()
       operationAbort = new AbortController()
+      const requestID = `${turnStore?.epoch ?? "read-only"}:request:${++requestSequence}`
       const cancelTurn = () => operationAbort?.abort()
       abort.signal.addEventListener("abort", cancelTurn, { once: true })
       let turn: Awaited<ReturnType<PlanConversation["turn"]>>
@@ -1527,14 +1656,24 @@ export async function runInteractiveSession(
           continue
         }
         dispatched = true
+        requestObservation = { state: "in-progress", operationID: requestID }
+        publishView()
         turn = skillInvocation
           ? await turnSelection.conversation.turn(message, operationAbort.signal, skillInvocation)
           : await turnSelection.conversation.turn(message, operationAbort.signal)
         if (operationAbort.signal.aborted && !abort.signal.aborted) {
+          requestObservation = { state: "cancellation-unconfirmed", operationID: requestID }
+          publishView()
           reportTurnCancellation()
           continue
         }
+        requestObservation = { state: "completed", operationID: requestID }
+        publishView()
       } catch (error) {
+        if (dispatched) {
+          requestObservation = { state: "failed", operationID: requestID, category: { state: "unknown" }, retryable: { state: "unknown" } }
+          publishView()
+        }
         if (operationAbort.signal.aborted && !abort.signal.aborted) {
           if (dispatched) reportTurnCancellation()
           else reportSkillCancellation()
@@ -1557,7 +1696,9 @@ export async function runInteractiveSession(
       let assistantFact: ReturnType<SessionStore["append"]> | undefined
       if (turn.text) {
         assistantFact = persist("assistant", { text: turn.text })
-        visibleWrite(terminalSafeText(`\nConversation:\n${turn.text}\n`))
+        const assistantText = terminalSafeText(turn.text)
+        if (terminal.writeText) terminal.writeText({ provenance: "assistant", text: assistantText })
+        else visibleWrite(`\nConversation:\n${assistantText}\n`)
       }
       if (skillInvocation && preparedSkill && turnStore) {
         const audit = safeSkillAudit(turn.skill, {
