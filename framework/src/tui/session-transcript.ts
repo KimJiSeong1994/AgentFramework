@@ -23,8 +23,9 @@ export function restoreTranscript(model: TranscriptModel, records: readonly Tran
       history.push(data.text)
       model.append({ provenance: "user", text: data.text })
     } else if (record.kind === "assistant" && typeof data.text === "string") model.append({ provenance: "assistant", text: data.text })
+    else if (record.kind === "canonical-plan" && typeof data.text === "string") model.append({ provenance: "canonical-plan", text: data.text })
     else if (record.kind === "notice") {
-      if (typeof data.text === "string") model.append({ provenance: "notice", text: data.text })
+      if (typeof data.text === "string") model.append({ provenance: data.provenance === "error" ? "error" : "notice", text: data.text })
       if (typeof data.draft === "string" && Array.isArray(data.queued) && data.queued.every(value => typeof value === "string")) {
         draft = data.draft
         queued = data.queued as string[]
@@ -54,7 +55,7 @@ export function restoreTranscript(model: TranscriptModel, records: readonly Tran
         `Execution terminal: ${data.terminal}`, `Reconciliation: ${data.reconciliation}`, `Quiescent: ${data.quiescent ? "observed" : "unconfirmed"}`,
         ...(data.cancel ? [`Cancellation: ${data.cancel}`] : []), ...(data.claim ? ["Execution claim retained"] : []),
         ...(data.fence ? ["Unresolved execution fence retained"] : []),
-      ])
+      ], { state: "historical", fence: data.fence, claim: data.claim })
     } else if (record.kind === "workflow-choice" || record.kind === "workflow-stage") {
       if (typeof data.text === "string") model.append({ provenance: "notice", text: data.text })
     }

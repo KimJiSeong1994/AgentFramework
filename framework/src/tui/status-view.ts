@@ -1,5 +1,5 @@
 import type { InteractiveViewFacts } from "../hosts/interactive-view.ts"
-import { displayWidth } from "./render.ts"
+import { clipToWidth, displayWidth } from "./render.ts"
 
 export type StatusInput = {
   readonly facts?: InteractiveViewFacts
@@ -13,15 +13,6 @@ export type StatusInput = {
 }
 
 type Segment = { text: string; priority: number }
-
-function clip(value: string, columns: number): string {
-  let result = ""
-  for (const character of value) {
-    if (displayWidth(result + character) > columns) break
-    result += character
-  }
-  return result
-}
 
 function factSegments(facts: InteractiveViewFacts | undefined): Segment[] {
   if (!facts) return []
@@ -39,11 +30,9 @@ function factSegments(facts: InteractiveViewFacts | undefined): Segment[] {
   }
   if (facts.request.state === "cancellation-unconfirmed") safety.push("request-cancel:?")
   const segments: Segment[] = safety.length ? [{ text: `safety[${safety.join(" ")}]`, priority: 200 }] : []
-  segments.push(
-    { text: `selected ${facts.selection.engine}:${facts.selection.model}`, priority: 70 },
-    { text: `discovery ${facts.discovery}`, priority: 65 },
-    { text: `request ${facts.request.state}`, priority: 75 },
-  )
+  segments.push({ text: `${facts.selection.engine} / ${facts.selection.model}`, priority: 50 })
+  if (facts.request.state === "in-progress") segments.push({ text: "Model request running", priority: 90 })
+  if (facts.discovery === "failed") segments.push({ text: "Model list unavailable", priority: 85 })
   if (facts.hold.state === "known" && facts.hold.value.held && facts.hold.value.reason) {
     segments.push({ text: `hold reason: ${facts.hold.value.reason}`, priority: 55 })
   }
@@ -53,13 +42,23 @@ function factSegments(facts: InteractiveViewFacts | undefined): Segment[] {
 function pack(segments: readonly Segment[], columns: number, separator: string): string[] {
   const ordered = [...segments].sort((left, right) => right.priority - left.priority)
   const rows: string[] = []
+  let omitted = 0
   for (const segment of ordered) {
     let placed = false
     for (let index = 0; index < rows.length; index += 1) {
       const candidate = rows[index] ? `${rows[index]}${separator}${segment.text}` : segment.text
       if (displayWidth(candidate) <= columns) { rows[index] = candidate; placed = true; break }
     }
-    if (!placed && rows.length < 2) rows.push(clip(segment.text, columns))
+    if (!placed && rows.length < 2) {
+      rows.push(clipToWidth(segment.text, columns))
+      if (displayWidth(segment.text) > columns) omitted += 1
+    } else if (!placed) omitted += 1
+  }
+  if (omitted && rows.length) {
+    const index = rows.length - 1
+    const indicator = clipToWidth(` | +${omitted} more`, columns)
+    const remaining = Math.max(0, columns - displayWidth(indicator))
+    rows[index] = (remaining ? clipToWidth(rows[index]!, remaining) : "") + indicator
   }
   return rows.filter(Boolean)
 }
@@ -69,8 +68,8 @@ export function statusLines(input: StatusInput): string[] {
     ...factSegments(input.facts),
     ...(input.search ? [{ text: `search: ${input.search}`, priority: 70 }] : []),
     ...(input.queued ? [{ text: `queued ${input.queued}`, priority: 75 }] : []),
-    ...(input.workflow ? [{ text: input.workflow, priority: 65 }] : []),
-    { text: input.activity, priority: 40 },
+    ...(input.workflow ? [{ text: input.workflow, priority: 80 }] : []),
+    { text: input.activity, priority: 70 },
     ...(input.notice ? [{ text: input.notice, priority: 110 }] : []),
   ]
   return pack(segments, Math.max(1, Math.floor(input.columns)), input.ascii ? " | " : " · ")

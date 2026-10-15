@@ -66,3 +66,48 @@ test("cancellation ACK alone never becomes stopped and claims retain the fence",
   expect(model.lines().join("\n")).toContain("Cancellation: stopped with proof")
   expect(model.lines().join("\n")).not.toContain("requestedAt")
 })
+
+test("multiline provenance uses a stable continuation gutter without changing stored content", () => {
+  const model = new TranscriptModel("sid")
+  const text = "first\nsecond\n\nlast"
+  for (const provenance of ["user", "assistant", "error", "canonical-plan"] as const) {
+    model.append({ provenance, text })
+  }
+  expect(model.lines()).toEqual([
+    "[You] first", "  | second", "  | ", "  | last",
+    "[Assistant] first", "  | second", "  | ", "  | last",
+    "[Error] first", "  | second", "  | ", "  | last",
+    "[Canonical plan] first", "  | second", "  | ", "  | last",
+  ])
+  expect(model.items.every(item => item.kind === "text" && item.text === text)).toBe(true)
+})
+
+test("successful call summaries retain unsettled execution and claim warnings before expansion", () => {
+  const model = new TranscriptModel("sid")
+  model.activity(start("one"))
+  model.activity(finish("one"))
+  expect(model.lines()[0]).toContain("call succeeded")
+  expect(model.lines()[0]).toContain("execution not observed")
+  const state: ExecutionRunStatus = {
+    generation: 1,
+    claim: { ownerSession: "sid", instance: "instance", pid: 1, generation: 1 },
+    executions: [{
+      executionId: "exec", ownerSession: "sid", taskId: "t1", attemptId: "attempt", generation: 1,
+      role: "worker", cwd: "/repo", policyID: "policy", kind: "host", profile: "legacy-unowned",
+      terminal: { outcome: "done", terminalAt: 3 },
+      reconciliation: { outcome: "terminal", quiescent: true, evidence: "joined", at: 4 },
+    }],
+  }
+  model.executionSnapshot(state, false)
+  expect(model.lines()[0]).toContain("call succeeded")
+  expect(model.lines()[0]).toContain("execution unconfirmed")
+  expect(model.lines()[0]).toContain("claim retained")
+  expect(model.lines().join("\n")).not.toContain("Execution terminal:")
+  delete state.claim
+  model.executionSnapshot(state, false)
+  expect(model.lines()[0]).not.toContain("unconfirmed")
+  expect(model.lines()[0]).not.toContain("claim retained")
+  model.evidenceSnapshot("exec", ["Unresolved execution fence retained"], { state: "historical", fence: true, claim: false })
+  expect(model.lines()[0]).toContain("execution last recorded")
+  expect(model.lines()[0]).toContain("fence retained")
+})

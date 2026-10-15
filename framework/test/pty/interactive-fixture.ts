@@ -29,7 +29,7 @@ import { readCommitted } from "../../src/workflows/commit.ts"
 import { DEEP_INTERVIEW_PROMPTS, RALPLAN_PROMPTS } from "../../src/workflows/prompts/index.ts"
 import { fullScript } from "../workflow-fixture.ts"
 
-type Scenario = "approve" | "reject" | "queue" | "signal" | "ctrlc" | "restore" | "sdk-observer" | "skills" | "readline-skills" | "skill-grants" | "skill-restore" | "skill-tool-scope" | "skill-tool-cancel" | "skill-main-write" | "pause-resume" | "cancel-unconfirmed" | "paused-cancel" | "workflow-di"
+type Scenario = "approve" | "reject" | "queue" | "signal" | "ctrlc" | "restore" | "sdk-observer" | "skills" | "readline-skills" | "readline-picker" | "skill-grants" | "skill-restore" | "skill-tool-scope" | "skill-tool-cancel" | "skill-main-write" | "pause-resume" | "cancel-unconfirmed" | "paused-cancel" | "workflow-di"
 
 const WORKFLOW_ID = "wf_pty_fixture"
 const PLAN_SHA = "c0ffee0000000000000000000000000000000000000000000000000000000000"
@@ -289,7 +289,7 @@ function installOllamaHttpStub(worktree: string, responses: readonly string[], s
 
 async function main(): Promise<void> {
   startupStage("fixture-main-entered")
-  if (!(scenario === "approve" || scenario === "reject" || scenario === "queue" || scenario === "signal" || scenario === "ctrlc" || scenario === "restore" || scenario === "sdk-observer" || sourceSkillScenario || scenario === "skill-tool-scope" || scenario === "skill-tool-cancel" || scenario === "skill-main-write" || flowScenario || workflowScenario)) {
+  if (!(scenario === "approve" || scenario === "reject" || scenario === "queue" || scenario === "signal" || scenario === "ctrlc" || scenario === "restore" || scenario === "sdk-observer" || scenario === "readline-picker" || sourceSkillScenario || scenario === "skill-tool-scope" || scenario === "skill-tool-cancel" || scenario === "skill-main-write" || flowScenario || workflowScenario)) {
     throw new Error(`unknown PTY fixture scenario: ${String(scenario)}`)
   }
   if (!resultPath) throw new Error("PTY fixture result path was not supplied")
@@ -684,7 +684,7 @@ async function main(): Promise<void> {
     },
   } as unknown as ForegroundController
 
-  const terminal: Terminal = scenario === "readline-skills" ? createReadlineTerminal() : new TuiApp()
+  const terminal: Terminal = scenario === "readline-skills" || scenario === "readline-picker" ? createReadlineTerminal() : new TuiApp()
   if (workflowScenario) {
     const choose = terminal.choose?.bind(terminal)
     const workflowStatus = terminal.workflowStatus?.bind(terminal)
@@ -834,10 +834,14 @@ async function main(): Promise<void> {
       },
     }
     },
-    discoverModels: async () => {
+    discoverModels: async engine => {
       report.modelCatalogCallCount = Number(report.modelCatalogCallCount) + 1
-      record("model.catalog.discovered")
+      record("model.catalog.discovered", { engine })
       recordFixtureCounts()
+      if (scenario === "readline-picker") return {
+        models: [],
+        notice: "Deterministic fixture catalog; availability is not verified.",
+      }
       throw new Error("fixture did not expect model discovery")
     },
     humanDecision: async (action, binding, signal) => {
@@ -859,11 +863,15 @@ async function main(): Promise<void> {
 
   try {
     startupStage("runInteractiveSession-invoking")
-    const result = await runInteractiveSession(
-      { worktree, engine: sourceSkillScenario || workflowScenario || scenario === "skill-tool-scope" ||
-        scenario === "skill-tool-cancel" || scenario === "skill-main-write" ? "local" : "codex", model: "pty-fixture-model" },
-      deps,
-    )
+    if (scenario === "readline-picker") {
+      report.runtime = "synthetic host; no provider is launched, and no runtime is created before explicit model selection"
+      record("readline-picker.ready", fixtureCounts())
+    }
+    const args = scenario === "readline-picker"
+      ? { worktree }
+      : { worktree, engine: sourceSkillScenario || workflowScenario || scenario === "skill-tool-scope" ||
+        scenario === "skill-tool-cancel" || scenario === "skill-main-write" ? "local" as const : "codex" as const, model: "pty-fixture-model" }
+    const result = await runInteractiveSession(args, deps)
     report.exitCode = result.code
     startupStage("runInteractiveSession-returned")
     record("session.exit", { code: result.code })

@@ -46,6 +46,7 @@ export type ChoicePresentation =
   | { readonly kind: "plain" }
   | { readonly kind: "approval"; readonly document: string; readonly binding: ApprovalBinding }
   | { readonly kind: "generic-list"; readonly rows: readonly string[]; readonly initialIndex?: number; readonly origin: ViewIdentity }
+  | { readonly kind: "picker"; readonly purpose: "selection" | "command"; readonly rows: readonly string[]; readonly hint?: string; readonly initialIndex?: number }
 
 export type SessionCandidate = {
   readonly sessionID: string

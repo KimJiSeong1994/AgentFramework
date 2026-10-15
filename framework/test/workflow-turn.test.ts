@@ -7,7 +7,7 @@ import type { ExecutionHost, ExecutionOutcome, ExecutionRequest, ExecutionRuntim
 import { createPlanConversation } from "../src/hosts/plan-conversation.ts"
 import { openSession, type SessionStore } from "../src/sessions/store.ts"
 import { DEEP_INTERVIEW_SUMMARIZE_PROMPT, RALPLAN_SUMMARIZE_PROMPT, PLAN_MAIN_PROMPT, SUMMARIZE_PROMPT, definePrompt, promptIntact, promptSha } from "../src/workflows/prompts/index.ts"
-import { parseStageEvents, parseStageEventsFor, summarizerFor, runWorkflowTurn, type TurnBinding, type TurnRequest } from "../src/workflows/turn.ts"
+import { ModelRequestError, parseStageEvents, parseStageEventsFor, summarizerFor, runWorkflowTurn, type TurnBinding, type TurnRequest } from "../src/workflows/turn.ts"
 import { publishWorkflow, writeWorkflow } from "./commit-fixture.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
 
@@ -27,6 +27,8 @@ type Hooks = {
   onRun?: () => void | Promise<void>
   onPrepare?: () => void
   text?: string | ((request: ExecutionRequest) => string)
+  outcome?: ExecutionOutcome | (() => ExecutionOutcome)
+  preflightError?: Error
   unknown?: boolean
   gate?: Promise<void>
 }
@@ -36,7 +38,11 @@ function harness(hooks: Hooks = {}) {
   const requests: ExecutionRequest[] = []
   const host: ExecutionHost = {
     identity: { engine: "fixture", profile: "legacy-unowned" },
-    async preflight() { calls.push("preflight"); return { compatible: true, controls, problems: [] } },
+    async preflight() {
+      calls.push("preflight")
+      if (hooks.preflightError) throw hooks.preflightError
+      return { compatible: true, controls, problems: [] }
+    },
     async reconcile() { return { outcome: "unknown", quiescent: false, evidence: "fixture has no recovery" } },
     async prepare(request) {
       calls.push("prepare")
@@ -50,6 +56,7 @@ function harness(hooks: Hooks = {}) {
           await hooks.onRun?.()
           await hooks.gate
           done = true
+          if (hooks.outcome) return typeof hooks.outcome === "function" ? hooks.outcome() : hooks.outcome
           const text = typeof hooks.text === "function" ? hooks.text(request) : hooks.text ?? "ok"
           return { status: "completed", text }
         },
@@ -137,6 +144,57 @@ describe("workflow turn lifecycle (R12)", () => {
     expect(status.executions.at(-1)?.fence?.reason).toContain("requires reconciliation")
     expect(status.claim).toBeDefined()
     expect(executionActivity(wt.worktree)).toBeNull()
+  })
+
+  test("a failed terminal response is typed only after quiescence is recorded and the claim is released", async () => {
+    const secret = "PRIVATE_PROVIDER_SECRET_fixture_8d38"
+    const h = harness({ outcome: { status: "failed", error: secret } })
+    let caught: unknown
+    try { await runWorkflowTurn(h.runtime, bindingFor(null, "s-model-failed"), request()) }
+    catch (error) { caught = error }
+
+    expect(caught).toBeInstanceOf(ModelRequestError)
+    expect(caught).toMatchObject({
+      category: "model_failed",
+      message: "planning model did not complete a response",
+      diagnostic: "The model request failed after execution stopped. Check the selected model or CLI, then submit the draft again manually.",
+    })
+    expect(String(caught)).not.toContain(secret)
+    expect(h.calls).toEqual(["preflight", "prepare", "run", "reconcile", "reconcile"])
+    const status = h.runtime.runs.status()
+    expect(status.claim).toBeUndefined()
+    expect(status.executions.at(-1)).toMatchObject({
+      terminal: { outcome: "failed" }, reconciliation: { outcome: "terminal", quiescent: true },
+    })
+    expect(status.executions.at(-1)?.fence).toBeUndefined()
+  })
+
+  test("empty and oversized completed responses have finite typed categories", async () => {
+    const empty = harness({ text: "  " })
+    await expect(runWorkflowTurn(empty.runtime, bindingFor(null, "s-empty-response"), request()))
+      .rejects.toMatchObject({ name: "ModelRequestError", category: "empty_response" })
+    expect(empty.runtime.runs.status().executions.at(-1)).toMatchObject({
+      terminal: { outcome: "completed" }, reconciliation: { outcome: "terminal", quiescent: true },
+    })
+
+    const oversized = harness({ text: "x".repeat(BUDGET.reserveChars + 1) })
+    await expect(runWorkflowTurn(oversized.runtime, bindingFor(null, "s-response-budget"), request()))
+      .rejects.toMatchObject({ name: "ModelRequestError", category: "response_budget" })
+    expect(oversized.runtime.runs.status().executions.at(-1)).toMatchObject({
+      terminal: { outcome: "completed" }, reconciliation: { outcome: "terminal", quiescent: true },
+    })
+  })
+
+  test("host/preflight integrity errors remain generic and never become response failures", async () => {
+    const h = harness({ preflightError: new Error("fixture admission integrity failure") })
+    let caught: unknown
+    try { await runWorkflowTurn(h.runtime, bindingFor(null, "s-generic-preflight"), request()) }
+    catch (error) { caught = error }
+    expect(caught).toBeInstanceOf(Error)
+    expect(caught).not.toBeInstanceOf(ModelRequestError)
+    expect(String(caught)).toContain("fixture admission integrity failure")
+    expect(h.calls).toEqual(["preflight"])
+    expect(h.runtime.runs.status().executions).toHaveLength(0)
   })
 })
 
@@ -382,6 +440,25 @@ describe("plan conversation delegates to the workflow turn", () => {
     expect(h.runtime.runs.status().executions[0]!.workflowBinding).toMatchObject({ workflowID: wf.id, kind: "plan", role: "main", promptSha: PLAN_MAIN_PROMPT.sha256 })
     // history was not advanced by the superseded late reply
     expect(h.requests).toHaveLength(1)
+  })
+
+  test("a failed response does not enter conversation history before a later manual turn", async () => {
+    let attempt = 0
+    const h = harness({ outcome: () => ++attempt === 1
+      ? { status: "failed", error: "PRIVATE_PROVIDER_SECRET_1538" }
+      : { status: "completed", text: "Later response." } })
+    const conversation = createPlanConversation(h.runtime, "s-response-recovery")
+
+    await expect(conversation.turn("first manual request")).rejects.toBeInstanceOf(ModelRequestError)
+    expect(h.runtime.runs.status().claim).toBeUndefined()
+    expect(h.runtime.runs.status().executions[0]).toMatchObject({
+      terminal: { outcome: "failed" }, reconciliation: { outcome: "terminal", quiescent: true },
+    })
+    expect(await conversation.turn("second manual request")).toEqual({ text: "Later response." })
+
+    const serializedMessages = h.requests[1]!.text.split("\nConversation:\n").at(-1)
+    expect(JSON.parse(serializedMessages!)).toEqual([{ role: "user", text: "second manual request" }])
+    expect(h.runtime.runs.status().claim).toBeUndefined()
   })
 })
 

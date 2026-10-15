@@ -221,6 +221,22 @@ export function wrapText(text: string, columns: number): string[] {
   return lines
 }
 
+export function wrapTranscriptLine(text: string, columns: number): string[] {
+  const width = safeColumns(columns)
+  const continuation = "  | "
+  const speaker = /^\[(?:You|Assistant|Error|Notice|Canonical plan)\] /.exec(text)?.[0]
+  if (speaker) {
+    const content = text.slice(speaker.length)
+    return wrapText(content, Math.max(1, width - displayWidth(speaker)))
+      .map((line, index) => `${index === 0 ? speaker : continuation}${line}`)
+  }
+  if (text.startsWith(continuation)) {
+    return wrapText(text.slice(continuation.length), Math.max(1, width - displayWidth(continuation)))
+      .map(line => `${continuation}${line}`)
+  }
+  return wrapText(text, width)
+}
+
 function sgrResetState(sequence: string): { resets: boolean; finalReset: boolean } {
   const parameters = sequence.slice(2, -1).split(";")
   let reset = false
@@ -286,7 +302,7 @@ function oneLineText(value: string): string {
     .join("")
 }
 
-function clipToWidth(value: string, columns: number): string {
+export function clipToWidth(value: string, columns: number): string {
   const width = safeColumns(columns)
   let used = 0
   let result = ""
@@ -362,7 +378,7 @@ function terminalDimension(value: number): number {
 function transcriptRowsFor(rows: number, composerLineCount: number, statusRows = 1): number {
   const maxComposerRows = Math.max(1, Math.floor(rows / 3))
   const composerRows = Math.min(composerLineCount, maxComposerRows)
-  return rows - composerRows - Math.max(1, Math.min(2, statusRows))
+  return rows - composerRows - Math.max(1, Math.min(2, statusRows)) - 1
 }
 
 export function transcriptViewportRows(input: {
@@ -394,6 +410,9 @@ export function renderFrame(input: {
   rows: number
   transcript: readonly string[]
   transcriptOffset?: number
+  transcriptOlder?: boolean
+  transcriptNewer?: boolean
+  home?: readonly string[]
   status: string | readonly string[]
   draft: string
   cursor: number
@@ -414,18 +433,20 @@ export function renderFrame(input: {
 
   const composer = layoutComposer(input.draft, input.prompt ?? "> ", columns, input.cursor)
   const maxComposerRows = Math.max(1, Math.floor(rows / 3))
-  const composerRows = Math.min(composer.rows.length, maxComposerRows)
+  const composerOverflow = composer.rows.length > maxComposerRows
+  const composerRows = Math.min(composer.rows.length, maxComposerRows - (composerOverflow ? 1 : 0))
   const requestedStatus = Array.isArray(input.status) ? input.status : [input.status]
   const statusRows = Math.max(1, Math.min(2, requestedStatus.length))
   const transcriptRows = transcriptRowsFor(rows, composer.rows.length, statusRows)
-  const composerStart = transcriptRows + statusRows
+  const statusStart = transcriptRows + 1
+  const composerStart = statusStart + statusRows + (composerOverflow ? 1 : 0)
   const firstVisibleComposerRow = Math.max(
     0,
     Math.min(composer.cursor.line - composerRows + 1, composer.rows.length - composerRows),
   )
 
   let visualTranscriptRows = 0
-  for (const entry of input.transcript) visualTranscriptRows += wrapText(entry, columns).length
+  for (const entry of input.transcript) visualTranscriptRows += wrapTranscriptLine(entry, columns).length
   const maximumTranscriptOffset = Math.max(0, visualTranscriptRows - transcriptRows)
   const requestedTranscriptOffset = input.transcriptOffset ?? 0
   const transcriptOffset = Number.isFinite(requestedTranscriptOffset)
@@ -435,25 +456,50 @@ export function renderFrame(input: {
   const endVisibleTranscriptRow = firstVisibleTranscriptRow + transcriptRows
   const transcriptLines: string[] = []
   let visualRowIndex = 0
+  let messageSemantic: SemanticToken = "text"
+  let speaker: string | undefined
+  let continuedSpeaker: string | undefined
   for (const entry of input.transcript) {
+    if (!entry.startsWith("  | ")) {
+      speaker = /^\[(You|Assistant|Error|Notice|Canonical plan)\]/u.exec(entry)?.[1]
+      messageSemantic = entry.startsWith("[Error]") ? "error" :
+        entry.startsWith("[Assistant]") ? "notice" :
+        entry.startsWith("[Notice]") ? "muted" : "text"
+    }
     const semantic: SemanticToken = entry.startsWith("[Error]") ? "error" :
-      entry.includes("[+] ") ? "diff-add" :
-      entry.includes("[-] ") ? "diff-remove" :
+      /^(?:\[[^\]]+\] |  \| )?\[\+\] \+/.test(entry) ? "diff-add" :
+      /^(?:\[[^\]]+\] |  \| )?\[-\] -/.test(entry) ? "diff-remove" :
       entry.includes("[code] ") ? "code" :
-      entry.startsWith("[Assistant]") ? "notice" :
-      entry.startsWith("[Notice]") ? "muted" : "text"
-    const wrapped = wrapText(entry, columns).map(line => input.color === true
+      messageSemantic
+    const wrapped = wrapTranscriptLine(entry, columns).map(line => input.color === true
       ? wrapAnsiText(semanticStyle(line, semantic, input.theme ?? resolveTheme(), true), columns)[0] ?? line
       : line)
     const firstEntryRow = Math.max(0, firstVisibleTranscriptRow - visualRowIndex)
     const endEntryRow = Math.min(wrapped.length, endVisibleTranscriptRow - visualRowIndex)
-    if (endEntryRow > firstEntryRow) transcriptLines.push(...wrapped.slice(firstEntryRow, endEntryRow))
+    if (endEntryRow > firstEntryRow) {
+      if (transcriptLines.length === 0 && (firstEntryRow > 0 || entry.startsWith("  | "))) continuedSpeaker = speaker
+      transcriptLines.push(...wrapped.slice(firstEntryRow, endEntryRow))
+    }
     visualRowIndex += wrapped.length
     if (visualRowIndex >= endVisibleTranscriptRow) break
   }
   const transcriptStart = transcriptRows - transcriptLines.length
   for (let index = 0; index < transcriptLines.length; index += 1) {
     frameLines[transcriptStart + index] = transcriptLines[index]!
+  }
+  if (input.home?.length && input.transcript.length === 0) {
+    const home = input.home.flatMap(line => wrapText(line, Math.max(1, columns - 4))).slice(0, transcriptRows)
+    const start = Math.max(0, Math.floor((transcriptRows - home.length) / 2))
+    for (let index = 0; index < home.length; index += 1) {
+      frameLines[start + index] = `  ${home[index]}`
+    }
+  }
+  if (visualTranscriptRows > transcriptRows || input.transcriptOlder || input.transcriptNewer) {
+    const older = firstVisibleTranscriptRow
+    const newer = Math.max(0, visualTranscriptRows - endVisibleTranscriptRow)
+    const historical = newer > 0 || input.transcriptNewer
+    const position = `${historical ? "History" : "Latest"}${continuedSpeaker ? ` | ${continuedSpeaker} continued` : ""} | ${older}${input.transcriptOlder ? "+" : ""} older | ${newer}${input.transcriptNewer ? "+" : ""} newer | PgUp/PgDn`
+    frameLines[transcriptRows] = clipToWidth(position, columns)
   }
 
   const statusValues = requestedStatus.length ? requestedStatus.slice(0, statusRows) : [""]
@@ -462,31 +508,27 @@ export function renderFrame(input: {
     const safeStatus = clipToWidth(oneLineText(statusValues[index] ?? ""), columns)
     if (input.color === true && safeStatus) {
       const styledStatus = wrapAnsiText(semanticStyle(safeStatus, "notice", input.theme ?? resolveTheme(), true), columns)[0] ?? ""
-      frameLines[transcriptRows + index] = displayAnsiWidth(styledStatus) <= columns ? styledStatus : safeStatus
+      frameLines[statusStart + index] = displayAnsiWidth(styledStatus) <= columns ? styledStatus : safeStatus
     } else {
-      frameLines[transcriptRows + index] = safeStatus
+      frameLines[statusStart + index] = safeStatus
     }
   }
 
+  if (composerOverflow) {
+    const hiddenBelow = composer.rows.length - firstVisibleComposerRow - composerRows
+    frameLines[composerStart - 1] = clipToWidth(
+      `Draft ${firstVisibleComposerRow + 1}-${firstVisibleComposerRow + composerRows}/${composer.rows.length} | ${input.ascii ? "^" : "↑"} ${firstVisibleComposerRow} above | ${input.ascii ? "v" : "↓"} ${hiddenBelow} below`,
+      columns,
+    )
+  }
   for (let index = 0; index < composerRows; index += 1) {
     const sourceRow = firstVisibleComposerRow + index
-    let text = composer.rows[sourceRow]?.text ?? ""
-    const up = input.ascii ? "^" : "↑"
-    const down = input.ascii ? "v" : "↓"
-    const separator = input.ascii ? " | " : " · "
-    if (index === 0 && firstVisibleComposerRow > 0) text = clipToWidth(`${up} ${firstVisibleComposerRow} hidden${separator}${text}`, columns)
-    if (index === composerRows - 1 && sourceRow + 1 < composer.rows.length) {
-      text = clipToWidth(`${text}${separator}${down} ${composer.rows.length - sourceRow - 1} hidden`, columns)
-    }
-    frameLines[composerStart + index] = text
+    frameLines[composerStart + index] = composer.rows[sourceRow]?.text ?? ""
   }
 
   const cursorRow = composerStart + composer.cursor.line - firstVisibleComposerRow
-  const cursorPrefix = composer.cursor.line === firstVisibleComposerRow && firstVisibleComposerRow > 0
-    ? displayWidth(`${input.ascii ? "^" : "↑"} ${firstVisibleComposerRow} hidden${input.ascii ? " | " : " · "}`)
-    : 0
   return makeFrame(frameLines, {
     line: Math.max(composerStart, Math.min(rows - 1, cursorRow)),
-    column: Math.max(0, Math.min(columns - 1, composer.cursor.column + cursorPrefix)),
+    column: Math.max(0, Math.min(columns - 1, composer.cursor.column)),
   })
 }

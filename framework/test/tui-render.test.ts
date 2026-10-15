@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import fixtureSet from "./fixtures/gjc-keys-8cd17c0.json"
-import { displayAnsiWidth, displayWidth, renderFrame, wrapAnsiText, wrapText } from "../src/tui/render.ts"
+import { displayAnsiWidth, displayWidth, renderFrame, wrapAnsiText, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
 
 interface ReferenceFixture {
   id: string
@@ -153,9 +153,11 @@ describe("renderFrame", () => {
       cursor: 2,
     })
 
-    expect(rows(frame())[0]).toBe("E".repeat(80))
-    expect(rows(frame(1))[0]).toBe("D".repeat(80))
+    expect(rows(frame())[0]).toBe("F".repeat(80))
+    expect(rows(frame(1))[0]).toBe("E".repeat(80))
     expect(rows(frame(Number.MAX_SAFE_INTEGER))[0]).toBe("A".repeat(80))
+    expect(stripCsi(frame())).toContain("Latest | 5 older | 0 newer | PgUp/PgDn")
+    expect(stripCsi(frame(1))).toContain("History | 4 older | 1 newer | PgUp/PgDn")
   })
 
   test("neutralizes untrusted escapes and controls; optional status color is internal SGR only", () => {
@@ -206,5 +208,93 @@ describe("renderFrame", () => {
     expect(row).toBe(40)
     expect(column).toBe(3)
     expect(stripCsi(multiline)).toContain("transcript survives")
+  })
+
+  test("home actions are visible without leaking into the undersized recovery frame", () => {
+    for (const [columns, rows] of [[80, 24], [120, 40]] as const) {
+      const home = ["LCA", "No model selected", "/model  Choose an engine and model", "/help  Commands", "/quit  Exit"]
+      const frame = basicFrame({ columns, rows, transcript: [], home })
+      expect(stripCsi(frame)).toContain("No model selected")
+      expect(stripCsi(frame)).toContain("/model  Choose an engine and model")
+      const small = basicFrame({ columns: 79, rows, transcript: [], home })
+      expect(stripCsi(small)).not.toContain("No model selected")
+      expect(stripCsi(small)).toContain("Terminal too small")
+    }
+  })
+
+  test("overflow has its own visible row even when draft lines fill every column", () => {
+    for (const columns of [80, 120]) {
+      const line = "x".repeat(columns - 2)
+      const draft = Array.from({ length: 20 }, () => line).join("\n")
+      const frame = basicFrame({ columns, draft, cursor: 0 })
+      const drawn = [...frame.matchAll(/\u001b\[\d+;1H\u001b\[2K([^\u001b]*)/g)].map(match => match[1]!)
+      expect(drawn.some(row => row.includes("Draft ") && row.includes("↓ ") && row.includes(" below"))).toBe(true)
+      expect(drawn.every(row => displayWidth(row) <= columns)).toBe(true)
+      const [row, column] = finalCursor(frame)
+      expect(drawn[row - 1]).toBe(`> ${line}`)
+      expect(column).toBe(3)
+      expect(stripCsi(basicFrame({ columns, draft, cursor: draft.length, ascii: true }))).toMatch(/Draft .* \| \^ \d+ above \| v 0 below/)
+    }
+  })
+
+  test("retained page metadata never labels an old page as latest", () => {
+    const frame = basicFrame({ transcriptNewer: true, transcriptOlder: true })
+    expect(stripCsi(frame)).toContain("History | 0+ older | 0+ newer | PgUp/PgDn")
+  })
+
+  test("a scrolled multiline message retains its speaker even without color", () => {
+    const transcript = ["[Assistant] first line", ...Array.from({ length: 30 }, (_, index) => `  | continuation ${index}`)]
+    for (const color of [false, true]) {
+      const frame = basicFrame({ transcript, color })
+      expect(stripCsi(frame)).not.toContain("[Assistant] first line")
+      expect(stripCsi(frame)).toContain("Assistant continued")
+      expect(stripCsi(frame)).toContain("  | continuation 29")
+    }
+  })
+
+  test.each([80, 120])("physical transcript wraps retain provenance gutters and share scroll row accounting at %i columns", columns => {
+    const transcript = ["You", "Assistant", "Error", "Notice", "Canonical plan"]
+      .map(label => `[${label}] ${"x".repeat(180)}`)
+    const expected = transcript.flatMap(line => wrapTranscriptLine(line, columns))
+    expect(expected.length).toBeGreaterThan(transcript.length)
+    for (const line of transcript) {
+      const wrapped = wrapTranscriptLine(line, columns)
+      expect(wrapped[0]).toStartWith(line.slice(0, line.indexOf("]") + 2))
+      expect(wrapped.slice(1).every(row => row.startsWith("  | "))).toBe(true)
+      expect(wrapped.every(row => displayWidth(row) <= columns)).toBe(true)
+    }
+
+    const frame = renderFrame({
+      columns,
+      rows: 24,
+      transcript,
+      status: "ready",
+      draft: "ok",
+      cursor: 2,
+      color: false,
+    })
+    const rows = [...frame.matchAll(/\u001b\[\d+;1H\u001b\[2K([^\u001b]*)/g)].map(match => match[1]!)
+    const first = rows.indexOf(expected[0]!)
+    expect(first).toBeGreaterThanOrEqual(0)
+    expect(rows.slice(first, first + expected.length)).toEqual(expected)
+    expect(frame).not.toMatch(/\u001b\[[0-9;]*m/)
+
+    const long = `[Assistant] ${"y".repeat(columns * 24)}`
+    const physicalRows = wrapTranscriptLine(long, columns)
+    const scrolled = renderFrame({
+      columns,
+      rows: 24,
+      transcript: [long],
+      transcriptOffset: 1,
+      status: "ready",
+      draft: "ok",
+      cursor: 2,
+      color: false,
+    })
+    const scrolledRows = [...scrolled.matchAll(/\u001b\[\d+;1H\u001b\[2K([^\u001b]*)/g)].map(match => match[1]!)
+    const scrolledFirst = scrolledRows.indexOf(physicalRows.at(-22)!)
+    expect(scrolledFirst).toBeGreaterThanOrEqual(0)
+    expect(scrolledRows.slice(scrolledFirst, scrolledFirst + 21)).toEqual(physicalRows.slice(-22, -1))
+    expect(stripCsi(scrolled)).toContain(`History | Assistant continued | ${physicalRows.length - 22} older | 1 newer | PgUp/PgDn`)
   })
 })

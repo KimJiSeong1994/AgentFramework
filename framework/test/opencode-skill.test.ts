@@ -231,7 +231,7 @@ function childLineReader(stream: ReadableStream<Uint8Array>): ChildLineReader {
   return { reader: stream.getReader(), decoder: new TextDecoder(), buffer: "" }
 }
 
-async function readChildLine(source: ChildLineReader): Promise<Record<string, unknown>> {
+async function readChildLine(source: ChildLineReader, context: string): Promise<Record<string, unknown>> {
   for (;;) {
     const newline = source.buffer.indexOf("\n")
     if (newline >= 0) {
@@ -242,7 +242,12 @@ async function readChildLine(source: ChildLineReader): Promise<Record<string, un
     let timer: ReturnType<typeof setTimeout> | undefined
     const chunk = await Promise.race([
       source.reader.read(),
-      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("remote owner control response timed out")), 15_000) }),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          console.error(`remote owner control response timed out: ${context}`)
+          reject(new Error(`remote owner control response timed out: ${context}`))
+        }, 15_000)
+      }),
     ]).finally(() => { if (timer) clearTimeout(timer) })
     if (chunk.done) throw new Error("remote owner exited before sending its next control message")
     source.buffer += source.decoder.decode(chunk.value, { stream: true })
@@ -274,9 +279,11 @@ async function startRemoteOwner(root: string, childWorktree: string, childSessio
     `  runtime.runs.registerIntent(claim, { executionId: executionID, ownerSession: ownerSessionID, taskId: taskID, attemptId: "native_skill_remote_attempt", generation: claim.generation, role: "main", cwd: childWorktree, policyID: policy.id, kind: "host", engine: runtime.host.identity.engine, profile: "legacy-unowned" })`,
     `  runtime.runs.markHostDispatched(claim, executionID)`,
     `  runtime.runs.bindVendorRef(claim, executionID, JSON.stringify({ executionID, vendorSessionID: childSessionID }))`,
-    `  send({ type: "ready", pid: process.pid, epoch: store.epoch, executionID, taskID })`,
     `  const { createInterface } = await import("node:readline")`,
-    `  for await (const line of createInterface({ input: process.stdin })) {`,
+    `  const controls = createInterface({ input: process.stdin })`,
+    `  const commands = controls[Symbol.asyncIterator]()`,
+    `  send({ type: "ready", pid: process.pid, epoch: store.epoch, executionID, taskID })`,
+    `  for await (const line of commands) {`,
     `    const command = JSON.parse(line)`,
     `    if (command.type === "hold") { holdOwnedAdmission(root, ownerSessionID, "native-remote-child-stop"); send({ type: "held" }); continue }`,
     `    if (command.type === "resume") { try { resumeAdmission(runtime, ownerSessionID); send({ type: "resumed" }) } catch (error) { send({ type: "resume-refused", message: String(error && error.message || error) }) } continue }`,
@@ -307,14 +314,14 @@ async function startRemoteOwner(root: string, childWorktree: string, childSessio
   const output = childLineReader(child.stdout)
   const owner: Omit<RemoteOwner, "ready"> = {
     child,
-    next: () => readChildLine(output),
+    next: () => readChildLine(output, "ready"),
     async command(type) {
       const stdin = child.stdin
       if (!stdin || typeof stdin === "number") throw new Error("remote owner control pipe is unavailable")
       stdin.write(`${JSON.stringify({ type })}\n`)
       if (type === "finish") await stdin.end()
       else await stdin.flush()
-      return readChildLine(output)
+      return readChildLine(output, type)
     },
     releaseOutput() { output.reader.releaseLock() },
   }

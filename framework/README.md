@@ -74,12 +74,14 @@ This is a request bound, not evidence that a remote provider enforces it or stop
 
 ## Common LCA terminal
 
-Bare `lca` and `lca chat` open LCA's engine/model selection, not the OpenCode TUI.
-Select **local** (the installed Ollama CLI), **Codex**, or **Claude Code**.
+Bare `lca` and `lca chat` open LCA's composer with no engine or model selected, not the
+OpenCode TUI. No model discovery, runtime setup, or model call happens at launch. Enter
+`/model` in the composer to select **local** (the installed Ollama CLI), **Codex**, or
+**Claude Code**. Chat and workflow input is refused with a `/model` hint until selection.
 The default path runs natively in the current environment with `legacy-unowned`
 verification; it requires no VM. Linux verifier qualification remains a separate,
 explicitly selected facility, not a prerequisite for ordinary CLI use.
-Selections can also be supplied explicitly:
+Startup selection can be supplied explicitly with both `--engine` and `--model`:
 
 ```sh
 lca chat --engine local --model llama3.2:3b
@@ -87,29 +89,44 @@ lca chat --engine codex --model gpt-5.6-sol
 lca chat --engine claude --model sonnet
 ```
 
-Without an explicit model, the terminal offers numbered choices or native model ID
-entry. Ollama choices come from a bounded, read-only `ollama list` probe in the same
+Either flag on its own still opens the unselected composer; `/model` then asks for the
+missing choice. Without an explicit model, `/model` offers numbered choices or native
+model ID entry. Ollama choices come from a bounded, read-only `ollama list` probe in the same
 subprocess environment as inference; unavailable or empty discovery is reported
-without starting a service or downloading a model. Codex choices are the bundled,
+without starting a service or downloading a model. Discovery happens only when the
+operator requests `/model`; explicit `--model` skips discovery. Codex choices are the bundled,
 version-pinned supported slugs, not an account entitlement query. Claude choices are
-native aliases, not a fetched account catalogue. Explicit `--model` skips discovery.
+native aliases, not a fetched account catalogue.
 
-During idle conversation, `/model` displays the current selection and opens that
-engine's model picker; `/model claude sonnet` switches engines/models directly.
-`/help` lists local commands. Empty input or `/cancel` in the model picker cancels
-selection without changing the current conversation.
+Before initial selection, `/model` opens the engine and model pickers (using any
+partial flag already supplied); `/model claude sonnet` selects that engine/model
+directly. Cancelling either picker returns to the unselected composer. During idle
+conversation, `/model` offers engine selection followed by that engine's models;
+`/model claude sonnet` switches engines/models directly. Full-screen pickers filter
+as you type and preserve the current selection on Escape or `/cancel`. They do not
+dump their menus into the transcript. `/help` opens a contextual command palette:
+Enter inserts the selected command; a separate submission is required to run it.
+Readline prints contextual help and numbered engine/model choices. Empty input,
+`/cancel`, or physical Escape in its pickers cancels without changing the current
+selection or leaking partial selection text into the composer. EOF closes the
+readline input owner; later reads return EOF rather than reusing a closed reader.
 An actual switch starts a fresh conversation/session: prior conversation context is
 not transferred, and no approval is reused. Selecting the same engine/model keeps
 the current session. Switching is refused while a workflow is active, workflow
 state is corrupt, or execution ownership is unresolved; recover with the original
 engine/model/session instead. Cancelling the picker or a failed selection leaves
 the current selection intact. Native host preflight must pass before a candidate
-replaces the current selection. These commands do not run model inference.
+replaces the current selection. Held contexts omit `/model` from contextual help;
+typing it explicitly is refused before discovery or switching, while the switch
+guards still recheck ownership. These commands do not run model inference. Settled
+model-request errors return to the composer only when persistence and ownership
+remain safe; transcript append failures stay fail-closed without draft restoration.
 The full-screen terminal returns to conversation after execution. Readline still
 exits after execution; rejection exits either frontend. Model switching never
 turns recovery into a different-model replay.
 
-Bare `lca` selects a three-region TUI (transcript, status, composer) when all
+Bare `lca` opens a model-unselected home with `/model`, `/help`, and `/quit` actions.
+The TUI has transcript, viewport/status, and composer regions and is enabled when all
 standard streams are TTYs, raw input is supported, `TERM` is set and not `dumb`,
 and the screen is at least 80x24. `LCA_TUI=0` selects readline. Unsupported
 terminals receive a plain fallback notice; missing stdin/stderr TTYs still
@@ -125,8 +142,10 @@ Enter submits; Shift+Enter (enhanced keyboard protocol) and Ctrl+J insert a
 newline. Legacy terminals that send the same bytes for Enter and Shift+Enter
 cannot distinguish them. Bracketed paste is one editing transaction and never
 submits. Tab/Enter on a focused completion inserts only. Up/Down navigate
-history at editor boundaries, and Ctrl+R searches submitted input. First Ctrl+C
-clears the draft; a second strictly less than 500ms later requests shutdown.
+history at editor boundaries, and Ctrl+R searches submitted input. In the composer,
+first Ctrl+C clears the draft; a second strictly less than 500ms later requests shutdown.
+Details and pickers own their input without editing the underlying draft; Ctrl+D
+and the double-Ctrl+C shutdown control remain available in these overlays.
 Escape dismisses transient input UI or requests cancellation. While busy,
 Alt+Q on macOS / Alt+Enter on Linux queues text for later serial turns; queued
 text never answers choices or supplies execution approval.
@@ -176,13 +195,28 @@ denied and thrown calls; duplicate notifications for one call are not new calls.
 The TUI uses `/search <tool/status/task>` to filter this session's transcript,
 `/search` to clear the filter, `/expand <item number>` to show correlation and
 termination evidence, `/details` to toggle the bounded task/evidence panel, and
-PageUp/PageDown to scroll. Help and completion share the same command descriptors.
-Transcript text carries explicit user/assistant/notice/error provenance; code/diff
-presentation remains inert. The status view prioritizes held, read-only, ownership
-and unconfirmed termination/request facts before ordinary activity and distinguishes
-selected/discovered models from observed requests. Tool arguments, raw tool output and
+PageUp/PageDown to scroll. The viewport identifies older/newer content, including
+retained pages; multiline drafts have a separate overflow row that does not overwrite
+their text or cursor. Help and completion share context-filtered command descriptors.
+Transcript text preserves user, assistant, notice, error, and canonical-plan
+provenance with a continuation gutter; canonical-plan text is presentation only,
+not approval authority. Code/diff presentation remains inert. Collapsed tool summaries
+distinguish the call outcome from unconfirmed or historical execution evidence.
+The status view prioritizes held, read-only, ownership and unconfirmed termination/request
+facts before ordinary activity, marks omitted facts, and avoids idle diagnostic noise.
+Model discovery is recorded only when attempted; selection does not prove connectivity.
+Tool arguments, raw tool output and
 model response fragments are not progress messages. Model replies still appear
 after the turn completes rather than as a token stream.
+
+Known model-response failures keep the composer open only after settlement,
+session ownership, hold and workflow checks succeed. They show a bounded error,
+restore the failed draft only if the composer is still empty, and leave queued
+input unadmitted until a manual submission. No retry or model switch is automatic.
+Unknown failures and integrity/admission faults remain fail-closed. History read
+failures instead quarantine the display: input, queues and decisions are blocked
+while a visible diagnostic and safe exit remain available. This is not proof that
+existing execution has stopped.
 
 Required UX evidence is classified separately: the macOS native gate drives the
 production TUI with the explicitly installed model and validates its current model

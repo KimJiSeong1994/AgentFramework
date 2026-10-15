@@ -60,6 +60,27 @@ export type TurnResult =
 
 const MAX_LATE_TEXT = 2_000
 
+export type ModelRequestFailureCategory = "model_failed" | "empty_response" | "response_budget"
+
+const MODEL_REQUEST_DIAGNOSTICS: Readonly<Record<ModelRequestFailureCategory, string>> = {
+  model_failed: "The model request failed after execution stopped. Check the selected model or CLI, then submit the draft again manually.",
+  empty_response: "The model returned no usable response after execution stopped. Review the draft, then submit it again manually.",
+  response_budget: "The model response exceeded the configured response budget. Shorten the draft, then submit it again manually.",
+}
+/** Issued only after settlement; the display diagnostic is fixed, not provider text. */
+export class ModelRequestError extends Error {
+  readonly category: ModelRequestFailureCategory
+  readonly diagnostic: string
+
+  constructor(category: ModelRequestFailureCategory, message: string) {
+    super(message)
+    if (!Object.hasOwn(MODEL_REQUEST_DIAGNOSTICS, category)) throw new TypeError("invalid model request failure category")
+    this.name = "ModelRequestError"
+    this.category = category
+    this.diagnostic = MODEL_REQUEST_DIAGNOSTICS[category]
+  }
+}
+
 function fits(text: string, budget: TurnBudget): boolean {
   return text.length + budget.reserveChars <= budget.maxChars
 }
@@ -278,11 +299,14 @@ async function dispatch(runtime: ExecutionRuntime, input: Dispatch): Promise<Tur
     }
     if (outcome.status !== "completed" || typeof outcome.text !== "string" || !outcome.text.trim()) {
       if (input.summary && outcome.status === "completed") throw new SummaryUnusable("summary was empty")
-      throw new Error(`${request.label} model did not complete a response`)
+      if (outcome.status === "failed") {
+        throw new ModelRequestError("model_failed", `${request.label} model did not complete a response`)
+      }
+      throw new ModelRequestError("empty_response", `${request.label} model did not complete a response`)
     }
     if (outcome.text.length > request.budget.reserveChars) {
       if (input.summary) throw new SummaryUnusable("summary exceeds the reserved response budget")
-      throw new Error(`${request.label} response exceeds the reserved conversation response budget`)
+      throw new ModelRequestError("response_budget", `${request.label} response exceeds the reserved conversation response budget`)
     }
     return { status: "completed", text: outcome.text }
   } catch (error) {

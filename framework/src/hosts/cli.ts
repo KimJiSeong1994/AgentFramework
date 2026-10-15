@@ -99,6 +99,8 @@ Prerequisites and safety:
   Common-engine approve and reject require a local interactive terminal for explicit human decisions.
   Standalone commands do not start a server.
   Interactive chat requires a terminal on stdin and stderr; EOF or interruption never approves a plan.
+  Bare interactive chat opens with no engine or model selected; enter /model in the composer to choose.
+  Startup selection is opt-in with both --engine and --model; partial flags leave the composer unselected.
   Native CLI input limits are estimated and output limits are reactive, not strict guarantees; no process
   or filesystem containment is claimed. Plans are never auto-approved. Host admission refuses when
   required control evidence is unavailable; the CLI does not expose raw vendor preflight diagnostics.

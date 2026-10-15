@@ -22,7 +22,7 @@ afterEach(() => {
 })
 
 function childArgv(mode: string, ...args: string[]): string[] {
-  if (process.versions.bun) return [FIXTURE, mode, ...args]
+  if (process.versions.bun) return ["--no-env-file", FIXTURE, mode, ...args]
   return ["--input-type=module", "--eval", readFileSync(FIXTURE, "utf8"), FIXTURE, mode, ...args]
 }
 

@@ -777,7 +777,7 @@ def run_workflow(temp_root: Path, action: str):
         session.send_text("/theme dark\r")
         session._wait(lambda: session.screen.current_lines()[-1].startswith("You>"), "process-local theme command")
         session.send_text("/ascii\r")
-        session._wait(lambda: "selected codex:pty-fixture-model" in session.screen.current_text(), "ASCII status keeps selected model text")
+        session._wait(lambda: "codex / pty-fixture-model" in session.screen.current_text(), "ASCII status keeps selected model text")
         session.mode_proof["themeAndAsciiLocalNoDispatch"] = True
         assert_no_additional_dispatch(session, turns=0, runs=0)
 
@@ -829,43 +829,49 @@ def run_workflow(temp_root: Path, action: str):
             # Give the coordinator's event loop a chance to consume any invalid
             # choice-mode input; any dispatch is also recorded as a turn event.
             session._wait(lambda: len([e for e in session.events() if e.get("type") == "turn.started"]) == 1, "no turn dispatched from inline-choice input", 0.25)
-            session._wait(lambda: any(f"[+] #1 read · succeeded · task {label} · t1" in session.screen.current_text() for label in ("Implement", "title unavailable")), "validated task title or explicit unavailable title")
-            task_label = "Implement" if "#1 read · succeeded · task Implement · t1" in session.screen.current_text() else "title unavailable"
-            first_tool = f"[+] #1 read · succeeded · task {task_label} · t1"
-            second_tool = f"[+] #2 read · failed · task {task_label} · t1"
-            session.wait_screen(second_tool)
-            visible = session.screen.current_text()
+            logical_screen = lambda: " ".join(session.screen.current_text().split())
+            session._wait(lambda: any(f"[+] #1 read · call succeeded · execution not observed · task {label} · t1" in logical_screen() for label in ("Implement", "title unavailable")), "validated task title and explicit unobserved execution")
+            task_label = "Implement" if "task Implement · t1" in logical_screen() else "title unavailable"
+            first_tool = f"[+] #1 read · call succeeded · execution not observed · task {task_label} · t1"
+            second_tool = f"[+] #2 read · call failed · execution not observed · task {task_label} · t1"
+            session._wait(lambda: second_tool in logical_screen(), "second failed call with explicit execution uncertainty")
+            visible = logical_screen()
             if visible.count("read ·") != 2 or "#3 read" in visible:
                 raise AssertionError(f"repeated terminal tool event duplicated a tool item: {visible}")
             session.mode_proof["toolItemsBeforeFilter"] = [first_tool, second_tool]
 
             session.send_text("/expand 2\r")
             call_detail = "Call call-fixture-2 · execution exec-fixture · worker"
-            expanded_tool = f"[-] #2 read · failed · task {task_label} · t1"
+            expanded_tool = f"[-] #2 read · call failed · execution not observed · task {task_label} · t1"
             session.wait_screen(call_detail)
             session.mode_proof["expandedCallDetailVisible"] = call_detail in session.screen.current_text()
-            if expanded_tool not in session.screen.current_text():
+            if expanded_tool not in logical_screen():
                 raise AssertionError("/expand 2 did not expand the failed read tool item")
             assert_no_additional_dispatch(session, turns=1, runs=1)
 
             session.send_text("/search read failed\r")
-            filtered_tool = "#2 read · failed · task title unavailable · t1"
+            filtered_tool = "#2 read · call failed · execution not observed · task title unavailable · t1"
             session._wait(
-                lambda: filtered_tool in session.screen.current_text() and
-                "#1 read · succeeded" not in session.screen.current_text(),
+                lambda: filtered_tool in logical_screen() and
+                "#1 read · call succeeded" not in logical_screen(),
                 "search redraw with only the failed tool",
             )
-            filtered = session.screen.current_text()
-            if filtered.count("read ·") != 1 or "#1 read · succeeded" in filtered:
+            filtered = logical_screen()
+            if filtered.count("read ·") != 1 or "#1 read · call succeeded" in filtered:
                 raise AssertionError(f"/search read failed did not isolate exactly the failed read tool: {filtered}")
             session.mode_proof["searchReadFailedVisible"] = filtered_tool in filtered
             session.mode_proof["searchReadFailedMatchCount"] = filtered.count("read ·")
             assert_no_additional_dispatch(session, turns=1, runs=1)
 
             session.send_text("/search\r")
-            session._wait(lambda: any(f"[+] #1 read · succeeded · task {label} · t1" in session.screen.current_text() for label in ("Implement", "title unavailable")), "cleared search restores first tool with validated or unavailable title")
-            session._wait(lambda: any(f"[-] #2 read · failed · task {label} · t1" in session.screen.current_text() for label in ("Implement", "title unavailable")), "cleared search restores expanded second tool with validated or unavailable title")
-            restored = session.screen.current_text()
+            session._wait(lambda: any(f"[+] #1 read · call succeeded · execution not observed · task {label} · t1" in logical_screen() for label in ("Implement", "title unavailable")), "cleared search restores first tool with validated or unavailable title")
+            session._wait(lambda: any(f"[-] #2 read · call failed · execution not observed · task {label} · t1" in logical_screen() for label in ("Implement", "title unavailable")), "cleared search restores expanded second tool with validated or unavailable title")
+            session._wait(
+                lambda: "search:" not in " ".join(session.screen.current_lines()[-3:-1]) and
+                session.screen.current_lines()[-1].strip() == "You>",
+                "search-clear redraw reaches status and empty composer",
+            )
+            restored = logical_screen()
             if restored.count("read ·") != 2:
                 raise AssertionError(f"/search did not clear the current-session filter: {restored}")
             session.mode_proof["emptySearchRestoredBothTools"] = True
@@ -1154,7 +1160,9 @@ def run_sdk_observer(temp_root: Path):
         def refuse(command: str):
             session._wait(
                 lambda: (f"History> {command}" in session.screen.current_text() or f"[You] {command}" in session.screen.current_text()) and
-                readonly_refusal in " ".join(session.screen.current_text().split()) and
+                readonly_refusal in " ".join(
+                    " ".join(line.removeprefix("  | ") for line in session.screen.current_lines()).split()
+                ) and
                 session.screen.current_lines()[-1].startswith("History>"),
                 f"read-only SDK refusal of {command!r}",
             )
@@ -1449,6 +1457,59 @@ def run_skills(temp_root: Path):
         session.close()
 
 
+def run_readline_pickers(preflight: dict[str, Any]):
+    cases = {}
+    with tempfile.TemporaryDirectory(prefix="lca-readline-pickers-") as directory:
+        root = Path(directory).resolve()
+        for level in ("engine", "model"):
+            for action in ("escape", "cancel", "eof"):
+                name = f"{level}-{action}"
+                case_root = root / name
+                case_root.mkdir()
+                session = PtySession("readline-picker", case_root).start()
+                try:
+                    session.wait_output("You>")
+                    session.send_text("/model\r")
+                    prompt = "Engine [1-3]:"
+                    session.wait_output(prompt)
+                    if level == "model":
+                        session.send_text("1\r")
+                        prompt = "Model [native ID]:"
+                        session.wait_output(prompt)
+                    session.checkpoint("picker")
+                    start = len(session.output)
+                    session.send({"escape": b"\x1b", "cancel": b"/cancel\r", "eof": b"\x04"}[action])
+                    if action != "eof":
+                        session._wait(
+                            lambda: "You>" in plain_text(session.output[start:]),
+                            f"{name}: fresh composer after cancellation",
+                        )
+                        session.checkpoint("cancelled")
+                        session.send_text("/quit\r")
+                    session.capture_terminal_cleanup()
+                    code = session.wait_exit()
+                    fixture = session.fixture_report()
+                    expected = {
+                        "runtimeCreateCount": 0,
+                        "runtimeAdmissionCount": 0,
+                        "turnCount": 0,
+                        "decisionCount": 0,
+                        "runCount": 0,
+                        "modelCatalogCallCount": 1 if level == "model" else 0,
+                    }
+                    if code != 0 or any(fixture.get(key) != value for key, value in expected.items()):
+                        raise AssertionError(f"{name}: unexpected exit or side effect: {code}, {fixture}")
+                    cases[name] = {"exitCode": code, "fixture": fixture, "capture": session.capture()}
+                finally:
+                    session.close()
+    return {
+        "status": "passed",
+        "scope": "production readline terminal and coordinator; deterministic empty model catalog, no runtime or inference",
+        "preflight": preflight,
+        "cases": cases,
+    }
+
+
 def run_readline_skills(temp_root: Path):
     session = PtySession("readline-skills", temp_root).start()
     try:
@@ -1593,6 +1654,19 @@ def finish_skill_tool_scenario(session: PtySession, expected_code: int):
     return {"exitCode": code, "fixture": fixture, "capture": session.capture()}
 
 
+def exit_settled_failure(session: PtySession):
+    session.wait_screen("[Error] The model request failed")
+    session._wait(
+        lambda: "request:failed(" in session.screen.current_text() and
+        session.screen.current_lines()[-1].startswith("You> /skill:"),
+        "settled response failure retains its draft and a live composer",
+    )
+    if session.process.poll() is not None:
+        raise AssertionError("settled response failure terminated the TUI before explicit exit")
+    session.mode_proof["settledFailureRetainsComposer"] = True
+    session.send(b"\x04")
+
+
 def run_skill_tool_scope(temp_root: Path):
     session = PtySession("skill-tool-scope", temp_root).start()
     try:
@@ -1634,7 +1708,8 @@ def run_skill_tool_scope(temp_root: Path):
             "owner denial of the repeated grep call",
         )
 
-        outcome = finish_skill_tool_scenario(session, 1)
+        exit_settled_failure(session)
+        outcome = finish_skill_tool_scenario(session, 0)
         fixture = outcome["fixture"]
         final_tools = native_tool_events(fixture)
         expected_tools = [
@@ -1645,7 +1720,7 @@ def run_skill_tool_scope(temp_root: Path):
         ]
         if final_tools != expected_tools:
             raise AssertionError(f"repeated grep denial did not produce a failed native tool result without a second effect: {final_tools}")
-        if fixture.get("error") != "Error: planning model did not complete a response" or fixture.get("runCount") != 0:
+        if fixture.get("error") is not None or fixture.get("runCount") != 0:
             raise AssertionError(f"denied repeated grep did not fail the owned model turn without execution: {fixture.get('error')} / {fixture.get('runCount')}")
         if fixture.get("sourceChoices") != [{
             "sessionID": "lca-pty-session", "values": ["Allow this content in this session", "Deny"], "answer": 0,
@@ -1749,7 +1824,8 @@ def run_skill_main_write(temp_root: Path):
             lambda event: event.get("type") == "native.tool.activity" and event.get("kind") == "tool-started" and event.get("tool") == "write",
             "real host receives the model's skill-context write request",
         )
-        outcome = finish_skill_tool_scenario(session, 1)
+        exit_settled_failure(session)
+        outcome = finish_skill_tool_scenario(session, 0)
         fixture = outcome["fixture"]
         if native_tool_events(fixture) != [
             {"kind": "tool-started", "role": "main", "tool": "write"},
@@ -2484,6 +2560,7 @@ def run_all(preflight: dict[str, Any]):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true", help="check the frozen PTY prerequisites only")
+    parser.add_argument("--readline-pickers-only", action="store_true", help="probe fallback selection cancellation and EOF without inference")
     parser.add_argument("--out", type=Path, help="optional path for structured PTY evidence and screen captures")
     args = parser.parse_args()
     required = os.environ.get("LCA_TUI_PTY_REQUIRED") == "1"
@@ -2506,7 +2583,7 @@ def main():
         return 0
 
     try:
-        evidence = run_all(preflight)
+        evidence = run_readline_pickers(preflight) if args.readline_pickers_only else run_all(preflight)
     except Exception as error:
         evidence = {
             "schemaVersion": 1,
