@@ -66,9 +66,25 @@ describe("TUI command and skill palette", () => {
     expect(fuzzyScore("dx", "deep-interview")).toBeUndefined()
   })
 
+  test("/skill lists every skill, not only names containing 'skill'", () => {
+    const skills = palette(catalog, "/skill")!.rows.filter(row => row.kind === "skill").map(row => row.name).sort()
+    expect(skills).toEqual(["blocked-skill", "deep-interview", "hidden", "ralplan", "release-check", "review"])
+    expect(palette(catalog, "/skill")!.rows[0]?.label).toBe("/skills")
+    // `/skills` is the command; it does not widen into every skill by loose letters.
+    expect(palette(catalog, "/skills")!.rows.map(row => row.label)).toEqual(["/skills"])
+  })
+
+  test("before a model is chosen /skill explains why no skills are listed and inserts nothing", () => {
+    for (const draft of ["/sk", "/skill", "/skill:", "/skill:rev"]) {
+      const row = palette(catalog, draft, "unselected")!.rows.find(item => item.label === "skill:…")!
+      expect(row.description).toContain("/model")
+      expect(paletteInsertion(row)).toBeUndefined()
+    }
+    expect(palette(catalog, "/mo", "unselected")!.rows.some(row => row.label === "skill:…")).toBe(false)
+  })
+
   test("skills appear only where they can be invoked; commands follow the context", () => {
     expect(palette(catalog, "/rev", "unselected")).toBeUndefined()
-    expect(palette(catalog, "/skill:", "unselected")).toBeUndefined()
     expect(palette(catalog, "/mo", "unselected")?.rows.map(row => row.label)).toEqual(["/model"])
     expect(palette(catalog, "/", "read-only")!.rows.some(row => row.kind === "skill")).toBe(false)
   })
