@@ -320,11 +320,11 @@ export class TuiApp implements Terminal {
       sections: this.interactionContext === "unselected"
         ? [
           { heading: "Get started", lines: ["/model  choose an engine and model", "/help   commands and keys", "/quit   leave"] },
-          { heading: "Flow keys", lines: [["/ commands", "Ctrl+R history", "Ctrl+J newline"].join(keys), ["Ctrl+C clear", "twice exits"].join(keys)] },
+          { heading: "Flow keys", lines: [["/ commands", "Ctrl+R history"].join(keys), ["Ctrl+J newline", "Ctrl+C clear"].join(keys)] },
         ]
         : [
-          { heading: "Get started", lines: ["No messages yet.", "Type a message and press Enter to begin.", "/help commands · /model switch · /quit leave"] },
-          { heading: "Flow keys", lines: [["/ commands", "Ctrl+R history", "Ctrl+J newline"].join(keys), ["PgUp/PgDn scroll", "Ctrl+C clear"].join(keys)] },
+          { heading: "Get started", lines: ["No messages yet.", "Type a message, then press Enter.", "/help   commands and keys", "/model  switch engine or model"] },
+          { heading: "Flow keys", lines: [["/ commands", "Ctrl+R history"].join(keys), ["Ctrl+J newline", "PgUp/PgDn scroll"].join(keys)] },
         ],
     }
   }
@@ -514,8 +514,8 @@ export class TuiApp implements Terminal {
       screen = "Task/evidence details"
       composerVisible = false
     }
-    const home = this.transcript.items.length === 0 && !panel ? this.homeScreen() : undefined
-    if (home) screen = "Home"
+    const home = this.transcript.items.length === 0 && panel?.placement !== "body" ? this.homeScreen() : undefined
+    if (home && !panel) screen = "Home"
     if (panel?.placement === "body") composerVisible = false
     if (!composerVisible) { draft = ""; cursor = 0; prompt = "" }
     this.driver.write(renderFrame({ ...this.dimensions(), transcript: panel?.placement === "body" ? [] : lines,
@@ -639,7 +639,7 @@ export class TuiApp implements Terminal {
         this.choice.documentAnchorLine = wrapped[this.choice.documentOffset]?.sourceLine ?? this.choice.documentAnchorLine
         this.choice.documentAnchorOffset = wrapped[this.choice.documentOffset]?.sourceOffset ?? this.choice.documentAnchorOffset
       } else if (this.choice.presentation.kind === "generic-list") {
-        const height = Math.max(1, this.bodyViewportRows() - 3)
+        const height = Math.max(1, this.panelRows() - 3)
         if (event.key === "up") this.choice.selected = (this.choice.selected + this.choice.values.length - 1) % this.choice.values.length
         else if (event.key === "down" || event.key === "tab") this.choice.selected = (this.choice.selected + 1) % this.choice.values.length
         else if (event.key === "pageUp" || event.key === "pageup") this.choice.selected = Math.max(0, this.choice.selected - height)

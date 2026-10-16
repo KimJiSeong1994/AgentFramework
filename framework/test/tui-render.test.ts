@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import fixtureSet from "./fixtures/gjc-keys-8cd17c0.json"
-import { displayAnsiWidth, displayWidth, renderFrame, transcriptViewportRows, wrapAnsiText, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
+import { displayAnsiWidth, displayWidth, renderFrame, transcriptDisplayRows, transcriptViewportRows, wrapAnsiText, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
 
 interface ReferenceFixture {
   id: string
@@ -24,7 +24,8 @@ function fixture(id: string): ReferenceFixture {
 }
 
 const stripCsi = (value: string): string => value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-const frameRows = (value: string): string[] => [...value.matchAll(/\u001b\[\d+;1H\u001b\[2K([^\u001b]*)/g)].map(match => match[1]!)
+const frameRows = (value: string): string[] => [...value.matchAll(/\u001b\[\d+;1H\u001b\[2K((?:[^\u001b]|\u001b\[[0-9;]*m)*)/g)]
+  .map(match => match[1]!.replace(/\u001b\[[0-9;]*m/g, "").trimEnd())
 const finalCursor = (value: string): [number, number] => {
   const match = value.match(/\u001b\[(\d+);(\d+)H$/)
   if (!match) throw new Error("frame has no final cursor position")
@@ -89,33 +90,45 @@ describe("TUI renderer text primitives", () => {
 })
 
 describe("renderFrame", () => {
-  test("redraws every row at 80x24 and positions the cursor after the draft", () => {
+  const composerContent = (drawn: readonly string[]): string[] => {
+    const bottom = drawn.findLastIndex(row => row.startsWith("╰") && !row.includes("┴"))
+    const top = drawn.slice(0, bottom).findLastIndex(row => row.startsWith("╭"))
+    return drawn.slice(top + 1, bottom).map(row => row.replace(/^│ /u, "").replace(/ *│$/u, ""))
+  }
+
+  test("redraws every row at 80x24 and positions the cursor inside the composer box", () => {
     const frame = basicFrame()
     expect((frame.match(/\u001b\[\d+;1H\u001b\[2K/g) ?? [])).toHaveLength(24)
-    expect(finalCursor(frame)).toEqual([24, 5])
-    expect(stripCsi(frame)).toContain("transcript row")
-    expect(stripCsi(frame)).toContain("ready")
-    expect(frameRows(frame)[2]).toBe("transcript row")
+    const drawn = frameRows(frame)
+    expect(drawn[0]).toBe("  transcript row")
+    expect(drawn[20]).toStartWith(" ⬢ no model ─")
+    expect(drawn[21]).toBe(`╭${"─".repeat(78)}╮`)
+    expect(drawn[22]).toBe(`│ > ok${" ".repeat(73)}│`)
+    expect(drawn[23]).toBe(`╰${"─".repeat(78)}╯`)
+    expect(drawn[19]).toBe("ready")
+    expect(finalCursor(frame)).toEqual([23, 7])
   })
 
-  test.each([[80, 24], [120, 40]] as const)("anchors header, transcript, status and composer at %ix%i", (columns, rows) => {
+  test.each([[80, 24], [120, 40]] as const)("arranges transcript, status, model rule and bordered composer at %ix%i", (columns, rows) => {
     const frame = basicFrame({
       columns,
       rows,
-      transcript: ["[Assistant] first message"],
-      header: { screen: "Home", selection: "local / model-a" },
+      transcript: ["[You] question", "[Assistant] first message"],
+      header: { screen: "Chat", selection: "local / model-a" },
       status: ["status one", "status two"],
     })
     const drawn = frameRows(frame)
     expect(drawn).toHaveLength(rows)
-    expect(drawn[0]).toBe("LCA · Home · local / model-a")
-    expect(displayWidth(drawn[1]!)).toBe(columns)
-    expect(drawn[2]).toBe("[Assistant] first message")
-    expect(drawn[rows - 4]).toBe(drawn[1])
-    expect(drawn[rows - 3]).toBe("status one")
-    expect(drawn[rows - 2]).toBe("status two")
-    expect(drawn[rows - 1]).toBe("> ok")
-    expect(finalCursor(frame)).toEqual([rows, 5])
+    expect(drawn[0]).toBe("❯ question")
+    expect(drawn[1]).toBe("")
+    expect(drawn[2]).toBe("● first message")
+    expect(drawn[rows - 6]).toBe("status one")
+    expect(drawn[rows - 5]).toBe("status two")
+    expect(drawn[rows - 4]).toStartWith(" ⬢ local / model-a ─")
+    expect(drawn[rows - 4]).toEndWith("─ LCA")
+    expect(displayWidth(drawn[rows - 4]!)).toBe(columns)
+    expect(composerContent(drawn)).toEqual(["> ok"])
+    expect(finalCursor(frame)).toEqual([rows - 1, 7])
     expect(transcriptViewportRows({ columns, rows, draft: "ok", cursor: 2 })).toBe(rows - 6)
   })
 
@@ -163,9 +176,10 @@ describe("renderFrame", () => {
     })
   })
 
-  test("scrolls within one paragraph by wrapped visual rows", () => {
+  test("scrolls within one paragraph by wrapped visual rows and reports position on the rule", () => {
     const paragraph = Array.from({ length: 26 }, (_, index) => String.fromCharCode(65 + index).repeat(80)).join("")
-    const rows = frameRows
+    const physical = transcriptDisplayRows([paragraph], 80).map(row => `${row.gutter}${row.text}`)
+    const viewport = transcriptViewportRows({ columns: 80, rows: 24, draft: "ok", cursor: 2 })
     const frame = (transcriptOffset?: number) => renderFrame({
       columns: 80,
       rows: 24,
@@ -176,11 +190,11 @@ describe("renderFrame", () => {
       cursor: 2,
     })
 
-    expect(rows(frame())[2]).toBe("I".repeat(80))
-    expect(rows(frame(1))[2]).toBe("H".repeat(80))
-    expect(rows(frame(Number.MAX_SAFE_INTEGER))[2]).toBe("A".repeat(80))
-    expect(stripCsi(frame())).toContain("Latest | 8 older | 0 newer | PgUp/PgDn")
-    expect(stripCsi(frame(1))).toContain("History | 7 older | 1 newer | PgUp/PgDn")
+    expect(frameRows(frame())[0]).toBe(physical[physical.length - viewport])
+    expect(frameRows(frame(1))[0]).toBe(physical[physical.length - viewport - 1])
+    expect(frameRows(frame(Number.MAX_SAFE_INTEGER))[0]).toBe(physical[0])
+    expect(stripCsi(frame())).toContain(`Latest · ${physical.length - viewport} older · 0 newer · PgUp/PgDn`)
+    expect(stripCsi(frame(1))).toContain(`History · ${physical.length - viewport - 1} older · 1 newer · PgUp/PgDn`)
   })
 
   test("neutralizes untrusted escapes and controls; optional status color is internal SGR only", () => {
@@ -203,20 +217,27 @@ describe("renderFrame", () => {
     expect(frame).not.toMatch(/\u001b\[[0-9;]*m/)
 
     const colored = basicFrame({ color: true })
-    expect(colored).toContain("\u001b[36mready\u001b[0m")
+    expect(colored).toContain("\u001b[2mready\u001b[0m")
+  })
+
+  test("user rows keep a provenance glyph without color and a full-width bar with color", () => {
+    const plain = frameRows(basicFrame({ transcript: ["[You] mine", "[Assistant] reply"], color: false }))
+    expect(plain[0]).toBe("❯ mine")
+    expect(plain[2]).toBe("● reply")
+    const colored = basicFrame({ transcript: ["[You] mine"], color: true })
+    expect(colored).toContain(`\u001b[1;48;5;236;97m❯ mine${" ".repeat(74)}\u001b[0m`)
+    expect(frameRows(basicFrame({ transcript: ["[You] mine"], ascii: true }))[0]).toBe("> mine")
   })
 
   test("wraps a full-width cursor onto a valid following row", () => {
-    const frame = basicFrame({ draft: "x".repeat(78), cursor: 78 })
-    const [row, column] = finalCursor(frame)
-    expect(row).toBe(24)
-    expect(column).toBe(3)
-    expect(column).toBeLessThanOrEqual(80)
+    const frame = basicFrame({ draft: "x".repeat(74), cursor: 74 })
+    expect(finalCursor(frame)).toEqual([23, 5])
+    expect(frameRows(frame)[21]).toBe(`│ > ${"x".repeat(74)} │`)
   })
 
   test("uses grapheme display width for cursor placement and scrolls multiline input with it", () => {
-    const unicode = basicFrame({ draft: "a👩‍💻é", cursor: 1 })
-    expect(finalCursor(unicode)).toEqual([24, 4])
+    const unicode = basicFrame({ draft: "a👩‍💻é", cursor: 1 })
+    expect(finalCursor(unicode)).toEqual([23, 6])
 
     const draft = "line\n".repeat(20)
     const multiline = renderFrame({
@@ -227,33 +248,42 @@ describe("renderFrame", () => {
       draft,
       cursor: draft.length,
     })
-    const [row, column] = finalCursor(multiline)
-    expect(row).toBe(40)
-    expect(column).toBe(3)
+    expect(finalCursor(multiline)).toEqual([39, 5])
     expect(stripCsi(multiline)).toContain("transcript survives")
   })
 
-  test("home actions are visible without leaking into the undersized recovery frame", () => {
+  test("welcome box shows identity and sections without leaking into the undersized recovery frame", () => {
+    const home = {
+      title: "LCA · local coding agent",
+      left: ["LCA", "No model is selected."],
+      sections: [
+        { heading: "Get started", lines: ["/model  choose an engine and model", "/help   commands and keys"] },
+        { heading: "Flow keys", lines: ["/ commands"] },
+      ],
+    }
     for (const [columns, rows] of [[80, 24], [120, 40]] as const) {
-      const home = ["LCA", "No model selected", "/model  Choose an engine and model", "/help  Commands", "/quit  Exit"]
       const frame = basicFrame({ columns, rows, transcript: [], home })
-      expect(frameRows(frame)[2]).toBe("  LCA")
-      expect(frameRows(frame)[3]).toBe("  No model selected")
-      expect(stripCsi(frame)).toContain("No model selected")
-      expect(stripCsi(frame)).toContain("/model  Choose an engine and model")
+      const drawn = frameRows(frame)
+      expect(drawn[0]).toStartWith("╭─ LCA · local coding agent ─")
+      expect(drawn[0]).toEndWith("╮")
+      expect(drawn.findIndex(row => row.startsWith("╰") && row.includes("┴"))).toBeGreaterThan(0)
+      expect(stripCsi(frame)).toContain("No model is selected.")
+      expect(stripCsi(frame)).toContain("/model  choose an engine and model")
+      expect(stripCsi(frame)).toContain("Flow keys")
+      expect(drawn.every(row => displayWidth(row) <= columns)).toBe(true)
       const small = basicFrame({ columns: 79, rows, transcript: [], home })
-      expect(stripCsi(small)).not.toContain("No model selected")
+      expect(stripCsi(small)).not.toContain("No model is selected")
       expect(stripCsi(small)).toContain("Terminal too small")
     }
   })
 
-  test.each([[80, 24], [120, 40]] as const)("renders a titled panel without transcript or inactive composer leakage at %ix%i", (columns, rows) => {
+  test.each([[80, 24], [120, 40]] as const)("renders a bordered body panel without transcript or inactive composer leakage at %ix%i", (columns, rows) => {
     const frame = basicFrame({
       columns,
       rows,
       transcript: ["private transcript context"],
       header: { screen: "Task/evidence details", selection: "local / model-a" },
-      panel: { title: "Task/evidence details", focus: "evidence list", lines: ["No task evidence is available."] },
+      panel: { title: "Task/evidence details", focus: "evidence list", placement: "body", lines: ["No task evidence is available."] },
       status: "Escape closes",
       draft: "private draft",
       cursor: 8,
@@ -262,92 +292,100 @@ describe("renderFrame", () => {
     })
     const plain = stripCsi(frame)
     const drawn = frameRows(frame)
-    expect(drawn[0]).toBe("LCA · local / model-a")
+    expect(drawn[0]).toStartWith("╭─ Task/evidence details · evidence list focus ─")
+    expect(drawn[1]).toStartWith("│ No task evidence is available.")
+    expect(drawn[2]).toStartWith("╰")
     expect(plain.match(/Task\/evidence details/g)).toHaveLength(1)
-    expect(drawn[2]).toBe("Task/evidence details · evidence list focus")
-    expect(drawn[3]).toBe("No task evidence is available.")
     expect(plain).not.toContain("private transcript context")
     expect(plain).not.toContain("private draft")
     expect(plain).not.toContain("You>")
-    expect(drawn[rows - 1]).toBe("")
+    expect(drawn[rows - 1]).toStartWith(" ⬢ local / model-a ─")
+    expect(drawn[rows - 1]).toEndWith("─ LCA")
     expect(frame).toContain("\u001b[?25l")
     expect(finalCursor(frame)).toEqual([rows, 1])
   })
 
-  test("overflow has its own visible row even when draft lines fill every column", () => {
+  test("a below panel keeps the transcript and composer and lists choices under the box", () => {
+    const frame = basicFrame({
+      transcript: ["[Assistant] still visible"],
+      header: { screen: "Choose an execution engine", selection: "local / model-a" },
+      composerTitle: "Choose an execution engine",
+      panel: { title: "Choose an execution engine", focus: "filter", placement: "below", lines: ["> local — Ollama CLI", "  codex — Codex CLI", "(1/2) 2 matches"] },
+      status: "Up/Down move",
+      draft: "lo",
+      cursor: 2,
+      prompt: "Filter> ",
+    })
+    const drawn = frameRows(frame)
+    expect(drawn[0]).toBe("● still visible")
+    expect(drawn.at(-3)).toBe("> local — Ollama CLI")
+    expect(drawn.at(-2)).toBe("  codex — Codex CLI")
+    expect(drawn.at(-1)).toBe("(1/2) 2 matches")
+    expect(drawn.at(-6)).toStartWith("╭─ Choose an execution engine ─")
+    expect(drawn.at(-5)).toStartWith("│ Filter> lo")
+    expect(drawn.at(-7)).toEndWith("─ LCA")
+    expect(stripCsi(frame).match(/Choose an execution engine/g)).toHaveLength(1)
+    expect(finalCursor(frame)).toEqual([20, 13])
+  })
+
+  test("overflow is reported on the composer border even when draft lines fill every column", () => {
     for (const columns of [80, 120]) {
-      const line = "x".repeat(columns - 2)
+      const line = "x".repeat(columns - 4)
       const draft = Array.from({ length: 20 }, () => line).join("\n")
       const frame = basicFrame({ columns, draft, cursor: 0 })
-      const drawn = [...frame.matchAll(/\u001b\[\d+;1H\u001b\[2K([^\u001b]*)/g)].map(match => match[1]!)
-      expect(drawn.some(row => row.includes("Draft ") && row.includes("↓ ") && row.includes(" below"))).toBe(true)
+      const drawn = frameRows(frame)
+      const top = drawn.findLastIndex(row => row.startsWith("╭"))
+      expect(drawn[top]).toMatch(/^╭─ Draft 1-\d+\/\d+ · ↑ 0 above · ↓ \d+ below ─+╮$/u)
       expect(drawn.every(row => displayWidth(row) <= columns)).toBe(true)
       const [row, column] = finalCursor(frame)
-      expect(drawn[row - 1]).toBe(`> ${line}`)
-      expect(column).toBe(3)
+      expect(row - 1).toBe(top + 1)
+      expect(drawn[row - 1]).toStartWith(`│ > ${"x".repeat(columns - 6)}`)
+      expect(column).toBe(5)
       expect(stripCsi(basicFrame({ columns, draft, cursor: draft.length, ascii: true }))).toMatch(/Draft .* \| \^ \d+ above \| v 0 below/)
     }
   })
 
   test("retained page metadata never labels an old page as latest", () => {
     const frame = basicFrame({ transcriptNewer: true, transcriptOlder: true })
-    expect(stripCsi(frame)).toContain("History | 0+ older | 0+ newer | PgUp/PgDn")
+    expect(stripCsi(frame)).toContain("History · 0+ older · 0+ newer · PgUp/PgDn")
   })
 
   test("a scrolled multiline message retains its speaker even without color", () => {
     const transcript = ["[Assistant] first line", ...Array.from({ length: 30 }, (_, index) => `  | continuation ${index}`)]
     for (const color of [false, true]) {
       const frame = basicFrame({ transcript, color })
-      expect(stripCsi(frame)).not.toContain("[Assistant] first line")
+      expect(stripCsi(frame)).not.toContain("● first line")
       expect(stripCsi(frame)).toContain("Assistant continued")
-      expect(stripCsi(frame)).toContain("  | continuation 29")
+      expect(stripCsi(frame)).toContain("  continuation 29")
     }
   })
 
-  test.each([80, 120])("physical transcript wraps retain provenance gutters and share scroll row accounting at %i columns", columns => {
-    const transcript = ["You", "Assistant", "Error", "Notice", "Canonical plan"]
-      .map(label => `[${label}] ${"x".repeat(180)}`)
-    const expected = transcript.flatMap(line => wrapTranscriptLine(line, columns))
-    expect(expected.length).toBeGreaterThan(transcript.length)
-    for (const line of transcript) {
-      const wrapped = wrapTranscriptLine(line, columns)
-      expect(wrapped[0]).toStartWith(line.slice(0, line.indexOf("]") + 2))
-      expect(wrapped.slice(1).every(row => row.startsWith("  | "))).toBe(true)
+  test.each([80, 120])("physical transcript wraps keep distinct provenance glyphs and share scroll row accounting at %i columns", columns => {
+    const labels = ["You", "Assistant", "Error", "Notice", "Canonical plan"] as const
+    const glyphs = ["❯ ", "● ", "✗ ", "· ", "◆ "]
+    const transcript = labels.map(label => `[${label}] ${"x".repeat(180)}`)
+    labels.forEach((label, index) => {
+      const wrapped = wrapTranscriptLine(transcript[index]!, columns)
+      expect(wrapped.length).toBeGreaterThan(1)
+      expect(wrapped[0]).toStartWith(glyphs[index]!)
+      expect(wrapped.slice(1).every(row => row.startsWith("  "))).toBe(true)
       expect(wrapped.every(row => displayWidth(row) <= columns)).toBe(true)
-    }
-
-    const frame = renderFrame({
-      columns,
-      rows: 24,
-      transcript,
-      status: "ready",
-      draft: "ok",
-      cursor: 2,
-      color: false,
+      if (label === "Canonical plan") expect(wrapped[0]).toStartWith("◆ Plan:")
     })
-    const rows = frameRows(frame)
-    const first = rows.indexOf(expected[0]!)
-    expect(first).toBeGreaterThanOrEqual(0)
-    expect(rows.slice(first, first + expected.length)).toEqual(expected)
+    expect(new Set(glyphs).size).toBe(glyphs.length)
+
+    const expected = transcriptDisplayRows(transcript, columns).map(row => `${row.gutter}${row.text}`.trimEnd())
+    expect(expected.filter(row => row === "")).toHaveLength(transcript.length - 1)
+    const viewportRows = transcriptViewportRows({ columns, rows: 24, draft: "ok", cursor: 2 })
+    const frame = renderFrame({ columns, rows: 24, transcript, status: "ready", draft: "ok", cursor: 2, color: false })
+    const shown = expected.slice(-viewportRows)
+    expect(frameRows(frame).slice(0, shown.length)).toEqual(shown)
     expect(frame).not.toMatch(/\u001b\[[0-9;]*m/)
 
     const long = `[Assistant] ${"y".repeat(columns * 24)}`
     const physicalRows = wrapTranscriptLine(long, columns)
-    const viewportRows = transcriptViewportRows({ columns, rows: 24, draft: "ok", cursor: 2 })
-    const scrolled = renderFrame({
-      columns,
-      rows: 24,
-      transcript: [long],
-      transcriptOffset: 1,
-      status: "ready",
-      draft: "ok",
-      cursor: 2,
-      color: false,
-    })
-    const scrolledRows = frameRows(scrolled)
-    const scrolledFirst = scrolledRows.indexOf(physicalRows.at(-(viewportRows + 1))!)
-    expect(scrolledFirst).toBeGreaterThanOrEqual(0)
-    expect(scrolledRows.slice(scrolledFirst, scrolledFirst + viewportRows)).toEqual(physicalRows.slice(-(viewportRows + 1), -1))
-    expect(stripCsi(scrolled)).toContain(`History | Assistant continued | ${physicalRows.length - viewportRows - 1} older | 1 newer | PgUp/PgDn`)
+    const scrolled = renderFrame({ columns, rows: 24, transcript: [long], transcriptOffset: 1, status: "ready", draft: "ok", cursor: 2, color: false })
+    expect(frameRows(scrolled).slice(0, viewportRows)).toEqual(physicalRows.slice(-(viewportRows + 1), -1))
+    expect(stripCsi(scrolled)).toContain(`History · Assistant continued · ${physicalRows.length - viewportRows - 1} older · 1 newer · PgUp/PgDn`)
   })
 })

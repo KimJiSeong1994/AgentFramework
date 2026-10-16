@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test"
 import { commandInsertions, interactiveActions, interactiveHelp } from "../src/hosts/interactive-actions.ts"
 import { commandCompletions } from "../src/tui/skill-completion.ts"
 import { TuiApp } from "../src/tui/app.ts"
-import { transcriptViewportRows, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
+import { bodyPanelRows, panelInnerColumns, transcriptViewportRows, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
+
+const plain = (frame: string | undefined): string => (frame ?? "").replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
 
 type AppInput = {
   input(event: unknown): void
@@ -78,9 +80,13 @@ describe("exclusive application input ownership", () => {
 
     internal.draw()
 
-    expect(frames.at(-1)).toContain("LCA · Home · local / model-known")
-    expect(frames.at(-1)).toContain("\u001b[3;1H\u001b[2K  No messages yet.")
-    expect(frames.at(-1)).not.toContain("ready")
+    const frame = plain(frames.at(-1))
+    expect(frame).toContain("╭─ LCA · local coding agent ─")
+    expect(frame).toContain("⬢ local / model-known")
+    expect(frame).toContain("No messages yet.")
+    expect(frame).toContain("Type a message, then press Enter.")
+    expect(frame).not.toContain("No model is selected.")
+    expect(frame).not.toContain("ready")
     app.close()
   })
 
@@ -289,13 +295,12 @@ describe("exclusive application input ownership", () => {
       document,
       binding: { sessionID: "session-1", workflowID: "workflow-1", expectedRevision: 3, planSha: "a".repeat(64), path: "plan.json" },
     })
-    expect(frames.at(-1)).toContain("Review canonical plan · document focus")
+    expect(plain(frames.at(-1))).toContain("╭─ Review canonical plan · document focus ─")
     expect(frames.at(-1)).not.toContain("private approval draft")
     expect(frames.at(-1)).not.toContain("You> ")
     expect(frames.at(-1)).toContain("\u001b[?25l")
-    const bodyRows = transcriptViewportRows({ columns, rows, draft: "", cursor: 0, prompt: "" })
-    const pageRows = Math.max(1, bodyRows - 6 - values.length)
-    const totalRows = document.split("\n").flatMap(line => wrapText(line, columns)).length
+    const pageRows = Math.max(1, bodyPanelRows({ columns, rows }) - 5 - values.length)
+    const totalRows = document.split("\n").flatMap(line => wrapText(line, panelInnerColumns(columns))).length
 
     internal.input({ type: "key", key: "pageDown" })
     expect(internal.choice?.documentOffset).toBe(pageRows)
@@ -334,8 +339,9 @@ describe("exclusive application input ownership", () => {
     internal.input({ type: "paste", text: "claude" })
     await Promise.resolve()
     expect(settled).toBe(false)
-    expect(frames.at(-1)).toContain("Engine · filter and selection focus")
-    expect(frames.at(-1)).toContain("Filter> claude")
+    expect(plain(frames.at(-1))).toContain("╭─ Engine ─")
+    expect(plain(frames.at(-1))).toContain("│ Filter> claude")
+    expect(plain(frames.at(-1))).toContain("> claude")
     expect(frames.at(-1)).not.toContain("You> ")
     expect(frames.at(-1)).not.toContain("retained draft")
     expect(app.draftSnapshot().draft).toBe("retained draft")

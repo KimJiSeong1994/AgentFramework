@@ -555,9 +555,9 @@ function makeFrame(lines: readonly string[], cursor: CursorPosition, cursorVisib
   return output.join("")
 }
 
-type Glyphs = { h: string; v: string; tl: string; tr: string; bl: string; br: string; tj: string; bj: string; model: string; select: string }
-const unicodeGlyphs: Glyphs = { h: "─", v: "│", tl: "╭", tr: "╮", bl: "╰", br: "╯", tj: "┬", bj: "┴", model: "⬢", select: "❯" }
-const asciiGlyphs: Glyphs = { h: "-", v: "|", tl: "+", tr: "+", bl: "+", br: "+", tj: "+", bj: "+", model: "*", select: ">" }
+type Glyphs = { h: string; v: string; tl: string; tr: string; bl: string; br: string; bj: string; model: string }
+const unicodeGlyphs: Glyphs = { h: "─", v: "│", tl: "╭", tr: "╮", bl: "╰", br: "╯", bj: "┴", model: "⬢" }
+const asciiGlyphs: Glyphs = { h: "-", v: "|", tl: "+", tr: "+", bl: "+", br: "+", bj: "+", model: "*" }
 
 function padToWidth(text: string, width: number): string {
   const clipped = clipToWidth(text, width)
@@ -657,12 +657,12 @@ export function renderFrame(input: {
     const title = clipToWidth(oneLineText(`${bodyPanel.title}${separator}${bodyPanel.focus} focus`), Math.max(1, columns - 6))
     const contentRows = Math.max(1, bodyRows - panelBorderRows)
     const content = bodyPanel.lines.flatMap(line => wrapText(line, innerWidth)).slice(0, contentRows)
-    frameLines[0] = `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(title, "focus")}${paint(` ${horizontal(columns - 4 - displayWidth(title))}${glyph.tr}`, "border")}`
+    frameLines[0] = `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(title, "focus")}${paint(` ${horizontal(columns - 5 - displayWidth(title))}${glyph.tr}`, "border")}`
     content.forEach((line, index) => {
       frameLines[index + 1] = `${paint(`${glyph.v} `, "border")}${padToWidth(line, innerWidth)}${paint(` ${glyph.v}`, "border")}`
     })
     frameLines[content.length + 1] = paint(`${glyph.bl}${horizontal(columns - 2)}${glyph.br}`, "border")
-  } else if (input.home && input.transcript.length === 0) {
+  } else if (input.home && input.transcript.length === 0 && bodyRows >= 6) {
     const home = input.home
     const split = Math.floor((columns - 3) / 2)
     const leftWidth = split
@@ -678,7 +678,7 @@ export function renderFrame(input: {
     })
     const height = Math.min(Math.max(left.length, right.length) + 2, Math.max(0, bodyRows - 2))
     const title = clipToWidth(oneLineText(home.title), Math.max(1, columns - 6))
-    frameLines[0] = `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(title, "accent")}${paint(` ${horizontal(columns - 4 - displayWidth(title))}${glyph.tr}`, "border")}`
+    frameLines[0] = `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(title, "accent")}${paint(` ${horizontal(columns - 5 - displayWidth(title))}${glyph.tr}`, "border")}`
     const leftStart = Math.max(0, Math.floor((height - left.length) / 2))
     for (let index = 0; index < height; index += 1) {
       const leftText = left[index - leftStart] ?? ""
@@ -716,7 +716,8 @@ export function renderFrame(input: {
     const duplicate = screen === undefined || screen === input.panel?.title || screen === input.composerTitle || screen === "Chat" || screen === "Home"
     right = duplicate ? "LCA" : `LCA${separator}${oneLineText(screen)}`
   }
-  const left = clipToWidth(input.header?.selection ? `${glyph.model} ${oneLineText(input.header.selection)}` : `${glyph.model} no model`, Math.floor(columns / 2))
+  const badge = input.header?.selection ? `${glyph.model} ${oneLineText(input.header.selection)}` : `${glyph.model} no model`
+  const left = clipToWidth(badge, Math.max(12, Math.min(Math.floor(columns / 2), columns - displayWidth(right) - 5)))
   const rightClipped = clipToWidth(right, Math.max(1, columns - displayWidth(left) - 4))
   const fill = Math.max(1, columns - displayWidth(left) - displayWidth(rightClipped) - 3)
   frameLines[ruleRow] = `${paint(` ${left}`, "accent")}${paint(` ${horizontal(fill)} `, "border")}${paint(rightClipped, "muted")}`
@@ -728,7 +729,7 @@ export function renderFrame(input: {
     const title = overflow ?? input.composerTitle ?? belowPanel?.title
     const titleText = title ? clipToWidth(oneLineText(title), Math.max(1, columns - 6)) : ""
     frameLines[composerTop] = titleText
-      ? `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(titleText, "focus")}${paint(` ${horizontal(columns - 4 - displayWidth(titleText))}${glyph.tr}`, "border")}`
+      ? `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(titleText, "focus")}${paint(` ${horizontal(columns - 5 - displayWidth(titleText))}${glyph.tr}`, "border")}`
       : paint(`${glyph.tl}${horizontal(columns - 2)}${glyph.tr}`, "border")
     for (let index = 0; index < composerRows; index += 1) {
       const text = composer.rows[firstVisibleComposerRow + index]?.text ?? ""
@@ -737,9 +738,10 @@ export function renderFrame(input: {
     frameLines[composerTop + 1 + composerRows] = paint(`${glyph.bl}${horizontal(columns - 2)}${glyph.br}`, "border")
     belowLines.forEach((line, index) => {
       const selected = line.startsWith("> ")
+      const option = selected || line.startsWith("  ")
       frameLines[composerTop + composerRows + composerBorderRows + index] = selected
-        ? paint(`${glyph.select} ${line.slice(2)}`, "accent")
-        : line
+        ? paint(line, "accent")
+        : option ? line : paint(line, "muted")
     })
   }
 
