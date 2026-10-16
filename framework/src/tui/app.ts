@@ -11,16 +11,15 @@ import type { ExecutionRunStatus } from "../hosts/run-state.ts"
 import type { ReplayOptions, ReplayResult } from "../sessions/store.ts"
 import type { SkillCatalog } from "../skills/session.ts"
 import { restoreTranscript } from "./session-transcript.ts"
-import { commandInsertion, commandInsertions, interactiveActions, type InteractiveContext } from "../hosts/interactive-actions.ts"
-import {
-  formatSkillCompletionRow,
-  skillCompletion,
-  skillCompletionInsertion,
-  skillCompletionWindow,
-} from "./skill-completion.ts"
+import { commandInsertion, interactiveActions, type InteractiveContext } from "../hosts/interactive-actions.ts"
+import { formatPaletteRow, palette, paletteInsertion, paletteLabelColumns, paletteWindow } from "./skill-completion.ts"
 import { sameViewIdentity, type ChoicePresentation, type InteractiveViewFacts, type TranscriptText, type ViewIdentity } from "../hosts/interactive-view.ts"
 import { statusLines } from "./status-view.ts"
 import { resolveTheme, type ThemeName } from "./theme.ts"
+
+const SPINNER_INTERVAL_MS = 120
+const UNICODE_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+const ASCII_SPINNER = "-\\|/"
 
 type Pending = { finish: (text: string | undefined) => void; kind: "chat" | "selection"; title: string }
 type Choice = {
@@ -74,12 +73,13 @@ export class TuiApp implements Terminal {
   private workflow: string | undefined
   private viewIdentity?: ViewIdentity
   private viewFacts?: InteractiveViewFacts
-  // Animates only while the host reports an in-progress request; it never infers progress.
-  private requestTimer?: ReturnType<typeof setInterval>
   private requestStarted?: { operationID: string; at: number }
-  private spinnerFrame = 0
-  // Ticks the running shell footer (elapsed seconds) and coalesces bursty output into one redraw.
-  private shellTimer?: ReturnType<typeof setInterval>
+  // One spinner clock for all live work: a submitted turn the host has not answered yet, an in-progress
+  // model request, a running shell or tool call. It stops while input or a choice is waiting on the user.
+  private spinnerTimer?: ReturnType<typeof setInterval>
+  private busySince?: number
+  private hostWorking = false
+  // Coalesces bursty shell output into one redraw.
   private shellDraw?: ReturnType<typeof setTimeout>
   private prompt = "You> "
   private lastSubmittedDraft: string | undefined
@@ -118,19 +118,33 @@ export class TuiApp implements Terminal {
   private trackRequest(): void {
     const request = this.closed ? undefined : this.viewFacts?.request
     if (request?.state === "in-progress") {
-      if (this.requestStarted?.operationID !== request.operationID) {
-        this.requestStarted = { operationID: request.operationID, at: Date.now() }
-        this.spinnerFrame = 0
-      }
-      if (!this.requestTimer) {
-        this.requestTimer = setInterval(() => { this.spinnerFrame += 1; this.draw() }, 500)
-        this.requestTimer.unref?.()
+      if (this.requestStarted?.operationID !== request.operationID) this.requestStarted = { operationID: request.operationID, at: Date.now() }
+    } else this.requestStarted = undefined
+    this.syncSpinner()
+  }
+
+  private busy(): boolean {
+    if (this.closed || this.readFailure) return false
+    if (this.requestStarted || this.transcript.liveActivity) return true
+    return this.hostWorking && !this.pending && !this.choice
+  }
+  private syncSpinner(): void {
+    if (this.busy() && !this.suspended) {
+      this.busySince ??= Date.now()
+      if (!this.spinnerTimer) {
+        this.spinnerTimer = setInterval(() => this.draw(), SPINNER_INTERVAL_MS)
+        this.spinnerTimer.unref?.()
       }
       return
     }
-    this.requestStarted = undefined
-    if (this.requestTimer) clearInterval(this.requestTimer)
-    this.requestTimer = undefined
+    if (!this.busy()) this.busySince = undefined
+    if (this.spinnerTimer) clearInterval(this.spinnerTimer)
+    this.spinnerTimer = undefined
+  }
+  private spinnerGlyph(): string | undefined {
+    if (this.busySince === undefined) return undefined
+    const frames = this.asciiChrome ? ASCII_SPINNER : UNICODE_SPINNER
+    return frames[Math.floor((Date.now() - this.busySince) / SPINNER_INTERVAL_MS) % frames.length]!
   }
   skillCatalog(catalog: SkillCatalog): void {
     this.catalog = catalog
@@ -257,13 +271,10 @@ export class TuiApp implements Terminal {
   executionSnapshot(state: ExecutionRunStatus, active: boolean): void { this.transcript.executionSnapshot(state, active); this.draw() }
   private completionIndex = 0
   private completionDismissed = false
-  private completions(): string[] {
-    if (this.choice || this.editor.searchState || this.completionDismissed || this.pending?.kind === "selection") return []
-    return commandInsertions(this.editor.text, this.interactionContext)
-  }
-  private skillCompletions() {
-    if (this.interactionContext === "unselected" || this.choice || this.editor.searchState || this.completionDismissed || this.pending?.kind === "selection") return undefined
-    return skillCompletion(this.catalog, this.editor.text)
+  /** The `/` palette for the current draft: commands and invocable skills, fuzzy-matched. */
+  private palette() {
+    if (this.readFailure || this.choice || this.editor.searchState || this.completionDismissed || this.pending?.kind === "selection") return undefined
+    return palette(this.catalog, this.editor.text, this.interactionContext)
   }
 
   // The renderer owns terminal escapes; shared coordinator prose stays plain.
@@ -317,20 +328,21 @@ export class TuiApp implements Terminal {
   private currentStatusLines(): string[] {
     if (this.readFailure) return ["History unavailable | new input blocked", "Ctrl+D exit | active work may remain"]
     const { columns } = this.dimensions()
+    const frame = this.spinnerGlyph()
     const overlayHint = this.choice?.presentation.kind === "picker"
       ? ["Up/Down move", `Enter ${this.choice.presentation.purpose === "command" ? "inserts" : "selects"}`, "Esc back", "Ctrl+D quit"].join(this.separator())
       : this.detailsVisible ? ["Details", "Up/Down move", "Enter expands", "Esc closes", "Ctrl+D quits"].join(this.separator()) : undefined
+    const activity = overlayHint ?? (this.transcript.runningShell ? "Shell running" : undefined) ?? this.transcript.currentTask ?? this.status
+    // A model request carries its own spinner segment; any other live work spins on the activity line.
+    const spinActivity = frame !== undefined && !this.requestStarted && overlayHint === undefined
     return statusLines({
       facts: this.viewFacts,
       selectionInHeader: true,
       workflow: this.workflow,
-      activity: overlayHint ?? this.transcript.currentTask ?? this.status,
+      activity: spinActivity ? `${frame} ${activity} · ${Math.floor((Date.now() - this.busySince!) / 1000)}s` : activity,
       search: this.transcriptQuery,
-      ...(this.requestStarted ? {
-        request: {
-          frame: (this.asciiChrome ? "-\\|/" : "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")[this.spinnerFrame % (this.asciiChrome ? 4 : 10)]!,
-          elapsedSeconds: Math.floor((Date.now() - this.requestStarted.at) / 1000),
-        },
+      ...(this.requestStarted && frame !== undefined ? {
+        request: { frame, elapsedSeconds: Math.floor((Date.now() - this.requestStarted.at) / 1000) },
       } : {}),
       queued: this.queue.length,
       columns,
@@ -372,6 +384,7 @@ export class TuiApp implements Terminal {
   }
 
   private draw(): void {
+    this.syncSpinner()
     if (this.suspended || this.closed) return
     let lines = this.transcript.lines(this.transcriptQuery)
     let panel: NonNullable<Parameters<typeof renderFrame>[0]["panel"]> | undefined
@@ -504,35 +517,20 @@ export class TuiApp implements Terminal {
       cursor = search.query.length
       prompt = "History> "
     }
-    const skills = this.readFailure ? undefined : this.skillCompletions()
-    const completions = this.readFailure || skills ? [] : this.completions()
-    if (skills && !panel) {
+    const suggestions = this.palette()
+    if (suggestions && !panel) {
       const { columns } = this.dimensions()
-      const maximumRows = Math.min(6, Math.max(0, Math.floor((this.belowRows(this.editor.text, this.prompt) - 2) / 2)))
-      const visible = skillCompletionWindow(skills.rows, this.completionIndex, maximumRows)
-      const panelLines = [`${skills.rows.length} matches · Up/Down navigate · Tab/Enter insert · Escape dismiss`]
-      if (visible.rows.length) {
-        visible.rows.forEach((row, index) => {
-          const [name, metadata] = formatSkillCompletionRow(row)
-          panelLines.push(`${visible.start + index === this.completionIndex ? ">" : " "} ${wrapText(name, columns)[0] ?? ""}`,
-            `  ${wrapText(metadata, columns)[0] ?? ""}`)
-        })
-        if (visible.start > 0 || visible.start + visible.rows.length < skills.rows.length) {
-          panelLines.push(`  Showing ${visible.start + 1}-${visible.start + visible.rows.length} of ${skills.rows.length}`)
-        }
-      } else {
-        panelLines.push(this.catalog ? "No matching skills" : "No skill catalog is available for this session")
-      }
-      panel = { title: this.catalog ? "Skill suggestions" : "Skill catalog unavailable", focus: "composer", placement: "below", lines: panelLines }
-      screen = "Skill suggestions"
-    } else if (completions.length && !panel) {
-      panel = {
-        title: "Command suggestions",
-        focus: "composer",
-        placement: "below",
-        lines: [...completions.map((value, i) => `${i === this.completionIndex % completions.length ? ">" : " "} ${value}`), ["Tab/Enter inserts only", "Escape dismisses"].join(this.separator())],
-      }
-      screen = "Command suggestions"
+      const maximumRows = Math.min(8, Math.max(1, this.belowRows(this.editor.text, this.prompt) - 1))
+      const visible = paletteWindow(suggestions.rows, this.completionIndex, maximumRows)
+      const labelColumns = paletteLabelColumns(suggestions.rows)
+      const panelLines = visible.rows.map((row, index) =>
+        `${visible.start + index === this.completionIndex ? ">" : " "} ${wrapText(formatPaletteRow(row, labelColumns), Math.max(1, columns - 2))[0] ?? ""}`)
+      if (!panelLines.length) panelLines.push(this.catalog ? "No matching skills" : "No skill catalog is available for this session")
+      const shown = visible.start > 0 || visible.start + visible.rows.length < suggestions.rows.length
+        ? [`${visible.start + 1}-${visible.start + visible.rows.length} of ${suggestions.rows.length}`] : []
+      panelLines.push([...shown, "Up/Down move", "Tab/Enter insert", "Esc dismiss"].join(this.separator()))
+      panel = { title: suggestions.skillsOnly ? "Skills" : "Commands", focus: "composer", placement: "below", columns: true, lines: panelLines }
+      screen = suggestions.skillsOnly ? "Skill suggestions" : "Command suggestions"
     }
     if (this.detailsVisible && !this.choice && !panel) {
       const details = this.transcript.details()
@@ -581,6 +579,7 @@ export class TuiApp implements Terminal {
       color: process.env.NO_COLOR === undefined,
       theme: resolveTheme(this.themeName),
       ascii: this.asciiChrome,
+      ...(this.spinnerGlyph() !== undefined ? { spinner: this.spinnerGlyph()! } : {}),
     }))
   }
 
@@ -595,8 +594,8 @@ export class TuiApp implements Terminal {
       else if (event.type === "key" && event.key === "ctrl+c" && this.overlayControls.handle(event) === "shutdown") this.control?.("shutdown")
       return
     }
-    const skills = this.skillCompletions()
-    const overlayVisible = !!this.choice || !!this.editor.searchState || !!skills || this.completions().length > 0 || this.detailsVisible
+    const suggestions = this.palette()
+    const overlayVisible = !!this.choice || !!this.editor.searchState || !!suggestions || this.detailsVisible
     if (!overlayVisible && this.usable() && event.type === "key" && (event.key === "pageUp" || event.key === "pageDown" || event.key === "pageup" || event.key === "pagedown")) {
       const { pageRows, maximumOffset } = this.transcriptScrollBounds()
       this.scrollOffset = Math.min(this.scrollOffset, maximumOffset)
@@ -717,41 +716,26 @@ export class TuiApp implements Terminal {
       this.pending.finish(undefined)
       return
     }
-    if (skills && event.type === "key") {
+    if (suggestions && event.type === "key") {
+      const selected = suggestions.rows[this.completionIndex]
+      // A fully typed command (`/quit`) submits on Enter instead of re-inserting itself. A skill always needs a
+      // request, so Enter on a complete skill name still inserts it and never submits a bare invocation.
+      const typed = event.key === "enter" && selected?.kind === "command" && selected.insertion?.trimEnd() === this.editor.text
       if (event.key === "ctrl+c") {
         if (this.overlayControls.handle(event) === "shutdown") this.control?.("shutdown")
         return
       }
-      if (event.key === "enter" || event.key === "tab") {
-        const insertion = skillCompletionInsertion(skills.rows[this.completionIndex])
+      if ((event.key === "enter" || event.key === "tab") && !typed) {
+        const insertion = paletteInsertion(selected)
         if (insertion !== undefined) this.editor.setText(insertion)
         this.completionDismissed = true
         this.draw()
         return
       }
       if (event.key === "up" || event.key === "down") {
-        if (skills.rows.length) {
-          this.completionIndex = (this.completionIndex + (event.key === "up" ? -1 : 1) + skills.rows.length) % skills.rows.length
+        if (suggestions.rows.length) {
+          this.completionIndex = (this.completionIndex + (event.key === "up" ? -1 : 1) + suggestions.rows.length) % suggestions.rows.length
         }
-        this.draw()
-        return
-      }
-      if (event.key === "escape") { this.completionDismissed = true; this.draw(); return }
-    }
-    const completions = this.completions()
-    if (completions.length && event.type === "key") {
-      if (event.key === "ctrl+c") {
-        if (this.overlayControls.handle(event) === "shutdown") this.control?.("shutdown")
-        return
-      }
-      if (event.key === "enter" || event.key === "tab") {
-        this.editor.setText(completions[this.completionIndex % completions.length]! + " ")
-        this.completionDismissed = true
-        this.draw()
-        return
-      }
-      if (event.key === "up" || event.key === "down") {
-        this.completionIndex = (this.completionIndex + (event.key === "up" ? -1 : 1) + completions.length) % completions.length
         this.draw()
         return
       }
@@ -843,6 +827,7 @@ export class TuiApp implements Terminal {
     this.lastSubmittedDraft = undefined
     this.lastSubmittedCursor = undefined
     this.choiceSettled = false
+    this.hostWorking = false
     this.status = input.kind === "chat" && this.viewFacts ? input.hint : `${input.title} · ${input.hint}`
     this.prompt = input.prompt
     this.resume()
@@ -863,6 +848,7 @@ export class TuiApp implements Terminal {
           this.editor.cursor = selectionOrigin.cursor
         }
         this.status = text === undefined ? "Input closed" : "LCA · working · Escape cancels"
+        this.hostWorking = text !== undefined
         resolve(text)
         this.draw()
       }
@@ -882,6 +868,7 @@ export class TuiApp implements Terminal {
     if (this.pending || this.choice || !values.length) throw new Error("invalid terminal choice ownership")
     if (this.editor.searchState) this.editor.handle({ type: "key", key: "escape" })
     this.choiceSettled = false
+    this.hostWorking = false
     const returnDraft = presentation.kind === "picker" && presentation.purpose === "command"
       ? this.lastSubmittedDraft ?? ""
       : undefined
@@ -942,7 +929,7 @@ export class TuiApp implements Terminal {
     this.transcript.append({ ...value, text: value.text.replace(/\r\n/g, "\n") })
     this.draw()
   }
-  suspend(): void { this.driver.handoff(); this.suspended = true }
+  suspend(): void { this.driver.handoff(); this.suspended = true; this.syncSpinner() }
   resume(): void {
     if (this.closed) return
     this.choiceSettled = false
@@ -953,10 +940,6 @@ export class TuiApp implements Terminal {
   shellStart(run: { id: string; command: string }): ShellView {
     this.transcript.shellStarted(run.id, run.command)
     this.scrollOffset = 0
-    if (!this.shellTimer) {
-      this.shellTimer = setInterval(() => this.draw(), 1000)
-      this.shellTimer.unref?.()
-    }
     this.draw()
     return {
       output: snapshot => {
@@ -968,7 +951,6 @@ export class TuiApp implements Terminal {
       finish: result => {
         this.transcript.shellStarted(run.id, run.command)
         this.transcript.shellFinished(run.id, result)
-        if (!this.transcript.runningShell) this.stopShellTimers()
         this.draw()
       },
     }
@@ -978,17 +960,13 @@ export class TuiApp implements Terminal {
     this.shellDraw = setTimeout(() => { this.shellDraw = undefined; this.draw() }, 50)
     this.shellDraw.unref?.()
   }
-  private stopShellTimers(): void {
-    if (this.shellTimer) clearInterval(this.shellTimer)
-    if (this.shellDraw) clearTimeout(this.shellDraw)
-    this.shellTimer = undefined
-    this.shellDraw = undefined
-  }
+
   close(): void {
     if (this.closed) return
     this.closed = true
     this.trackRequest()
-    this.stopShellTimers()
+    if (this.shellDraw) clearTimeout(this.shellDraw)
+    this.shellDraw = undefined
     this.queue.length = 0
     this.pending?.finish(undefined)
     this.choice?.finish(undefined)

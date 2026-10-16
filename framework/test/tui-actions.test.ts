@@ -16,8 +16,7 @@ type AppInput = {
   asciiChrome: boolean
   choice?: { documentOffset: number; documentAnchorLine: number; focus: string; selected: number }
   completionDismissed: boolean
-  completions(): string[]
-  skillCompletions(): object | undefined
+  palette(): { rows: readonly { label: string }[] } | undefined
   dimensions(): { columns: number; rows: number }
   currentStatusLines(): string[]
   viewFacts?: { selection: { engine: string; model: string } }
@@ -92,7 +91,7 @@ describe("exclusive application input ownership", () => {
 
   test("spinner animates only while the host reports an in-progress request", async () => {
     const app = new TuiApp()
-    const internal = app as unknown as AppInput & { requestTimer?: unknown }
+    const internal = app as unknown as AppInput & { spinnerTimer?: unknown }
     internal.dimensions = () => ({ columns: 80, rows: 24 })
     const frames: string[] = []
     internal.driver.write = frame => frames.push(frame)
@@ -104,26 +103,60 @@ describe("exclusive application input ownership", () => {
     }
     app.bindView(identity)
     app.viewSnapshot({ ...facts, request: { state: "not-observed" } })
-    expect(internal.requestTimer).toBeUndefined()
+    expect(internal.spinnerTimer).toBeUndefined()
     app.viewSnapshot({ ...facts, request: { state: "in-progress", operationID: "op-1" } })
-    expect(internal.requestTimer).toBeDefined()
+    expect(internal.spinnerTimer).toBeDefined()
     const before = frames.length
     await Bun.sleep(1100)
     expect(frames.length).toBeGreaterThan(before)
     const status = frames.at(-1)!.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
-    expect(status).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Model request running · 1s/u)
+    expect(status).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Model request running · [01]s/u)
     app.viewSnapshot({ ...facts, request: { state: "completed", operationID: "op-1" } })
-    expect(internal.requestTimer).toBeUndefined()
+    expect(internal.spinnerTimer).toBeUndefined()
     expect(frames.at(-1)!).not.toContain("Model request running")
     app.viewSnapshot({ ...facts, request: { state: "in-progress", operationID: "op-2" } })
     app.close()
-    expect(internal.requestTimer).toBeUndefined()
+    expect(internal.spinnerTimer).toBeUndefined()
+  })
+
+  test("a submitted turn spins until the host asks again; waiting on the user never spins", async () => {
+    const app = new TuiApp()
+    app.resume = () => {}
+    const internal = app as unknown as AppInput & { spinnerTimer?: unknown }
+    internal.dimensions = () => ({ columns: 80, rows: 24 })
+    const frames: string[] = []
+    internal.driver.write = frame => frames.push(frame)
+    const first = app.readInput({ title: "Chat", hint: "Enter send", prompt: "You> ", kind: "chat" }, new AbortController().signal)
+    expect(internal.spinnerTimer).toBeUndefined()
+    internal.input({ type: "text", text: "do the thing" })
+    internal.input({ type: "key", key: "enter" })
+    expect(await first).toBe("do the thing")
+    expect(internal.spinnerTimer).toBeDefined()
+    const before = frames.length
+    await Bun.sleep(400)
+    // The clock redraws on its own; successive frames show different spinner glyphs.
+    expect(frames.length).toBeGreaterThan(before + 1)
+    const glyphs = new Set(frames.slice(before).map(frame => /([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]) LCA · working/u.exec(plain(frame))?.[1]).filter(Boolean))
+    expect(glyphs.size).toBeGreaterThan(1)
+    expect(plain(frames.at(-1))).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] LCA · working · Escape cancels · 0s/u)
+
+    // A choice waits on the user: no spinner, no redraw clock.
+    const choice = app.choose("Decide", ["Yes", "No"], new AbortController().signal)
+    expect(internal.spinnerTimer).toBeUndefined()
+    internal.input({ type: "key", key: "enter" })
+    expect(await choice).toBe(0)
+    const next = app.readInput({ title: "Chat", hint: "Enter send", prompt: "You> ", kind: "chat" }, new AbortController().signal)
+    expect(internal.spinnerTimer).toBeUndefined()
+    expect(plain(frames.at(-1))).not.toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /u)
+    app.close()
+    expect(await next).toBeUndefined()
+    expect(internal.spinnerTimer).toBeUndefined()
   })
 
   test("!command renders as a live shell window, not a chat message, and /expand $N shows retained output", async () => {
     const app = new TuiApp()
     app.resume = () => {}
-    const internal = app as unknown as AppInput & { shellTimer?: unknown }
+    const internal = app as unknown as AppInput & { spinnerTimer?: unknown; hostWorking: boolean }
     internal.dimensions = () => ({ columns: 80, rows: 40 })
     internal.currentStatusLines = () => ["status"]
     const frames: string[] = []
@@ -134,16 +167,18 @@ describe("exclusive application input ownership", () => {
     expect(await pending).toBe("!seq 30")
     expect(internal.transcript.lines().join("\n")).not.toContain("[You]")
 
+    // Even without a pending submitted turn, a live shell keeps the spinner clock running.
+    internal.hostWorking = false
     const view = app.shellStart({ id: "shell:1", command: "seq 30" })
-    expect(internal.shellTimer).toBeDefined()
+    expect(internal.spinnerTimer).toBeDefined()
     view.output({ lines: ["1", "2"], totalLines: 2, completed: 1, completedTail: ["1"] })
     await Bun.sleep(80)
     expect(plain(frames.at(-1))).toMatch(/╭─ shell · \$1 · \$ seq 30 ─+╮/u)
-    expect(plain(frames.at(-1))).toContain("running · 0s · Esc cancels")
+    expect(plain(frames.at(-1))).toMatch(/│ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] running · 0s · Esc cancels/u)
 
     const all = Array.from({ length: 30 }, (_, index) => String(index + 1))
     view.finish({ status: "complete", exitCode: 0, signal: null, durationMs: 120, lines: all, totalLines: 30 })
-    expect(internal.shellTimer).toBeUndefined()
+    expect(internal.spinnerTimer).toBeUndefined()
     const done = plain(frames.at(-1))
     expect(done).toContain("exit 0 · 0.1s")
     expect(done).toContain("… 10 earlier lines · /expand $1")
@@ -156,6 +191,47 @@ describe("exclusive application input ownership", () => {
     expect(internal.transcript.lines().join("\n")).not.toContain("Usage: /expand")
     app.close()
     expect(await next).toBeUndefined()
+  })
+
+  test("/ palette lists skills by fuzzy name, Enter inserts the skill, and a typed command still submits", async () => {
+    const app = new TuiApp()
+    app.resume = () => {}
+    const internal = app as unknown as AppInput
+    internal.dimensions = () => ({ columns: 100, rows: 30 })
+    const frames: string[] = []
+    internal.driver.write = frame => frames.push(frame)
+    const descriptor = (name: string, description: string) => ({ descriptor: { kind: "skill" as const, source: "home" as const,
+      identity: `home:${name}`, name, description }, classification: "custom" as const })
+    app.skillCatalog({ entries: [
+      { descriptor: { kind: "protected-workflow", source: "builtin", identity: "builtin:deep-interview", name: "deep-interview",
+        description: "Socratic deep interview", workflow: "deep-interview" }, classification: "common" },
+      descriptor("contribute-pr", "Dump redacted session context"),
+    ], refusals: [] } as never)
+    const actions: string[] = []
+    app.controls(action => actions.push(action))
+    const pending = app.readInput({ title: "Chat", hint: "Enter send", prompt: "You> ", kind: "chat" }, new AbortController().signal)
+    internal.input({ type: "text", text: "/depp" })
+    const frame = plain(frames.at(-1))
+    expect(frame).toMatch(/> skill:deep-interview\s{2,}Socratic deep interview/u)
+    expect(frame).not.toContain("skill:contribute-pr")
+    internal.input({ type: "key", key: "enter" })
+    expect(app.draftSnapshot().draft).toBe("/skill:deep-interview ")
+    expect(internal.palette()).toBeUndefined()
+
+    // A complete skill name inserts on Enter; it never submits a bare invocation.
+    app.setDraft("")
+    internal.input({ type: "text", text: "/skill:deep-interview" })
+    internal.input({ type: "key", key: "enter" })
+    expect(app.draftSnapshot().draft).toBe("/skill:deep-interview ")
+
+    app.setDraft("")
+    internal.input({ type: "text", text: "/quit" })
+    expect(internal.palette()?.rows[0]?.label).toBe("/quit")
+    internal.input({ type: "key", key: "enter" })
+    // Enter submits the typed command to the host instead of re-inserting "/quit ".
+    expect(await pending).toBe("/quit")
+    expect(actions).toEqual([])
+    app.close()
   })
 
   test("unselected local transcript actions show choose-model guidance; theme and ASCII stay local", async () => {
@@ -296,11 +372,11 @@ describe("exclusive application input ownership", () => {
     app.controls(action => actions.push(action))
     const pending = app.readInput({ title: "Chat", hint: "Enter send", prompt: "You> ", kind: "chat" }, new AbortController().signal)
     internal.input({ type: "text", text: "/se" })
-    expect(internal.completions().length).toBeGreaterThan(0)
+    expect(internal.palette()?.rows.length).toBeGreaterThan(0)
     internal.editor.cursor = 1
 
     internal.input({ type: "key", key: "ctrl+c" })
-    expect(internal.completions().length).toBeGreaterThan(0)
+    expect(internal.palette()?.rows.length).toBeGreaterThan(0)
     expect(internal.completionDismissed).toBe(false)
     expect(app.draftSnapshot()).toEqual({ draft: "/se", queued: [] })
     expect(internal.editor.cursor).toBe(1)
@@ -320,11 +396,11 @@ describe("exclusive application input ownership", () => {
     app.controls(action => actions.push(action))
     const pending = app.readInput({ title: "Chat", hint: "Enter send", prompt: "You> ", kind: "chat" }, new AbortController().signal)
     internal.input({ type: "text", text: "/skill:" })
-    expect(internal.skillCompletions()).toBeDefined()
+    expect(internal.palette()).toBeDefined()
     internal.editor.cursor = 3
 
     internal.input({ type: "key", key: "ctrl+c" })
-    expect(internal.skillCompletions()).toBeDefined()
+    expect(internal.palette()).toBeDefined()
     expect(app.draftSnapshot()).toEqual({ draft: "/skill:", queued: [] })
     expect(internal.editor.cursor).toBe(3)
     expect(actions).toEqual([])

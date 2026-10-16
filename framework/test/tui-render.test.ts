@@ -450,4 +450,26 @@ describe("renderFrame", () => {
     expect(transcriptDisplayRows(["[+] #1 read · call denied · task t · t1"], 80, true).map(transcriptRowText)[0]).toBe("x > #1 read · call denied · task t · t1")
   })
 
+  test("live tool and shell icons take the spinner frame; last-recorded state stays static", () => {
+    const lines = [
+      "[+] #1 bash · call running · execution not observed · task Implement · t1 running",
+      "[+] #2 read · call running (last recorded; unconfirmed) · execution last recorded · task Implement · t1 running (last recorded)",
+      "[+] #3 grep · call succeeded · execution not observed · task Implement · t1 done",
+      "[Shell] $1 $ sleep 5",
+      "  = running · 2s · Esc cancels",
+      "[Shell] $2 $ true",
+      "  = exit 0 · 0.0s",
+    ]
+    const rows = transcriptDisplayRows(lines, 160, false, "⠹").map(transcriptRowText)
+    expect(rows[0]).toStartWith("⠹ ▸ #1 bash")
+    expect(rows[1]).toStartWith("⟳ ▸ #2 read")
+    expect(rows[2]).toStartWith("✔ ▸ #3 grep")
+    expect(rows).toContainEqual(expect.stringMatching(/^│ ⠹ running · 2s · Esc cancels\s+│$/u))
+    expect(rows).toContainEqual(expect.stringMatching(/^│ ✔ exit 0 · 0\.0s\s+│$/u))
+    // Without a frame (not busy) the running shell keeps its static marker.
+    expect(transcriptDisplayRows(lines, 100).map(transcriptRowText)).toContainEqual(expect.stringMatching(/^│ ⟳ running/u))
+    // The frame never changes layout.
+    expect(transcriptDisplayRows(lines, 100, false, "⠹")).toHaveLength(transcriptDisplayRows(lines, 100).length)
+  })
+
 })

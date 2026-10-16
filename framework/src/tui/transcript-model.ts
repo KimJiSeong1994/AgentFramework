@@ -40,6 +40,12 @@ export class TranscriptModel {
     for (const shell of this.shells.values()) if (shell.status === "running") return true
     return false
   }
+  /** A shell or tool call observed running in this process (restored, last-recorded state is excluded). */
+  get liveActivity(): boolean {
+    if (this.runningShell) return true
+    for (const item of this.calls.values()) if (item.outcome === "running" && !this.historicalCalls.has(item.id)) return true
+    return false
+  }
   get items(): readonly TranscriptItem[] { return this.entries }
   get currentTask(): string | undefined {
     for (const [id, task] of this.tasks) if (task.status === "running" && !this.historicalTasks.has(id)) return `${task.title ?? id} running`

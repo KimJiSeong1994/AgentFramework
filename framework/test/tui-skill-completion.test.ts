@@ -3,10 +3,11 @@ import type { SkillCatalog, SkillCatalogEntry } from "../src/skills/session.ts"
 import type { ProtectedWorkflowName } from "../src/skills/types.ts"
 import {
   commandCompletions,
-  formatSkillCompletionRow,
-  skillCompletion,
-  skillCompletionInsertion,
-  skillCompletionWindow,
+  formatPaletteRow,
+  fuzzyScore,
+  palette,
+  paletteInsertion,
+  paletteWindow,
 } from "../src/tui/skill-completion.ts"
 
 function entry(input: {
@@ -38,52 +39,82 @@ const catalog: SkillCatalog = {
   refusals: [{ source: "home", name: "blocked-skill", identities: [], reason: "unsafe-path" }],
 }
 
-describe("TUI skill completion", () => {
-  test("filters skill names and descriptions case-insensitively", () => {
-    expect(skillCompletion(catalog, "/skill:REVIEW")?.rows.map(row => row.name)).toEqual(["review"])
-    expect(skillCompletion(catalog, "/skill:deployment")?.rows.map(row => row.name)).toEqual(["release-check"])
-    expect(skillCompletion(catalog, "/skill:missing")?.rows).toEqual([])
+describe("TUI command and skill palette", () => {
+  test("/ fuzzy-matches skills and commands together, ranked by match quality", () => {
+    // GJC example: a typo still finds the skill, and unrelated names are not listed.
+    expect(palette(catalog, "/depp")?.rows.map(row => row.label)).toEqual(["skill:deep-interview"])
+    // Best match first; looser in-order-letter matches follow it.
+    expect(palette(catalog, "/rev")?.rows[0]?.label).toBe("skill:review")
+    expect(palette(catalog, "/review")?.rows.map(row => row.label)).toEqual(["skill:review"])
+    const re = palette(catalog, "/re")!.rows.map(row => row.label)
+    expect(re.slice(0, 3)).toEqual(["/resume", "skill:review", "skill:release-check"])
+    expect(palette(catalog, "/mod")?.rows[0]).toMatchObject({ kind: "command", label: "/model", insertion: "/model " })
+    expect(palette(catalog, "/zzzz")).toBeUndefined()
+    const all = palette(catalog, "/")!.rows
+    expect(all.findIndex(row => row.kind === "skill")).toBeGreaterThan(all.findLastIndex(row => row.kind === "command"))
   })
 
-  test("exposes source, classification, description, and refusal labels", () => {
-    const rows = skillCompletion(catalog, "/skill:")!.rows
-    const custom = rows.find(row => row.name === "release-check")!
-    expect(formatSkillCompletionRow(custom)).toEqual([
-      "release-check — Check deployment readiness",
-      "Source: home · Classification: custom",
-    ])
+  test("fuzzy score orders prefix, substring, in-order letters and a single typo", () => {
+    const prefix = fuzzyScore("deep", "deep-interview")!
+    const substring = fuzzyScore("inter", "deep-interview")!
+    const letters = fuzzyScore("dpi", "deep-interview")!
+    const typo = fuzzyScore("depp", "deep-interview")!
+    expect(prefix).toBeLessThan(substring)
+    expect(substring).toBeLessThan(letters)
+    expect(letters).toBeLessThan(typo)
+    expect(fuzzyScore("xq", "deep-interview")).toBeUndefined()
+    expect(fuzzyScore("dx", "deep-interview")).toBeUndefined()
+  })
 
+  test("skills appear only where they can be invoked; commands follow the context", () => {
+    expect(palette(catalog, "/rev", "unselected")).toBeUndefined()
+    expect(palette(catalog, "/skill:", "unselected")).toBeUndefined()
+    expect(palette(catalog, "/mo", "unselected")?.rows.map(row => row.label)).toEqual(["/model"])
+    expect(palette(catalog, "/", "read-only")!.rows.some(row => row.kind === "skill")).toBe(false)
+  })
+
+  test("/skill: narrows to skills and also matches descriptions case-insensitively", () => {
+    expect(palette(catalog, "/skill:REVIEW")?.rows.map(row => row.name)).toEqual(["review"])
+    expect(palette(catalog, "/skill:deployment")?.rows.map(row => row.name)).toEqual(["release-check"])
+    expect(palette(catalog, "/skill:missing")).toMatchObject({ skillsOnly: true, rows: [] })
+  })
+
+  test("rows are one aligned label/description line; unavailable rows show why and cannot insert", () => {
+    const rows = palette(catalog, "/skill:")!.rows
+    expect(formatPaletteRow(rows.find(row => row.name === "release-check")!, 22)).toBe("skill:release-check     Check deployment readiness")
     const unavailable = rows.find(row => row.name === "hidden")!
-    expect(formatSkillCompletionRow(unavailable)[1]).toContain("Source: project · Classification: unavailable · Refusal: unsafe path")
+    expect(unavailable.description).toBe("unavailable · unsafe path")
     const refusal = rows.find(row => row.name === "blocked-skill")!
-    expect(formatSkillCompletionRow(refusal)[1]).toContain("Source: home · Classification: unavailable · Refusal: unsafe-path")
-    expect(skillCompletionInsertion(unavailable)).toBeUndefined()
-    expect(skillCompletionInsertion(refusal)).toBeUndefined()
+    expect(refusal.description).toBe("unavailable · unsafe-path")
+    expect(paletteInsertion(unavailable)).toBeUndefined()
+    expect(paletteInsertion(refusal)).toBeUndefined()
+    expect(formatPaletteRow({ kind: "command", label: "/a-very-long-command-name-here", name: "x", description: "d" }, 10)).toBe("/a-very-l…  d")
   })
 
   test("keeps protected names non-selectable unless the descriptor is builtin", () => {
-    const rows = skillCompletion(catalog, "/skill:")!.rows
-    expect(skillCompletionInsertion(rows.find(row => row.name === "ralplan"))).toBeUndefined()
+    const rows = palette(catalog, "/skill:")!.rows
+    expect(paletteInsertion(rows.find(row => row.name === "ralplan"))).toBeUndefined()
     expect(rows.find(row => row.name === "ralplan")?.refusal).toContain("protected-name")
-    expect(skillCompletionInsertion(rows.find(row => row.name === "deep-interview"))).toBe("/skill:deep-interview ")
+    expect(paletteInsertion(rows.find(row => row.name === "deep-interview"))).toBe("/skill:deep-interview ")
   })
 
   test("selection inserts composer text only and never invokes a skill", () => {
-    const row = skillCompletion(catalog, "/skill:review")!.rows[0]!
+    const row = palette(catalog, "/review")!.rows[0]!
     const unchangedCatalog = structuredClone(catalog)
-    expect(skillCompletionInsertion(row)).toBe("/skill:review ")
+    expect(paletteInsertion(row)).toBe("/skill:review ")
     expect(catalog).toEqual(unchangedCatalog)
   })
 
-  test("completed skill names and request arguments return Enter to normal submission", () => {
-    expect(skillCompletion(catalog, "/skill:review ")).toBeUndefined()
-    expect(skillCompletion(catalog, "/skill:review inspect the changes")).toBeUndefined()
-    expect(skillCompletion(catalog, "/skill:review\ninspect")).toBeUndefined()
+  test("completed names and request arguments return Enter to normal submission", () => {
+    expect(palette(catalog, "/skill:review ")).toBeUndefined()
+    expect(palette(catalog, "/skill:review inspect the changes")).toBeUndefined()
+    expect(palette(catalog, "/skill:review\ninspect")).toBeUndefined()
+    expect(palette(catalog, "/model codex")).toBeUndefined()
   })
 
   test("bounds the candidate viewport while keeping the selected row visible and completes /skills", () => {
-    const rows = skillCompletion(catalog, "/skill:")!.rows
-    const window = skillCompletionWindow(rows, rows.length - 1, 2)
+    const rows = palette(catalog, "/skill:")!.rows
+    const window = paletteWindow(rows, rows.length - 1, 2)
     expect(window.rows).toHaveLength(2)
     expect(window.start).toBe(rows.length - 2)
     expect(window.rows.at(-1)).toBe(rows.at(-1))

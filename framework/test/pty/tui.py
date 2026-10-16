@@ -1390,19 +1390,34 @@ def run_skills(temp_root: Path):
         assert_skill_turn_count(session, 0, "catalog listing must not dispatch a conversation turn")
         assert_no_source_choice(session, "catalog listing")
 
+        # GJC-style `/` palette: a fuzzy, typo-tolerant name lists the skill beside its description.
+        palette_row = re.compile(r"> skill:pty-inspect\s{2,}Inspect the PTY fixture project")
+        session.send_text("/pty-insepct")
+        session._wait(lambda: palette_row.search(session.screen.current_text()) is not None, "fuzzy / palette lists the skill")
+        session.send(b"\r")
+        session._wait(
+            lambda: session.screen.composer_line() == "You> /skill:pty-inspect",
+            "fuzzy palette Enter inserts the explicit skill command",
+        )
+        assert_skill_turn_count(session, 0, "fuzzy palette insertion must not dispatch")
+        assert_no_source_choice(session, "fuzzy palette insertion")
+        session.mode_proof["fuzzyPaletteInsertedSkill"] = True
+        session.send(b"\x7f" * len("/skill:pty-inspect "))
+        session._wait(lambda: session.screen.composer_line() == "You>", "composer cleared after fuzzy insertion")
+
         session.send_text("/skill:pty-insp")
-        session.wait_screen("pty-inspect — Inspect the PTY fixture project")
+        session._wait(lambda: palette_row.search(session.screen.current_text()) is not None, "/skill: palette row")
         session.send(b"\x1b")
         session._wait(
             lambda: session.screen.composer_line() == "You> /skill:pty-insp" and
-            not any("matches · Up/Down" in line for line in session.screen.current_lines()),
+            not any("Tab/Enter insert" in line for line in session.screen.current_lines()),
             "Escape dismisses completion without changing or submitting the draft",
         )
         assert_skill_turn_count(session, 0, "completion dismissal must not dispatch")
         assert_no_source_choice(session, "completion dismissal")
         session.send(b"\x7f")
         session.send_text("pect")
-        session.wait_screen("pty-inspect — Inspect the PTY fixture project")
+        session._wait(lambda: palette_row.search(session.screen.current_text()) is not None, "/skill: palette row after edit")
         session.send(b"\r")
         session._wait(
             lambda: session.screen.composer_line() == "You> /skill:pty-inspect",
@@ -1415,7 +1430,7 @@ def run_skills(temp_root: Path):
         session.send_text("inspect via inserted completion")
         session._wait(
             lambda: session.screen.composer_line() == "You> /skill:pty-inspect inspect via inserted completion" and
-            not any("matches · Up/Down" in line for line in session.screen.current_lines()),
+            not any("Tab/Enter insert" in line for line in session.screen.current_lines()),
             "request arguments preserve the inserted explicit command without a chooser",
         )
         session.send(b"\r")
