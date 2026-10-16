@@ -5,10 +5,10 @@
 
 ## 설치 (한 줄)
 
-저장소가 비공개이므로 GitHub 접근 권한이 있는 계정으로 `gh auth login`이 된 상태에서 실행합니다.
+저장소가 공개되어 있으므로 다음 명령어를 실행하여 바로 설치할 수 있습니다.
 
 ```sh
-gh api repos/KimJiSeong1994/AgentFramework/contents/install.sh -H "Accept: application/vnd.github.raw" | bash
+curl -fsSL https://raw.githubusercontent.com/KimJiSeong1994/AgentFramework/master/install.sh | bash
 ```
 
 - 저장소를 `~/.local/share/lca/AgentFramework`에 받고, 실행 의존성만 설치한 뒤 `~/.local/bin/lca`를 만듭니다.
