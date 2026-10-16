@@ -660,9 +660,10 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
     { kind: "tool-finished", role: "worker", execution: 1, taskID: "t1", executionID: "exec-fixture", callID: "call-fixture-2", tool: "read", outcome: "failed", ok: false },
   ])
   expect(report.scenarios.approve.capture.modeProof).toMatchObject({
+    // The approve scenario runs after /ascii, so rows use the ASCII status icons and toggle.
     toolItemsBeforeFilter: [
-      "[+] #1 read · call succeeded · execution not observed · task Implement · t1",
-      "[+] #2 read · call failed · execution not observed · task Implement · t1",
+      "+ > #1 read · call succeeded · execution not observed · task Implement · t1",
+      "x > #2 read · call failed · execution not observed · task Implement · t1",
     ],
     expandedCallDetailVisible: true,
     searchReadFailedVisible: true,

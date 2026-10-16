@@ -1,4 +1,5 @@
 import { MIN_COLUMNS, MIN_ROWS, MIN_SIZE_LABEL } from "./capability.ts"
+import { parseMarkdown, type InlineSpan, type InlineStyle } from "./markdown.ts"
 import { resolveTheme, semanticStyle, type SemanticToken, type Theme } from "./theme.ts"
 
 type DisplayToken = {
@@ -255,98 +256,340 @@ export function wrapText(text: string, columns: number): string[] {
 
 type Speaker = "You" | "Assistant" | "Error" | "Notice" | "Canonical plan"
 
-/** One physical transcript row. `gutter` carries color-independent provenance. */
-export type TranscriptRow = {
-  readonly gutter: string
+/** A styled run within one physical row; styles map to theme tokens at paint time. */
+export type TranscriptSegment = {
   readonly text: string
-  readonly speaker?: Speaker
-  readonly role: "first" | "continuation" | "blank"
-  readonly semantic: SemanticToken
-  readonly gutterSemantic: SemanticToken
-}
-
-const speakers: Record<Speaker, { glyph: string; ascii: string; semantic: SemanticToken; gutter: SemanticToken }> = {
-  You: { glyph: "❯", ascii: ">", semantic: "user", gutter: "user" },
-  Assistant: { glyph: "●", ascii: "*", semantic: "text", gutter: "accent" },
-  Notice: { glyph: "·", ascii: "-", semantic: "muted", gutter: "muted" },
-  Error: { glyph: "✗", ascii: "x", semantic: "error", gutter: "error" },
-  "Canonical plan": { glyph: "◆", ascii: "#", semantic: "text", gutter: "warning" },
-}
-const gutterWidth = 2
-const speakerLabel = /^\[(You|Assistant|Error|Notice|Canonical plan)\](?: |$)/u
-const toolSummary = /^\[[+-]\] #\d+ /u
-
-function contentSemantic(text: string): SemanticToken | undefined {
-  if (/^\[\+\] \+/u.test(text)) return "diff-add"
-  if (/^\[-\] -/u.test(text)) return "diff-remove"
-  if (text.startsWith("[code] ")) return "code"
-  return undefined
+  readonly styles: readonly SemanticToken[]
 }
 
 /**
- * Map logical transcript lines to physical rows. A blank row separates entries, the first
- * row of an entry carries its speaker glyph, and continuations are indented. Rendering and
- * scroll bounds both use this so page arithmetic matches what is drawn.
+ * One physical transcript row. Speaker labels (`you`, `lca`, `plan`) and gutter glyphs
+ * (`·` notice, `✗` error, tool status) carry provenance without relying on color.
+ */
+export type TranscriptRow = {
+  readonly segments: readonly TranscriptSegment[]
+  readonly speaker?: Speaker
+  readonly role: "first" | "continuation" | "blank"
+  /** Pad to the full width with this style (the user message bar) when color is on. */
+  readonly fill?: SemanticToken
+}
+
+export function transcriptRowText(row: TranscriptRow): string {
+  return row.segments.map(segment => segment.text).join("")
+}
+
+type StyledToken = DisplayToken & { styles: readonly SemanticToken[] }
+
+function styledTokens(spans: ReadonlyArray<{ text: string; styles: readonly SemanticToken[] }>): StyledToken[] {
+  const tokens: StyledToken[] = []
+  for (const span of spans) {
+    for (const token of displayTokens(displayGroups(span.text))) tokens.push({ ...token, styles: span.styles })
+  }
+  return tokens
+}
+
+function segmentsOf(tokens: readonly StyledToken[]): TranscriptSegment[] {
+  const segments: Array<{ text: string; styles: readonly SemanticToken[] }> = []
+  for (const token of tokens) {
+    const last = segments[segments.length - 1]
+    if (last && last.styles.join(" ") === token.styles.join(" ")) last.text += token.text
+    else segments.push({ text: token.text, styles: token.styles })
+  }
+  return segments
+}
+
+/** Word-wrap styled spans; explicit newlines start new rows. Styles never affect widths. */
+function wrapSpans(spans: ReadonlyArray<{ text: string; styles: readonly SemanticToken[] }>, columns: number): TranscriptSegment[][] {
+  const width = safeColumns(columns)
+  const result: TranscriptSegment[][] = []
+  let paragraph: StyledToken[] = []
+  const layout = (tokens: StyledToken[]): void => {
+    const words: Array<{ tokens: StyledToken[]; width: number; whitespace: boolean }> = []
+    for (const token of tokens) {
+      const last = words[words.length - 1]
+      if (last && last.whitespace === token.whitespace) { last.tokens.push(token); last.width += token.width }
+      else words.push({ tokens: [token], width: token.width, whitespace: token.whitespace })
+    }
+    let current: StyledToken[] = []
+    let currentWidth = 0
+    let emitted = false
+    const flush = (trim: boolean): void => {
+      let end = current.length
+      if (trim) while (end > 0 && current[end - 1]!.whitespace) end -= 1
+      if (end > 0 || !emitted) result.push(segmentsOf(current.slice(0, end)))
+      emitted = true
+      current = []
+      currentWidth = 0
+    }
+    for (const word of words) {
+      if (word.width > width && !word.whitespace) {
+        if (currentWidth > 0 && currentWidth + word.width > width) flush(true)
+        for (const token of word.tokens) {
+          if (currentWidth + token.width > width && currentWidth > 0) flush(true)
+          current.push(token)
+          currentWidth += token.width
+        }
+        continue
+      }
+      if (currentWidth + word.width > width && currentWidth > 0) {
+        flush(true)
+        if (word.whitespace) continue
+      }
+      current.push(...word.tokens)
+      currentWidth += word.width
+    }
+    if (current.length > 0 || !emitted) flush(false)
+  }
+  for (const token of styledTokens(spans)) {
+    if (token.newline) { layout(paragraph); paragraph = [] }
+    else paragraph.push(token)
+  }
+  layout(paragraph)
+  return result
+}
+
+/** Break by display width only, preserving every space (code blocks). */
+function hardWrap(text: string, styles: readonly SemanticToken[], columns: number): TranscriptSegment[][] {
+  const width = safeColumns(columns)
+  const rows: TranscriptSegment[][] = []
+  let current: StyledToken[] = []
+  let used = 0
+  for (const token of styledTokens([{ text, styles }])) {
+    if (token.newline) continue
+    if (used + token.width > width && used > 0) { rows.push(segmentsOf(current)); current = []; used = 0 }
+    current.push(token)
+    used += token.width
+  }
+  rows.push(segmentsOf(current))
+  return rows
+}
+
+const inlineStyleTokens: Record<InlineStyle, SemanticToken> = {
+  bold: "focus", italic: "italic", "inline-code": "inline-code", link: "link", muted: "muted",
+}
+
+function inlineSegments(spans: readonly InlineSpan[], base: readonly SemanticToken[]): Array<{ text: string; styles: readonly SemanticToken[] }> {
+  return spans.map(span => ({ text: span.text, styles: [...base, ...span.styles.map(style => inlineStyleTokens[style])] }))
+}
+
+/** Lay out Markdown into rows of `width` display columns. */
+function markdownRows(source: string, width: number, ascii: boolean): TranscriptSegment[][] {
+  const rows: TranscriptSegment[][] = []
+  const blank = (): void => { if (rows.length && rows[rows.length - 1]!.length) rows.push([]) }
+  const prefixed = (lines: TranscriptSegment[][], first: TranscriptSegment[], rest: TranscriptSegment[]): void => {
+    lines.forEach((line, index) => rows.push([...(index === 0 ? first : rest), ...line]))
+  }
+  for (const block of parseMarkdown(source)) {
+    switch (block.kind) {
+      case "blank":
+        blank()
+        break
+      case "paragraph":
+        rows.push(...wrapSpans(inlineSegments(block.spans, []), width))
+        break
+      case "heading": {
+        const base: SemanticToken[] = ["heading"]
+        const lead = block.level >= 3 ? [{ text: `${"#".repeat(block.level)} `, styles: base }] : []
+        rows.push(...wrapSpans([...lead, ...inlineSegments(block.spans, base)], width))
+        break
+      }
+      case "list-item": {
+        const indent = " ".repeat(Math.min(8, block.indent))
+        const marker = block.ordered ? `${block.marker} ` : `${ascii ? "*" : "•"} `
+        const lead = `${indent}${marker}`
+        const hang = " ".repeat(displayWidth(lead))
+        prefixed(wrapSpans(inlineSegments(block.spans, []), Math.max(1, width - displayWidth(lead))),
+          [{ text: indent, styles: [] }, { text: marker, styles: ["bullet"] }], [{ text: hang, styles: [] }])
+        break
+      }
+      case "list-continuation": {
+        const hang = " ".repeat(Math.min(10, block.indent))
+        prefixed(wrapSpans(inlineSegments(block.spans, []), Math.max(1, width - hang.length)), [{ text: hang, styles: [] }], [{ text: hang, styles: [] }])
+        break
+      }
+      case "quote": {
+        const border = { text: `${ascii ? "|" : "▏"} `, styles: ["quote"] as SemanticToken[] }
+        prefixed(wrapSpans(inlineSegments(block.spans, ["quote"]), Math.max(1, width - 2)), [border], [border])
+        break
+      }
+      case "code": {
+        const diff = block.language === "diff"
+        rows.push([{ text: clipToWidth(`\`\`\`${block.language}`, width), styles: ["muted"] }])
+        for (const line of block.lines) {
+          const styles: SemanticToken[] = diff || /^[+-](?![+-]{2})/u.test(line)
+            ? [line.startsWith("+") ? "diff-add" : line.startsWith("-") ? "diff-remove" : "code"]
+            : ["code"]
+          prefixed(hardWrap(line, styles, Math.max(1, width - 2)), [{ text: "  ", styles: [] }], [{ text: "  ", styles: [] }])
+        }
+        if (block.closed) rows.push([{ text: "```", styles: ["muted"] }])
+        break
+      }
+      case "rule":
+        rows.push([{ text: (ascii ? "-" : "─").repeat(Math.min(width, 80)), styles: ["rule"] }])
+        break
+    }
+  }
+  while (rows.length && rows[rows.length - 1]!.length === 0) rows.pop()
+  return rows
+}
+
+type TranscriptEntry =
+  | { kind: "text"; speaker: Speaker; lines: string[] }
+  | { kind: "tool"; summary: string; details: string[] }
+  | { kind: "shell"; ordinal: string; command: string; notes: string[]; output: string[]; footers: string[] }
+  | { kind: "plain"; lines: string[] }
+
+const speakerLabel = /^\[(You|Assistant|Error|Notice|Canonical plan)\](?: |$)/u
+const toolSummary = /^\[([+-])\] (#\d+ \S+)(.*)$/u
+const shellHeader = /^\[Shell\] (\$\d+) \$ (.*)$/u
+
+function transcriptEntries(lines: readonly string[]): TranscriptEntry[] {
+  const entries: TranscriptEntry[] = []
+  for (const line of lines) {
+    const current = entries[entries.length - 1]
+    const label = speakerLabel.exec(line)
+    const shell = shellHeader.exec(line)
+    if (shell) {
+      entries.push({ kind: "shell", ordinal: shell[1]!, command: shell[2]!, notes: [], output: [], footers: [] })
+    } else if (current?.kind === "shell" && line.startsWith("  : ")) {
+      current.notes.push(line.slice(4))
+    } else if (current?.kind === "shell" && line.startsWith("  | ")) {
+      current.output.push(line.slice(4))
+    } else if (current?.kind === "shell" && line.startsWith("  = ")) {
+      current.footers.push(line.slice(4))
+    } else if (label) {
+      entries.push({ kind: "text", speaker: label[1] as Speaker, lines: [line.slice(label[0].length)] })
+    } else if (line.startsWith("  | ") && current?.kind === "text") {
+      current.lines.push(line.slice(4))
+    } else if (toolSummary.test(line)) {
+      entries.push({ kind: "tool", summary: line, details: [] })
+    } else if (/^\s/u.test(line) && current?.kind === "tool") {
+      current.details.push(line.trim())
+    } else if (/^\s/u.test(line) && current) {
+      if (current.kind === "text") current.lines.push(line.replace(/^ {2}\| /u, ""))
+      else if (current.kind === "plain") current.lines.push(line.trim())
+    } else {
+      entries.push({ kind: "plain", lines: [line.replace(/^ {2}\| /u, "")] })
+    }
+  }
+  return entries
+}
+
+const speakerStyle: Record<Speaker, { label?: string; labelStyle: SemanticToken[]; glyph?: [string, string]; style: SemanticToken[] }> = {
+  You: { label: "you", labelStyle: ["accent"], style: ["user"] },
+  Assistant: { label: "lca", labelStyle: ["focus"], style: [] },
+  "Canonical plan": { label: "plan", labelStyle: ["warning", "focus"], style: [] },
+  Notice: { glyph: ["·", "-"], labelStyle: ["muted"], style: ["muted"] },
+  Error: { glyph: ["✗", "x"], labelStyle: ["error"], style: ["error"] },
+}
+
+/**
+ * Map logical transcript lines to physical rows, GJC style: a blank row between entries,
+ * a speaker label above user/assistant/plan messages, Markdown for assistant and plan
+ * text, compact glyph rows for notices, errors and tool calls. Rendering and scroll
+ * bounds both use this so page arithmetic matches what is drawn.
  */
 export function transcriptDisplayRows(lines: readonly string[], columns: number, ascii = false): TranscriptRow[] {
-  const width = Math.max(1, safeColumns(columns) - gutterWidth)
+  const width = safeColumns(columns)
+  const body = Math.max(1, width - 2)
   const rows: TranscriptRow[] = []
-  let speaker: Speaker | undefined
-  let semantic: SemanticToken = "text"
-  const blank = (): void => {
-    if (rows.length) rows.push({ gutter: "", text: "", role: "blank", semantic: "text", gutterSemantic: "text" })
-  }
-  const push = (text: string, role: "first" | "continuation", rowSemantic: SemanticToken, gutter: string, gutterSemantic: SemanticToken): void => {
-    wrapText(text, width).forEach((line, index) => rows.push({
-      gutter: index === 0 && role === "first" ? gutter : "  ",
-      text: line,
-      ...(speaker ? { speaker } : {}),
-      role: index === 0 ? role : "continuation",
-      semantic: rowSemantic,
-      gutterSemantic,
-    }))
-  }
-  for (const line of lines) {
-    const label = speakerLabel.exec(line)
-    if (label) {
-      speaker = label[1] as Speaker
-      const style = speakers[speaker]
-      let body = line.slice(label[0].length)
-      if (speaker === "Canonical plan") body = `Plan: ${body}`
-      semantic = speaker === "You" || speaker === "Error" ? style.semantic : contentSemantic(body) ?? style.semantic
-      blank()
-      push(body, "first", semantic, `${ascii ? style.ascii : style.glyph} `, style.gutter)
-      semantic = style.semantic
+  const indent: TranscriptSegment = { text: "  ", styles: [] }
+  // Consecutive notices, errors or tool calls stay together; any other change of entry is spaced.
+  const compactKind = (entry: TranscriptEntry): string | undefined =>
+    entry.kind === "tool" ? "tool" : entry.kind === "text" && !speakerStyle[entry.speaker].label ? entry.speaker : undefined
+  let previous: string | undefined
+  for (const entry of transcriptEntries(lines)) {
+    const kind = compactKind(entry)
+    if (rows.length && (kind === undefined || kind !== previous)) rows.push({ segments: [], role: "blank" })
+    previous = kind
+    if (entry.kind === "text") {
+      const speaker = entry.speaker
+      const style = speakerStyle[speaker]
+      const text = entry.lines.join("\n")
+      if (style.label) {
+        rows.push({ segments: [{ text: style.label, styles: style.labelStyle }], speaker, role: "first" })
+        const content = speaker === "You"
+          ? wrapSpans([{ text, styles: style.style }], body)
+          : markdownRows(text, body, ascii)
+        for (const line of content) {
+          rows.push({ segments: line.length ? [indent, ...line] : [], speaker, role: "continuation", ...(speaker === "You" ? { fill: "user" as const } : {}) })
+        }
+      } else {
+        const glyph: TranscriptSegment = { text: `${ascii ? style.glyph![1] : style.glyph![0]} `, styles: style.labelStyle }
+        wrapSpans([{ text, styles: style.style }], body).forEach((line, index) => {
+          rows.push({ segments: [index === 0 ? glyph : indent, ...line], speaker, role: index === 0 ? "first" : "continuation" })
+        })
+      }
       continue
     }
-    if (line.startsWith("  | ")) {
-      const body = line.slice(4)
-      const rowSemantic = speaker === "You" || speaker === "Error" ? semantic : contentSemantic(body) ?? semantic
-      push(body, "continuation", rowSemantic, "  ", "text")
+    if (entry.kind === "shell") {
+      rows.push(...shellWindowRows(entry, width, ascii))
       continue
     }
-    if (toolSummary.test(line)) {
-      speaker = undefined
-      semantic = "muted"
-      blank()
-      push(line, "first", "text", `${ascii ? "+" : "⏺"} `, "success")
+    if (entry.kind === "tool") {
+      const match = toolSummary.exec(entry.summary)!
+      const outcome = / · call (?:failed|denied)/u.test(entry.summary) ? "error" : / · call succeeded/u.test(entry.summary) ? "success" : "running"
+      const icon: TranscriptSegment = outcome === "error"
+        ? { text: `${ascii ? "x" : "✘"} `, styles: ["error"] }
+        : outcome === "success" ? { text: `${ascii ? "+" : "✔"} `, styles: ["success"] } : { text: `${ascii ? "~" : "⟳"} `, styles: ["warning"] }
+      const toggle = match[1] === "+" ? (ascii ? "> " : "▸ ") : (ascii ? "v " : "▾ ")
+      wrapSpans([{ text: toggle, styles: ["muted"] }, { text: match[2]!, styles: ["focus"] }, { text: match[3]!, styles: ["muted"] }], body)
+        .forEach((line, index) => rows.push({ segments: [index === 0 ? icon : indent, ...line], role: index === 0 ? "first" : "continuation" }))
+      for (const detail of entry.details) {
+        wrapSpans([{ text: detail, styles: ["muted"] }], Math.max(1, width - 4))
+          .forEach(line => rows.push({ segments: [{ text: "    ", styles: [] }, ...line], role: "continuation" }))
+      }
       continue
     }
-    if (/^\s/u.test(line)) {
-      push(line.trimStart(), "continuation", semantic, "  ", "text")
-      continue
-    }
-    speaker = undefined
-    semantic = "text"
-    blank()
-    push(line, "first", "text", "  ", "text")
+    wrapSpans([{ text: entry.lines.join("\n"), styles: [] }], body)
+      .forEach((line, index) => rows.push({ segments: [indent, ...line], role: index === 0 ? "first" : "continuation" }))
   }
   return rows
 }
 
-/** Physical rows for one logical line, without the separator that precedes later entries. */
+/** A GJC-style shell window: titled top border, output, status footer, bottom border. */
+function shellWindowRows(entry: Extract<TranscriptEntry, { kind: "shell" }>, width: number, ascii: boolean): TranscriptRow[] {
+  const box = ascii ? { h: "-", v: "|", tl: "+", tr: "+", bl: "+", br: "+" } : { h: "─", v: "│", tl: "╭", tr: "╮", bl: "╰", br: "╯" }
+  const status = entry.footers.at(-1) ?? ""
+  const state: { icon: string; style: SemanticToken } = status.startsWith("running")
+    ? { icon: ascii ? "~" : "⟳", style: "warning" }
+    : status.startsWith("exit 0 ") ? { icon: ascii ? "+" : "✔", style: "success" }
+      : status.startsWith("cancelled") || status.startsWith("timed out") ? { icon: "!", style: "warning" }
+        : { icon: ascii ? "x" : "✘", style: "error" }
+  const border: SemanticToken[] = [state.style === "success" ? "border" : state.style]
+  const inner = Math.max(1, width - 4)
+  const titleRoom = Math.max(1, width - 6)
+  const label = `shell · ${entry.ordinal} · `
+  const command = clipToWidth(`$ ${entry.command}`, Math.max(1, titleRoom - displayWidth(label)))
+  const title = displayWidth(label) + 1 >= titleRoom ? clipToWidth(`$ ${entry.command}`, titleRoom) : undefined
+  const titleWidth = title ? displayWidth(title) : displayWidth(label) + displayWidth(command)
+  const rows: TranscriptRow[] = [{
+    segments: [
+      { text: `${box.tl}${box.h} `, styles: border },
+      ...(title ? [{ text: title, styles: ["focus"] as SemanticToken[] }] : [
+        { text: "shell", styles: ["accent"] as SemanticToken[] },
+        { text: ` · ${entry.ordinal} · `, styles: ["muted"] as SemanticToken[] },
+        { text: command, styles: ["focus"] as SemanticToken[] },
+      ]),
+      { text: ` ${box.h.repeat(Math.max(0, width - 5 - titleWidth))}${box.tr}`, styles: border },
+    ],
+    role: "first",
+  }]
+  const row = (content: TranscriptSegment[]): TranscriptRow => {
+    const used = content.reduce((total, segment) => total + displayWidth(segment.text), 0)
+    return { segments: [{ text: `${box.v} `, styles: border }, ...content, { text: `${" ".repeat(Math.max(0, inner - used))} ${box.v}`, styles: border }], role: "continuation" }
+  }
+  for (const note of entry.notes) for (const wrapped of wrapSpans([{ text: note, styles: ["muted"] }], inner)) rows.push(row(wrapped))
+  for (const line of entry.output) for (const wrapped of hardWrap(line, ["muted"], inner)) rows.push(row(wrapped))
+  for (const footer of entry.footers.slice(0, -1)) for (const wrapped of wrapSpans([{ text: footer, styles: ["muted"] }], inner)) rows.push(row(wrapped))
+  for (const wrapped of wrapSpans([{ text: `${state.icon} `, styles: [state.style] }, { text: status, styles: [state.style] }], inner)) rows.push(row(wrapped))
+  rows.push({ segments: [{ text: `${box.bl}${box.h.repeat(Math.max(0, width - 2))}${box.br}`, styles: border }], role: "continuation" })
+  return rows
+}
+
+/** Physical rows for one logical line, as plain text. */
 export function wrapTranscriptLine(text: string, columns: number, ascii = false): string[] {
-  return transcriptDisplayRows([text], columns, ascii).map(row => `${row.gutter}${row.text}`)
+  return transcriptDisplayRows([text], columns, ascii).map(transcriptRowText)
 }
 
 function sgrResetState(sequence: string): { resets: boolean; finalReset: boolean } {
@@ -645,12 +888,16 @@ export function renderFrame(input: {
   const leadingBlank = visible[0]?.role === "blank" ? 1 : 0
   const firstShown = displayRows[firstVisibleTranscriptRow + leadingBlank]
   const continuedSpeaker = firstShown && firstShown.role === "continuation" ? firstShown.speaker : undefined
+  const styled = (text: string, styles: readonly SemanticToken[]): string => {
+    const codes = styles.filter(style => style !== "text").map(style => theme.sgr[style]).join("")
+    return color && text && codes ? `${codes}${text}\x1b[0m` : text
+  }
   visible.slice(leadingBlank).forEach((row, index) => {
     if (row.role === "blank") return
-    if (row.semantic === "user") {
-      frameLines[index] = paint(padToWidth(`${row.gutter}${row.text}`, columns), "user")
+    if (row.fill && color) {
+      frameLines[index] = paint(padToWidth(transcriptRowText(row), columns), row.fill)
     } else {
-      frameLines[index] = `${paint(row.gutter, row.gutterSemantic)}${paint(row.text, row.semantic)}`
+      frameLines[index] = row.segments.map(segment => styled(segment.text, segment.styles)).join("")
     }
   })
 

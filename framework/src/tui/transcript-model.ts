@@ -9,8 +9,17 @@ export type ExecutionDisplay = {
   claim: boolean
 }
 
+export type ShellItemStatus = "running" | "complete" | "error" | "cancelled" | "timeout"
+export type ShellItem = {
+  kind: "shell"; id: string; ordinal: number; command: string; lines: string[]; totalLines: number
+  status: ShellItemStatus; exitCode: number | null; signal: string | null; startedAt: number; durationMs?: number; expanded: boolean
+}
+/** Collapsed shell windows show this many trailing output lines (GJC preview). */
+export const SHELL_PREVIEW_LINES = 20
+
 export type TranscriptItem =
   | { kind: "text"; id: string; text: string; provenance: TranscriptText["provenance"] }
+  | ShellItem
   | { kind: "tool"; id: string; ordinal: number; executionID: string; callID: string; taskID: string; name: string; role: string;
       outcome: "running" | "succeeded" | "failed" | "denied"; expanded: boolean; evidence: string[]; execution: ExecutionDisplay }
 export type TranscriptDetail = { id: string; summary: string; lines: string[]; expandable: boolean }
@@ -24,7 +33,13 @@ export class TranscriptModel {
   private readonly tasks = new Map<string, { status: string; title?: string }>()
   private readonly historicalTasks = new Set<string>()
   private readonly historicalCalls = new Set<string>()
-  constructor(readonly sessionID: string) {}
+  private readonly shells = new Map<string, ShellItem>()
+  private nextShellOrdinal = 0
+  constructor(readonly sessionID: string, private readonly now: () => number = Date.now) {}
+  get runningShell(): boolean {
+    for (const shell of this.shells.values()) if (shell.status === "running") return true
+    return false
+  }
   get items(): readonly TranscriptItem[] { return this.entries }
   get currentTask(): string | undefined {
     for (const [id, task] of this.tasks) if (task.status === "running" && !this.historicalTasks.has(id)) return `${task.title ?? id} running`
@@ -46,6 +61,9 @@ export class TranscriptModel {
   }
   details(): TranscriptDetail[] {
     const details: TranscriptDetail[] = []
+    for (const shell of this.shells.values()) {
+      details.push({ id: shell.id, summary: `$${shell.ordinal} ${shell.command} · ${shellFooter(shell, this.now())}`, lines: shell.lines.slice(-SHELL_PREVIEW_LINES), expandable: true })
+    }
     for (const [id, task] of this.tasks) {
       const historical = this.historicalTasks.has(id)
       details.push({ id: `task:${id}`, summary: `Task ${task.title ?? "title unavailable"} · ${id} · ${historical ? `${task.status} (last recorded)` : task.status}`, lines: [], expandable: false })
@@ -125,7 +143,38 @@ export class TranscriptModel {
     }
   }
 
+  /** Start a live shell window; `id` is the durable event identity used when it is persisted. */
+  shellStarted(id: string, command: string, ordinal?: number): ShellItem {
+    const existing = this.shells.get(id)
+    if (existing) return existing
+    const assigned = ordinal ?? this.nextShellOrdinal + 1
+    this.nextShellOrdinal = Math.max(this.nextShellOrdinal, assigned)
+    const item: ShellItem = { kind: "shell", id, ordinal: assigned, command, lines: [], totalLines: 0, status: "running",
+      exitCode: null, signal: null, startedAt: this.now(), expanded: false }
+    this.shells.set(id, item)
+    this.entries.push(item)
+    return item
+  }
+
+  shellOutput(id: string, lines: readonly string[], totalLines: number): void {
+    const item = this.shells.get(id)
+    if (!item || item.status !== "running") return
+    item.lines = [...lines]
+    item.totalLines = totalLines
+  }
+
+  shellFinished(id: string, result: { status: Exclude<ShellItemStatus, "running">; exitCode: number | null; signal: string | null; durationMs: number; lines: readonly string[]; totalLines: number }): void {
+    const item = this.shells.get(id)
+    if (!item) return
+    Object.assign(item, { status: result.status, exitCode: result.exitCode, signal: result.signal, durationMs: result.durationMs, lines: [...result.lines], totalLines: result.totalLines })
+  }
+
   toggle(id: string): boolean {
+    const shell = this.shells.get(id)
+    if (shell) {
+      shell.expanded = !shell.expanded
+      return true
+    }
     const item = this.calls.get(id)
     if (!item) return false
     item.expanded = !item.expanded
@@ -136,6 +185,7 @@ export class TranscriptModel {
     const terms = query.toLocaleLowerCase().split(/\s+/u).filter(Boolean)
     return this.entries.filter(item => {
       const task = item.kind === "tool" ? this.tasks.get(item.taskID) : undefined
+      if (item.kind === "shell") return terms.every(term => `${item.command} ${item.lines.join(" ")}`.toLocaleLowerCase().includes(term))
       const text = item.kind === "text" ? item.text : `${item.name} ${item.outcome} ${item.taskID} ${task?.title ?? ""} ${task?.status ?? ""} ${item.role} ${item.evidence.join(" ")}`
       return terms.every(term => text.toLocaleLowerCase().includes(term))
     })
@@ -148,16 +198,19 @@ export class TranscriptModel {
           item.provenance === "assistant" ? "Assistant" :
           item.provenance === "error" ? "Error" :
           item.provenance === "canonical-plan" ? "Canonical plan" : "Notice"
-        const rows = item.text.split("\n")
-        let fenced = false
-        const presented = rows.map((row, index) => {
-          const fence = /^\s*```/u.test(row)
-          const semantic = fenced ? "[code] " : row.startsWith("+") ? "[+] " : row.startsWith("-") ? "[-] " : ""
-          const value = `${index === 0 ? `[${label}] ` : "  | "}${semantic}${row}`
-          if (fence) fenced = !fenced
-          return value
-        })
+        // Logical lines keep the raw message; the renderer lays out Markdown and diff semantics.
+        const presented = item.text.split("\n").map((row, index) => `${index === 0 ? `[${label}] ` : "  | "}${row}`)
         return presented.length ? presented : [`[${label}]`]
+      }
+      if (item.kind === "shell") {
+        const shown = item.expanded ? item.lines : item.lines.slice(-SHELL_PREVIEW_LINES)
+        const hidden = item.totalLines - shown.length
+        return [
+          `[Shell] $${item.ordinal} $ ${item.command}`,
+          ...(hidden > 0 ? [`  : … ${hidden} earlier line${hidden === 1 ? "" : "s"}${item.expanded ? " not retained" : ` · /expand $${item.ordinal}`}`] : []),
+          ...shown.map(line => `  | ${line}`),
+          `  = ${shellFooter(item, this.now())}`,
+        ]
       }
       const outcome = item.outcome === "running" && this.historicalCalls.has(item.id) ? "running (last recorded; unconfirmed)" : item.outcome
       const task = this.tasks.get(item.taskID)
@@ -174,4 +227,18 @@ export class TranscriptModel {
       return item.expanded ? [summary, `  Call ${item.callID} · execution ${item.executionID} · ${item.role}`, ...item.evidence.map(line => `  ${line}`)] : [summary]
     })
   }
+}
+
+function seconds(ms: number): string {
+  return ms < 10_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms / 1000)}s`
+}
+
+/** Status text for a shell window; the renderer picks its icon and color from the leading word. */
+export function shellFooter(item: ShellItem, now: number): string {
+  if (item.status === "running") return `running · ${Math.floor((now - item.startedAt) / 1000)}s · Esc cancels`
+  const duration = seconds(item.durationMs ?? 0)
+  if (item.status === "cancelled") return `cancelled · ${duration}`
+  if (item.status === "timeout") return `timed out · ${duration}`
+  if (item.signal) return `signal ${item.signal} · ${duration}`
+  return `exit ${item.exitCode ?? "?"} · ${duration}`
 }

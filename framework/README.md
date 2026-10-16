@@ -89,6 +89,23 @@ lca chat --engine codex --model gpt-5.6-sol
 lca chat --engine claude --model sonnet
 ```
 
+To skip `/model` on every launch, set a default. With neither `--engine` nor `--model`,
+`lca` starts with `chat.default_model` from `~/.config/lca/lca.jsonc` (a project's
+`.lca/lca.jsonc` wins per key), exactly as if both flags were given: no discovery, the
+same preflight, and no fallback to another model if it is refused:
+
+```jsonc
+{ "chat": { "default_model": { "engine": "local", "model": "gemma4-26b-mtp:latest" } } }
+```
+
+In the composer, `/model default` shows the effective default, `/model default save`
+stores the current selection, `/model default <local|codex|claude> <native-id>` stores
+that model (and selects it if none is selected yet), and `/model default clear` removes
+the user default. Saving rewrites only that key in the user config, preserving comments,
+refuses to overwrite invalid JSONC, and never switches an active session. An invalid
+default is reported and ignored, leaving the composer unselected; a project default that
+still overrides a saved user default is reported. Explicit flags always win.
+
 Either flag on its own still opens the unselected composer; `/model` then asks for the
 missing choice. Without an explicit model, `/model` offers numbered choices or native
 model ID entry. Ollama choices come from a bounded, read-only `ollama list` probe in the same
@@ -110,8 +127,17 @@ Readline prints contextual help and numbered engine/model choices. Empty input,
 `/cancel`, or physical Escape in its pickers cancels without changing the current
 selection or leaking partial selection text into the composer. EOF closes the
 readline input owner; later reads return EOF rather than reusing a closed reader.
-An actual switch starts a fresh conversation/session: prior conversation context is
-not transferred, and no approval is reused. Selecting the same engine/model keeps
+An actual `/model` switch keeps the conversation going: the earlier user/assistant
+turns (newest first, up to 24 turns and the 24k-character conversation budget) are
+carried into the new engine/model and sent with the next message, and stay visible in
+the transcript under `Earlier conversation with <engine> / <model>`. Each engine/model
+still gets its own durable session (ownership, admission and recovery stay bound to the
+model that ran them); the new session records the carried turns with their source
+session, engine and model, so earlier answers are never attributed to the new model and
+the context survives `/resume`. Carried text is sent to whichever engine you pick,
+including a remote one. `/new` starts without earlier turns; if the current conversation
+cannot be read in full, the switch is refused rather than dropping context. No approval
+is ever reused. Selecting the same engine/model keeps
 the current session. Switching is refused while a workflow is active, workflow
 state is corrupt, or execution ownership is unresolved; recover with the original
 engine/model/session instead. Cancelling the picker or a failed selection leaves
@@ -128,9 +154,16 @@ turns recovery into a different-model replay.
 Bare `lca` opens a model-unselected home with `/model`, `/help`, and `/quit` actions.
 The TUI follows the GJC arrangement: an empty session opens a bordered welcome box
 (identity and selected model on the left, getting-started commands and flow keys on
-the right); the transcript flows top-down with a provenance glyph on each message
-(`❯` you, `●` assistant, `·` notice, `✗` error, `◆ Plan:` canonical plan, `⏺` tool),
-so provenance never depends on color. Beneath it sit up to two status rows, a rule
+the right); the transcript flows top-down. User, assistant and canonical-plan messages
+sit under a `you` / `lca` / `plan` label with an indented body (user text on a
+full-width bar when color is on); notices (`·`) and errors (`✗`) are compact glyph rows,
+and tool calls show an outcome icon (`✔` succeeded, `✘` failed/denied, `⟳` running)
+before the unchanged truthful summary, so provenance never depends on color. Assistant
+and plan text is laid out as Markdown — headings, `•` lists, fenced code blocks, `▏`
+quotes, rules, bold/italic, inline code and `label (url)` links — without interpreting
+terminal controls in model output. While the host reports an in-progress request, the
+status shows a spinner and elapsed seconds (`⠋ Model request running · 12s`); it never
+infers progress. Beneath it sit up to two status rows, a rule
 carrying the `⬢ engine / model` badge and scroll position, and a bordered composer.
 Pickers, command/skill suggestions and history search title the composer border and
 list their choices beneath it; details, approval, session lists and read failures

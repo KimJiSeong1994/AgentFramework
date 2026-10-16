@@ -14,11 +14,11 @@ import { ledgerPath } from "../state/ledger.ts"
 import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
 import { inputColorSupported, inputLine, renderInput, type InputPresentation } from "./cli-input.ts"
 import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus } from "./cli-progress.ts"
-import { createPlanConversation, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
+import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
 import { PROTECTED_WORKFLOWS, resolveSkillRoots } from "../skills/roots.ts"
 import { SkillSession, type PreparedSkillInvocation, type SkillCatalog } from "../skills/session.ts"
 import { attachAdmission, detachAdmission, effectiveHold, holdAdmission, resumeAdmission } from "../sessions/admission.ts"
-import { inspectSessions, readSessionMetadata, replaySession, type SessionStore, type ReplayOptions, type ReplayResult, type TranscriptKind } from "../sessions/store.ts"
+import { inspectSessions, MAX_CARRIED_MESSAGES, MAX_SHELL_COMMAND_BYTES, readSessionMetadata, replaySession, type SessionStore, type ReplayOptions, type ReplayResult, type TranscriptKind } from "../sessions/store.ts"
 import { persistToolActivity } from "../tui/session-transcript.ts"
 import { createForegroundController, readForegroundStatus, type ForegroundController } from "./controller.ts"
 import { discoverModels as discoverModelCatalog, type ModelCatalog } from "./model-catalog.ts"
@@ -36,6 +36,8 @@ import { settled, type ExecutionRunStatus } from "./run-state.ts"
 import { LinuxAdmissionRefused, type ExecutionRuntime } from "./types.ts"
 import type { ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
 import { commandInsertion, interactiveActions, interactiveHelp, type InteractiveContext } from "./interactive-actions.ts"
+import { fileDefaultModelStore, validModelID, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
+import { runOperatorShell, type ShellResult, type ShellSnapshot } from "./operator-shell.ts"
 
 export type CliEngine = CliRuntimeOptions["engine"]
 export type InteractiveArgs = { worktree: string; engine?: CliEngine; model?: string }
@@ -71,7 +73,14 @@ export type Terminal = {
   readLine: (prompt: string, signal?: AbortSignal) => Promise<string | undefined>
   write: (text: string) => void
   writeText?: (text: TranscriptText) => void
+  /** Live operator shell window (full-screen TUI); readline prints output lines instead. */
+  shellStart?: (run: { id: string; command: string }) => ShellView
   close: () => void
+}
+
+export type ShellView = {
+  output: (snapshot: ShellSnapshot) => void
+  finish: (result: ShellResult) => void
 }
 
 type PlanConversation = {
@@ -95,6 +104,8 @@ export type InteractiveDependencies = {
   createConversation: (runtime: ExecutionRuntime, sessionID: string, prior?: readonly ConversationMessage[]) => PlanConversation
   createController: (runtime: ExecutionRuntime) => ForegroundController
   discoverModels: (engine: CliEngine, worktree: string, signal?: AbortSignal) => Promise<ModelCatalog>
+  /** Persisted `chat.default_model`; used only when neither --engine nor --model is given. */
+  defaultModel: DefaultModelStore
   humanDecision: typeof humanDecision
   randomUUID: () => string
   signals: SignalSource
@@ -154,6 +165,20 @@ function readProgressTasks(worktree: string, sessionID: string, taskIDs: readonl
   }
 }
 
+/** Keep the newest complete pairs that fit the turn cap and the conversation character budget. */
+function boundedPairs(pairs: readonly ConversationMessage[]): ConversationMessage[] {
+  const kept: ConversationMessage[] = []
+  let chars = 0
+  for (let index = pairs.length - 2; index >= 0 && kept.length < MAX_CARRIED_MESSAGES; index -= 2) {
+    const user = pairs[index]!
+    const assistant = pairs[index + 1]!
+    chars += user.text.length + assistant.text.length
+    if (chars > MAX_PLAN_CONVERSATION_CHARS && kept.length) break
+    kept.unshift(user, assistant)
+  }
+  return kept
+}
+
 export class InteractiveLaunchError extends Error {
   constructor(message: string) {
     super(message)
@@ -161,10 +186,7 @@ export class InteractiveLaunchError extends Error {
   }
 }
 
-export function validModelID(value: string): boolean {
-  return value.length > 0 && value.length <= 256 && !value.startsWith("-") && value.trim() === value &&
-    !/[\\\s\u0000-\u001f\u007f]/u.test(value)
-}
+export { validModelID } from "./default-model.ts"
 
 export function parseInteractiveArgs(argv: string[], cwd = process.cwd()): InteractiveArgs {
   const fields: Record<string, string> = {}
@@ -304,7 +326,7 @@ export function createReadlineTerminal(): Terminal {
   return terminal
 }
 
-function defaultDependencies(): InteractiveDependencies {
+export function defaultDependencies(): InteractiveDependencies {
   return {
     cwd: process.cwd(),
     terminal: createReadlineTerminal(),
@@ -313,9 +335,10 @@ function defaultDependencies(): InteractiveDependencies {
     admitRuntime: async (runtime) => {
       assertHostAdmission(await runtime.host.preflight(runtime.host.identity.profile), runtime.host.identity.controlProfile)
     },
-    createConversation: (runtime, sessionID) => createPlanConversation(runtime, sessionID),
+    createConversation: (runtime, sessionID, prior) => createPlanConversation(runtime, sessionID, prior),
     createController: createForegroundController,
     discoverModels: discoverModelCatalog,
+    defaultModel: fileDefaultModelStore,
     humanDecision,
     randomUUID,
     signals: {
@@ -480,14 +503,20 @@ async function chooseModel(
   return { value: undefined, discovery, backToEngine: false }
 }
 
-function selectionBanner(worktree: string, engine: CliEngine, model: string, presentation?: InputPresentation, reset = false): string {
+function selectionBanner(worktree: string, engine: CliEngine, model: string, presentation?: InputPresentation, note?: string): string {
   return "\n" + [
     "Native execution selection:",
     `  Engine: ${engine}`,
     `  Model: ${model}`,
     `  Worktree: ${worktree}`,
-    ...(reset ? ["  Conversation context reset after model switch."] : []),
+    ...(note ? [`  ${note}`] : []),
   ].map(line => inputLine(line, presentation)).join("\n") + "\n\n"
+}
+
+function switchNote(turns: number, source: { engine: string; model: string } | undefined): string {
+  return turns && source
+    ? `Conversation continues: ${turns} earlier turn${turns === 1 ? "" : "s"} from ${source.engine} / ${source.model}, sent with your next message.`
+    : "New conversation: no earlier turns to carry."
 }
 
 function helpText(context: InteractiveContext = "chat"): string {
@@ -691,7 +720,7 @@ export async function runInteractiveSession(
     try { progress.cancelRequested() } catch { persistenceFailed = true }
     abort.abort()
   }
-  const onSigint = () => signalCancel("SIGINT")
+  const onSigint = () => shellAbort ? shellAbort.abort() : signalCancel("SIGINT")
   const onSigterm = () => signalCancel("SIGTERM")
   const onSighup = () => signalCancel("SIGHUP")
   let requestCancel = () => { progress.cancelRequested(); abort.abort() }
@@ -711,8 +740,46 @@ export async function runInteractiveSession(
       } else if (paused?.stopIntent) terminal.write(`${stopDisplay(paused) === "cancelling" ? STOP_LABEL.cancelling : STOP_LABEL.pausing}\n`)
     } catch { /* display only */ }
   }
+  // Operator `!command`: the host owns the run (cwd, cancellation, persistence); the terminal only renders it.
+  let shellAbort: AbortController | undefined
+  async function runShell(command: string, cwd: string): Promise<void> {
+    const id = `shell:${deps.randomUUID()}`
+    const controller = new AbortController()
+    const onSessionAbort = () => controller.abort()
+    shellAbort = controller
+    abort.signal.addEventListener("abort", onSessionAbort, { once: true })
+    const view = terminal.shellStart?.({ id, command })
+    if (!view) visibleWrite(terminalSafeText(`$ ${command}\n`))
+    let printed = 0
+    const printCompleted = (completed: number, tail: readonly string[]) => {
+      const fresh = Math.min(completed - printed, tail.length)
+      if (fresh > 0) visibleWrite(terminalSafeText(`${tail.slice(-fresh).join("\n")}\n`))
+      printed = completed
+    }
+    try {
+      const result = await runOperatorShell(command, {
+        cwd, signal: controller.signal,
+        onUpdate: snapshot => view ? view.output(snapshot) : printCompleted(snapshot.completed, snapshot.completedTail),
+      })
+      if (view) view.finish(result)
+      else {
+        printCompleted(result.totalLines, result.lines)
+        const seconds = `${(result.durationMs / 1000).toFixed(1)}s`
+        const outcome = result.status === "cancelled" ? "cancelled" : result.status === "timeout" ? "timed out" :
+          result.signal ? `signal ${result.signal}` : `exit ${result.exitCode ?? "?"}`
+        visibleWrite(`[shell] ${outcome} · ${seconds}\n`)
+      }
+      persist("shell", { command, status: result.status, exitCode: result.exitCode, signal: result.signal,
+        durationMs: result.durationMs, lines: [...result.lines], totalLines: result.totalLines }, id)
+    } finally {
+      abort.signal.removeEventListener("abort", onSessionAbort)
+      if (shellAbort === controller) shellAbort = undefined
+    }
+  }
   terminal.controls?.(action => {
-    if (action === "shutdown") onSigint()
+    // Esc / Ctrl+C / /cancel stop a running operator shell before they reach the session.
+    if (shellAbort && (action === "cancel" || action === "shutdown")) shellAbort.abort()
+    else if (action === "shutdown") onSigint()
     else if (action === "quit") signalCancel()
     else if (action === "disconnect") onSighup()
     else if (action === "suspend") requestSuspend()
@@ -774,13 +841,89 @@ export async function runInteractiveSession(
         visibleWrite("Skill catalog unavailable; source invocation is disabled for this session.\n")
       }
     }
+    const describeDefault = (lookup: DefaultModelLookup): string => lookup.state === "configured"
+      ? `Default model: ${lookup.value.engine} / ${lookup.value.model} (${lookup.source} config).`
+      : lookup.state === "invalid"
+        ? `Default model ignored: ${boundedTerminalDiagnostic(lookup.reason)}.`
+        : "No default model is set."
+    /**
+     * `/model default` shows the default; `save` stores the current selection; `<engine> <id>` stores that model;
+     * `clear` removes it. Saving never switches an active session. Returns a model to select only when none is
+     * selected yet and the operator named one explicitly.
+     */
+    // Notices that must outlive selection: the full-screen transcript reloads from the new session's history.
+    const startupNotices: string[] = []
+    const defaultModelCommand = (rest: readonly string[], current: { engine: CliEngine; model: string } | undefined): { engine: CliEngine; model: string } | undefined => {
+      let deferNext = false
+      const write = (text: string) => {
+        if (deferNext) startupNotices.push(text)
+        else terminal.write(terminalSafeText(`${text}\n`))
+      }
+      const save = (value: { engine: CliEngine; model: string }): boolean => {
+        try {
+          const path = deps.defaultModel.save(value)
+          const effective = deps.defaultModel.read(worktree)
+          const overridden = effective.state === "configured" && effective.source === "project" &&
+            (effective.value.engine !== value.engine || effective.value.model !== value.model)
+          write(`Saved default model ${value.engine} / ${value.model} to ${path}.${overridden ? ` This project's .lca/lca.jsonc still selects ${effective.value.engine} / ${effective.value.model}.` : ""}`)
+          return true
+        } catch (error) {
+          write(`Default model not saved: ${boundedTerminalDiagnostic(String(error))}`)
+          return false
+        }
+      }
+      if (rest.length === 0 || (rest.length === 1 && rest[0] === "show")) {
+        write(`${describeDefault(deps.defaultModel.read(worktree))} Use /model default save, /model default <local|codex|claude> <native-id>, or /model default clear.`)
+        return undefined
+      }
+      if (rest.length === 1 && rest[0] === "clear") {
+        try { write(deps.defaultModel.clear() ? "Default model cleared from user config." : "No user default model was set.") }
+        catch (error) { write(`Default model not cleared: ${boundedTerminalDiagnostic(String(error))}`) }
+        return undefined
+      }
+      if (rest.length === 1 && rest[0] === "save") {
+        if (!current) write("No model is selected yet; use /model default <local|codex|claude> <native-id>.")
+        else if (save(current)) write("The current session is unchanged.")
+        return undefined
+      }
+      if (rest.length === 2 && ["local", "codex", "claude"].includes(rest[0]!) && validModelID(rest[1]!)) {
+        const value = { engine: rest[0] as CliEngine, model: rest[1]! }
+        deferNext = !current
+        const saved = save(value)
+        deferNext = false
+        if (!saved) {
+          for (const notice of startupNotices.splice(0)) write(notice)
+          return undefined
+        }
+        if (current) {
+          write(`The current session is unchanged; use /model ${value.engine} ${value.model} to switch now.`)
+          return undefined
+        }
+        return value
+      }
+      write("Usage: /model default [show | save | clear | <local|codex|claude> <native-id>]")
+      return undefined
+    }
     let engine: CliEngine | undefined
     let model: string | undefined
     let startupDiscovery: InteractiveViewFacts["discovery"] = "not-observed"
+    // Explicit flags win; a persisted default applies only when neither flag was given.
+    const configuredDefault: DefaultModelLookup = args.engine === undefined && args.model === undefined
+      ? deps.defaultModel.read(worktree)
+      : { state: "unset" }
     if (args.engine !== undefined && args.model !== undefined) {
       engine = args.engine
       model = args.model
+    } else if (configuredDefault.state === "configured") {
+      engine = configuredDefault.value.engine
+      model = configuredDefault.value.model
+      if (!terminal.fullscreen) {
+        terminal.write(terminalSafeText(`Using default model ${engine} / ${model} from ${configuredDefault.source} config; /model switches, /model default clear removes it.\n`))
+      }
     } else {
+      if (configuredDefault.state === "invalid") {
+        terminal.write(terminalSafeText(`Default model ignored: ${boundedTerminalDiagnostic(configuredDefault.reason)}. Choose with /model.\n`))
+      }
       terminal.actionContext?.("unselected")
       const selectionTitle = args.engine
         ? `Engine ${args.engine} selected; model unselected`
@@ -808,6 +951,15 @@ export async function runInteractiveSession(
         }
         if (["/search", "/expand", "/details", "/theme", "/ascii"].includes(command!)) {
           terminal.write(`${command} is a local full-screen TUI action; it is unavailable in readline and no model turn was dispatched.\n`)
+          continue
+        }
+        if (command === "/model" && commandArgs[0] === "default" && hasInteractiveAction("unselected", "model")) {
+          const chosen = defaultModelCommand(commandArgs.slice(1), undefined)
+          if (chosen) {
+            engine = chosen.engine
+            model = chosen.model
+            break
+          }
           continue
         }
         if (command === "/model" && hasInteractiveAction("unselected", "model")) {
@@ -932,6 +1084,7 @@ export async function runInteractiveSession(
     terminal.bindSession?.(initialSessionID)
     terminal.bindView?.(currentViewIdentity())
     terminal.transcriptSource?.(options => replaySession(worktree, initialSessionID, options))
+    for (const notice of startupNotices.splice(0)) terminal.write(terminalSafeText(`${notice}\n`))
     publishView()
     await bindSkillSession(sessionStore)
     if (abort.signal.aborted) return signalExit(receivedSignal)
@@ -1082,6 +1235,10 @@ export async function runInteractiveSession(
       return result
     }
 
+    /**
+     * Complete user/assistant pairs, oldest first, including context carried into this session by a model switch.
+     * Bounded to the turns and characters a conversation window can use.
+     */
     function restoredConversation(sessionID: string): ConversationMessage[] {
       const pairs: ConversationMessage[] = []
       let response: string | undefined
@@ -1094,10 +1251,15 @@ export async function runInteractiveSession(
           else if (record.kind === "user" && typeof record.data.text === "string" && response !== undefined) {
             pairs.unshift({ role: "user", text: record.data.text }, { role: "assistant", text: response })
             response = undefined
-            if (pairs.length === 48) return pairs
+            if (pairs.length >= MAX_CARRIED_MESSAGES) return boundedPairs(pairs)
+          } else if (record.kind === "carried-context" && Array.isArray(record.data.messages)) {
+            // The carried record is written first in a session, so everything before it is older context.
+            response = undefined
+            pairs.unshift(...record.data.messages as ConversationMessage[])
+            return boundedPairs(pairs)
           }
         }
-        if (replay.nextOffset === undefined) return pairs
+        if (replay.nextOffset === undefined) return boundedPairs(pairs)
         if (replay.nextOffset <= offset) throw new InteractiveLaunchError("Session replay did not advance; work remains held.")
         offset = replay.nextOffset
       }
@@ -1240,6 +1402,19 @@ export async function runInteractiveSession(
         return true
       }
       try {
+        // An explicit /model switch carries the conversation; /new and opening another session do not.
+        const carrySource = !forceNew && !targetSessionID && sessionStore && !retainedSDKSessionID
+          ? { sessionID: selection.sessionID, engine: selection.engine, model: selection.model }
+          : undefined
+        let carried: ConversationMessage[] = []
+        if (carrySource) {
+          try { carried = restoredConversation(carrySource.sessionID) }
+          catch {
+            // Never drop context silently: keep the current model and conversation.
+            terminal.write("Model switch refused: the current conversation could not be read in full; selection and conversation are unchanged. Use /new to start without it.\n")
+            return true
+          }
+        }
         const sessionID = targetSessionID ?? defaultSessionID(deps.randomUUID())
         if (!targetSessionID && usedSessionIDs.has(sessionID)) throw new Error("new conversation identity was not unique")
         const retained = targetSessionID ? readSessionMetadata(worktree, sessionID) : undefined
@@ -1251,7 +1426,7 @@ export async function runInteractiveSession(
         }
         if (abort.signal.aborted) return false
         const controller = deps.createController(runtime)
-        const conversation = deps.createConversation(runtime, sessionID, retained ? restoredConversation(sessionID) : undefined)
+        const conversation = deps.createConversation(runtime, sessionID, retained ? restoredConversation(sessionID) : carried.length ? carried : undefined)
         if (abort.signal.aborted) return false
         const drafts = terminal.draftSnapshot?.()
         if (drafts) persist("notice", drafts)
@@ -1275,6 +1450,9 @@ export async function runInteractiveSession(
         terminal.sessionChanged?.()
         const nextStore = attachAdmission(runtime, sessionID, { engine: nextEngine, model: nextModel })
         sessionStore = nextStore
+        if (carrySource && carried.length) {
+          persist("carried-context", { sourceSessionID: carrySource.sessionID, engine: carrySource.engine, model: carrySource.model, messages: carried })
+        }
         nextProgress.bind(nextStore)
         attachedRuntime = runtime
         retainedSDKSessionID = undefined
@@ -1289,9 +1467,14 @@ export async function runInteractiveSession(
         publishView()
         await bindSkillSession(nextStore)
         if (abort.signal.aborted) return false
-        terminal.write(terminal.fullscreen
-          ? terminalSafeText(`${nextStore.restored ? "Selected" : "New conversation"}: ${selection.engine} / ${selection.model}.`)
-          : selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.(), true))
+        const note = nextStore.restored ? undefined : switchNote(carried.length / 2, carrySource)
+        if (terminal.fullscreen) {
+          terminal.write(terminalSafeText(nextStore.restored ? `Selected: ${selection.engine} / ${selection.model}.` : `Now using ${selection.engine} / ${selection.model}. ${note}`))
+        } else {
+          // The banner clips to the terminal width; the carry note states what is sent, so it is never clipped.
+          terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.()))
+          if (note) terminal.write(terminalSafeText(`${note}\n`))
+        }
         if (nextStore.restored) {
           terminal.write("Restored session held. Drafts remain unsent; use /continue for an explicit Resume decision.\n")
           // Restore recomputes artifact state from disk: a tampered or missing artifact shows as incomplete, never as remembered-verified.
@@ -1534,6 +1717,15 @@ export async function runInteractiveSession(
       const message = text.trim()
       if (!message) continue
 
+      if (message.startsWith("!")) {
+        const command = message.slice(1).trim()
+        if (!command) visibleWrite("Usage: !<command> runs one shell command in the worktree.\n")
+        else if (retainedSDKSessionID) visibleWrite("Shell is unavailable in read-only history; no command was run.\n")
+        else if (Buffer.byteLength(command, "utf8") > MAX_SHELL_COMMAND_BYTES) visibleWrite(`Shell command exceeds ${MAX_SHELL_COMMAND_BYTES} bytes; no command was run.\n`)
+        else await runShell(command, worktree)
+        continue
+      }
+
       if (retainedSDKSessionID) {
         const sessionID = retainedSDKSessionID
         const [command, ...commandArgs] = message.split(/\s+/u)
@@ -1727,6 +1919,10 @@ export async function runInteractiveSession(
       }
       if (command === "/model" && !hasInteractiveAction(actionContext, "model")) {
         terminal.write("Model selection is unavailable while this session is held; resolve the active workflow first or recover execution ownership. No discovery or switch was attempted.\n")
+        continue
+      }
+      if (command === "/model" && commandArgs[0] === "default" && hasInteractiveAction(actionContext, "model")) {
+        defaultModelCommand(commandArgs.slice(1), { engine: selection.engine, model: selection.model })
         continue
       }
       if (command === "/model" && hasInteractiveAction(actionContext, "model")) {

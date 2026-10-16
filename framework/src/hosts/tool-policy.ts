@@ -57,6 +57,8 @@ export function createExecutionPolicy(config: Readonly<LcaConfig>, options: Exec
       }
       return Object.freeze({ identity: supplied.identity, instructions: supplied.instructions })
     })()
+  // `chat` only selects the launch model (host UI state); it never shapes execution, so it stays out of role identity.
+  const { chat: _chat, ...identityConfig } = config
   const snapshots = new Map<ExecutionRole, ExecutionPolicySnapshot>()
   const sessions = new Map<string, ExecutionPolicyHandlers>()
   const sessionSnapshots = new Map<string, ExecutionPolicySnapshot>()
@@ -86,7 +88,7 @@ export function createExecutionPolicy(config: Readonly<LcaConfig>, options: Exec
       ...(nativeContext ? { nativeContext } : {}),
       thinking: role !== "main" && model && /ollama|:11434/i.test(model.providerID) ? "disabled" : "inherit",
     }
-    const id = `lca:${role}:${createHash("sha256").update(JSON.stringify({ resolved, config })).digest("hex")}`
+    const id = `lca:${role}:${createHash("sha256").update(JSON.stringify({ resolved, config: identityConfig })).digest("hex")}`
     snapshots.set(role, Object.freeze({ id, ...resolved }))
   }
   const repeat = new RepeatGuard(config.guards.repeat_limit)

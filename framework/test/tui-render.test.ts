@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import fixtureSet from "./fixtures/gjc-keys-8cd17c0.json"
-import { displayAnsiWidth, displayWidth, renderFrame, transcriptDisplayRows, transcriptViewportRows, wrapAnsiText, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
+import { displayAnsiWidth, displayWidth, renderFrame, transcriptDisplayRows, transcriptRowText, transcriptViewportRows, wrapAnsiText, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
 
 interface ReferenceFixture {
   id: string
@@ -119,9 +119,7 @@ describe("renderFrame", () => {
     })
     const drawn = frameRows(frame)
     expect(drawn).toHaveLength(rows)
-    expect(drawn[0]).toBe("❯ question")
-    expect(drawn[1]).toBe("")
-    expect(drawn[2]).toBe("● first message")
+    expect(drawn.slice(0, 5)).toEqual(["you", "  question", "", "lca", "  first message"])
     expect(drawn[rows - 6]).toBe("status one")
     expect(drawn[rows - 5]).toBe("status two")
     expect(drawn[rows - 4]).toStartWith(" ⬢ local / model-a ─")
@@ -178,7 +176,7 @@ describe("renderFrame", () => {
 
   test("scrolls within one paragraph by wrapped visual rows and reports position on the rule", () => {
     const paragraph = Array.from({ length: 26 }, (_, index) => String.fromCharCode(65 + index).repeat(80)).join("")
-    const physical = transcriptDisplayRows([paragraph], 80).map(row => `${row.gutter}${row.text}`)
+    const physical = transcriptDisplayRows([paragraph], 80).map(transcriptRowText)
     const viewport = transcriptViewportRows({ columns: 80, rows: 24, draft: "ok", cursor: 2 })
     const frame = (transcriptOffset?: number) => renderFrame({
       columns: 80,
@@ -220,13 +218,12 @@ describe("renderFrame", () => {
     expect(colored).toContain("\u001b[2mready\u001b[0m")
   })
 
-  test("user rows keep a provenance glyph without color and a full-width bar with color", () => {
+  test("user messages keep a speaker label without color and a full-width bar with color", () => {
     const plain = frameRows(basicFrame({ transcript: ["[You] mine", "[Assistant] reply"], color: false }))
-    expect(plain[0]).toBe("❯ mine")
-    expect(plain[2]).toBe("● reply")
+    expect(plain.slice(0, 5)).toEqual(["you", "  mine", "", "lca", "  reply"])
     const colored = basicFrame({ transcript: ["[You] mine"], color: true })
-    expect(colored).toContain(`\u001b[1;48;5;236;97m❯ mine${" ".repeat(74)}\u001b[0m`)
-    expect(frameRows(basicFrame({ transcript: ["[You] mine"], ascii: true }))[0]).toBe("> mine")
+    expect(colored).toContain(`\u001b[1;48;5;236;97m  mine${" ".repeat(74)}\u001b[0m`)
+    expect(colored).toContain("\u001b[1;36myou\u001b[0m")
   })
 
   test("wraps a full-width cursor onto a valid following row", () => {
@@ -317,7 +314,7 @@ describe("renderFrame", () => {
       prompt: "Filter> ",
     })
     const drawn = frameRows(frame)
-    expect(drawn[0]).toBe("● still visible")
+    expect(drawn.slice(0, 2)).toEqual(["lca", "  still visible"])
     expect(drawn.at(-3)).toBe("> local — Ollama CLI")
     expect(drawn.at(-2)).toBe("  codex — Codex CLI")
     expect(drawn.at(-1)).toBe("(1/2) 2 matches")
@@ -354,32 +351,36 @@ describe("renderFrame", () => {
     const transcript = ["[Assistant] first line", ...Array.from({ length: 30 }, (_, index) => `  | continuation ${index}`)]
     for (const color of [false, true]) {
       const frame = basicFrame({ transcript, color })
-      expect(stripCsi(frame)).not.toContain("● first line")
+      expect(stripCsi(frame)).not.toContain("first line")
       expect(stripCsi(frame)).toContain("Assistant continued")
       expect(stripCsi(frame)).toContain("  continuation 29")
     }
   })
 
-  test.each([80, 120])("physical transcript wraps keep distinct provenance glyphs and share scroll row accounting at %i columns", columns => {
+  test.each([80, 120])("physical transcript wraps keep distinct provenance and share scroll row accounting at %i columns", columns => {
     const labels = ["You", "Assistant", "Error", "Notice", "Canonical plan"] as const
-    const glyphs = ["❯ ", "● ", "✗ ", "· ", "◆ "]
-    const transcript = labels.map(label => `[${label}] ${"x".repeat(180)}`)
+    const leads = ["you", "lca", "✗ ", "· ", "plan"]
+    const transcript = labels.map(label => `[${label}] ${"x ".repeat(columns)}`)
     labels.forEach((label, index) => {
       const wrapped = wrapTranscriptLine(transcript[index]!, columns)
-      expect(wrapped.length).toBeGreaterThan(1)
-      expect(wrapped[0]).toStartWith(glyphs[index]!)
-      expect(wrapped.slice(1).every(row => row.startsWith("  "))).toBe(true)
+      expect(wrapped.length).toBeGreaterThan(2)
+      if (leads[index]!.length > 2) {
+        expect(wrapped[0]).toBe(leads[index])
+        expect(wrapped.slice(1).every(row => row.startsWith("  "))).toBe(true)
+      } else {
+        expect(wrapped[0]).toStartWith(leads[index]!)
+        expect(wrapped.slice(1).every(row => row.startsWith("  "))).toBe(true)
+      }
       expect(wrapped.every(row => displayWidth(row) <= columns)).toBe(true)
-      if (label === "Canonical plan") expect(wrapped[0]).toStartWith("◆ Plan:")
     })
-    expect(new Set(glyphs).size).toBe(glyphs.length)
 
-    const expected = transcriptDisplayRows(transcript, columns).map(row => `${row.gutter}${row.text}`.trimEnd())
+    const expected = transcriptDisplayRows(transcript, columns).map(row => transcriptRowText(row).trimEnd())
     expect(expected.filter(row => row === "")).toHaveLength(transcript.length - 1)
     const viewportRows = transcriptViewportRows({ columns, rows: 24, draft: "ok", cursor: 2 })
     const frame = renderFrame({ columns, rows: 24, transcript, status: "ready", draft: "ok", cursor: 2, color: false })
     const shown = expected.slice(-viewportRows)
-    expect(frameRows(frame).slice(0, shown.length)).toEqual(shown)
+    const firstShown = shown[0] === "" ? shown.slice(1) : shown
+    expect(frameRows(frame).slice(0, firstShown.length)).toEqual(firstShown)
     expect(frame).not.toMatch(/\u001b\[[0-9;]*m/)
 
     const long = `[Assistant] ${"y".repeat(columns * 24)}`
@@ -388,4 +389,65 @@ describe("renderFrame", () => {
     expect(frameRows(scrolled).slice(0, viewportRows)).toEqual(physicalRows.slice(-(viewportRows + 1), -1))
     expect(stripCsi(scrolled)).toContain(`History · Assistant continued · ${physicalRows.length - viewportRows - 1} older · 1 newer · PgUp/PgDn`)
   })
+
+  test("assistant Markdown renders structure instead of raw syntax", () => {
+    const reply = [
+      "## Plan", "", "* **Analyze** the `bun test` output.", "  continues the item", "1. first", "", "```ts",
+      "const x = 1  // keep  spacing", "```", "", "> quoted", "---", "snake_case_name and 2 * 3 * 4 stay literal.",
+      "See [docs](https://example.com).",
+    ]
+    const lines = reply.map((line, index) => index === 0 ? `[Assistant] ${line}` : `  | ${line}`)
+    const rows = transcriptDisplayRows(lines, 60).map(transcriptRowText)
+    expect(rows).toEqual([
+      "lca",
+      "  Plan",
+      "",
+      "  • Analyze the bun test output.",
+      "    continues the item",
+      "  1. first",
+      "",
+      "  ```ts",
+      "    const x = 1  // keep  spacing",
+      "  ```",
+      "",
+      "  ▏ quoted",
+      `  ${"─".repeat(58)}`,
+      "  snake_case_name and 2 * 3 * 4 stay literal.",
+      "  See docs (https://example.com).",
+    ])
+    expect(transcriptDisplayRows(lines, 60, true).map(transcriptRowText)).toContain("  * Analyze the bun test output.")
+
+    const colored = renderFrame({ columns: 80, rows: 30, transcript: lines, status: "", draft: "", cursor: 0, color: true })
+    expect(colored).toContain("\u001b[1;36mPlan\u001b[0m")
+    expect(colored).toContain("\u001b[1mAnalyze\u001b[0m")
+    expect(colored).toContain("\u001b[36mbun test\u001b[0m")
+    expect(colored).toContain("\u001b[35mconst x = 1  // keep  spacing\u001b[0m")
+    const plain = renderFrame({ columns: 80, rows: 30, transcript: lines, status: "", draft: "", cursor: 0, color: false })
+    expect(plain).not.toMatch(/\u001b\[[0-9;]*m/)
+    expect(stripCsi(plain)).not.toContain("**")
+    expect(stripCsi(plain)).not.toContain("## ")
+  })
+
+  test("Markdown layout never interprets model-supplied terminal controls", () => {
+    const rows = transcriptDisplayRows(["[Assistant] **bold\u001b[2J** and `code\u001b]52;x\u0007`"], 80).map(transcriptRowText)
+    expect(rows.join("\n")).not.toMatch(/[\u001b\u0007]/u)
+    expect(rows[1]).toBe("  bold�[2J and code�]52;x�")
+  })
+
+  test("tool rows show outcome status and keep the logical summary searchable", () => {
+    const rows = transcriptDisplayRows([
+      "[+] #1 read · call succeeded · execution not observed · task Implement · t1 done",
+      "[-] #2 grep · call failed · execution unconfirmed · task Implement · t1 running",
+      "  Call call-2 · execution exec-2 · worker",
+      "[+] #3 bash · call running · execution not observed · task Implement · t1 running",
+    ], 120).map(transcriptRowText)
+    expect(rows).toEqual([
+      "✔ ▸ #1 read · call succeeded · execution not observed · task Implement · t1 done",
+      "✘ ▾ #2 grep · call failed · execution unconfirmed · task Implement · t1 running",
+      "    Call call-2 · execution exec-2 · worker",
+      "⟳ ▸ #3 bash · call running · execution not observed · task Implement · t1 running",
+    ])
+    expect(transcriptDisplayRows(["[+] #1 read · call denied · task t · t1"], 80, true).map(transcriptRowText)[0]).toBe("x > #1 read · call denied · task t · t1")
+  })
+
 })

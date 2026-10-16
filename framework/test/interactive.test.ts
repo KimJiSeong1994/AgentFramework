@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { launchInteractive, parseInteractiveArgs, validModelID, type InteractiveDependencies, type Terminal } from "../src/hosts/interactive.ts"
 import type { TerminalControl } from "../src/hosts/interactive-session.ts"
+import type { ShellResult } from "../src/hosts/operator-shell.ts"
 import type { ModelCatalog } from "../src/hosts/model-catalog.ts"
 import type { ChoicePresentation, InteractiveViewFacts, TranscriptText } from "../src/hosts/interactive-view.ts"
 import { newWorkflow, withFlowTransaction, workflowPath } from "../src/flow/state.ts"
@@ -24,6 +25,7 @@ import { planBinding, withTerminalLine } from "./operator-helpers.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { interactiveActions } from "../src/hosts/interactive-actions.ts"
+import type { DefaultModelLookup } from "../src/hosts/default-model.ts"
 import { getOwnedSession, inspectSessionAttachment, openSession, replaySession, readSessionMetadata, type ReplayOptions, type ReplayResult } from "../src/sessions/store.ts"
 import { sessionDir } from "../src/state/store.ts"
 import type { ConversationMessage, SkillConversationInvocation } from "../src/hosts/plan-conversation.ts"
@@ -60,6 +62,8 @@ type HarnessOptions = {
   workflowID?: string
   deferRun?: boolean
   activityForTurn?: (selection: { engine: string; model: string }, progress?: CliProgressSink) => void
+  defaultModel?: DefaultModelLookup
+  defaultModelSaveError?: Error
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -99,7 +103,9 @@ function harness(options: HarnessOptions = {}) {
     queueAdmissions: boolean[]
     controllerCreations: number
     conversationRestores: Array<{ sessionID: string; prior?: readonly ConversationMessage[] }>
-  } = { prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [] }
+    defaultModel: DefaultModelLookup
+    defaultModelWrites: Array<{ engine: string; model: string } | null>
+  } = { prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [], defaultModel: options.defaultModel ?? { state: "unset" }, defaultModelWrites: [] }
   let boundSessionID: string | undefined
 
   let releaseRun: (() => void) | undefined
@@ -247,6 +253,21 @@ function harness(options: HarnessOptions = {}) {
       calls.events.push("humanDecision")
       calls.approvalRequest = { action, workflowID: binding.workflowID, planSha: binding.subject.sha256 }
       return { action: options.decision ?? "approve", ...binding } as unknown as OperatorDecision
+    },
+    defaultModel: {
+      read: () => calls.defaultModel,
+      save: value => {
+        if (options.defaultModelSaveError) throw options.defaultModelSaveError
+        calls.defaultModelWrites.push({ ...value })
+        calls.defaultModel = { state: "configured", value, source: "user" }
+        return "/config/lca/lca.jsonc"
+      },
+      clear: () => {
+        calls.defaultModelWrites.push(null)
+        const present = calls.defaultModel.state !== "unset"
+        calls.defaultModel = { state: "unset" }
+        return present
+      },
     },
     discoverModels: async (engine, worktree) => {
       calls.discoveries.push({ engine, worktree })
@@ -727,7 +748,7 @@ describe("interactive terminal", () => {
     expect(output).toContain("No model selected; use /model to choose an engine and model. Nothing was sent.")
     expect(output).toContain("Usage: /model or /model <local|codex|claude> <native-id>")
     expect(output).toContain("Commands (unselected):")
-    expect(output).toContain("/model [engine native-id]")
+    expect(output).toContain("/model [engine native-id | default ...]")
     expect(output).toContain("/theme <neutral|light|dark>")
     expect(output).toContain("/details")
   })
@@ -793,13 +814,13 @@ describe("interactive terminal", () => {
     const output = h.calls.output.join("")
     expect(output).not.toContain("Native execution selection:")
     expect(output).not.toContain(realpathSync(wt.worktree))
-    expect(h.calls.output).toContain("New conversation: local / native-secondary.")
+    expect(h.calls.output).toContain("Now using local / native-secondary. New conversation: no earlier turns to carry.")
     expect(h.calls.viewFacts[0]?.selection).toEqual({ engine: "codex", model: "original" })
     expect(h.calls.viewFacts.at(-1)?.selection).toEqual({ engine: "local", model: "native-secondary" })
     expect(h.calls.turns).toEqual([])
     const records = replaySession(wt.worktree, h.calls.sessionIDs.at(-1)!, { order: "asc" }).records
     expect(records.some(record => record.kind === "notice" &&
-      record.data.text === "New conversation: local / native-secondary.")).toBe(true)
+      record.data.text === "Now using local / native-secondary. New conversation: no earlier turns to carry.")).toBe(true)
     expect(records.some(record => typeof record.data.text === "string" && record.data.text.includes("Native execution selection:"))).toBe(false)
   })
 
@@ -985,6 +1006,69 @@ describe("interactive terminal", () => {
     expect(explicit.calls.viewFacts.at(-1)?.discovery).toBe("not-observed")
   })
 
+  test("a configured default selects at launch without discovery, exactly like full flags", async () => {
+    const h = harness({ lines: ["hello", "/quit"], defaultModel: { state: "configured", value: { engine: "local", model: "native-default" }, source: "user" } })
+    expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
+    expect(h.calls.discoveries).toEqual([])
+    expect(h.calls.runtimes[0]).toMatchObject({ engine: "local", model: "native-default" })
+    expect(h.calls.turnBindings).toMatchObject([{ engine: "local", model: "native-default", text: "hello" }])
+    expect(h.calls.output.join("")).toContain("Using default model local / native-default from user config")
+    expect(h.calls.actionContexts).not.toContain("unselected")
+  })
+
+  test("explicit or partial flags ignore the configured default", async () => {
+    const configured: DefaultModelLookup = { state: "configured", value: { engine: "local", model: "native-default" }, source: "user" }
+    const full = harness({ lines: ["/quit"], defaultModel: configured })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, full.deps)
+    expect(full.calls.runtimes[0]).toMatchObject({ engine: "codex", model: "gpt-5-codex" })
+    const partial = harness({ lines: ["/quit"], defaultModel: configured })
+    await launchInteractive({ worktree: wt.worktree, engine: "claude" }, partial.deps)
+    expect(partial.calls.runtimes).toEqual([])
+    expect(partial.calls.actionContexts).toContain("unselected")
+  })
+
+  test("an invalid default is reported and leaves the composer unselected", async () => {
+    const h = harness({ lines: ["/quit"], defaultModel: { state: "invalid", reason: "chat.default_model.engine must be local, codex, or claude" } })
+    expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
+    expect(h.calls.output.join("")).toContain("Default model ignored: chat.default_model.engine must be local, codex, or claude")
+    expect(h.calls.runtimes).toEqual([])
+    expect(h.calls.discoveries).toEqual([])
+  })
+
+  test("/model default before selection saves and selects only an explicitly named model", async () => {
+    const h = harness({ lines: ["/model default", "/model default save", "/model default local bad id", "/model default local native-default", "hello", "/quit"] })
+    expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
+    const output = h.calls.output.join("")
+    expect(output).toContain("No default model is set.")
+    expect(output).toContain("No model is selected yet")
+    expect(output).toContain("Usage: /model default")
+    expect(output).toContain("Saved default model local / native-default to /config/lca/lca.jsonc.")
+    expect(h.calls.defaultModelWrites).toEqual([{ engine: "local", model: "native-default" }])
+    expect(h.calls.discoveries).toEqual([])
+    expect(h.calls.turnBindings).toMatchObject([{ engine: "local", model: "native-default", text: "hello" }])
+  })
+
+  test("/model default in chat saves or clears without switching the session", async () => {
+    const h = harness({ lines: ["/model default save", "/model default claude sonnet", "/model default", "/model default clear", "/model default clear", "/quit"] })
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)).toEqual({ code: 0 })
+    const output = h.calls.output.join("")
+    expect(h.calls.defaultModelWrites).toEqual([{ engine: "codex", model: "gpt-5-codex" }, { engine: "claude", model: "sonnet" }, null, null])
+    expect(output).toContain("Saved default model codex / gpt-5-codex")
+    expect(output).toContain("use /model claude sonnet to switch now")
+    expect(output).toContain("Default model: claude / sonnet (user config).")
+    expect(output).toContain("Default model cleared from user config.")
+    expect(output).toContain("No user default model was set.")
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.turns).toEqual([])
+  })
+
+  test("a failed default save is reported and nothing is selected", async () => {
+    const h = harness({ lines: ["/model default local native-default", "/quit"], defaultModelSaveError: new Error("lca: config /config/lca/lca.jsonc: invalid-jsonc") })
+    expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
+    expect(h.calls.output.join("")).toContain("Default model not saved: Error: lca: config /config/lca/lca.jsonc: invalid-jsonc")
+    expect(h.calls.runtimes).toEqual([])
+  })
+
   test("partial flags stay unselected until /model and fill only the missing choice", async () => {
     let h: ReturnType<typeof harness>
     let selectionStarted = false
@@ -1152,6 +1236,99 @@ describe("interactive terminal", () => {
     expect(h.calls.output.join("")).toContain("Delayed model response.")
   })
 
+  test("/model switch carries the conversation into the new model with provenance", async () => {
+    const h = harness({
+      lines: ["first question", "second question", "/model local native-secondary", "third question", "/quit"],
+      turns: [{ text: "first answer" }, { text: "second answer" }, { text: "third answer" }],
+    })
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)).toEqual({ code: 0 })
+    const carried: ConversationMessage[] = [
+      { role: "user", text: "first question" }, { role: "assistant", text: "first answer" },
+      { role: "user", text: "second question" }, { role: "assistant", text: "second answer" },
+    ]
+    expect(h.calls.conversationRestores.at(-1)).toEqual({ sessionID: "lca-fixture-session-2", prior: carried })
+    expect(h.calls.turnBindings.at(-1)).toMatchObject({ engine: "local", model: "native-secondary", sessionID: "lca-fixture-session-2", text: "third question" })
+    expect(h.calls.output.join("").replace(/\s+/g, " ")).toContain("Conversation continues: 2 earlier turns from codex / gpt-5-codex, sent with your next message.")
+
+    const records = replaySession(wt.worktree, "lca-fixture-session-2", { order: "asc" }).records
+    expect(records[0]).toMatchObject({ kind: "carried-context", data: { sourceSessionID: "lca-fixture-session", engine: "codex", model: "gpt-5-codex", messages: carried } })
+    // The new session's own replay never attributes the earlier answers to the new model as fresh assistant records.
+    // Each fixture conversation replays its scripted replies from the start; only the new turn is recorded here.
+    expect(records.filter(record => record.kind === "assistant").map(record => record.data.text)).toEqual(["first answer"])
+    expect(records.filter(record => record.kind === "user").map(record => record.data.text)).toEqual(["third question"])
+    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")).toMatchObject({ engine: "codex", model: "gpt-5-codex" })
+    expect(readSessionMetadata(wt.worktree, "lca-fixture-session-2")).toMatchObject({ engine: "local", model: "native-secondary" })
+  })
+
+  test("carried context survives resume and chains through later switches", async () => {
+    const h = harness({
+      lines: ["q1", "/model local native-secondary", "q2", "/model claude sonnet", "q3", "/resume lca-fixture-session-2", "/quit"],
+      turns: [{ text: "a1" }],
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    // The fixture gives each new conversation the same scripted reply queue, so every first answer is "a1".
+    expect(h.calls.conversationRestores[2]).toEqual({ sessionID: "lca-fixture-session-3", prior: [
+      { role: "user", text: "q1" }, { role: "assistant", text: "a1" }, { role: "user", text: "q2" }, { role: "assistant", text: "a1" },
+    ] })
+    expect(h.calls.conversationRestores.at(-1)).toEqual({ sessionID: "lca-fixture-session-2", prior: [
+      { role: "user", text: "q1" }, { role: "assistant", text: "a1" }, { role: "user", text: "q2" }, { role: "assistant", text: "a1" },
+    ] })
+  })
+
+  test("/new starts without carried context and an unreadable conversation refuses the switch", async () => {
+    const h = harness({ lines: ["q1", "/new", "q2", "/quit"], turns: [{ text: "a1" }, { text: "a2" }] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.conversationRestores.at(-1)).toEqual({ sessionID: "lca-fixture-session-2" })
+    expect(replaySession(wt.worktree, "lca-fixture-session-2", { order: "asc" }).records.some(record => record.kind === "carried-context")).toBe(false)
+  })
+
+  test("!command runs in the worktree, prints and persists the run, and never reaches the model", async () => {
+    const h = harness({ lines: ["!pwd; printf 'a\\nb\\n'; exit 3", "!", "/quit"] })
+    const result = await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(result.code).toBe(0)
+    expect(h.calls.turns).toEqual([])
+    const output = h.calls.output.join("")
+    expect(output).toContain(`$ pwd; printf 'a\\nb\\n'; exit 3\n${realpathSync(wt.worktree)}\na\nb\n[shell] exit 3 · `)
+    expect(output).toContain("Usage: !<command> runs one shell command in the worktree.")
+    const records = replaySession(wt.worktree, "lca-fixture-session", { order: "asc" }).records
+    expect(records.some(record => record.kind === "user")).toBe(false)
+    const shell = records.find(record => record.kind === "shell")
+    expect(shell?.eventID).toStartWith("shell:")
+    expect(shell?.data).toMatchObject({ command: "pwd; printf 'a\\nb\\n'; exit 3", status: "error", exitCode: 3, signal: null,
+      lines: [realpathSync(wt.worktree), "a", "b"], totalLines: 3 })
+  })
+
+  test("a shell window streams through shellStart and Esc cancels only the shell", async () => {
+    let h: ReturnType<typeof harness>
+    const runs: Array<{ id: string; command: string }> = []
+    const snapshots: string[][] = []
+    const results: ShellResult[] = []
+    h = harness({ lines: ["!echo started; sleep 30", "/quit"] })
+    h.deps.terminal!.shellStart = run => {
+      runs.push(run)
+      return {
+        output: snapshot => {
+          snapshots.push([...snapshot.lines])
+          if (snapshot.lines.includes("started")) h.calls.control?.("cancel")
+        },
+        finish: result => { results.push(result) },
+      }
+    }
+    const result = await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(result.code).toBe(0)
+    expect(runs).toHaveLength(1)
+    expect(runs[0]!.command).toBe("echo started; sleep 30")
+    expect(snapshots.at(-1)).toEqual(["started"])
+    expect(results[0]).toMatchObject({ status: "cancelled", lines: ["started"] })
+    expect(results[0]!.durationMs).toBeLessThan(10_000)
+    // The cancelled shell left the session alive: /quit was still read afterwards.
+    expect(h.calls.prompts.length).toBeGreaterThanOrEqual(2)
+    expect(h.calls.output.join("")).not.toContain("[shell]")
+    const shell = replaySession(wt.worktree, "lca-fixture-session", { order: "asc" }).records.find(record => record.kind === "shell")
+    expect(shell?.eventID).toBe(runs[0]!.id)
+    expect(shell?.data.status).toBe("cancelled")
+  })
+
   test("local help, picker and unknown slash commands never reach inference; /plan stays a prompt", async () => {
     const h = harness({ lines: ["/help", "/unknown", "/model", "2", "native-secondary", "hello", "/plan", "/quit"] })
     const result = await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
@@ -1168,7 +1345,7 @@ describe("interactive terminal", () => {
     expect(h.calls.sessionIDs).toEqual(["lca-fixture-session", "lca-fixture-session-2"])
     expect(h.calls.discoveries).toEqual([{ engine: "codex", worktree: realpathSync(wt.worktree) }])
     expect(h.calls.output.join("")).toContain("Commands (chat):\n/help — show contextual commands and keys")
-    expect(h.calls.output.join("")).toContain("Conversation context reset after model switch.")
+    expect(h.calls.output.join("")).toContain("New conversation: no earlier turns to carry.")
   })
 
   test("a settled model response failure returns to the composer for an explicitly submitted next request", async () => {

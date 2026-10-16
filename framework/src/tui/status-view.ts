@@ -11,11 +11,13 @@ export type StatusInput = {
   readonly notice?: string
   readonly ascii?: boolean
   readonly selectionInHeader?: boolean
+  /** Spinner frame and elapsed time for an in-progress request the host reported. */
+  readonly request?: { readonly frame: string; readonly elapsedSeconds: number }
 }
 
 type Segment = { text: string; priority: number }
 
-function factSegments(facts: InteractiveViewFacts | undefined, selectionInHeader: boolean): Segment[] {
+function factSegments(facts: InteractiveViewFacts | undefined, selectionInHeader: boolean, request?: StatusInput["request"]): Segment[] {
   if (!facts) return []
   const safety: string[] = []
   if (facts.identity.mode === "retained-read-only") safety.push("read-only")
@@ -32,7 +34,10 @@ function factSegments(facts: InteractiveViewFacts | undefined, selectionInHeader
   if (facts.request.state === "cancellation-unconfirmed") safety.push("request-cancel:?")
   const segments: Segment[] = safety.length ? [{ text: `safety[${safety.join(" ")}]`, priority: 200 }] : []
   if (!selectionInHeader) segments.push({ text: `${facts.selection.engine} / ${facts.selection.model}`, priority: 50 })
-  if (facts.request.state === "in-progress") segments.push({ text: "Model request running", priority: 90 })
+  if (facts.request.state === "in-progress") {
+    const elapsed = request ? ` · ${request.elapsedSeconds}s` : ""
+    segments.push({ text: `${request ? `${request.frame} ` : ""}Model request running${elapsed}`, priority: 90 })
+  }
   if (facts.discovery === "failed") segments.push({ text: "Model list unavailable", priority: 85 })
   if (facts.hold.state === "known" && facts.hold.value.held && facts.hold.value.reason) {
     segments.push({ text: `hold reason: ${facts.hold.value.reason}`, priority: 55 })
@@ -66,7 +71,7 @@ function pack(segments: readonly Segment[], columns: number, separator: string):
 
 export function statusLines(input: StatusInput): string[] {
   const segments: Segment[] = [
-    ...factSegments(input.facts, input.selectionInHeader === true),
+    ...factSegments(input.facts, input.selectionInHeader === true, input.request),
     ...(input.search ? [{ text: `search: ${input.search}`, priority: 70 }] : []),
     ...(input.queued ? [{ text: `queued ${input.queued}`, priority: 75 }] : []),
     ...(input.workflow ? [{ text: input.workflow, priority: 80 }] : []),

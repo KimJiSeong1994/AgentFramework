@@ -13,7 +13,12 @@ export function persistToolActivity(store: SessionStore, activity: CliHostActivi
     callID: activity.callID, taskID: activity.taskID, outcome }, `${kind}:${JSON.stringify([activity.executionID, activity.callID])}`)
 }
 
-export function restoreTranscript(model: TranscriptModel, records: readonly TranscriptRecord[], ordinalFor?: (executionID: string, callID: string) => number): { history: string[]; draft: string; queued: string[] } {
+export function restoreTranscript(
+  model: TranscriptModel,
+  records: readonly TranscriptRecord[],
+  ordinalFor?: (executionID: string, callID: string) => number,
+  shellOrdinalFor?: (eventID: string) => number,
+): { history: string[]; draft: string; queued: string[] } {
   const history: string[] = []
   let draft = ""
   let queued: string[] = []
@@ -56,6 +61,28 @@ export function restoreTranscript(model: TranscriptModel, records: readonly Tran
         ...(data.cancel ? [`Cancellation: ${data.cancel}`] : []), ...(data.claim ? ["Execution claim retained"] : []),
         ...(data.fence ? ["Unresolved execution fence retained"] : []),
       ], { state: "historical", fence: data.fence, claim: data.claim })
+    } else if (record.kind === "shell") {
+      const status = data.status
+      if (typeof data.command !== "string" || !Array.isArray(data.lines) || !data.lines.every(line => typeof line === "string") ||
+          typeof data.totalLines !== "number" || typeof data.durationMs !== "number" ||
+          (status !== "complete" && status !== "error" && status !== "cancelled" && status !== "timeout") ||
+          !(data.exitCode === null || typeof data.exitCode === "number") || !(data.signal === null || typeof data.signal === "string")) {
+        throw new Error("invalid stored shell run")
+      }
+      model.shellStarted(record.eventID, data.command, shellOrdinalFor?.(record.eventID))
+      model.shellFinished(record.eventID, { status, exitCode: data.exitCode, signal: data.signal, durationMs: data.durationMs, lines: data.lines as string[], totalLines: data.totalLines })
+    } else if (record.kind === "carried-context") {
+      const messages = Array.isArray(data.messages) ? data.messages as Array<{ role?: unknown; text?: unknown }> : []
+      if (typeof data.engine !== "string" || typeof data.model !== "string" ||
+          !messages.every(message => (message.role === "user" || message.role === "assistant") && typeof message.text === "string")) {
+        throw new Error("invalid stored carried context")
+      }
+      const turns = messages.length / 2
+      model.append({ provenance: "notice", text: `Earlier conversation with ${data.engine} / ${data.model} (${turns} turn${turns === 1 ? "" : "s"})` })
+      for (const message of messages) {
+        if (message.role === "user") history.push(message.text as string)
+        model.append({ provenance: message.role as "user" | "assistant", text: message.text as string })
+      }
     } else if (record.kind === "workflow-choice" || record.kind === "workflow-stage") {
       if (typeof data.text === "string") model.append({ provenance: "notice", text: data.text })
     }
