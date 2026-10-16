@@ -1,9 +1,8 @@
 {
   "name": "lca",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Local-first coding agent framework with a shared local, Codex, and Claude CLI plan/approval workflow.",
   "type": "module",
-  "private": true,
   "main": "src/index.ts",
   "scripts": {
     "test": "bun test",
