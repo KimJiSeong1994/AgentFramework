@@ -84,7 +84,7 @@ describe("exclusive application input ownership", () => {
     expect(frame).toContain("╭─ LCA · local coding agent ─")
     expect(frame).toContain("⬢ local / model-known")
     expect(frame).toContain("No messages yet.")
-    expect(frame).toContain("Type a message, then press Enter.")
+    expect(frame).toContain("Type, then press Enter.")
     expect(frame).not.toContain("No model is selected.")
     expect(frame).not.toContain("ready")
     app.close()

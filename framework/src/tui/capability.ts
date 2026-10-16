@@ -9,8 +9,10 @@ export type TerminalCapabilities = {
   optOut?: string
 }
 
-const MIN_COLUMNS = 80
-const MIN_ROWS = 24
+/** Smallest terminal the full-screen TUI supports; smaller panes fall back or are blocked. */
+export const MIN_COLUMNS = 60
+export const MIN_ROWS = 20
+export const MIN_SIZE_LABEL = `${MIN_COLUMNS}x${MIN_ROWS}`
 
 export function tuiCapability(input: TerminalCapabilities): { enabled: boolean; reason?: string } {
   if (input.optOut === "0") {
@@ -32,7 +34,7 @@ export function tuiCapability(input: TerminalCapabilities): { enabled: boolean; 
 
   if (!Number.isFinite(input.columns) || !Number.isFinite(input.rows) ||
     !(input.columns >= MIN_COLUMNS) || !(input.rows >= MIN_ROWS)) {
-    return { enabled: false, reason: "terminal must be at least 80 columns by 24 rows" }
+    return { enabled: false, reason: `terminal must be at least ${MIN_COLUMNS} columns by ${MIN_ROWS} rows` }
   }
 
   return { enabled: true }

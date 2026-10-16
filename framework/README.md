@@ -143,13 +143,13 @@ Unselected help offers setup, theme/ASCII accessibility controls, and `/quit`;
 transcript search and task details become available after selecting a model.
 `/quit` is the single exit command. The TUI is enabled when all
 standard streams are TTYs, raw input is supported, `TERM` is set and not `dumb`,
-and the screen is at least 80x24. `LCA_TUI=0` selects readline. Unsupported
+and the screen is at least 60x20 (split panes included). `LCA_TUI=0` selects readline. Unsupported
 terminals receive a plain fallback notice; missing stdin/stderr TTYs still
 refuse interactive operation. Noninteractive JSON/status commands are unchanged.
 `NO_COLOR` disables semantic styling, not the TUI. `/theme neutral`, `/theme light`
 and `/theme dark` select a process-local palette; `/ascii` toggles ASCII chrome.
 Neither setting is persisted, and ASCII mode never rewrites user, plan, model or
-receipt text. Shrinking below 80x24 shows only nonprivate recovery instructions
+receipt text. Shrinking below 60x20 shows only nonprivate recovery instructions
 and blocks ordinary input, paste, queue and decisions; growing redraws the same
 draft, pager, chooser and optional panel.
 

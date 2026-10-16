@@ -3,6 +3,7 @@ import { Editor, searchSubmittedHistory } from "./editor.ts"
 import type { InputEvent } from "./keys.ts"
 import { belowPanelRows, bodyPanelRows, panelInnerColumns, renderFrame, transcriptViewportRows, transcriptVisualRows, wrapText, type FrameHome } from "./render.ts"
 import { TerminalDriver } from "./terminal.ts"
+import { MIN_COLUMNS, MIN_ROWS, MIN_SIZE_LABEL } from "./capability.ts"
 import { TranscriptModel } from "./transcript-model.ts"
 import type { CliHostActivity } from "../hosts/cli-progress.ts"
 import type { CliProgressTask } from "../hosts/cli-progress.ts"
@@ -248,7 +249,7 @@ export class TuiApp implements Terminal {
   }
   private dimensions() { return { columns: process.stdout.columns || 80, rows: process.stdout.rows || 24 } }
   private separator(): string { return this.asciiChrome ? " | " : " · " }
-  private usable(): boolean { const size = this.dimensions(); return size.columns >= 80 && size.rows >= 24 }
+  private usable(): boolean { const size = this.dimensions(); return size.columns >= MIN_COLUMNS && size.rows >= MIN_ROWS }
 
   private transcriptScrollBounds(): { pageRows: number; maximumOffset: number } {
     const { columns, rows } = this.dimensions()
@@ -292,7 +293,7 @@ export class TuiApp implements Terminal {
       search: this.transcriptQuery,
       queued: this.queue.length,
       columns,
-      ...(!this.usable() ? { notice: "Resize terminal to at least 80x24. Cancellation remains available." } : {}),
+      ...(!this.usable() ? { notice: `Resize terminal to at least ${MIN_SIZE_LABEL}. Cancellation remains available.` } : {}),
       ascii: this.asciiChrome,
     })
   }
@@ -319,11 +320,11 @@ export class TuiApp implements Terminal {
       left: ["", ...logo, "", "plan · approve · prove", "", selection ? `${ascii ? "*" : "⬢"} ${selection}` : "No model is selected."],
       sections: this.interactionContext === "unselected"
         ? [
-          { heading: "Get started", lines: ["/model  choose an engine and model", "/help   commands and keys", "/quit   leave"] },
+          { heading: "Get started", lines: ["/model  choose a model", "/help   commands and keys", "/quit   leave"] },
           { heading: "Flow keys", lines: [["/ commands", "Ctrl+R history"].join(keys), ["Ctrl+J newline", "Ctrl+C clear"].join(keys)] },
         ]
         : [
-          { heading: "Get started", lines: ["No messages yet.", "Type a message, then press Enter.", "/help   commands and keys", "/model  switch engine or model"] },
+          { heading: "Get started", lines: ["No messages yet.", "Type, then press Enter.", "/help   commands and keys", "/model  switch model"] },
           { heading: "Flow keys", lines: [["/ commands", "Ctrl+R history"].join(keys), ["Ctrl+J newline", "PgUp/PgDn scroll"].join(keys)] },
         ],
     }

@@ -1,3 +1,4 @@
+import { MIN_COLUMNS, MIN_ROWS, MIN_SIZE_LABEL } from "./capability.ts"
 import { resolveTheme, semanticStyle, type SemanticToken, type Theme } from "./theme.ts"
 
 type DisplayToken = {
@@ -50,7 +51,7 @@ export type FrameHome = {
 
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" })
 const whitespace = /^\p{White_Space}+$/u
-const resizeNotice = "Terminal too small: resize to at least 80×24"
+const resizeNotice = `Terminal too small: resize to at least ${MIN_COLUMNS}×${MIN_ROWS}`
 // Bottom block: status rows, a rule, then the bordered composer (top + bottom border).
 const statusRows = 2
 const ruleRows = 1
@@ -513,7 +514,7 @@ function bottomRows(rows: number, composerRows: number, belowRows: number): numb
 export function belowPanelRows(input: { columns: number; rows: number; draft: string; cursor: number; prompt?: string }): number {
   const columns = terminalDimension(input.columns)
   const rows = terminalDimension(input.rows)
-  if (columns < 80 || rows < 24) return 0
+  if (columns < MIN_COLUMNS || rows < MIN_ROWS) return 0
   const used = bottomRows(rows, composerRowCount({ ...input, columns, rows }), 0)
   return Math.max(1, Math.min(maximumBelowRows, rows - used - minimumBodyRows))
 }
@@ -530,7 +531,7 @@ export function transcriptViewportRows(input: {
 }): number {
   const columns = terminalDimension(input.columns)
   const rows = terminalDimension(input.rows)
-  if (columns < 80 || rows < 24) return 0
+  if (columns < MIN_COLUMNS || rows < MIN_ROWS) return 0
   const composerRows = input.composerVisible === false ? 0 : composerRowCount({ ...input, columns, rows })
   return Math.max(0, rows - bottomRows(rows, composerRows, Math.max(0, input.belowRows ?? 0)))
 }
@@ -594,8 +595,8 @@ export function renderFrame(input: {
   const rows = terminalDimension(input.rows)
   const frameLines = Array<string>(rows).fill("")
 
-  if (columns < 80 || rows < 24) {
-    frameLines[0] = clipToWidth(input.ascii ? "Terminal too small: resize to at least 80x24" : resizeNotice, columns)
+  if (columns < MIN_COLUMNS || rows < MIN_ROWS) {
+    frameLines[0] = clipToWidth(input.ascii ? `Terminal too small: resize to at least ${MIN_SIZE_LABEL}` : resizeNotice, columns)
     return makeFrame(frameLines, { line: 0, column: 0 })
   }
 

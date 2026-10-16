@@ -6,16 +6,17 @@ const base: TerminalCapabilities = {
   stdoutTTY: true,
   stderrTTY: true,
   term: "xterm-256color",
-  columns: 80,
-  rows: 24,
+  columns: 60,
+  rows: 20,
   rawSupported: true,
 }
 
 describe("TUI capability", () => {
   test("enables only when all terminal requirements are met", () => {
     expect(tuiCapability(base)).toEqual({ enabled: true })
-    expect(tuiCapability({ ...base, columns: 79 }).enabled).toBe(false)
-    expect(tuiCapability({ ...base, rows: 23 }).enabled).toBe(false)
+    expect(tuiCapability({ ...base, columns: 59 }).enabled).toBe(false)
+    expect(tuiCapability({ ...base, rows: 19 }).enabled).toBe(false)
+    expect(tuiCapability({ ...base, columns: 70, rows: 58 })).toEqual({ enabled: true })
     expect(tuiCapability({ ...base, stdinTTY: false }).enabled).toBe(false)
     expect(tuiCapability({ ...base, stdoutTTY: false }).enabled).toBe(false)
     expect(tuiCapability({ ...base, stderrTTY: false }).enabled).toBe(false)
