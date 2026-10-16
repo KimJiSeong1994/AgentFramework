@@ -35,6 +35,8 @@ export type FramePanel = {
   readonly focus: string
   readonly lines: readonly string[]
   readonly placement?: "below" | "body"
+  /** Option rows are `label  description`: the description after the first two-space gap is muted. */
+  readonly columns?: boolean
 }
 
 /** `selection` is the authoritative engine/model fact; `screen` names the active surface. */
@@ -489,7 +491,7 @@ const speakerStyle: Record<Speaker, { label?: string; labelStyle: SemanticToken[
  * text, compact glyph rows for notices, errors and tool calls. Rendering and scroll
  * bounds both use this so page arithmetic matches what is drawn.
  */
-export function transcriptDisplayRows(lines: readonly string[], columns: number, ascii = false): TranscriptRow[] {
+export function transcriptDisplayRows(lines: readonly string[], columns: number, ascii = false, spinner?: string): TranscriptRow[] {
   const width = safeColumns(columns)
   const body = Math.max(1, width - 2)
   const rows: TranscriptRow[] = []
@@ -523,15 +525,18 @@ export function transcriptDisplayRows(lines: readonly string[], columns: number,
       continue
     }
     if (entry.kind === "shell") {
-      rows.push(...shellWindowRows(entry, width, ascii))
+      rows.push(...shellWindowRows(entry, width, ascii, spinner))
       continue
     }
     if (entry.kind === "tool") {
       const match = toolSummary.exec(entry.summary)!
       const outcome = / · call (?:failed|denied)/u.test(entry.summary) ? "error" : / · call succeeded/u.test(entry.summary) ? "success" : "running"
+      // Only a live call animates; a last-recorded/unconfirmed call keeps the static marker.
+      const live = outcome === "running" && spinner !== undefined && / · call running · /u.test(entry.summary)
       const icon: TranscriptSegment = outcome === "error"
         ? { text: `${ascii ? "x" : "✘"} `, styles: ["error"] }
-        : outcome === "success" ? { text: `${ascii ? "+" : "✔"} `, styles: ["success"] } : { text: `${ascii ? "~" : "⟳"} `, styles: ["warning"] }
+        : outcome === "success" ? { text: `${ascii ? "+" : "✔"} `, styles: ["success"] }
+          : { text: `${live ? spinner : ascii ? "~" : "⟳"} `, styles: ["warning"] }
       const toggle = match[1] === "+" ? (ascii ? "> " : "▸ ") : (ascii ? "v " : "▾ ")
       wrapSpans([{ text: toggle, styles: ["muted"] }, { text: match[2]!, styles: ["focus"] }, { text: match[3]!, styles: ["muted"] }], body)
         .forEach((line, index) => rows.push({ segments: [index === 0 ? icon : indent, ...line], role: index === 0 ? "first" : "continuation" }))
@@ -548,11 +553,11 @@ export function transcriptDisplayRows(lines: readonly string[], columns: number,
 }
 
 /** A GJC-style shell window: titled top border, output, status footer, bottom border. */
-function shellWindowRows(entry: Extract<TranscriptEntry, { kind: "shell" }>, width: number, ascii: boolean): TranscriptRow[] {
+function shellWindowRows(entry: Extract<TranscriptEntry, { kind: "shell" }>, width: number, ascii: boolean, spinner?: string): TranscriptRow[] {
   const box = ascii ? { h: "-", v: "|", tl: "+", tr: "+", bl: "+", br: "+" } : { h: "─", v: "│", tl: "╭", tr: "╮", bl: "╰", br: "╯" }
   const status = entry.footers.at(-1) ?? ""
   const state: { icon: string; style: SemanticToken } = status.startsWith("running")
-    ? { icon: ascii ? "~" : "⟳", style: "warning" }
+    ? { icon: spinner ?? (ascii ? "~" : "⟳"), style: "warning" }
     : status.startsWith("exit 0 ") ? { icon: ascii ? "+" : "✔", style: "success" }
       : status.startsWith("cancelled") || status.startsWith("timed out") ? { icon: "!", style: "warning" }
         : { icon: ascii ? "x" : "✘", style: "error" }
@@ -832,6 +837,8 @@ export function renderFrame(input: {
   color?: boolean
   theme?: Theme
   ascii?: boolean
+  /** Current spinner frame while the host is working; live shell/tool icons animate with it. */
+  spinner?: string
   notice?: string
 }): string {
   const columns = terminalDimension(input.columns)
@@ -875,7 +882,7 @@ export function renderFrame(input: {
   const bodyRows = Math.max(0, rows - bottom)
 
   // Body: transcript rows, a welcome box, or a bordered panel.
-  const displayRows = bodyPanel ? [] : transcriptDisplayRows(input.transcript, columns, input.ascii)
+  const displayRows = bodyPanel ? [] : transcriptDisplayRows(input.transcript, columns, input.ascii, input.spinner)
   const visualTranscriptRows = displayRows.length
   const maximumTranscriptOffset = Math.max(0, visualTranscriptRows - bodyRows)
   const requestedTranscriptOffset = input.transcriptOffset ?? 0
@@ -987,9 +994,11 @@ export function renderFrame(input: {
     belowLines.forEach((line, index) => {
       const selected = line.startsWith("> ")
       const option = selected || line.startsWith("  ")
-      frameLines[composerTop + composerRows + composerBorderRows + index] = selected
-        ? paint(line, "accent")
-        : option ? line : paint(line, "muted")
+      const split = belowPanel?.columns && option ? /^(. \S+?)( {2,}.*)$/u.exec(line) : null
+      frameLines[composerTop + composerRows + composerBorderRows + index] = split
+        ? `${selected ? paint(split[1]!, "accent") : split[1]!}${paint(split[2]!, "muted")}`
+        : selected ? paint(line, "accent")
+          : option ? line : paint(line, "muted")
     })
   }
 

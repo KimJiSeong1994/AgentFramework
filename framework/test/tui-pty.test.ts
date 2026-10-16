@@ -398,6 +398,7 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
   expect(skills.capture).toMatchObject({ ...restoredTerminalProof, onlyResetSgr: true })
   expect(skills.capture.modeProof).toMatchObject({
     projectSkillCatalogRendered: true,
+    fuzzyPaletteInsertedSkill: true,
     completionInsertedIntoComposer: true,
     declinedSourceConsentDidNotDispatch: true,
     acceptedSourceConsentDispatched: true,
