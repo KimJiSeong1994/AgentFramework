@@ -20,15 +20,14 @@ const all: readonly InteractiveAction[] = [
   { id: "cancel", syntax: "/cancel", summary: "request cancellation; proof may remain unconfirmed", contexts: ["chat", "busy", "held"] },
   { id: "skills", syntax: "/skills [grants|revoke <name>]", summary: "inspect skills and consent grants", contexts: ["chat", "held", "read-only"] },
   { id: "skill", syntax: "/skill:<name> [request]", summary: "invoke a discovered skill explicitly", contexts: ["chat"] },
-  { id: "search", syntax: "/search <tool/status/task>", summary: "filter this session transcript", contexts: ["chat", "busy", "held", "read-only", "unselected"], local: true },
-  { id: "expand", syntax: "/expand <item number>", summary: "toggle evidence for a visible tool item", contexts: ["chat", "busy", "held", "read-only", "unselected"], local: true },
-  { id: "details", syntax: "/details", summary: "toggle the local task/evidence panel", contexts: ["chat", "busy", "held", "read-only", "unselected"], local: true },
+  { id: "search", syntax: "/search <tool/status/task>", summary: "filter this session transcript", contexts: ["chat", "busy", "held", "read-only"], local: true },
+  { id: "expand", syntax: "/expand <item number>", summary: "toggle evidence for a visible tool item", contexts: ["chat", "busy", "held", "read-only"], local: true },
+  { id: "details", syntax: "/details", summary: "toggle the local task/evidence panel", contexts: ["chat", "busy", "held", "read-only"], local: true },
   { id: "theme", syntax: "/theme <neutral|light|dark>", summary: "set the process-local palette", contexts: ["chat", "busy", "held", "read-only", "unselected"], local: true },
   { id: "ascii", syntax: "/ascii", summary: "toggle ASCII chrome for this process", contexts: ["chat", "busy", "held", "read-only", "unselected"], local: true },
   { id: "finish", syntax: "/finish", summary: "finish an active interview prompt", contexts: ["chat"] },
   { id: "plan", syntax: "/plan", summary: "send a planning prompt; it grants no execution authority", contexts: ["chat"] },
   { id: "quit", syntax: "/quit", summary: "request exit", contexts: ["chat", "busy", "held", "read-only", "selection", "unselected"] },
-  { id: "exit", syntax: "/exit", summary: "request exit", contexts: ["chat", "busy", "held", "read-only", "selection", "unselected"] },
 ]
 
 export function interactiveActions(context?: InteractiveContext): readonly InteractiveAction[] {

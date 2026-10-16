@@ -105,6 +105,23 @@ describe("CLI progress presenter", () => {
     expect(output).toEqual(["[activity] Worker model is working.\n"])
   })
 
+  test("fullscreen main-model status stays out of chat without hiding errors or cancellation", () => {
+    const output: string[] = []
+    const observed: CliHostActivity[] = []
+    const progress = createCliProgressPresenter(text => output.push(text), activity => observed.push(activity), { mainModelLines: false })
+    progress.waiting()
+    progress.host({ kind: "model-started", role: "main", execution: 1 })
+    progress.host({ kind: "model-returned", role: "main", execution: 1, status: "completed" })
+    progress.responseReceived()
+    expect(output).toEqual([])
+    expect(observed).toHaveLength(2)
+    progress.host({ kind: "model-returned", role: "main", execution: 2, status: "failed" })
+    progress.cancelRequested()
+    expect(output.join("")).toContain("model request failed")
+    expect(output.join("")).toContain("Cancellation requested; outcome is not yet settled")
+    expect(observed).toHaveLength(3)
+  })
+
   test("shows cancel-requested separately from settled task cancellation and buffers during approval", () => {
     const { output, progress } = capture()
     progress.tasks([{ id: "t1", status: "running" }])

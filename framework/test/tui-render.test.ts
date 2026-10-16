@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import fixtureSet from "./fixtures/gjc-keys-8cd17c0.json"
-import { displayAnsiWidth, displayWidth, renderFrame, wrapAnsiText, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
+import { displayAnsiWidth, displayWidth, renderFrame, transcriptViewportRows, wrapAnsiText, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
 
 interface ReferenceFixture {
   id: string
@@ -24,6 +24,7 @@ function fixture(id: string): ReferenceFixture {
 }
 
 const stripCsi = (value: string): string => value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+const frameRows = (value: string): string[] => [...value.matchAll(/\u001b\[\d+;1H\u001b\[2K([^\u001b]*)/g)].map(match => match[1]!)
 const finalCursor = (value: string): [number, number] => {
   const match = value.match(/\u001b\[(\d+);(\d+)H$/)
   if (!match) throw new Error("frame has no final cursor position")
@@ -94,6 +95,28 @@ describe("renderFrame", () => {
     expect(finalCursor(frame)).toEqual([24, 5])
     expect(stripCsi(frame)).toContain("transcript row")
     expect(stripCsi(frame)).toContain("ready")
+    expect(frameRows(frame)[2]).toBe("transcript row")
+  })
+
+  test.each([[80, 24], [120, 40]] as const)("anchors header, transcript, status and composer at %ix%i", (columns, rows) => {
+    const frame = basicFrame({
+      columns,
+      rows,
+      transcript: ["[Assistant] first message"],
+      header: { screen: "Home", selection: "local / model-a" },
+      status: ["status one", "status two"],
+    })
+    const drawn = frameRows(frame)
+    expect(drawn).toHaveLength(rows)
+    expect(drawn[0]).toBe("LCA · Home · local / model-a")
+    expect(displayWidth(drawn[1]!)).toBe(columns)
+    expect(drawn[2]).toBe("[Assistant] first message")
+    expect(drawn[rows - 4]).toBe(drawn[1])
+    expect(drawn[rows - 3]).toBe("status one")
+    expect(drawn[rows - 2]).toBe("status two")
+    expect(drawn[rows - 1]).toBe("> ok")
+    expect(finalCursor(frame)).toEqual([rows, 5])
+    expect(transcriptViewportRows({ columns, rows, draft: "ok", cursor: 2 })).toBe(rows - 6)
   })
 
   test("shows a bounded resize notice below minimum without changing the model", () => {
@@ -142,7 +165,7 @@ describe("renderFrame", () => {
 
   test("scrolls within one paragraph by wrapped visual rows", () => {
     const paragraph = Array.from({ length: 26 }, (_, index) => String.fromCharCode(65 + index).repeat(80)).join("")
-    const rows = (frame: string) => [...frame.matchAll(/\u001b\[\d+;1H\u001b\[2K([^\u001b]*)/g)].map(match => match[1]!)
+    const rows = frameRows
     const frame = (transcriptOffset?: number) => renderFrame({
       columns: 80,
       rows: 24,
@@ -153,11 +176,11 @@ describe("renderFrame", () => {
       cursor: 2,
     })
 
-    expect(rows(frame())[0]).toBe("F".repeat(80))
-    expect(rows(frame(1))[0]).toBe("E".repeat(80))
-    expect(rows(frame(Number.MAX_SAFE_INTEGER))[0]).toBe("A".repeat(80))
-    expect(stripCsi(frame())).toContain("Latest | 5 older | 0 newer | PgUp/PgDn")
-    expect(stripCsi(frame(1))).toContain("History | 4 older | 1 newer | PgUp/PgDn")
+    expect(rows(frame())[2]).toBe("I".repeat(80))
+    expect(rows(frame(1))[2]).toBe("H".repeat(80))
+    expect(rows(frame(Number.MAX_SAFE_INTEGER))[2]).toBe("A".repeat(80))
+    expect(stripCsi(frame())).toContain("Latest | 8 older | 0 newer | PgUp/PgDn")
+    expect(stripCsi(frame(1))).toContain("History | 7 older | 1 newer | PgUp/PgDn")
   })
 
   test("neutralizes untrusted escapes and controls; optional status color is internal SGR only", () => {
@@ -214,12 +237,41 @@ describe("renderFrame", () => {
     for (const [columns, rows] of [[80, 24], [120, 40]] as const) {
       const home = ["LCA", "No model selected", "/model  Choose an engine and model", "/help  Commands", "/quit  Exit"]
       const frame = basicFrame({ columns, rows, transcript: [], home })
+      expect(frameRows(frame)[2]).toBe("  LCA")
+      expect(frameRows(frame)[3]).toBe("  No model selected")
       expect(stripCsi(frame)).toContain("No model selected")
       expect(stripCsi(frame)).toContain("/model  Choose an engine and model")
       const small = basicFrame({ columns: 79, rows, transcript: [], home })
       expect(stripCsi(small)).not.toContain("No model selected")
       expect(stripCsi(small)).toContain("Terminal too small")
     }
+  })
+
+  test.each([[80, 24], [120, 40]] as const)("renders a titled panel without transcript or inactive composer leakage at %ix%i", (columns, rows) => {
+    const frame = basicFrame({
+      columns,
+      rows,
+      transcript: ["private transcript context"],
+      header: { screen: "Task/evidence details", selection: "local / model-a" },
+      panel: { title: "Task/evidence details", focus: "evidence list", lines: ["No task evidence is available."] },
+      status: "Escape closes",
+      draft: "private draft",
+      cursor: 8,
+      prompt: "You> ",
+      composerVisible: false,
+    })
+    const plain = stripCsi(frame)
+    const drawn = frameRows(frame)
+    expect(drawn[0]).toBe("LCA · local / model-a")
+    expect(plain.match(/Task\/evidence details/g)).toHaveLength(1)
+    expect(drawn[2]).toBe("Task/evidence details · evidence list focus")
+    expect(drawn[3]).toBe("No task evidence is available.")
+    expect(plain).not.toContain("private transcript context")
+    expect(plain).not.toContain("private draft")
+    expect(plain).not.toContain("You>")
+    expect(drawn[rows - 1]).toBe("")
+    expect(frame).toContain("\u001b[?25l")
+    expect(finalCursor(frame)).toEqual([rows, 1])
   })
 
   test("overflow has its own visible row even when draft lines fill every column", () => {
@@ -273,7 +325,7 @@ describe("renderFrame", () => {
       cursor: 2,
       color: false,
     })
-    const rows = [...frame.matchAll(/\u001b\[\d+;1H\u001b\[2K([^\u001b]*)/g)].map(match => match[1]!)
+    const rows = frameRows(frame)
     const first = rows.indexOf(expected[0]!)
     expect(first).toBeGreaterThanOrEqual(0)
     expect(rows.slice(first, first + expected.length)).toEqual(expected)
@@ -281,6 +333,7 @@ describe("renderFrame", () => {
 
     const long = `[Assistant] ${"y".repeat(columns * 24)}`
     const physicalRows = wrapTranscriptLine(long, columns)
+    const viewportRows = transcriptViewportRows({ columns, rows: 24, draft: "ok", cursor: 2 })
     const scrolled = renderFrame({
       columns,
       rows: 24,
@@ -291,10 +344,10 @@ describe("renderFrame", () => {
       cursor: 2,
       color: false,
     })
-    const scrolledRows = [...scrolled.matchAll(/\u001b\[\d+;1H\u001b\[2K([^\u001b]*)/g)].map(match => match[1]!)
-    const scrolledFirst = scrolledRows.indexOf(physicalRows.at(-22)!)
+    const scrolledRows = frameRows(scrolled)
+    const scrolledFirst = scrolledRows.indexOf(physicalRows.at(-(viewportRows + 1))!)
     expect(scrolledFirst).toBeGreaterThanOrEqual(0)
-    expect(scrolledRows.slice(scrolledFirst, scrolledFirst + 21)).toEqual(physicalRows.slice(-22, -1))
-    expect(stripCsi(scrolled)).toContain(`History | Assistant continued | ${physicalRows.length - 22} older | 1 newer | PgUp/PgDn`)
+    expect(scrolledRows.slice(scrolledFirst, scrolledFirst + viewportRows)).toEqual(physicalRows.slice(-(viewportRows + 1), -1))
+    expect(stripCsi(scrolled)).toContain(`History | Assistant continued | ${physicalRows.length - viewportRows - 1} older | 1 newer | PgUp/PgDn`)
   })
 })

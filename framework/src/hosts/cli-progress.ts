@@ -43,7 +43,7 @@ export type CliProgressPresenter = CliProgressSink & {
   error: () => void
 }
 
-export type CliProgressPresenterOptions = { toolLines?: boolean }
+export type CliProgressPresenterOptions = { toolLines?: boolean; mainModelLines?: boolean }
 
 const TASK_STATUSES: readonly CliTaskStatus[] = ["pending", "running", "done", "failed", "cancelled"]
 const MODEL_STATUSES = ["completed", "failed", "cancelled", "unresolved", "incomplete"] as const
@@ -152,10 +152,12 @@ export function createCliProgressPresenter(
 ): CliProgressPresenter {
   if (typeof write !== "function") throw new TypeError("CLI progress writer must be a function")
   if ((observe !== undefined && typeof observe !== "function") || !options || typeof options !== "object" ||
-      (options.toolLines !== undefined && typeof options.toolLines !== "boolean")) {
+      (options.toolLines !== undefined && typeof options.toolLines !== "boolean") ||
+      (options.mainModelLines !== undefined && typeof options.mainModelLines !== "boolean")) {
     throw new TypeError("invalid CLI progress presenter options")
   }
   const toolLines = options.toolLines !== false
+  const mainModelLines = options.mainModelLines !== false
 
   const tasks = new Map<string, { status: CliTaskStatus; attempt?: number }>()
   const seen = new Set<string>()
@@ -206,7 +208,7 @@ export function createCliProgressPresenter(
     const label = roleName(activity.role)
     const keySuffix = `${activity.execution}:${activity.role}`
     if (activity.kind === "model-started") {
-      if (activity.role === "main" && planningWaitActive) return
+      if (activity.role === "main" && (planningWaitActive || !mainModelLines)) return
       once(`model-started:${keySuffix}`, `[activity] ${label} model is working.`)
       return
     }
@@ -215,7 +217,7 @@ export function createCliProgressPresenter(
       if (activity.role === "main") planningWaitActive = false
       if (activity.status === "completed") {
         if (activity.role === "main") {
-          if (!planningResponseReported) output("[activity] Planning model response received.")
+          if (mainModelLines && !planningResponseReported) output("[activity] Planning model response received.")
           planningResponseReported = true
         } else once(`model-returned:${keySuffix}`, `[activity] ${label} model response received.`)
       } else {
@@ -289,13 +291,13 @@ export function createCliProgressPresenter(
       if (planningWaitActive) return
       planningWaitActive = true
       planningResponseReported = false
-      output("[progress] Waiting for the planning model.")
+      if (mainModelLines) output("[progress] Waiting for the planning model.")
     },
     responseReceived() {
       planningWaitActive = false
       if (planningResponseReported) return
       planningResponseReported = true
-      output("[activity] Planning model response received.")
+      if (mainModelLines) output("[activity] Planning model response received.")
     },
     tasks(values, requestedTotal = values.length) {
       const accepted: CliProgressTask[] = []

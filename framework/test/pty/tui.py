@@ -612,18 +612,23 @@ def assert_screen_regions(session: PtySession):
     lines = session.screen.current_lines()
     if len(lines) < 24:
         raise AssertionError("TUI frame did not preserve the expected minimum row count")
+    header = lines[:2]
     status_index = len(lines) - 3
-    transcript = lines[:status_index]
+    transcript = lines[2:status_index]
     status_rows = lines[status_index:-1]
     status = " ".join(status_rows)
     composer = lines[-1]
-    if not any("Native execution selection:" in line for line in transcript):
-        raise AssertionError(f"transcript region missing selection: {transcript[:5]!r}")
-    if "codex" not in status or "pty-fixture-model" not in status:
-        raise AssertionError(f"status region missing selected model: {status!r}")
+    if not header[0].startswith("LCA") or not header[1].strip():
+        raise AssertionError(f"fixed header/divider missing: {header!r}")
+    if "codex" not in header[0] or "pty-fixture-model" not in header[0]:
+        raise AssertionError(f"header missing selected model: {header!r}")
+    if any("Native execution selection:" in line for line in transcript):
+        raise AssertionError("initial selection polluted the transcript with a path banner")
+    if not status.strip():
+        raise AssertionError("status region is empty")
     if "You>" not in composer:
         raise AssertionError(f"composer region missing input prompt: {composer!r}")
-    return {"transcript": transcript, "status": status, "composer": composer}
+    return {"header": header, "transcript": transcript, "status": status, "composer": composer}
 
 
 def chat_message(session: PtySession):
@@ -982,7 +987,7 @@ def run_restore(temp_root: Path):
         session.send(b"\x1b[6~")
         session._wait(lambda: "showing 1-" not in session.screen.current_text(), "captured session chooser page advances")
         session.send(b"\x1b")
-        session._wait(lambda: "Retained sessions · Up/Down" not in session.screen.current_text() and session.screen.current_lines()[-1].startswith("You>"), "session chooser Escape restores composer")
+        session._wait(lambda: not session.screen.current_lines()[2].startswith("Retained sessions ·") and session.screen.current_lines()[-1].startswith("You>"), "session chooser Escape restores composer")
         session.mode_proof["capturedSessionChooserPagedAndCancelled"] = True
         session.send_text(f"/resume {saved_sid}\r")
         session._wait(
@@ -990,7 +995,8 @@ def run_restore(temp_root: Path):
             "UNSENT_RESTORED_DRAFT" in session.screen.current_lines()[-1] and
             "QUEUED_RESTORED_DRAFT" in session.screen.current_text() and
             "LATEST_RESTORED_HISTORY_NEEDLE" in session.screen.current_text() and
-            any("codex" in line and "pty-fixture-model" in line for line in session.screen.current_lines()[-3:-1]),
+            "codex" in session.screen.current_lines()[0] and
+            "pty-fixture-model" in session.screen.current_lines()[0],
             "production /resume to restore the held draft and unsent queued notice",
         )
         if not session.raw_mode():
@@ -1003,14 +1009,14 @@ def run_restore(temp_root: Path):
 
         # Search all submitted history while preserving the restored draft.
         session.send(b"\x12")
-        session.wait_screen("Search input history")
+        session.wait_screen("History search")
         session.send_text("EARLIEST_RESTORED_HISTORY_NEEDLE")
         session.wait_screen("> EARLIEST_RESTORED_HISTORY_NEEDLE")
         session.send(b"\x1b")
         session._wait(
             lambda: session.screen.current_lines()[-1].startswith("You>") and
             "UNSENT_RESTORED_DRAFT" in session.screen.current_lines()[-1] and
-            "Search input history" not in session.screen.current_text(),
+            "History search" not in session.screen.current_text(),
             "Escape to cancel history search and restore the saved composer draft",
         )
         session.mode_proof["historyEscapeRestoredDraft"] = True
@@ -1036,7 +1042,7 @@ def run_restore(temp_root: Path):
         assert_no_additional_dispatch(session, turns=0, runs=0)
 
         session.send(b"\x12")
-        session.wait_screen("Search input history")
+        session.wait_screen("History search")
         session.send_text("EARLIEST_RESTORED_HISTORY_NEEDLE")
         session.wait_screen("> EARLIEST_RESTORED_HISTORY_NEEDLE")
         session.send(b"\r")
@@ -1044,7 +1050,7 @@ def run_restore(temp_root: Path):
         session._wait(
             lambda: session.screen.current_lines()[-1].startswith("You>") and
             history_text in session.screen.current_lines()[-1] and
-            "Search input history" not in session.screen.current_text(),
+            "History search" not in session.screen.current_text(),
             "Enter to insert the old history match into the composer only",
         )
         session.mode_proof["historyEnterInsertedWithoutDispatch"] = True
@@ -1059,7 +1065,7 @@ def run_restore(temp_root: Path):
         )
         session.send_text("/search\r")
         session._wait(
-            lambda: "search:" not in session.screen.current_lines()[-2] and
+            lambda: "search:" not in " ".join(session.screen.current_lines()[-3:-1]) and
             session.screen.current_lines()[-1].strip() == "You>",
             "clear the local transcript filter before the Resume decision",
         )
@@ -1150,7 +1156,7 @@ def run_sdk_observer(temp_root: Path):
         assert_sdk_observer_counts(session, conversations=1, turns=0)
         session.send_text("/search\r")
         session._wait(
-            lambda: "search:" not in session.screen.current_lines()[-2] and
+            lambda: "search:" not in " ".join(session.screen.current_lines()[-3:-1]) and
             session.screen.current_lines()[-1].startswith("History>"),
             "clear retained-history search before testing refused work commands",
         )
@@ -1189,8 +1195,8 @@ def run_sdk_observer(temp_root: Path):
         )
         session._wait(
             lambda: session.screen.current_lines()[-1].startswith("You>") and
-            "codex" in session.screen.current_lines()[-2] and
-            "pty-fixture-model" in session.screen.current_lines()[-2],
+            "codex" in session.screen.current_lines()[0] and
+            "pty-fixture-model" in session.screen.current_lines()[0],
             "fresh CLI session composer after leaving the read-only SDK observer",
         )
         new_counts = assert_sdk_observer_counts(session, conversations=2, turns=0)
@@ -1391,7 +1397,7 @@ def run_skills(temp_root: Path):
         )
         session._wait(
             lambda: session.screen.current_lines()[-1].startswith("You>") and
-            "Native execution selection:" in session.screen.current_text(),
+            "New conversation:" in session.screen.current_text(),
             "composer after /new resets the foreground session",
         )
         submit_explicit_skill(session, "/skill:pty-inspect after new session")

@@ -13,6 +13,17 @@ const facts: InteractiveViewFacts = {
 }
 
 describe("priority status layout", () => {
+  test("header selection removes only duplicate model text, never safety facts", () => {
+    const rows = statusLines({ facts, selectionInHeader: true, activity: "Esc closes", queued: 0, columns: 200 })
+    const text = rows.join(" ")
+    expect(text).not.toContain(facts.selection.model)
+    for (const marker of ["read-only", "held", "owner:foreign", "claim", "fence", "termination:?", "request-cancel:?"]) {
+      expect(text).toContain(marker)
+    }
+    expect(text).toContain("hold reason: unsettled fence")
+    expect(text).toContain("Esc closes")
+  })
+
   for (const columns of [80, 81, 100, 120, 200]) test(`keeps safety facts within ${columns} columns`, () => {
     const rows = statusLines({ facts, workflow: "ultragoal · execution · active", activity: "very long ordinary activity detail", search: "tool", queued: 3, columns })
     expect(rows.length).toBeLessThanOrEqual(2)

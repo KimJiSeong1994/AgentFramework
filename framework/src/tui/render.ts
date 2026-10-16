@@ -24,9 +24,40 @@ type CursorPosition = {
   column: number
 }
 
+/**
+ * `below` panels list under the composer (pickers, completions, history search) and keep
+ * the transcript visible; `body` panels replace the transcript and hide the composer.
+ */
+export type FramePanel = {
+  readonly title: string
+  readonly focus: string
+  readonly lines: readonly string[]
+  readonly placement?: "below" | "body"
+}
+
+/** `selection` is the authoritative engine/model fact; `screen` names the active surface. */
+export type FrameHeader = {
+  readonly screen: string
+  readonly selection?: string
+}
+
+/** Empty-session welcome box: left column identity, right column titled sections. */
+export type FrameHome = {
+  readonly title: string
+  readonly left: readonly string[]
+  readonly sections: ReadonlyArray<{ readonly heading: string; readonly lines: readonly string[] }>
+}
+
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" })
 const whitespace = /^\p{White_Space}+$/u
 const resizeNotice = "Terminal too small: resize to at least 80×24"
+// Bottom block: status rows, a rule, then the bordered composer (top + bottom border).
+const statusRows = 2
+const ruleRows = 1
+const composerBorderRows = 2
+const panelBorderRows = 2
+const minimumBodyRows = 3
+const maximumBelowRows = 12
 
 function isBidiControl(codePoint: number): boolean {
   return codePoint === 0x061c || codePoint === 0x200e || codePoint === 0x200f ||
@@ -221,20 +252,100 @@ export function wrapText(text: string, columns: number): string[] {
   return lines
 }
 
-export function wrapTranscriptLine(text: string, columns: number): string[] {
-  const width = safeColumns(columns)
-  const continuation = "  | "
-  const speaker = /^\[(?:You|Assistant|Error|Notice|Canonical plan)\] /.exec(text)?.[0]
-  if (speaker) {
-    const content = text.slice(speaker.length)
-    return wrapText(content, Math.max(1, width - displayWidth(speaker)))
-      .map((line, index) => `${index === 0 ? speaker : continuation}${line}`)
+type Speaker = "You" | "Assistant" | "Error" | "Notice" | "Canonical plan"
+
+/** One physical transcript row. `gutter` carries color-independent provenance. */
+export type TranscriptRow = {
+  readonly gutter: string
+  readonly text: string
+  readonly speaker?: Speaker
+  readonly role: "first" | "continuation" | "blank"
+  readonly semantic: SemanticToken
+  readonly gutterSemantic: SemanticToken
+}
+
+const speakers: Record<Speaker, { glyph: string; ascii: string; semantic: SemanticToken; gutter: SemanticToken }> = {
+  You: { glyph: "❯", ascii: ">", semantic: "user", gutter: "user" },
+  Assistant: { glyph: "●", ascii: "*", semantic: "text", gutter: "accent" },
+  Notice: { glyph: "·", ascii: "-", semantic: "muted", gutter: "muted" },
+  Error: { glyph: "✗", ascii: "x", semantic: "error", gutter: "error" },
+  "Canonical plan": { glyph: "◆", ascii: "#", semantic: "text", gutter: "warning" },
+}
+const gutterWidth = 2
+const speakerLabel = /^\[(You|Assistant|Error|Notice|Canonical plan)\](?: |$)/u
+const toolSummary = /^\[[+-]\] #\d+ /u
+
+function contentSemantic(text: string): SemanticToken | undefined {
+  if (/^\[\+\] \+/u.test(text)) return "diff-add"
+  if (/^\[-\] -/u.test(text)) return "diff-remove"
+  if (text.startsWith("[code] ")) return "code"
+  return undefined
+}
+
+/**
+ * Map logical transcript lines to physical rows. A blank row separates entries, the first
+ * row of an entry carries its speaker glyph, and continuations are indented. Rendering and
+ * scroll bounds both use this so page arithmetic matches what is drawn.
+ */
+export function transcriptDisplayRows(lines: readonly string[], columns: number, ascii = false): TranscriptRow[] {
+  const width = Math.max(1, safeColumns(columns) - gutterWidth)
+  const rows: TranscriptRow[] = []
+  let speaker: Speaker | undefined
+  let semantic: SemanticToken = "text"
+  const blank = (): void => {
+    if (rows.length) rows.push({ gutter: "", text: "", role: "blank", semantic: "text", gutterSemantic: "text" })
   }
-  if (text.startsWith(continuation)) {
-    return wrapText(text.slice(continuation.length), Math.max(1, width - displayWidth(continuation)))
-      .map(line => `${continuation}${line}`)
+  const push = (text: string, role: "first" | "continuation", rowSemantic: SemanticToken, gutter: string, gutterSemantic: SemanticToken): void => {
+    wrapText(text, width).forEach((line, index) => rows.push({
+      gutter: index === 0 && role === "first" ? gutter : "  ",
+      text: line,
+      ...(speaker ? { speaker } : {}),
+      role: index === 0 ? role : "continuation",
+      semantic: rowSemantic,
+      gutterSemantic,
+    }))
   }
-  return wrapText(text, width)
+  for (const line of lines) {
+    const label = speakerLabel.exec(line)
+    if (label) {
+      speaker = label[1] as Speaker
+      const style = speakers[speaker]
+      let body = line.slice(label[0].length)
+      if (speaker === "Canonical plan") body = `Plan: ${body}`
+      semantic = speaker === "You" || speaker === "Error" ? style.semantic : contentSemantic(body) ?? style.semantic
+      blank()
+      push(body, "first", semantic, `${ascii ? style.ascii : style.glyph} `, style.gutter)
+      semantic = style.semantic
+      continue
+    }
+    if (line.startsWith("  | ")) {
+      const body = line.slice(4)
+      const rowSemantic = speaker === "You" || speaker === "Error" ? semantic : contentSemantic(body) ?? semantic
+      push(body, "continuation", rowSemantic, "  ", "text")
+      continue
+    }
+    if (toolSummary.test(line)) {
+      speaker = undefined
+      semantic = "muted"
+      blank()
+      push(line, "first", "text", `${ascii ? "+" : "⏺"} `, "success")
+      continue
+    }
+    if (/^\s/u.test(line)) {
+      push(line.trimStart(), "continuation", semantic, "  ", "text")
+      continue
+    }
+    speaker = undefined
+    semantic = "text"
+    blank()
+    push(line, "first", "text", "  ", "text")
+  }
+  return rows
+}
+
+/** Physical rows for one logical line, without the separator that precedes later entries. */
+export function wrapTranscriptLine(text: string, columns: number, ascii = false): string[] {
+  return transcriptDisplayRows([text], columns, ascii).map(row => `${row.gutter}${row.text}`)
 }
 
 function sgrResetState(sequence: string): { resets: boolean; finalReset: boolean } {
@@ -375,44 +486,101 @@ function terminalDimension(value: number): number {
   return Number.isFinite(value) ? Math.max(1, Math.floor(value)) : 1
 }
 
-function transcriptRowsFor(rows: number, composerLineCount: number, statusRows = 1): number {
-  const maxComposerRows = Math.max(1, Math.floor(rows / 3))
-  const composerRows = Math.min(composerLineCount, maxComposerRows)
-  return rows - composerRows - Math.max(1, Math.min(2, statusRows)) - 1
+/** Composer text columns inside `│ ` and ` │`. */
+export function composerInnerColumns(columns: number): number {
+  return Math.max(1, terminalDimension(columns) - 4)
 }
 
+/** Content columns inside a bordered body panel. */
+export function panelInnerColumns(columns: number): number {
+  return Math.max(1, terminalDimension(columns) - 4)
+}
+
+function maximumComposerRows(rows: number): number {
+  return Math.max(1, Math.floor(rows / 3) - composerBorderRows)
+}
+
+function composerRowCount(input: { columns: number; rows: number; draft: string; cursor: number; prompt?: string }): number {
+  const composer = layoutComposer(input.draft, input.prompt ?? "> ", composerInnerColumns(input.columns), input.cursor)
+  return Math.min(composer.rows.length, maximumComposerRows(input.rows))
+}
+
+function bottomRows(rows: number, composerRows: number, belowRows: number): number {
+  return statusRows + ruleRows + (composerRows ? composerBorderRows + composerRows : 0) + belowRows
+}
+
+/** Rows a `below` panel may use under the composer while keeping a minimal transcript. */
+export function belowPanelRows(input: { columns: number; rows: number; draft: string; cursor: number; prompt?: string }): number {
+  const columns = terminalDimension(input.columns)
+  const rows = terminalDimension(input.rows)
+  if (columns < 80 || rows < 24) return 0
+  const used = bottomRows(rows, composerRowCount({ ...input, columns, rows }), 0)
+  return Math.max(1, Math.min(maximumBelowRows, rows - used - minimumBodyRows))
+}
+
+/** Transcript rows above the bottom block; render and scroll bounds share this. */
 export function transcriptViewportRows(input: {
   columns: number
   rows: number
   draft: string
   cursor: number
   prompt?: string
-  statusRows?: number
+  composerVisible?: boolean
+  belowRows?: number
 }): number {
   const columns = terminalDimension(input.columns)
   const rows = terminalDimension(input.rows)
   if (columns < 80 || rows < 24) return 0
-  const composer = layoutComposer(input.draft, input.prompt ?? "> ", columns, input.cursor)
-  return transcriptRowsFor(rows, composer.rows.length, input.statusRows)
+  const composerRows = input.composerVisible === false ? 0 : composerRowCount({ ...input, columns, rows })
+  return Math.max(0, rows - bottomRows(rows, composerRows, Math.max(0, input.belowRows ?? 0)))
 }
 
-function makeFrame(lines: readonly string[], cursor: CursorPosition): string {
+/** Content rows inside a bordered body panel (composer hidden). */
+export function bodyPanelRows(input: { columns: number; rows: number }): number {
+  return Math.max(1, transcriptViewportRows({ ...input, draft: "", cursor: 0, prompt: "", composerVisible: false }) - panelBorderRows)
+}
+
+/** Total physical transcript rows, including entry separators. */
+export function transcriptVisualRows(lines: readonly string[], columns: number, ascii = false): number {
+  return transcriptDisplayRows(lines, columns, ascii).length
+}
+
+function makeFrame(lines: readonly string[], cursor: CursorPosition, cursorVisible = true): string {
   const output: string[] = []
   for (let row = 0; row < lines.length; row += 1) {
     output.push(`\x1b[${row + 1};1H\x1b[2K${lines[row] ?? ""}`)
   }
+  output.push(cursorVisible ? "\x1b[?25h" : "\x1b[?25l")
   output.push(`\x1b[${cursor.line + 1};${cursor.column + 1}H`)
   return output.join("")
 }
 
+type Glyphs = { h: string; v: string; tl: string; tr: string; bl: string; br: string; tj: string; bj: string; model: string; select: string }
+const unicodeGlyphs: Glyphs = { h: "─", v: "│", tl: "╭", tr: "╮", bl: "╰", br: "╯", tj: "┬", bj: "┴", model: "⬢", select: "❯" }
+const asciiGlyphs: Glyphs = { h: "-", v: "|", tl: "+", tr: "+", bl: "+", br: "+", tj: "+", bj: "+", model: "*", select: ">" }
+
+function padToWidth(text: string, width: number): string {
+  const clipped = clipToWidth(text, width)
+  return clipped + " ".repeat(Math.max(0, width - displayWidth(clipped)))
+}
+
+/**
+ * Render one full frame in the GJC arrangement: transcript (or a welcome/body panel) on top,
+ * then status rows, a rule carrying the model badge, the bordered composer, and any list
+ * that belongs to the composer (picker, completions, history search) beneath it.
+ */
 export function renderFrame(input: {
   columns: number
   rows: number
   transcript: readonly string[]
+  header?: FrameHeader
+  panel?: FramePanel
+  composerVisible?: boolean
+  composerTitle?: string
   transcriptOffset?: number
   transcriptOlder?: boolean
   transcriptNewer?: boolean
-  home?: readonly string[]
+  home?: FrameHome
   status: string | readonly string[]
   draft: string
   cursor: number
@@ -431,104 +599,155 @@ export function renderFrame(input: {
     return makeFrame(frameLines, { line: 0, column: 0 })
   }
 
-  const composer = layoutComposer(input.draft, input.prompt ?? "> ", columns, input.cursor)
-  const maxComposerRows = Math.max(1, Math.floor(rows / 3))
-  const composerOverflow = composer.rows.length > maxComposerRows
-  const composerRows = Math.min(composer.rows.length, maxComposerRows - (composerOverflow ? 1 : 0))
-  const requestedStatus = Array.isArray(input.status) ? input.status : [input.status]
-  const statusRows = Math.max(1, Math.min(2, requestedStatus.length))
-  const transcriptRows = transcriptRowsFor(rows, composer.rows.length, statusRows)
-  const statusStart = transcriptRows + 1
-  const composerStart = statusStart + statusRows + (composerOverflow ? 1 : 0)
+  const theme = input.theme ?? resolveTheme()
+  const color = input.color === true
+  const paint = (text: string, token: SemanticToken): string => color && text ? semanticStyle(text, token, theme, true) : text
+  const glyph = input.ascii ? asciiGlyphs : unicodeGlyphs
+  const separator = input.ascii ? " | " : " · "
+  const horizontal = (width: number): string => glyph.h.repeat(Math.max(0, width))
+  const innerWidth = columns - 4
+
+  const bodyPanel = input.panel && input.panel.placement !== "below" ? input.panel : undefined
+  const belowPanel = input.panel?.placement === "below" ? input.panel : undefined
+  const composerVisible = input.composerVisible !== false && !bodyPanel
+  const composer = layoutComposer(
+    composerVisible ? input.draft : "",
+    composerVisible ? input.prompt ?? "> " : "",
+    innerWidth,
+    composerVisible ? input.cursor : 0,
+  )
+  const maxComposer = maximumComposerRows(rows)
+  const composerRows = composerVisible ? Math.min(composer.rows.length, maxComposer) : 0
+  const composerOverflow = composerVisible && composer.rows.length > maxComposer
   const firstVisibleComposerRow = Math.max(
     0,
     Math.min(composer.cursor.line - composerRows + 1, composer.rows.length - composerRows),
   )
+  const belowLimit = Math.max(0, rows - bottomRows(rows, composerRows, 0) - minimumBodyRows)
+  const belowLines = belowPanel && composerVisible
+    ? belowPanel.lines.flatMap(line => wrapText(line, columns)).slice(0, Math.min(maximumBelowRows, belowLimit))
+    : []
+  const bottom = bottomRows(rows, composerRows, belowLines.length)
+  const bodyRows = Math.max(0, rows - bottom)
 
-  let visualTranscriptRows = 0
-  for (const entry of input.transcript) visualTranscriptRows += wrapTranscriptLine(entry, columns).length
-  const maximumTranscriptOffset = Math.max(0, visualTranscriptRows - transcriptRows)
+  // Body: transcript rows, a welcome box, or a bordered panel.
+  const displayRows = bodyPanel ? [] : transcriptDisplayRows(input.transcript, columns, input.ascii)
+  const visualTranscriptRows = displayRows.length
+  const maximumTranscriptOffset = Math.max(0, visualTranscriptRows - bodyRows)
   const requestedTranscriptOffset = input.transcriptOffset ?? 0
   const transcriptOffset = Number.isFinite(requestedTranscriptOffset)
     ? Math.max(0, Math.min(maximumTranscriptOffset, Math.floor(requestedTranscriptOffset)))
     : 0
-  const firstVisibleTranscriptRow = Math.max(0, visualTranscriptRows - transcriptRows - transcriptOffset)
-  const endVisibleTranscriptRow = firstVisibleTranscriptRow + transcriptRows
-  const transcriptLines: string[] = []
-  let visualRowIndex = 0
-  let messageSemantic: SemanticToken = "text"
-  let speaker: string | undefined
-  let continuedSpeaker: string | undefined
-  for (const entry of input.transcript) {
-    if (!entry.startsWith("  | ")) {
-      speaker = /^\[(You|Assistant|Error|Notice|Canonical plan)\]/u.exec(entry)?.[1]
-      messageSemantic = entry.startsWith("[Error]") ? "error" :
-        entry.startsWith("[Assistant]") ? "notice" :
-        entry.startsWith("[Notice]") ? "muted" : "text"
+  const firstVisibleTranscriptRow = Math.max(0, visualTranscriptRows - bodyRows - transcriptOffset)
+  const endVisibleTranscriptRow = Math.min(visualTranscriptRows, firstVisibleTranscriptRow + bodyRows)
+  const visible = displayRows.slice(firstVisibleTranscriptRow, endVisibleTranscriptRow)
+  const leadingBlank = visible[0]?.role === "blank" ? 1 : 0
+  const firstShown = displayRows[firstVisibleTranscriptRow + leadingBlank]
+  const continuedSpeaker = firstShown && firstShown.role === "continuation" ? firstShown.speaker : undefined
+  visible.slice(leadingBlank).forEach((row, index) => {
+    if (row.role === "blank") return
+    if (row.semantic === "user") {
+      frameLines[index] = paint(padToWidth(`${row.gutter}${row.text}`, columns), "user")
+    } else {
+      frameLines[index] = `${paint(row.gutter, row.gutterSemantic)}${paint(row.text, row.semantic)}`
     }
-    const semantic: SemanticToken = entry.startsWith("[Error]") ? "error" :
-      /^(?:\[[^\]]+\] |  \| )?\[\+\] \+/.test(entry) ? "diff-add" :
-      /^(?:\[[^\]]+\] |  \| )?\[-\] -/.test(entry) ? "diff-remove" :
-      entry.includes("[code] ") ? "code" :
-      messageSemantic
-    const wrapped = wrapTranscriptLine(entry, columns).map(line => input.color === true
-      ? wrapAnsiText(semanticStyle(line, semantic, input.theme ?? resolveTheme(), true), columns)[0] ?? line
-      : line)
-    const firstEntryRow = Math.max(0, firstVisibleTranscriptRow - visualRowIndex)
-    const endEntryRow = Math.min(wrapped.length, endVisibleTranscriptRow - visualRowIndex)
-    if (endEntryRow > firstEntryRow) {
-      if (transcriptLines.length === 0 && (firstEntryRow > 0 || entry.startsWith("  | "))) continuedSpeaker = speaker
-      transcriptLines.push(...wrapped.slice(firstEntryRow, endEntryRow))
+  })
+
+  if (bodyPanel) {
+    const title = clipToWidth(oneLineText(`${bodyPanel.title}${separator}${bodyPanel.focus} focus`), Math.max(1, columns - 6))
+    const contentRows = Math.max(1, bodyRows - panelBorderRows)
+    const content = bodyPanel.lines.flatMap(line => wrapText(line, innerWidth)).slice(0, contentRows)
+    frameLines[0] = `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(title, "focus")}${paint(` ${horizontal(columns - 4 - displayWidth(title))}${glyph.tr}`, "border")}`
+    content.forEach((line, index) => {
+      frameLines[index + 1] = `${paint(`${glyph.v} `, "border")}${padToWidth(line, innerWidth)}${paint(` ${glyph.v}`, "border")}`
+    })
+    frameLines[content.length + 1] = paint(`${glyph.bl}${horizontal(columns - 2)}${glyph.br}`, "border")
+  } else if (input.home && input.transcript.length === 0) {
+    const home = input.home
+    const split = Math.floor((columns - 3) / 2)
+    const leftWidth = split
+    const rightWidth = columns - 3 - split
+    const left = home.left.map(line => clipToWidth(oneLineText(line), leftWidth))
+    const right: Array<{ text: string; token: SemanticToken }> = []
+    home.sections.forEach((section, index) => {
+      if (index) right.push({ text: horizontal(rightWidth - 2), token: "border" })
+      right.push({ text: clipToWidth(oneLineText(section.heading), rightWidth - 2), token: "focus" })
+      for (const line of section.lines) {
+        for (const wrapped of wrapText(oneLineText(line), rightWidth - 2)) right.push({ text: wrapped, token: "text" })
+      }
+    })
+    const height = Math.min(Math.max(left.length, right.length) + 2, Math.max(0, bodyRows - 2))
+    const title = clipToWidth(oneLineText(home.title), Math.max(1, columns - 6))
+    frameLines[0] = `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(title, "accent")}${paint(` ${horizontal(columns - 4 - displayWidth(title))}${glyph.tr}`, "border")}`
+    const leftStart = Math.max(0, Math.floor((height - left.length) / 2))
+    for (let index = 0; index < height; index += 1) {
+      const leftText = left[index - leftStart] ?? ""
+      const leftPad = Math.max(0, Math.floor((leftWidth - displayWidth(leftText)) / 2))
+      const leftCell = padToWidth(`${" ".repeat(leftPad)}${leftText}`, leftWidth)
+      const rightCell = right[index - 1]
+      const rightText = rightCell ? padToWidth(` ${rightCell.text}`, rightWidth) : " ".repeat(rightWidth)
+      frameLines[index + 1] = `${paint(glyph.v, "border")}${index - leftStart === 0 ? paint(leftCell, "accent") : leftCell}${paint(glyph.v, "border")}${rightCell ? paint(rightText, rightCell.token) : rightText}${paint(glyph.v, "border")}`
     }
-    visualRowIndex += wrapped.length
-    if (visualRowIndex >= endVisibleTranscriptRow) break
+    frameLines[height + 1] = paint(`${glyph.bl}${horizontal(split)}${glyph.bj}${horizontal(columns - 3 - split)}${glyph.br}`, "border")
   }
-  const transcriptStart = transcriptRows - transcriptLines.length
-  for (let index = 0; index < transcriptLines.length; index += 1) {
-    frameLines[transcriptStart + index] = transcriptLines[index]!
-  }
-  if (input.home?.length && input.transcript.length === 0) {
-    const home = input.home.flatMap(line => wrapText(line, Math.max(1, columns - 4))).slice(0, transcriptRows)
-    const start = Math.max(0, Math.floor((transcriptRows - home.length) / 2))
-    for (let index = 0; index < home.length; index += 1) {
-      frameLines[start + index] = `  ${home[index]}`
-    }
-  }
-  if (visualTranscriptRows > transcriptRows || input.transcriptOlder || input.transcriptNewer) {
+
+  // Bottom block.
+  const statusStart = bodyRows
+  const ruleRow = statusStart + statusRows
+  const composerTop = ruleRow + 1
+  const requestedStatus = (Array.isArray(input.status) ? input.status : [input.status]).filter(value => value !== "")
+  const statusValues = requestedStatus.slice(0, statusRows)
+  if (input.notice) statusValues.push(input.notice)
+  const shownStatus = statusValues.slice(-statusRows)
+  shownStatus.forEach((value, index) => {
+    frameLines[statusStart + statusRows - shownStatus.length + index] = paint(clipToWidth(oneLineText(value), columns), "muted")
+  })
+
+  const scrolled = visualTranscriptRows > bodyRows || input.transcriptOlder || input.transcriptNewer
+  let right: string
+  if (!bodyPanel && scrolled) {
     const older = firstVisibleTranscriptRow
     const newer = Math.max(0, visualTranscriptRows - endVisibleTranscriptRow)
     const historical = newer > 0 || input.transcriptNewer
-    const position = `${historical ? "History" : "Latest"}${continuedSpeaker ? ` | ${continuedSpeaker} continued` : ""} | ${older}${input.transcriptOlder ? "+" : ""} older | ${newer}${input.transcriptNewer ? "+" : ""} newer | PgUp/PgDn`
-    frameLines[transcriptRows] = clipToWidth(position, columns)
+    right = [historical ? "History" : "Latest", ...(continuedSpeaker ? [`${continuedSpeaker} continued`] : []),
+      `${older}${input.transcriptOlder ? "+" : ""} older`, `${newer}${input.transcriptNewer ? "+" : ""} newer`, "PgUp/PgDn"].join(separator)
+  } else {
+    const screen = input.header?.screen
+    const duplicate = screen === undefined || screen === input.panel?.title || screen === input.composerTitle || screen === "Chat" || screen === "Home"
+    right = duplicate ? "LCA" : `LCA${separator}${oneLineText(screen)}`
   }
+  const left = clipToWidth(input.header?.selection ? `${glyph.model} ${oneLineText(input.header.selection)}` : `${glyph.model} no model`, Math.floor(columns / 2))
+  const rightClipped = clipToWidth(right, Math.max(1, columns - displayWidth(left) - 4))
+  const fill = Math.max(1, columns - displayWidth(left) - displayWidth(rightClipped) - 3)
+  frameLines[ruleRow] = `${paint(` ${left}`, "accent")}${paint(` ${horizontal(fill)} `, "border")}${paint(rightClipped, "muted")}`
 
-  const statusValues = requestedStatus.length ? requestedStatus.slice(0, statusRows) : [""]
-  if (input.notice) statusValues[0] = `${statusValues[0] ?? ""} | ${input.notice}`
-  for (let index = 0; index < statusRows; index += 1) {
-    const safeStatus = clipToWidth(oneLineText(statusValues[index] ?? ""), columns)
-    if (input.color === true && safeStatus) {
-      const styledStatus = wrapAnsiText(semanticStyle(safeStatus, "notice", input.theme ?? resolveTheme(), true), columns)[0] ?? ""
-      frameLines[statusStart + index] = displayAnsiWidth(styledStatus) <= columns ? styledStatus : safeStatus
-    } else {
-      frameLines[statusStart + index] = safeStatus
+  if (composerVisible) {
+    const overflow = composerOverflow
+      ? `Draft ${firstVisibleComposerRow + 1}-${firstVisibleComposerRow + composerRows}/${composer.rows.length}${separator}${input.ascii ? "^" : "↑"} ${firstVisibleComposerRow} above${separator}${input.ascii ? "v" : "↓"} ${composer.rows.length - firstVisibleComposerRow - composerRows} below`
+      : undefined
+    const title = overflow ?? input.composerTitle ?? belowPanel?.title
+    const titleText = title ? clipToWidth(oneLineText(title), Math.max(1, columns - 6)) : ""
+    frameLines[composerTop] = titleText
+      ? `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(titleText, "focus")}${paint(` ${horizontal(columns - 4 - displayWidth(titleText))}${glyph.tr}`, "border")}`
+      : paint(`${glyph.tl}${horizontal(columns - 2)}${glyph.tr}`, "border")
+    for (let index = 0; index < composerRows; index += 1) {
+      const text = composer.rows[firstVisibleComposerRow + index]?.text ?? ""
+      frameLines[composerTop + 1 + index] = `${paint(`${glyph.v} `, "border")}${padToWidth(text, innerWidth)}${paint(` ${glyph.v}`, "border")}`
     }
+    frameLines[composerTop + 1 + composerRows] = paint(`${glyph.bl}${horizontal(columns - 2)}${glyph.br}`, "border")
+    belowLines.forEach((line, index) => {
+      const selected = line.startsWith("> ")
+      frameLines[composerTop + composerRows + composerBorderRows + index] = selected
+        ? paint(`${glyph.select} ${line.slice(2)}`, "accent")
+        : line
+    })
   }
 
-  if (composerOverflow) {
-    const hiddenBelow = composer.rows.length - firstVisibleComposerRow - composerRows
-    frameLines[composerStart - 1] = clipToWidth(
-      `Draft ${firstVisibleComposerRow + 1}-${firstVisibleComposerRow + composerRows}/${composer.rows.length} | ${input.ascii ? "^" : "↑"} ${firstVisibleComposerRow} above | ${input.ascii ? "v" : "↓"} ${hiddenBelow} below`,
-      columns,
-    )
-  }
-  for (let index = 0; index < composerRows; index += 1) {
-    const sourceRow = firstVisibleComposerRow + index
-    frameLines[composerStart + index] = composer.rows[sourceRow]?.text ?? ""
-  }
-
-  const cursorRow = composerStart + composer.cursor.line - firstVisibleComposerRow
-  return makeFrame(frameLines, {
-    line: Math.max(composerStart, Math.min(rows - 1, cursorRow)),
-    column: Math.max(0, Math.min(columns - 1, composer.cursor.column)),
-  })
+  const cursorRow = composerTop + 1 + composer.cursor.line - firstVisibleComposerRow
+  return makeFrame(frameLines, composerVisible
+    ? {
+        line: Math.max(composerTop + 1, Math.min(composerTop + composerRows, cursorRow)),
+        column: Math.max(0, Math.min(columns - 1, composer.cursor.column + 2)),
+      }
+    : { line: rows - 1, column: 0 }, composerVisible)
 }
