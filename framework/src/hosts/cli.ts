@@ -60,7 +60,7 @@ LCA workflows (chat only; each start is a submitted /skill: command, and invokin
   /finish                           early-exit request for an interview (round 3+, above threshold; closure still runs)
 A verified interview spec connects to ralplan in the same live session; consensus never executes anything on its own
 ("execution pending"). Workflow choices are inline lists. Fake-model tests are not live-model proof.
-Supported terminals default to a full-screen transcript, status line and composer (minimum 80x24).
+Supported terminals default to a full-screen transcript, status line and composer (minimum 60x20).
 LCA_TUI=0 forces readline; unsupported terminals fall back with a notice. NO_COLOR disables styling.
 Enter sends, enhanced Shift+Enter/Ctrl+J inserts a newline, Escape cancels, and a second Ctrl+C
 strictly within 500ms requests shutdown. Busy turns can be queued with macOS Alt+Q / Linux Alt+Enter.

@@ -134,7 +134,7 @@ describe("renderFrame", () => {
 
   test("shows a bounded resize notice below minimum without changing the model", () => {
     const input = Object.freeze({
-      columns: 79,
+      columns: 59,
       rows: 24,
       transcript: Object.freeze(["private transcript"]),
       status: "private status",
@@ -149,7 +149,7 @@ describe("renderFrame", () => {
     expect(input).toEqual(before)
     expect(finalCursor(frame)).toEqual([1, 1])
 
-    const shortFrame = renderFrame({ ...input, columns: 80, rows: 23 })
+    const shortFrame = renderFrame({ ...input, columns: 80, rows: 19 })
     expect(stripCsi(shortFrame)).toContain("Terminal too small")
     expect(finalCursor(shortFrame)).toEqual([1, 1])
   })
@@ -162,7 +162,7 @@ describe("renderFrame", () => {
       draft: "still here",
       cursor: 10,
     })
-    const small = renderFrame({ ...state, columns: 79 })
+    const small = renderFrame({ ...state, columns: 59 })
     const restored = renderFrame({ ...state, columns: 80 })
     expect(stripCsi(small)).toContain("Terminal too small")
     expect(stripCsi(restored)).toContain("kept transcript")
@@ -257,21 +257,21 @@ describe("renderFrame", () => {
       title: "LCA · local coding agent",
       left: ["LCA", "No model is selected."],
       sections: [
-        { heading: "Get started", lines: ["/model  choose an engine and model", "/help   commands and keys"] },
+        { heading: "Get started", lines: ["/model  choose a model", "/help   commands and keys"] },
         { heading: "Flow keys", lines: ["/ commands"] },
       ],
     }
-    for (const [columns, rows] of [[80, 24], [120, 40]] as const) {
+    for (const [columns, rows] of [[60, 20], [70, 58], [80, 24], [120, 40]] as const) {
       const frame = basicFrame({ columns, rows, transcript: [], home })
       const drawn = frameRows(frame)
       expect(drawn[0]).toStartWith("╭─ LCA · local coding agent ─")
       expect(drawn[0]).toEndWith("╮")
       expect(drawn.findIndex(row => row.startsWith("╰") && row.includes("┴"))).toBeGreaterThan(0)
       expect(stripCsi(frame)).toContain("No model is selected.")
-      expect(stripCsi(frame)).toContain("/model  choose an engine and model")
+      expect(stripCsi(frame)).toContain("/model  choose a model")
       expect(stripCsi(frame)).toContain("Flow keys")
       expect(drawn.every(row => displayWidth(row) <= columns)).toBe(true)
-      const small = basicFrame({ columns: 79, rows, transcript: [], home })
+      const small = basicFrame({ columns: 59, rows, transcript: [], home })
       expect(stripCsi(small)).not.toContain("No model is selected")
       expect(stripCsi(small)).toContain("Terminal too small")
     }

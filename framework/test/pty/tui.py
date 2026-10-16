@@ -822,11 +822,11 @@ def run_workflow(temp_root: Path, action: str):
         session.mode_proof["themeAndAsciiLocalNoDispatch"] = True
         assert_no_additional_dispatch(session, turns=0, runs=0)
 
-        session._set_size(70, 20)
-        session.screen.resize(70, 20)
+        session._set_size(59, 19)
+        session.screen.resize(59, 19)
         session._wait(lambda: any(value in session.screen.current_text() for value in (
-            "Terminal too small: resize to at least 80×24",
-            "Terminal too small: resize to at least 80x24",
+            "Terminal too small: resize to at least 60×20",
+            "Terminal too small: resize to at least 60x20",
         )), "small-terminal notice")
         session.checkpoint("resized-small")
         session._set_size(DEFAULT_COLUMNS, DEFAULT_ROWS)
@@ -2550,7 +2550,7 @@ def run_all(preflight: dict[str, Any]):
                     "SIGHUP": run_signal(root, "sighup", signal.SIGHUP, 129),
                 },
                 "ux01-long-approval": ux("UX01", run_workflow(ux_root("ux01"), "approve"), ["220 canonical rows", "document paging", "resize", "paste inert", "typed consent"]),
-                "ux02-status-pressure": ux("UX02", run_cancel_unconfirmed(ux_root("ux02")), ["unconfirmed termination", "safety-priority status", "80x24"]),
+                "ux02-status-pressure": ux("UX02", run_cancel_unconfirmed(ux_root("ux02")), ["unconfirmed termination", "safety-priority status", "60x20 minimum"]),
                 "ux03-focus": ux("UX03", run_skills(ux_root("ux03")), ["choice owns input", "completion insertion only", "no premature dispatch"]),
                 "ux04-task-results": ux("UX04", run_workflow(ux_root("ux04"), "approve"), ["task/tool evidence", "details focus", "failed result", "panel close"]),
                 "ux05-composer-queue": ux("UX05", {**ux05_queue, "restoreEvidence": ux05_restore}, ["multiline Unicode", "busy FIFO", "restored unsent queue"]),
@@ -2562,7 +2562,7 @@ def run_all(preflight: dict[str, Any]):
                 "productionUI": ["TuiApp", "createReadlineTerminal", "runInteractiveSession", "openSession", "attachAdmission", "replaySession", "humanDecision", "consumeOperatorDecision", "SkillSession", "createPlanConversation", "createCliRuntime", "native CLI host/tool executor", "skill permission broker"],
                 "observed": [
                     "three TTY streams", "raw and cooked terminal modes", "termios restoration", "NO_COLOR",
-                    "80x24 resize recovery", "transcript/status/composer regions", "Unicode composer and transcript",
+                    "60x20 minimum resize recovery", "transcript/status/composer regions", "Unicode composer and transcript",
                     "enhanced Shift+Enter", "Ctrl+J", "fragmented bracketed paste", "first Ctrl+C clears draft",
                     "separated >500 ms Ctrl+C clears draft without exit", "paired <500 ms Ctrl+C exits with code 130",
                     "paste cannot select or approve", "typed exact workflow/hash decision", "receipt-before-run fence",
