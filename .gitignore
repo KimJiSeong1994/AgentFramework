@@ -18,3 +18,4 @@ __pycache__/
 .env
 *.env
 !.env.example
+scripts/fixtures/data-vv/.evoontology/project.json
