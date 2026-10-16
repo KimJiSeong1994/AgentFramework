@@ -126,11 +126,17 @@ exits after execution; rejection exits either frontend. Model switching never
 turns recovery into a different-model replay.
 
 Bare `lca` opens a model-unselected home with `/model`, `/help`, and `/quit` actions.
-The TUI uses a fixed header, a top-aligned content area, and anchored status/input
-regions. Pickers and details occupy a separate panel rather than appearing as chat
-messages; non-text panels hide the retained draft and do not display an active chat
-prompt. Initial selection stays in the header/status instead of dumping a path
-banner into the transcript. A new conversation is identified by one compact notice.
+The TUI follows the GJC arrangement: an empty session opens a bordered welcome box
+(identity and selected model on the left, getting-started commands and flow keys on
+the right); the transcript flows top-down with a provenance glyph on each message
+(`❯` you, `●` assistant, `·` notice, `✗` error, `◆ Plan:` canonical plan, `⏺` tool),
+so provenance never depends on color. Beneath it sit up to two status rows, a rule
+carrying the `⬢ engine / model` badge and scroll position, and a bordered composer.
+Pickers, command/skill suggestions and history search title the composer border and
+list their choices beneath it; details, approval, session lists and read failures
+occupy a bordered body panel that hides the retained draft and shows no active
+prompt. Initial selection stays on the rule instead of dumping a path banner into
+the transcript. A new conversation is identified by one compact notice.
 Transient main-model activity stays in status rather than becoming chat messages;
 errors and unconfirmed cancellation notices remain visible.
 Unselected help offers setup, theme/ASCII accessibility controls, and `/quit`;
