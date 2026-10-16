@@ -1,4 +1,4 @@
-import type { Terminal, TerminalControl } from "../hosts/interactive-session.ts"
+import type { ShellView, Terminal, TerminalControl } from "../hosts/interactive-session.ts"
 import { Editor, searchSubmittedHistory } from "./editor.ts"
 import type { InputEvent } from "./keys.ts"
 import { belowPanelRows, bodyPanelRows, panelInnerColumns, renderFrame, transcriptViewportRows, transcriptVisualRows, wrapText, type FrameHome } from "./render.ts"
@@ -74,6 +74,13 @@ export class TuiApp implements Terminal {
   private workflow: string | undefined
   private viewIdentity?: ViewIdentity
   private viewFacts?: InteractiveViewFacts
+  // Animates only while the host reports an in-progress request; it never infers progress.
+  private requestTimer?: ReturnType<typeof setInterval>
+  private requestStarted?: { operationID: string; at: number }
+  private spinnerFrame = 0
+  // Ticks the running shell footer (elapsed seconds) and coalesces bursty output into one redraw.
+  private shellTimer?: ReturnType<typeof setInterval>
+  private shellDraw?: ReturnType<typeof setTimeout>
   private prompt = "You> "
   private lastSubmittedDraft: string | undefined
   private lastSubmittedCursor: number | undefined
@@ -97,13 +104,33 @@ export class TuiApp implements Terminal {
     if (sameViewIdentity(this.viewIdentity, identity)) return
     this.viewIdentity = identity
     this.viewFacts = undefined
+    this.trackRequest()
     this.detailsVisible = false
     this.draw()
   }
   viewSnapshot(facts: InteractiveViewFacts): void {
     if (!sameViewIdentity(this.viewIdentity, facts.identity)) return
     this.viewFacts = facts
+    this.trackRequest()
     this.draw()
+  }
+
+  private trackRequest(): void {
+    const request = this.closed ? undefined : this.viewFacts?.request
+    if (request?.state === "in-progress") {
+      if (this.requestStarted?.operationID !== request.operationID) {
+        this.requestStarted = { operationID: request.operationID, at: Date.now() }
+        this.spinnerFrame = 0
+      }
+      if (!this.requestTimer) {
+        this.requestTimer = setInterval(() => { this.spinnerFrame += 1; this.draw() }, 500)
+        this.requestTimer.unref?.()
+      }
+      return
+    }
+    this.requestStarted = undefined
+    if (this.requestTimer) clearInterval(this.requestTimer)
+    this.requestTimer = undefined
   }
   skillCatalog(catalog: SkillCatalog): void {
     this.catalog = catalog
@@ -118,6 +145,7 @@ export class TuiApp implements Terminal {
     this.workflow = undefined
     this.viewIdentity = undefined
     this.viewFacts = undefined
+    this.trackRequest()
     this.detailsVisible = false
     this.catalog = undefined
     this.completionIndex = 0
@@ -291,6 +319,12 @@ export class TuiApp implements Terminal {
       workflow: this.workflow,
       activity: overlayHint ?? this.transcript.currentTask ?? this.status,
       search: this.transcriptQuery,
+      ...(this.requestStarted ? {
+        request: {
+          frame: (this.asciiChrome ? "-\\|/" : "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")[this.spinnerFrame % (this.asciiChrome ? 4 : 10)]!,
+          elapsedSeconds: Math.floor((Date.now() - this.requestStarted.at) / 1000),
+        },
+      } : {}),
       queued: this.queue.length,
       columns,
       ...(!this.usable() ? { notice: `Resize terminal to at least ${MIN_SIZE_LABEL}. Cancellation remains available.` } : {}),
@@ -324,7 +358,7 @@ export class TuiApp implements Terminal {
           { heading: "Flow keys", lines: [["/ commands", "Ctrl+R history"].join(keys), ["Ctrl+J newline", "Ctrl+C clear"].join(keys)] },
         ]
         : [
-          { heading: "Get started", lines: ["No messages yet.", "Type, then press Enter.", "/help   commands and keys", "/model  switch model"] },
+          { heading: "Get started", lines: ["No messages yet.", "Type, then press Enter.", "/model  switch model", "/model default  keep it"] },
           { heading: "Flow keys", lines: [["/ commands", "Ctrl+R history"].join(keys), ["Ctrl+J newline", "PgUp/PgDn scroll"].join(keys)] },
         ],
     }
@@ -747,14 +781,16 @@ export class TuiApp implements Terminal {
           if (requested === "neutral" || requested === "light" || requested === "dark") this.themeName = requested
           else this.transcript.append("Usage: /theme <neutral|light|dark>")
         } else if (localAction.id === "expand") {
-          const ordinal = Number(command.slice(commandName.length).trim())
-          const item = this.transcript.items.find(item => item.kind === "tool" && item.ordinal === ordinal)
-          if (Number.isInteger(ordinal) && item?.kind === "tool") {
+          const argument = command.slice(commandName.length).trim()
+          const shell = argument.startsWith("$")
+          const ordinal = Number(shell ? argument.slice(1) : argument)
+          const item = this.transcript.items.find(item => item.kind === (shell ? "shell" : "tool") && item.ordinal === ordinal)
+          if (argument && Number.isInteger(ordinal) && item && item.kind !== "text") {
             this.transcript.toggle(item.id)
             if (item.expanded) this.expandedCalls.add(item.id)
             else this.expandedCalls.delete(item.id)
           }
-          else this.transcript.append("Usage: /expand <tool item number>")
+          else this.transcript.append("Usage: /expand <tool item number> or /expand $<shell number>")
         } else if (localAction.id === "search") {
           this.transcriptQuery = command.slice(commandName.length).trim() || undefined
           this.pageOffset = 0
@@ -779,7 +815,9 @@ export class TuiApp implements Terminal {
         if (this.pending.kind === "selection") this.editor.setText("")
         const transientSelection = this.interactionContext === "unselected" &&
           (command === "/help" || command === "/model" || command.startsWith("/model "))
-        if (!transientSelection) this.transcript.append({ provenance: "user", text })
+        // `!command` is shown as its shell window, not as a chat message.
+        const operatorShell = this.pending.kind === "chat" && command.startsWith("!") && command.slice(1).trim().length > 0
+        if (!transientSelection && !operatorShell) this.transcript.append({ provenance: "user", text })
         this.pending.finish(text)
       } else if (action === "queue" && command) {
         this.queue.push(this.editor.submit())
@@ -905,9 +943,45 @@ export class TuiApp implements Terminal {
     this.driver.start()
     this.draw()
   }
+  shellStart(run: { id: string; command: string }): ShellView {
+    this.transcript.shellStarted(run.id, run.command)
+    this.scrollOffset = 0
+    if (!this.shellTimer) {
+      this.shellTimer = setInterval(() => this.draw(), 1000)
+      this.shellTimer.unref?.()
+    }
+    this.draw()
+    return {
+      output: snapshot => {
+        // A transcript reload during the run replaces the model; re-seat the live window by its id.
+        this.transcript.shellStarted(run.id, run.command)
+        this.transcript.shellOutput(run.id, snapshot.lines, snapshot.totalLines)
+        this.scheduleShellDraw()
+      },
+      finish: result => {
+        this.transcript.shellStarted(run.id, run.command)
+        this.transcript.shellFinished(run.id, result)
+        if (!this.transcript.runningShell) this.stopShellTimers()
+        this.draw()
+      },
+    }
+  }
+  private scheduleShellDraw(): void {
+    if (this.shellDraw) return
+    this.shellDraw = setTimeout(() => { this.shellDraw = undefined; this.draw() }, 50)
+    this.shellDraw.unref?.()
+  }
+  private stopShellTimers(): void {
+    if (this.shellTimer) clearInterval(this.shellTimer)
+    if (this.shellDraw) clearTimeout(this.shellDraw)
+    this.shellTimer = undefined
+    this.shellDraw = undefined
+  }
   close(): void {
     if (this.closed) return
     this.closed = true
+    this.trackRequest()
+    this.stopShellTimers()
     this.queue.length = 0
     this.pending?.finish(undefined)
     this.choice?.finish(undefined)

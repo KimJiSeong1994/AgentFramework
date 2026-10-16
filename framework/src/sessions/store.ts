@@ -10,7 +10,7 @@ import { sessionDir, stateRoot } from "../state/store.ts"
 import { pendingSkillPermissionActivityCount, pendingSkillPermissionActivityCountForSession } from "../skills/activity.ts"
 import { consumeValidatedResumeProof } from "./admission.ts"
 
-export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice"
+export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "shell"
 export type TranscriptRecord = { seq: number; kind: TranscriptKind; eventID: string; data: Record<string, unknown> }
 export type SessionMetadata = {
   version: 1
@@ -78,7 +78,13 @@ const MAX_EVENT_ID_BYTES = 16 * 1024
 const MAX_TOOL_TEXT_BYTES = 4096
 const noFollow = fs.constants.O_NOFOLLOW ?? 0
 const directoryOnly = fs.constants.O_DIRECTORY ?? 0
-const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice"])
+const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice", "carried-context", "shell"])
+/** Bounds for a persisted operator shell run (see hosts/operator-shell.ts). */
+export const MAX_SHELL_LINES = 200
+export const MAX_SHELL_OUTPUT_BYTES = 64 * 1024
+export const MAX_SHELL_COMMAND_BYTES = 8 * 1024
+/** Upper bound on carried user/assistant messages (the conversation window uses at most 24 turns). */
+export const MAX_CARRIED_MESSAGES = 48
 const toolKinds = new Set<TranscriptKind>(["tool-start", "tool-result", "tool-denied"])
 const toolFields = new Set(["name", "role", "executionID", "callID", "taskID", "outcome"])
 const activeStores = new Map<string, SessionStoreImpl>()
@@ -551,6 +557,34 @@ function validateKindData(kind: TranscriptKind, data: Record<string, unknown>): 
     if (exactKeys(data, ["text", "provenance"]) && data.provenance === "error" && boundedString(data.text, MAX_SEGMENT_BYTES, true)) return
     if (exactKeys(data, ["draft", "queued"]) && boundedString(data.draft, MAX_SEGMENT_BYTES, true) && Array.isArray(data.queued) && data.queued.every(item => boundedString(item, MAX_SEGMENT_BYTES, true))) return
     throw new TypeError("notice transcript data must contain text or an unsent draft and queue")
+  }
+  if (kind === "shell") {
+    // Operator `!command` run: shown and recorded, never part of the model conversation.
+    const lines = data.lines
+    const bytes = Array.isArray(lines) ? lines.reduce((total: number, line) => total + (typeof line === "string" ? Buffer.byteLength(line, "utf8") + 1 : Infinity), 0) : Infinity
+    if (!exactKeys(data, ["command", "status", "exitCode", "signal", "durationMs", "lines", "totalLines"]) ||
+        !boundedString(data.command, MAX_SHELL_COMMAND_BYTES) || !["complete", "error", "cancelled", "timeout"].includes(data.status as string) ||
+        !(data.exitCode === null || Number.isSafeInteger(data.exitCode)) || !(data.signal === null || boundedText(data.signal, 64)) ||
+        !Number.isSafeInteger(data.durationMs) || (data.durationMs as number) < 0 || !Array.isArray(lines) ||
+        lines.length > MAX_SHELL_LINES || bytes > MAX_SHELL_OUTPUT_BYTES || !Number.isSafeInteger(data.totalLines) ||
+        (data.totalLines as number) < lines.length) {
+      throw new TypeError("shell transcript data must be {command,status,exitCode,signal,durationMs,lines,totalLines}")
+    }
+    return
+  }
+  if (kind === "carried-context") {
+    // Conversation copied from the previous engine/model session on an explicit model switch; it keeps the
+    // source identity so provenance is never attributed to the new model, and it grants no approval.
+    const messages = data.messages
+    if (!exactKeys(data, ["sourceSessionID", "engine", "model", "messages"]) || !boundedText(data.sourceSessionID, 256) ||
+        !boundedText(data.engine, 64) || !boundedText(data.model, 256) || !Array.isArray(messages) ||
+        messages.length === 0 || messages.length % 2 !== 0 || messages.length > MAX_CARRIED_MESSAGES ||
+        !messages.every((message, index) => plainObject(message) && exactKeys(message, ["role", "text"]) &&
+          message.role === (index % 2 === 0 ? "user" : "assistant") && boundedString(message.text, MAX_SEGMENT_BYTES, false) &&
+          (message.text as string).trim().length > 0)) {
+      throw new TypeError("carried-context transcript data must be {sourceSessionID,engine,model,messages:[user,assistant,...]}")
+    }
+    return
   }
   if (kind === "task-state") {
     if (!exactKeys(data, ["taskID", "status"]) || !boundedText(data.taskID, 256) || !boundedText(data.status, 256)) throw new TypeError("task-state transcript data must be {taskID,status}")

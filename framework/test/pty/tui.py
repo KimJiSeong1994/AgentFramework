@@ -265,6 +265,20 @@ class TerminalScreen:
             rows.append(value[2:].rstrip().removesuffix("│").removesuffix("|").rstrip())
         return rows
 
+    def user_message_visible(self, text, exact=False):
+        """True when a transcript `you` label is followed by a body row with `text`."""
+        lines = self.current_lines()
+        for index, value in enumerate(lines[:-1]):
+            if value != "you":
+                continue
+            for body in lines[index + 1:]:
+                if not body.startswith("  "):
+                    break
+                content = body[2:].rstrip()
+                if (content == text) if exact else (text in content):
+                    return True
+        return False
+
     def composer_line(self):
         rows = self.composer_rows()
         return rows[0] if rows else ""
@@ -871,11 +885,22 @@ def run_workflow(temp_root: Path, action: str):
             # choice-mode input; any dispatch is also recorded as a turn event.
             session._wait(lambda: len([e for e in session.events() if e.get("type") == "turn.started"]) == 1, "no turn dispatched from inline-choice input", 0.25)
             logical_screen = lambda: " ".join(session.screen.current_text().split())
-            session._wait(lambda: any(f"[+] #1 read · call succeeded · execution not observed · task {label} · t1" in logical_screen() for label in ("Implement", "title unavailable")), "validated task title and explicit unobserved execution")
+            def tool_row(outcome: str, expanded: bool, rest: str) -> str:
+                # Unicode or /ascii chrome: status icon, expand toggle, then the logical summary.
+                icons = {"ok": ("✔", "+"), "error": ("✘", "x")}[outcome]
+                toggles = ("▾", "v") if expanded else ("▸", ">")
+                screen = logical_screen()
+                for icon, toggle in ((icons[0], toggles[0]), (icons[1], toggles[1])):
+                    candidate = f"{icon} {toggle} {rest}"
+                    if candidate in screen:
+                        return candidate
+                return f"{icons[0]} {toggles[0]} {rest}"
+            session._wait(lambda: any(tool_row("ok", False, f"#1 read · call succeeded · execution not observed · task {label} · t1") in logical_screen() for label in ("Implement", "title unavailable")), "validated task title and explicit unobserved execution")
             task_label = "Implement" if "task Implement · t1" in logical_screen() else "title unavailable"
-            first_tool = f"[+] #1 read · call succeeded · execution not observed · task {task_label} · t1"
-            second_tool = f"[+] #2 read · call failed · execution not observed · task {task_label} · t1"
-            session._wait(lambda: second_tool in logical_screen(), "second failed call with explicit execution uncertainty")
+            first_tool = tool_row("ok", False, f"#1 read · call succeeded · execution not observed · task {task_label} · t1")
+            second_tool_text = f"#2 read · call failed · execution not observed · task {task_label} · t1"
+            session._wait(lambda: tool_row("error", False, second_tool_text) in logical_screen(), "second failed call with explicit execution uncertainty")
+            second_tool = tool_row("error", False, second_tool_text)
             visible = logical_screen()
             if visible.count("read ·") != 2 or "#3 read" in visible:
                 raise AssertionError(f"repeated terminal tool event duplicated a tool item: {visible}")
@@ -883,10 +908,10 @@ def run_workflow(temp_root: Path, action: str):
 
             session.send_text("/expand 2\r")
             call_detail = "Call call-fixture-2 · execution exec-fixture · worker"
-            expanded_tool = f"[-] #2 read · call failed · execution not observed · task {task_label} · t1"
+            expanded_tool_text = f"#2 read · call failed · execution not observed · task {task_label} · t1"
             session.wait_screen(call_detail)
             session.mode_proof["expandedCallDetailVisible"] = call_detail in session.screen.current_text()
-            if expanded_tool not in logical_screen():
+            if tool_row("error", True, expanded_tool_text) not in logical_screen():
                 raise AssertionError("/expand 2 did not expand the failed read tool item")
             assert_no_additional_dispatch(session, turns=1, runs=1)
 
@@ -905,8 +930,8 @@ def run_workflow(temp_root: Path, action: str):
             assert_no_additional_dispatch(session, turns=1, runs=1)
 
             session.send_text("/search\r")
-            session._wait(lambda: any(f"[+] #1 read · call succeeded · execution not observed · task {label} · t1" in logical_screen() for label in ("Implement", "title unavailable")), "cleared search restores first tool with validated or unavailable title")
-            session._wait(lambda: any(f"[-] #2 read · call failed · execution not observed · task {label} · t1" in logical_screen() for label in ("Implement", "title unavailable")), "cleared search restores expanded second tool with validated or unavailable title")
+            session._wait(lambda: any(tool_row("ok", False, f"#1 read · call succeeded · execution not observed · task {label} · t1") in logical_screen() for label in ("Implement", "title unavailable")), "cleared search restores first tool with validated or unavailable title")
+            session._wait(lambda: any(tool_row("error", True, f"#2 read · call failed · execution not observed · task {label} · t1") in logical_screen() for label in ("Implement", "title unavailable")), "cleared search restores expanded second tool with validated or unavailable title")
             session._wait(
                 lambda: "search:" not in " ".join(session.screen.status_rows()) and
                 session.screen.composer_line().strip() == "You>",
@@ -1071,7 +1096,7 @@ def run_restore(temp_root: Path):
         session.send_text("/search EARLIEST_RESTORED_HISTORY_NEEDLE\r")
         session._wait(
             lambda: any("search:" in line for line in session.screen.status_rows()) and
-            any("❯ EARLIEST_RESTORED_HISTORY_NEEDLE" in line for line in session.screen.current_lines()),
+            session.screen.user_message_visible("EARLIEST_RESTORED_HISTORY_NEEDLE"),
             "local transcript search to find the oldest submitted segment",
         )
         session.mode_proof["oldestSegmentSearchVisible"] = True
@@ -1201,7 +1226,7 @@ def run_sdk_observer(temp_root: Path):
 
         def refuse(command: str):
             session._wait(
-                lambda: (f"History> {command}" in session.screen.current_text() or f"❯ {command}" in session.screen.current_text()) and
+                lambda: (f"History> {command}" in session.screen.current_text() or session.screen.user_message_visible(command, exact=True)) and
                 readonly_refusal in " ".join(
                     " ".join(line.removeprefix("· ").strip() for line in session.screen.current_lines()).split()
                 ) and

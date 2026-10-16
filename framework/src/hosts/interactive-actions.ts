@@ -10,7 +10,7 @@ export type InteractiveAction = Readonly<{
 
 const all: readonly InteractiveAction[] = [
   { id: "help", syntax: "/help", summary: "show contextual commands and keys", contexts: ["chat", "busy", "held", "read-only", "selection", "unselected"] },
-  { id: "model", syntax: "/model [engine native-id]", summary: "open the picker or select an engine/model", contexts: ["chat", "selection", "unselected"] },
+  { id: "model", syntax: "/model [engine native-id | default ...]", summary: "pick a model; /model default shows, saves or clears the startup default", contexts: ["chat", "selection", "unselected"] },
   { id: "sessions", syntax: "/sessions", summary: "inspect or choose retained sessions", contexts: ["chat", "held", "read-only", "selection"] },
   { id: "resume", syntax: "/resume <sid>", summary: "open a retained session through existing checks", contexts: ["chat", "held", "read-only", "selection"] },
   { id: "new", syntax: "/new", summary: "start a new conversation after release checks", contexts: ["chat", "held", "read-only"] },
@@ -21,7 +21,7 @@ const all: readonly InteractiveAction[] = [
   { id: "skills", syntax: "/skills [grants|revoke <name>]", summary: "inspect skills and consent grants", contexts: ["chat", "held", "read-only"] },
   { id: "skill", syntax: "/skill:<name> [request]", summary: "invoke a discovered skill explicitly", contexts: ["chat"] },
   { id: "search", syntax: "/search <tool/status/task>", summary: "filter this session transcript", contexts: ["chat", "busy", "held", "read-only"], local: true },
-  { id: "expand", syntax: "/expand <item number>", summary: "toggle evidence for a visible tool item", contexts: ["chat", "busy", "held", "read-only"], local: true },
+  { id: "expand", syntax: "/expand <item number>", summary: "toggle evidence for a tool item or full output for $<shell number>", contexts: ["chat", "busy", "held", "read-only"], local: true },
   { id: "details", syntax: "/details", summary: "toggle the local task/evidence panel", contexts: ["chat", "busy", "held", "read-only"], local: true },
   { id: "theme", syntax: "/theme <neutral|light|dark>", summary: "set the process-local palette", contexts: ["chat", "busy", "held", "read-only", "unselected"], local: true },
   { id: "ascii", syntax: "/ascii", summary: "toggle ASCII chrome for this process", contexts: ["chat", "busy", "held", "read-only", "unselected"], local: true },

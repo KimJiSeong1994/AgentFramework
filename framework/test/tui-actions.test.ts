@@ -90,6 +90,74 @@ describe("exclusive application input ownership", () => {
     app.close()
   })
 
+  test("spinner animates only while the host reports an in-progress request", async () => {
+    const app = new TuiApp()
+    const internal = app as unknown as AppInput & { requestTimer?: unknown }
+    internal.dimensions = () => ({ columns: 80, rows: 24 })
+    const frames: string[] = []
+    internal.driver.write = frame => frames.push(frame)
+    const identity = { mode: "writable" as const, sessionID: "s", epoch: "e" }
+    const facts = {
+      identity, selection: { engine: "local", model: "m" }, hold: { state: "known" as const, value: { held: false } },
+      workflow: { state: "known" as const, value: null }, owner: "current-session" as const, claim: { state: "known" as const, value: false },
+      fence: { state: "known" as const, value: false }, termination: "not-observed" as const, discovery: "not-observed" as const,
+    }
+    app.bindView(identity)
+    app.viewSnapshot({ ...facts, request: { state: "not-observed" } })
+    expect(internal.requestTimer).toBeUndefined()
+    app.viewSnapshot({ ...facts, request: { state: "in-progress", operationID: "op-1" } })
+    expect(internal.requestTimer).toBeDefined()
+    const before = frames.length
+    await Bun.sleep(1100)
+    expect(frames.length).toBeGreaterThan(before)
+    const status = frames.at(-1)!.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
+    expect(status).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Model request running · 1s/u)
+    app.viewSnapshot({ ...facts, request: { state: "completed", operationID: "op-1" } })
+    expect(internal.requestTimer).toBeUndefined()
+    expect(frames.at(-1)!).not.toContain("Model request running")
+    app.viewSnapshot({ ...facts, request: { state: "in-progress", operationID: "op-2" } })
+    app.close()
+    expect(internal.requestTimer).toBeUndefined()
+  })
+
+  test("!command renders as a live shell window, not a chat message, and /expand $N shows retained output", async () => {
+    const app = new TuiApp()
+    app.resume = () => {}
+    const internal = app as unknown as AppInput & { shellTimer?: unknown }
+    internal.dimensions = () => ({ columns: 80, rows: 40 })
+    internal.currentStatusLines = () => ["status"]
+    const frames: string[] = []
+    internal.driver.write = frame => frames.push(frame)
+    const pending = app.readInput({ title: "Chat", hint: "Enter send", prompt: "You> ", kind: "chat" }, new AbortController().signal)
+    internal.input({ type: "text", text: "!seq 30" })
+    internal.input({ type: "key", key: "enter" })
+    expect(await pending).toBe("!seq 30")
+    expect(internal.transcript.lines().join("\n")).not.toContain("[You]")
+
+    const view = app.shellStart({ id: "shell:1", command: "seq 30" })
+    expect(internal.shellTimer).toBeDefined()
+    view.output({ lines: ["1", "2"], totalLines: 2, completed: 1, completedTail: ["1"] })
+    await Bun.sleep(80)
+    expect(plain(frames.at(-1))).toMatch(/╭─ shell · \$1 · \$ seq 30 ─+╮/u)
+    expect(plain(frames.at(-1))).toContain("running · 0s · Esc cancels")
+
+    const all = Array.from({ length: 30 }, (_, index) => String(index + 1))
+    view.finish({ status: "complete", exitCode: 0, signal: null, durationMs: 120, lines: all, totalLines: 30 })
+    expect(internal.shellTimer).toBeUndefined()
+    const done = plain(frames.at(-1))
+    expect(done).toContain("exit 0 · 0.1s")
+    expect(done).toContain("… 10 earlier lines · /expand $1")
+    expect(done).not.toMatch(/│ 10\s/u)
+
+    const next = app.readInput({ title: "Chat", hint: "Enter send", prompt: "You> ", kind: "chat" }, new AbortController().signal)
+    internal.input({ type: "text", text: "/expand $1" })
+    internal.input({ type: "key", key: "enter" })
+    expect(internal.transcript.lines()).toContain("  | 1")
+    expect(internal.transcript.lines().join("\n")).not.toContain("Usage: /expand")
+    app.close()
+    expect(await next).toBeUndefined()
+  })
+
   test("unselected local transcript actions show choose-model guidance; theme and ASCII stay local", async () => {
     const app = new TuiApp()
     app.resume = () => {}

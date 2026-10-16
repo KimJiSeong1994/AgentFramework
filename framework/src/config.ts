@@ -115,6 +115,8 @@ export type LcaConfig = {
     failures: number
     compaction_guard_ms: number
   }
+  /** Interactive `lca` chat. `default_model` is the persisted startup selection (`/model default` writes it). */
+  chat: { default_model?: { engine: string; model: string } | null }
   models: {
     /** provider/model ids; undefined = inherit OpenCode default */
     main?: string
@@ -259,6 +261,7 @@ export const DATA_DEFAULTS: LcaConfig["data"] = {
 
 export const DEFAULT_CONFIG: LcaConfig = {
   disabled_hooks: [],
+  chat: {},
   budget: { main: 8000, worker: 5000, reviewer: 3000 },
   guards: {
     repeat_limit: 2,

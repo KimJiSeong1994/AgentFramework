@@ -101,6 +101,8 @@ Prerequisites and safety:
   Interactive chat requires a terminal on stdin and stderr; EOF or interruption never approves a plan.
   Bare interactive chat opens with no engine or model selected; enter /model in the composer to choose.
   Startup selection is opt-in with both --engine and --model; partial flags leave the composer unselected.
+  Without either flag, chat.default_model in ~/.config/lca/lca.jsonc (or the project .lca/lca.jsonc) is used;
+  set it with /model default save or /model default <engine> <native-id>, remove it with /model default clear.
   Native CLI input limits are estimated and output limits are reactive, not strict guarantees; no process
   or filesystem containment is claimed. Plans are never auto-approved. Host admission refuses when
   required control evidence is unavailable; the CLI does not expose raw vendor preflight diagnostics.

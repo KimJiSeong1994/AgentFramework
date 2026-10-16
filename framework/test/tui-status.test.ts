@@ -53,6 +53,10 @@ describe("priority status layout", () => {
     expect(rows.join(" ")).not.toContain("discovery completed")
     const running = statusLines({ facts: { ...idle, request: { state: "in-progress", operationID: "op" } }, activity: "Waiting", queued: 0, columns: 80 })
     expect(running.join(" ")).toContain("Model request running")
+    const ticking = statusLines({ facts: { ...idle, request: { state: "in-progress", operationID: "op" } }, request: { frame: "⠋", elapsedSeconds: 12 }, activity: "Waiting", queued: 0, columns: 80 })
+    expect(ticking.join(" ")).toContain("⠋ Model request running · 12s")
+    const settled = statusLines({ facts: idle, request: { frame: "⠋", elapsedSeconds: 12 }, activity: "Waiting", queued: 0, columns: 80 })
+    expect(settled.join(" ")).not.toContain("Model request running")
   })
 
   test("omitted state has a bounded visible cue while safety stays first", () => {

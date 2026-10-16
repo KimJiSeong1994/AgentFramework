@@ -257,6 +257,20 @@ describe("common planning conversation", () => {
     expect(request.length + PLAN_RESPONSE_RESERVE_CHARS).toBeLessThanOrEqual(MAX_PLAN_CONVERSATION_CHARS)
   })
 
+  test("the production interactive factory forwards carried or restored history into the request", async () => {
+    const f = fixture()
+    const { defaultDependencies } = await import("../src/hosts/interactive-session.ts")
+    const prior: ConversationMessage[] = [
+      { role: "user", text: "Remember this codeword: PLUM-4271." },
+      { role: "assistant", text: "OK" },
+    ]
+    const conversation = defaultDependencies().createConversation(f.runtime, "chat-switched", prior)
+    await conversation.turn("What was the codeword?")
+    const request = f.requests[0]!.text
+    const messages = JSON.parse(request.slice(request.indexOf("Conversation:\n") + "Conversation:\n".length)) as ConversationMessage[]
+    expect(messages).toEqual([...prior, { role: "user", text: "What was the codeword?" }])
+  })
+
   test("refuses an incomplete restored pair before creating an execution", () => {
     const f = fixture()
     expect(() => createPlanConversation(f.runtime, "chat-restored-draft", [

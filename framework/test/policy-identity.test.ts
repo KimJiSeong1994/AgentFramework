@@ -32,6 +32,19 @@ test("legacy role identities survive UI toggles and unrelated home skill roots",
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
+test("a persisted chat default model never changes role identity", async () => {
+  const { DEFAULT_CONFIG } = await import("../src/config.ts")
+  const { createExecutionPolicy } = await import("../src/hosts/tool-policy.ts")
+  const plain = createExecutionPolicy(DEFAULT_CONFIG, { planningOnlyMain: true })
+  const withDefault = createExecutionPolicy({ ...DEFAULT_CONFIG, chat: { default_model: { engine: "codex", model: "gpt-5-codex" } } }, { planningOnlyMain: true })
+  for (const role of Object.keys(baseline.fixtures[0]!.snapshots)) {
+    expect(withDefault.resolve(role as never).id).toBe(plain.resolve(role as never).id)
+  }
+  // Identity still follows real policy input.
+  const changed = createExecutionPolicy({ ...DEFAULT_CONFIG, max_output: { ...DEFAULT_CONFIG.max_output, worker: 1 } }, { planningOnlyMain: true })
+  expect(changed.resolve("worker").id).not.toBe(plain.resolve("worker").id)
+})
+
 test("CLI selection preserves frozen model keys and old serialized policy inputs", () => {
   const home = mkdtempSync(join(tmpdir(), "lca-policy-cli-home-"))
   const worktree = join(home, "worktree")
@@ -56,7 +69,8 @@ test("CLI selection preserves frozen model keys and old serialized policy inputs
       })
       expect(result.exitCode).toBe(0)
       const actual = JSON.parse(result.stdout.toString())
-      expect(actual.config).toEqual(expectedConfig)
+      // The runtime carries `chat` (launch selection), but role identity is still derived from the frozen policy input.
+      expect(actual.config).toEqual({ ...expectedConfig, chat: {} })
       for (const [name, snapshot] of Object.entries(captured.snapshots)) {
         const { id: _id, role, ...rest } = snapshot
         const resolved = { role, model: selected, ...rest }

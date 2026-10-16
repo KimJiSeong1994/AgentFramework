@@ -39,6 +39,64 @@ describe("durable session store", () => {
     expect(replaySession(wt.worktree, store.sessionID, { kind: "canonical-plan" }).records).toHaveLength(1)
   })
 
+  test("carried context keeps source provenance, validates pairs and restores as earlier conversation", () => {
+    const store = open()
+    const messages = [{ role: "user", text: "earlier question" }, { role: "assistant", text: "earlier answer" }]
+    store.append("carried-context", { sourceSessionID: "previous", engine: "local", model: "gemma", messages })
+    for (const bad of [
+      { sourceSessionID: "previous", engine: "local", model: "gemma", messages: [] },
+      { sourceSessionID: "previous", engine: "local", model: "gemma", messages: [messages[0]] },
+      { sourceSessionID: "previous", engine: "local", model: "gemma", messages: [messages[1], messages[0]] },
+      { sourceSessionID: "previous", engine: "local", model: "gemma", messages: [{ role: "user", text: " " }, messages[1]] },
+      { sourceSessionID: "previous", engine: "local", model: "gemma", messages, approved: true },
+      { engine: "local", model: "gemma", messages },
+    ]) expect(() => store.append("carried-context", bad as Record<string, unknown>)).toThrow("carried-context transcript data")
+    const page = replaySession(wt.worktree, store.sessionID)
+    expect(page.complete).toBe(true)
+    const model = new TranscriptModel(store.sessionID)
+    const restored = restoreTranscript(model, page.records)
+    expect(restored.history).toEqual(["earlier question"])
+    expect(model.lines()).toEqual([
+      "[Notice] Earlier conversation with local / gemma (1 turn)",
+      "[You] earlier question",
+      "[Assistant] earlier answer",
+    ])
+    release(store)
+  })
+
+  test("shell runs persist bounded output, reject malformed records and restore as finished windows", () => {
+    const store = open()
+    const lines = Array.from({ length: 25 }, (_, index) => `line ${index + 1}`)
+    store.append("shell", { command: "seq 25", status: "complete", exitCode: 0, signal: null, durationMs: 1500, lines, totalLines: 300 }, "shell:a")
+    store.append("shell", { command: "sleep 9", status: "cancelled", exitCode: null, signal: "SIGTERM", durationMs: 200, lines: [], totalLines: 0 }, "shell:b")
+    const valid = { command: "x", status: "complete", exitCode: 0, signal: null, durationMs: 1, lines: [], totalLines: 0 }
+    for (const bad of [
+      { ...valid, status: "running" },
+      { ...valid, lines: ["a", "b"], totalLines: 1 },
+      { ...valid, lines: Array.from({ length: 201 }, () => "x"), totalLines: 201 },
+      { ...valid, lines: ["x".repeat(64 * 1024)], totalLines: 1 },
+      { ...valid, command: "x".repeat(8 * 1024 + 1) },
+      { ...valid, durationMs: -1 },
+      { ...valid, approved: true },
+    ]) expect(() => store.append("shell", bad as Record<string, unknown>)).toThrow("shell transcript data")
+    const page = replaySession(wt.worktree, store.sessionID)
+    expect(page.complete).toBe(true)
+    const model = new TranscriptModel(store.sessionID)
+    const restored = restoreTranscript(model, page.records)
+    expect(restored.history).toEqual([])
+    expect(model.runningShell).toBe(false)
+    const shown = model.lines()
+    expect(shown[0]).toBe("[Shell] $1 $ seq 25")
+    expect(shown[1]).toBe("  : … 280 earlier lines · /expand $1")
+    expect(shown[2]).toBe("  | line 6")
+    expect(shown).toContain("  = exit 0 · 1.5s")
+    expect(shown.slice(-2)).toEqual(["[Shell] $2 $ sleep 9", "  = cancelled · 0.2s"])
+    model.toggle("shell:a")
+    expect(model.lines()[1]).toBe("  : … 275 earlier lines not retained")
+    expect(model.lines()).toContain("  | line 1")
+    release(store)
+  })
+
   test("explicit error notices retain provenance without admitting forged speaker roles", () => {
     const store = open()
     store.append("notice", { text: "The model returned no response.", provenance: "error" })
