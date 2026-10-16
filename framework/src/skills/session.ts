@@ -7,6 +7,7 @@ import {
   revalidateSkillCapture, SkillCaptureError,
 } from "./capture.ts"
 import { discoverSkills } from "./roots.ts"
+import { NO_SKILL_TRUST, skillTrusted, type SkillTrust } from "./trust.ts"
 import type { SkillCapture, SkillDescriptor, SkillDiscovery, SkillRoots, SkillToolName } from "./types.ts"
 
 const CLI_ENGINES = new Set(["local", "codex", "claude"])
@@ -22,11 +23,15 @@ export type SkillGrant = Readonly<{
   contentHash: string
   classification: "common" | "custom"
   allowedTools?: readonly SkillToolName[]
+  /** Granted by the operator's `skill_trust` user config instead of a prompt. */
+  trusted?: true
 }>
 export type SkillCatalogEntry = Readonly<{
   descriptor: SkillDescriptor
   classification: "common" | "custom" | "unavailable"
   refusal?: string
+  /** Usable without the source-consent prompt because user config trusts it. */
+  trusted?: true
 }>
 export type SkillCatalog = Readonly<{ entries: readonly SkillCatalogEntry[]; refusals: SkillDiscovery["refusals"] }>
 
@@ -57,6 +62,7 @@ export class SkillSession {
   readonly roots: SkillRoots
   readonly store: SessionStore
   private readonly terminal?: SkillTerminal
+  private readonly trust: SkillTrust
   private readonly baseline = new Set<string>()
   private readonly grants = new Map<string, SkillGrant>()
   private readonly captureTargets = new Set<string>()
@@ -68,15 +74,16 @@ export class SkillSession {
   private lease?: AdmissionLease
   private closed = false
 
-  private constructor(input: { roots: SkillRoots; store: SessionStore; terminal?: SkillTerminal }) {
+  private constructor(input: { roots: SkillRoots; store: SessionStore; terminal?: SkillTerminal; trust?: SkillTrust }) {
     this.roots = input.roots
     this.store = input.store
     this.terminal = input.terminal
+    this.trust = input.trust ?? NO_SKILL_TRUST
     this.assertOwned()
   }
 
   /** Restored held readers establish a new common baseline without admitting work or restoring grants. */
-  static async create(input: { roots: SkillRoots; store: SessionStore; terminal?: SkillTerminal }, signal: AbortSignal): Promise<SkillSession> {
+  static async create(input: { roots: SkillRoots; store: SessionStore; terminal?: SkillTerminal; trust?: SkillTrust }, signal: AbortSignal): Promise<SkillSession> {
     const session = new SkillSession(input)
     try {
       const discovery = await session.captureWork(signal, active => discoverSkills(session.roots, { signal: active }))
@@ -258,15 +265,16 @@ export class SkillSession {
     const entries: SkillCatalogEntry[] = []
     for (const descriptor of discovery.descriptors) {
       this.checkSignal(signal)
+      const trusted = skillTrusted(this.trust, this.roots, descriptor) ? { trusted: true as const } : {}
       if (descriptor.kind === "protected-workflow") entries.push(Object.freeze({ descriptor, classification: "common" }))
-      else if (descriptor.source === "home") entries.push(Object.freeze({ descriptor, classification: "custom" }))
+      else if (descriptor.source === "home") entries.push(Object.freeze({ descriptor, classification: "custom", ...trusted }))
       else {
         try {
           const capture = await this.captureWork(signal, active => captureSkill(this.roots, descriptor, { ...options, signal: active }), descriptor.name)
           this.checkSignal(signal)
           const classification = authenticSkillClassification(capture)
           if (!classification) throw new SkillAdmissionError("Skill capture authenticity is unavailable.")
-          entries.push(Object.freeze({ descriptor, classification }))
+          entries.push(Object.freeze({ descriptor, classification, ...trusted }))
         } catch (error) {
           this.checkSignal(signal)
           if (!(error instanceof SkillCaptureError)) throw error
@@ -283,6 +291,15 @@ export class SkillSession {
     const lease = this.requireLease()
     const revision = this.revisions.get(name) ?? 0
     let capture = await this.freshCapture(name, revision, lease, signal)
+    if (!this.authorizes(capture, lease, revision) && skillTrusted(this.trust, this.roots, capture.descriptor)) {
+      // Operator-configured trust stands in for the prompt; the grant still binds to this captured content.
+      const scope = capture.descriptor.kind === "skill" ? capture.descriptor.allowedTools : undefined
+      this.grants.set(grantKey(capture), Object.freeze({
+        name: capture.name, identity: capture.identity, source: capture.source,
+        contentHash: capture.contentHash, classification: capture.classification, trusted: true as const,
+        ...(scope === undefined ? {} : { allowedTools: Object.freeze([...scope]) }),
+      }))
+    }
     if (!this.authorizes(capture, lease, revision)) {
       const scope = capture.descriptor.kind === "skill" ? capture.descriptor.allowedTools : undefined
       const answer = await this.choose(name, revision,

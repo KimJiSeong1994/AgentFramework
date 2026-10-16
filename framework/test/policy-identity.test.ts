@@ -32,11 +32,12 @@ test("legacy role identities survive UI toggles and unrelated home skill roots",
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
-test("a persisted chat default model never changes role identity", async () => {
+test("a persisted chat default model or skill trust list never changes role identity", async () => {
   const { DEFAULT_CONFIG } = await import("../src/config.ts")
   const { createExecutionPolicy } = await import("../src/hosts/tool-policy.ts")
   const plain = createExecutionPolicy(DEFAULT_CONFIG, { planningOnlyMain: true })
-  const withDefault = createExecutionPolicy({ ...DEFAULT_CONFIG, chat: { default_model: { engine: "codex", model: "gpt-5-codex" } } }, { planningOnlyMain: true })
+  const withDefault = createExecutionPolicy({ ...DEFAULT_CONFIG, chat: { default_model: { engine: "codex", model: "gpt-5-codex" } },
+    skill_trust: ["code-review", "~/.codex/skills"] } as typeof DEFAULT_CONFIG, { planningOnlyMain: true })
   for (const role of Object.keys(baseline.fixtures[0]!.snapshots)) {
     expect(withDefault.resolve(role as never).id).toBe(plain.resolve(role as never).id)
   }

@@ -57,8 +57,9 @@ export function createExecutionPolicy(config: Readonly<LcaConfig>, options: Exec
       }
       return Object.freeze({ identity: supplied.identity, instructions: supplied.instructions })
     })()
-  // `chat` only selects the launch model (host UI state); it never shapes execution, so it stays out of role identity.
-  const { chat: _chat, ...identityConfig } = config
+  // `chat` (launch model) and `skill_trust` (user-config consent prompt skip) are host UI state; they never shape
+  // execution, so they stay out of role identity.
+  const { chat: _chat, skill_trust: _trust, ...identityConfig } = config as typeof config & { skill_trust?: unknown }
   const snapshots = new Map<ExecutionRole, ExecutionPolicySnapshot>()
   const sessions = new Map<string, ExecutionPolicyHandlers>()
   const sessionSnapshots = new Map<string, ExecutionPolicySnapshot>()

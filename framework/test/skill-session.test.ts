@@ -10,6 +10,7 @@ import type { SessionStore } from "../src/sessions/store.ts"
 import { pendingSkillPermissionActivityCount } from "../src/skills/activity.ts"
 import { resolveSkillRoots } from "../src/skills/roots.ts"
 import { claimPreparedSkillInvocation, SkillSession } from "../src/skills/session.ts"
+import { NO_SKILL_TRUST, parseSkillTrust, readSkillTrust, type SkillTrust } from "../src/skills/trust.ts"
 import { tempWorktree } from "./guards-helpers.ts"
 
 const SID = "skill_source_session"
@@ -36,10 +37,10 @@ function put(name: string, body = "Use read-only inspection.\r\n"): string {
   return directory
 }
 function commit(): void { git("add", "-A"); git("commit", "--quiet", "-m", "skill fixture") }
-async function source(foreground = true): Promise<SkillSession> {
+async function source(foreground = true, trust?: SkillTrust): Promise<SkillSession> {
   const roots = await resolveSkillRoots({ projectRoot: fixture.worktree })
   const session = await SkillSession.create({
-    roots, store,
+    roots, store, ...(trust ? { trust } : {}),
     ...(foreground ? { terminal: { stdinIsTTY: true, stderrIsTTY: true, choose: async (title: string, values: readonly string[], abort: AbortSignal) => {
       choices.push(title)
       return choose(title, values, abort)
@@ -111,6 +112,61 @@ test("baseline common instructions preserve exact bytes without consent and hand
   expect(bound.text).toBe("---\nname: inspect\ndescription: Inspect this project\nallowed-tools: [read]\n---\nUse read-only inspection.\r\n")
   expect(() => claimPreparedSkillInvocation(prepared)).toThrow("already bound")
   expect(session.listGrants()).toEqual([])
+})
+
+test("user-config trust by name or folder skips the consent prompt and survives content changes", async () => {
+  const directory = put("custom")
+  put("other")
+  const byName = parseSkillTrust(["custom"]) as SkillTrust
+  let session = await source(true, byName)
+  expect((await session.catalog(signal())).entries.find(entry => entry.descriptor.name === "custom")?.trusted).toBe(true)
+  claimPreparedSkillInvocation(await session.prepare("custom", signal()))
+  expect(choices).toEqual([])
+  expect(session.listGrants()).toEqual([expect.objectContaining({ name: "custom", trusted: true })])
+  // Changed content is still trusted (trust is by name), and the grant binds to the new bytes.
+  writeFileSync(join(directory, "SKILL.md"), "---\nname: custom\ndescription: Inspect this project\n---\nChanged.\n")
+  const changed = claimPreparedSkillInvocation(await session.prepare("custom", signal()))
+  expect(changed.text).toContain("Changed.")
+  expect(choices).toEqual([])
+  // An untrusted sibling still asks.
+  await session.prepare("other", signal())
+  expect(choices).toHaveLength(1)
+
+  session.close()
+  choices = []
+  session = await source(true, parseSkillTrust([join(fixture.worktree, ".agents", "skills")]) as SkillTrust)
+  await session.prepare("other", signal())
+  expect(choices).toEqual([])
+  // Without trust the prompt is back.
+  session.close()
+  session = await source(true, NO_SKILL_TRUST)
+  await session.prepare("other", signal())
+  expect(choices).toHaveLength(1)
+})
+
+test("skill trust parses only names and absolute/~ folders and is read from the user config alone", () => {
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "lca-trust-home-")))
+  try {
+    mkdirSync(join(home, ".codex", "skills"), { recursive: true })
+    const parsed = parseSkillTrust(["code-review", "~/.codex/skills", "/opt/skills"], home) as SkillTrust
+    expect([...parsed.names]).toEqual(["code-review"])
+    expect(parsed.folders).toEqual([join(home, ".codex", "skills"), "/opt/skills"])
+    expect(parseSkillTrust("code-review", home)).toContain("must be an array")
+    expect(parseSkillTrust(["relative/skills"], home)).toContain("neither a skill name")
+    expect(parseSkillTrust([1], home)).toContain("must be an array")
+    expect(parseSkillTrust(undefined, home)).toBe(NO_SKILL_TRUST)
+
+    const config = join(home, "lca.jsonc")
+    expect(readSkillTrust(config, home)).toEqual({ trust: NO_SKILL_TRUST, source: config })
+    writeFileSync(config, `{\n  // trusted by the operator\n  "skill_trust": ["code-review"],\n}\n`)
+    expect([...readSkillTrust(config, home).trust.names]).toEqual(["code-review"])
+    writeFileSync(config, `{ "skill_trust": ["bad path"] }`)
+    const invalid = readSkillTrust(config, home)
+    expect(invalid.trust).toBe(NO_SKILL_TRUST)
+    expect(invalid.problem).toContain("neither a skill name")
+    writeFileSync(config, "{ not jsonc")
+    expect(readSkillTrust(config, home).problem).toContain("not valid JSONC")
+  } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
 test("custom grants are session-local and revocation cannot revive an earlier invocation", async () => {
