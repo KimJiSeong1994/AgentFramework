@@ -18,8 +18,25 @@ const NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/
 const MAX_DESCRIPTOR_BYTES = 16 * 1024
 const PROTECTED_NAMES = new Set<ProtectedWorkflowName>(["deep-interview", "ralplan", "ultragoal", "autoresearch"])
 const KNOWN_TOOL_SET = new Set<string>(EXECUTION_TOOL_NAMES)
-const PROJECT_ROOTS = [".opencode/skills", ".agents/skills"] as const
-const HOME_ROOTS = [".agents/skills", ".claude/skills", ".config/opencode/skills"] as const
+/**
+ * Skill roots in precedence order. `native` roots are the agent's own locations (including GJC's `.gjc/skills`,
+ * `~/.gjc/agent/skills` and legacy `~/.gjc/skills`); `import` roots are other tools' conventions (Claude/Codex) and
+ * only fill names no native root provides. `optional` roots were added for GJC: a refusal there is reported for that
+ * base alone and never makes the whole project/home source unavailable.
+ */
+const ROOT_BASES: readonly Readonly<{ source: "project" | "home"; base: string; tier: "native" | "import"; optional?: true }>[] = [
+  { source: "project", base: ".opencode/skills", tier: "native" },
+  { source: "project", base: ".agents/skills", tier: "native" },
+  { source: "project", base: ".gjc/skills", tier: "native", optional: true },
+  { source: "home", base: ".agents/skills", tier: "native" },
+  { source: "home", base: ".claude/skills", tier: "native" },
+  { source: "home", base: ".config/opencode/skills", tier: "native" },
+  { source: "home", base: ".gjc/agent/skills", tier: "native", optional: true },
+  { source: "home", base: ".gjc/skills", tier: "native", optional: true },
+  { source: "project", base: ".claude/skills", tier: "import", optional: true },
+  { source: "project", base: ".codex/skills", tier: "import", optional: true },
+  { source: "home", base: ".codex/skills", tier: "import", optional: true },
+]
 
 export const PROTECTED_WORKFLOWS: readonly ProtectedWorkflowDescriptor[] = Object.freeze([
   Object.freeze({
@@ -68,14 +85,17 @@ export type SkillFrontmatter = Readonly<{
   allowedTools?: readonly SkillToolName[]
 }>
 
-type SkillRootSpec = Readonly<{ source: "project" | "home"; base: string; root: string }>
+type SkillRootSpec = Readonly<{ source: "project" | "home"; base: string; root: string; tier: "native" | "import"; optional?: true }>
 type Candidate = Readonly<{
   source: "project" | "home"
   base: string
+  tier: "native" | "import"
   name: string
   identity: string
   descriptor?: LocalSkillDescriptor
   refusal?: SkillRefusal
+  /** dev:ino of the opened skill directory; the same directory reached through a symlink is one skill. */
+  directory?: string
 }>
 
 type SkillRootPin = Readonly<{ path: string; dev: bigint; ino: bigint } | { path: string; absent: true }>
@@ -278,10 +298,10 @@ export function openSkillRoot(roots: SkillRoots, source: "project" | "home"): Fd
 }
 
 function rootSpecs(roots: SkillRoots): readonly SkillRootSpec[] {
-  return [
-    ...PROJECT_ROOTS.map((base) => ({ source: "project" as const, base, root: roots.projectRoot })),
-    ...(roots.homeDirectory === undefined ? [] : HOME_ROOTS.map((base) => ({ source: "home" as const, base, root: roots.homeDirectory! }))),
-  ]
+  return ROOT_BASES.flatMap((spec) => {
+    const root = spec.source === "project" ? roots.projectRoot : roots.homeDirectory
+    return root === undefined ? [] : [{ ...spec, root }]
+  })
 }
 
 function validName(name: string): boolean {
@@ -301,7 +321,19 @@ async function scanRoot(
   let directory: FdDirectory
   try {
     throwIfSkillOperationAborted(signal)
-    directory = tree.openDirectoryRelative(spec.base)
+    // A symlinked base (GJC's `.gjc/skills -> ../.agents/skills`) adds nothing when it names another configured base
+    // of the same source; any other symlinked base is refused because skill identities must be capture-openable paths.
+    const components = spec.base.split("/")
+    const leaf = components.pop()!
+    const parent = components.length ? tree.openDirectoryRelative(components.join("/")) : tree.root
+    if (fdStatKind(tree.statAt(parent, leaf)) === "symlink") {
+      const resolved = tree.resolveLinkAt(parent, leaf)
+      const aliased = resolved.internal && ROOT_BASES.some((other) =>
+        other.source === spec.source && other.base !== spec.base && other.base === resolved.relativeTarget)
+      if (aliased) return { candidates, refusals }
+      throw new FdTreeError("unsafe", "skill root base is a symlink outside the configured roots")
+    }
+    directory = tree.openDirectoryAt(parent, leaf)
   } catch (error) {
     if (error instanceof SkillOperationAbortError || signal?.aborted) throw new SkillOperationAbortError()
     if (error instanceof FdTreeError && error.code === 2) return { candidates, refusals }
@@ -320,6 +352,8 @@ async function scanRoot(
         const identity = `${spec.source}:${spec.base}/${name}`
         const kind = fdStatKind(entryStat)
         if (kind !== "directory" && kind !== "symlink") continue
+        // Hidden entries (e.g. Codex's `.system`) are tool internals, not skills.
+        if (name.startsWith(".")) continue
         if (!validName(name)) {
           refusals.push(frozenRefusal(spec.source, "invalid-name", identity, name))
           continue
@@ -341,7 +375,7 @@ async function scanRoot(
               if (!hasExternalTargetConsent(consent, resolved.canonicalTarget)) {
                 const refusal = frozenRefusal(spec.source, "external-consent-required", identity, name, [resolved.canonicalTarget])
                 refusals.push(refusal)
-                candidates.push({ source: spec.source, base: spec.base, name, identity, refusal })
+                candidates.push({ source: spec.source, base: spec.base, tier: spec.tier, name, identity, refusal })
                 continue
               }
               throwIfSkillOperationAborted(signal)
@@ -404,7 +438,8 @@ async function scanRoot(
             description: frontmatter.description,
             ...(frontmatter.allowedTools === undefined ? {} : { allowedTools: frontmatter.allowedTools }),
           })
-          candidates.push({ source: spec.source, base: spec.base, name, identity, descriptor })
+          candidates.push({ source: spec.source, base: spec.base, tier: spec.tier, name, identity, descriptor,
+            directory: `${candidateDirectory.openedStat.dev}:${candidateDirectory.openedStat.ino}` })
         } catch (error) {
           if (error instanceof SkillOperationAbortError || signal?.aborted) throw new SkillOperationAbortError()
           const reason: SkillRefusal["reason"] = error instanceof ExternalDescriptorConsentRequired
@@ -421,7 +456,7 @@ async function scanRoot(
             error instanceof ExternalDescriptorConsentRequired ? [error.target] : undefined,
           )
           refusals.push(refusal)
-          candidates.push({ source: spec.source, base: spec.base, name, identity, refusal })
+          candidates.push({ source: spec.source, base: spec.base, tier: spec.tier, name, identity, refusal })
         } finally {
           try {
             if (!signal?.aborted) {
@@ -534,20 +569,24 @@ export async function discoverSkills(
   const candidates = scanned.flatMap((result) => result.candidates)
   const refusals = scanned.flatMap((result) => result.refusals)
   const descriptors: SkillDescriptor[] = [...PROTECTED_WORKFLOWS]
-  const project = candidates.filter((candidate) => candidate.source === "project")
-  const home = candidates.filter((candidate) => candidate.source === "home")
-  const projectNames = new Set(project.map((candidate) => candidate.name))
-  const projectRootUnavailable = refusals.some((refusal) => refusal.source === "project" && refusal.name === undefined)
-  const homeRootUnavailable = refusals.some((refusal) => refusal.source === "home" && refusal.name === undefined)
+  const optionalBases = new Set(specs.filter((spec) => spec.optional).map((spec) => `${spec.source}:${spec.base}`))
+  const sourceUnavailable = (source: "project" | "home") => refusals.some((refusal) =>
+    refusal.source === source && refusal.name === undefined && !refusal.identities.every((identity) => optionalBases.has(identity)))
+  const projectRootUnavailable = sourceUnavailable("project")
+  const homeRootUnavailable = sourceUnavailable("home")
+  const claimed = new Set<string>()
 
   const addTier = (tier: Candidate[], source: "project" | "home") => {
     const byName = new Map<string, Candidate[]>()
     for (const candidate of tier) {
+      if (claimed.has(candidate.name)) continue
       const group = byName.get(candidate.name) ?? []
-      group.push(candidate)
+      // The same directory reached through another base (a symlink) is one skill; the earliest base names it.
+      if (!candidate.directory || !group.some((item) => item.directory === candidate.directory)) group.push(candidate)
       byName.set(candidate.name, group)
     }
     for (const [name, group] of byName) {
+      claimed.add(name)
       if (!validName(name) || PROTECTED_NAMES.has(name as ProtectedWorkflowName)) continue
       if (group.length > 1) {
         refusals.push(Object.freeze({ source, name, identities: Object.freeze(group.map((item) => item.identity).sort()), reason: "ambiguous" }))
@@ -558,9 +597,16 @@ export async function discoverSkills(
       else if (candidate.refusal && !refusals.includes(candidate.refusal)) refusals.push(candidate.refusal)
     }
   }
+  const tier = (source: "project" | "home", level: "native" | "import") =>
+    candidates.filter((candidate) => candidate.source === source && candidate.tier === level)
 
-  if (!projectRootUnavailable) addTier(project, "project")
-  if (!projectRootUnavailable && !homeRootUnavailable) addTier(home.filter((candidate) => !projectNames.has(candidate.name)), "home")
+  // Precedence: project native, home native, then Claude/Codex import roots (project before home).
+  if (!projectRootUnavailable) {
+    addTier(tier("project", "native"), "project")
+    if (!homeRootUnavailable) addTier(tier("home", "native"), "home")
+    addTier(tier("project", "import"), "project")
+    if (!homeRootUnavailable) addTier(tier("home", "import"), "home")
+  }
   descriptors.sort((a, b) => a.name.localeCompare(b.name, "en"))
   const finalRefusals = combineRefusals(refusals).sort((a, b) =>
     `${a.source}:${a.name ?? ""}:${a.reason}:${a.identities.join(",")}`.localeCompare(`${b.source}:${b.name ?? ""}:${b.reason}:${b.identities.join(",")}`, "en"),
