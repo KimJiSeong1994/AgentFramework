@@ -1,7 +1,7 @@
 # AgentFramework — local-first coding agent
 
 > **lca (자체 에이전트 프레임워크)**: `framework/README.md` (사용법·설정), 설계 `docs/agent-framework-review-2026-09-22.md`,
-> 구현 결과 `docs/lca-stage1-2026-09-22.md`, `docs/lca-stage2-2026-09-23.md`, `docs/lca-stage3-2026-09-23.md`(데이터 레이어), `docs/lca-stage4-2026-09-23.md`(온톨로지 진화 배치), `docs/lca-stage5-2026-09-23.md`(모델 비교). 아래는 OpenCode/Ollama 환경 설정 문서입니다.
+> 구현 결과 `docs/lca-stage1-2026-09-22.md`, `docs/lca-stage2-2026-09-23.md`, `docs/lca-stage3-2026-09-23.md`(데이터 레이어), `docs/lca-stage4-2026-09-23.md`(온톨로지 진화 배치), `docs/lca-stage5-2026-09-23.md`(모델 비교). 아래는 OpenCode/Ollama 및 선택적 Strata 연동 환경 설정 문서입니다.
 
 ## LCA 공통 선택
 
@@ -47,6 +47,56 @@ scripts/opencode-local.sh        # OpenCode TUI 실행 (사전 점검 + 모델 �
 scripts/bench-ollama.sh          # 전후 비교용 간이 벤치마크
 scripts/ollama-env.sh show       # 현재 적용 상태 확인
 ```
+
+## 선택적 Strata 백엔드 (OpenCode/GJC)
+
+**현재 배포 상태: 로컬 호환 패치로 실제 생성·API 도구 왕복·제한된 OpenCode/GJC 작업 확인, 전체 실사용 검증은 미완료.** macOS 15.3.1 / SDK 15.5에서 아래 커밋의 엔진을 빌드하고 Q2_0 모델을 다운로드했습니다. 초기 생성 요청은 `MetalPerformancePrimitives/MetalPerformancePrimitives.h` 부재로 HTTP 503을 반환했습니다. 두 prompt 설정만으로는 일반 디코딩의 레이아웃 탐지가 `mm_bench.metal`을 컴파일하는 문제가 남았습니다.
+
+`STRATA_METAL_PROMPT=window`·`STRATA_METAL_PROMPT_GEMM=0`·`COOP_K4=0`의 세 설정으로 짧은 추론이 성공한 뒤, 설치된 Strata의 호스트 코드를 수정했습니다. Metal 기능 검사에 따라 기존 window 경로를 자동 선택하고, 두 레이아웃 탐지 및 prompt 초기화 진입점을 보호하며, 지원되지 않는 기능의 강제 지정은 명시적으로 거부합니다. GPU 수치 연산 커널이나 OS는 바꾸지 않았습니다. 세 진단 설정 없이도 같은 18토큰 입력에 HTTP 200과 `OK.` 응답을 확인했습니다.
+
+사용자의 기준 완화 승인에 따라 **감시된 제한 검증에서** 사전 여유를 8 GiB에서 1 GiB로 낮추고 경고 수준 메모리 압력을 허용했습니다. 엔진 자체 메모리 보호, 1 Hz 외부 감시, 심각한 압력·스왑 급증·시간 초과 중단은 유지했습니다. 수치 비교, 제한된 API/client 요청과 아래 30분 시험에 적용했으며, 시험 서버는 모두 종료했습니다. 기존 Ollama/openjev는 종료하지 않았습니다. 이것이 무제한 장시간 사용이나 전체 32K 문맥의 안전성 보장은 아닙니다.
+
+최종 소스에 대해 입력·환경·빌드·모델 식별 정보를 실행 전에 고정한 별도 수치 비교를 완료했습니다. 기준 엔진(고정 커밋 + SDK 가드 + 동일 진단 계측, 세 설정 사용)과 수정 엔진의 고정된 짧은 입력 **20/20건 모두** 전체 raw logits 등을 포함한 스냅샷과 직렬화된 체크포인트가 바이트 단위로 일치했습니다. 실사용 빌드에는 덤프 기능을 남기지 않았습니다. 첫 기준 실행의 정리 단계 경고는 보존했고, 원인을 고친 뒤 이미 성공한 기준 실행은 반복하지 않았습니다. 일부 출력은 16토큰 한도에서 잘렸으므로 의미적 정답률로 해석하지 않습니다.
+
+기능 선택·강제 지정 거부·캐시 키 정책 및 `qsa_parity`의 3000 문맥 검사가 통과했습니다. 별도 직접 Window fixture에서도 `(2050,1)`, `(2050,2)`, `(2044,8)`의 실제 cache miss/hit을 관찰하고 수정 엔진의 행별 logits·체크포인트 배열·다음 토큰 logits 동등성을 확인했습니다. 다만 이 과거 fixture의 전체 빌드 이력 연결은 불완전하고, 원본 기준 엔진은 prefix 실행 중 layer 23에서 슬롯 부족으로 종료했습니다. 따라서 이 결과는 수정 엔진 내부 캐시 일관성의 제한된 증거이지, 해당 경계의 기준/수정 엔진 동등성이나 모든 KV·중간 버퍼 검증은 아닙니다.
+
+후속 도구 시험에서 실제 `no free slot` 오류를 재현했습니다. 8행 × top-10 경로가 최대 80개 expert를 요구하는데 기존 최소 슬롯은 64개였습니다. 필요한 슬롯 수를 도출하도록 수정하고, 예산 부족은 할당 전에 거부하며, 잘못 예측된 진행 중 prefetch의 일시 점유는 현재 행의 pin을 보호한 채 완료를 기다려 회수하도록 보완했습니다. 회귀 테스트와 수정 후 **JSON 5/5·SSE 5/5·실제 함수 도구 왕복 3/3**이 통과했습니다. 이 API 시험은 1024 입력/128 출력 토큰 및 시간 제한 안에서 같은 메모리 감시를 유지했습니다.
+
+최종 일반 빌드에서 실제 `scripts/opencode-strata.sh run`도 검증했습니다. 임시 git 작업 폴더의 단일 fixture 읽기만 허용한 agent가 실제 `read` 호출과 내용에 맞는 최종 답변을 냈고, 클라이언트는 **269.733초**, exit 0으로 종료했습니다. 별도 시험 감독기의 종료 처리 오류는 기능 성공과 구분해 보존했으며, 작은 무모델 회귀 테스트로 수정 확인했습니다. 일반 OpenCode agent 전체나 코딩 속도의 보장은 아닙니다.
+
+최종 빌드에서 실제 생성 내용 수신 후 SSE 연결 취소, 서버의 취소·idle 상태, 정상 후속 응답도 확인했습니다. 워밍업 후 **정확한 1800초 관찰 구간에 364건**, 이미 시작된 마지막 요청을 마친 1807.775초까지 **365건**이 성공했습니다. 서버·엔진 합산 physical footprint의 최대 증가는 **4.52 MiB**였고, 스왑 증가·GPU 오류·엔진 재시작은 없었습니다. RSS와 physical footprint는 따로 측정했습니다.
+
+**미완료:** 지원되는 MPP 하드웨어의 무회귀, 긴 prefix에서 실패한 원본 엔진과의 경계 동등성, 전체 32K 검증. 약 2K/4K 실제 지연으로는 승인된 1800초 이내의 near-32K 실행을 예상할 수 없어 시작하지 않았습니다. 최종 근거는 Strata 작업 세션 `01a13dfe-546a-7313-a4cf-e728b6d21e35`의 `ultragoal/evidence/final-qualification/`에 보존했습니다(`prospective/`, `soak/`, `client/`, `direct/`, `transfer-manifest.json`). 최종 일반 엔진 SHA-256은 `de93e12c7cc75cadeb5f5395ef90e740871d195301e8203f8724d3bdea7fabfe`입니다. 전체 목표나 상시 배포 준비 완료를 주장하지 않습니다.
+
+기존 Ollama 기본값과 `lca chat`, `scripts/opencode-local.sh`는 바꾸지 않습니다. Strata는 upstream commit `296b59d2f73c8f04a805df29c2fa97655adace78`을 `~/.local/share/strata`에 별도로 설치하고, Q2_0·32K 컨텍스트·vision off로 설정해 `127.0.0.1:18080`에서 먼저 실행해야 합니다. 런처는 `/v1/models`에서 첫 text 입력·출력 모델 ID를 찾아 사용합니다. 8080 포트의 다른 서비스는 건드리거나 종료하지 않습니다.
+
+이 Mac 배포는 메모리 압박을 줄이기 위해 `STRATA_METAL_STREAM=1` SSD streaming을 선택하고 MTP를 쓰지 않습니다. 이는 성능 벤치마크 결과나 성능 보장이 아닙니다. 설치 중 인증서 검증 오류가 나면 설치 명령에 `SSL_CERT_FILE="$(.venv/bin/python -m certifi)"`를 지정합니다. macOS 26보다 낮은 SDK로 빌드할 때는 `~/.local/share/strata/metal/src/mtl_rt.mm`의 `Context::supports_metal4()`에서 `MTLGPUFamilyMetal4` 참조를 `#if __MAC_OS_X_VERSION_MAX_ALLOWED >=260000`으로 가드해야 합니다.
+
+```bash
+# 충분한 메모리 여유를 확보한 뒤 별도 터미널에서 실행 (전체 실사용 검증 미완료)
+~/.local/share/strata/run-q2_0.sh
+# 저장소 루트의 다른 터미널에서
+scripts/opencode-strata.sh                 # OpenCode TUI
+scripts/opencode-strata.sh run "..."        # 나머지 인자를 OpenCode에 그대로 전달
+```
+
+런처는 최대 1 MiB·4초 제한으로 `/v1/models`를 확인할 뿐 Strata 설치·다운로드·시작·중지는 하지 않습니다. 발견한 같은 모델 ID를 main/`small_model`/OpenCode `--model`에 쓰고 내장 `task` 위임을 거부합니다. OpenAI 호환 provider는 function tool calling을 켭니다. Strata `/v1/chat/completions`는 OpenAI `tools` 요청을 처리하고 `tool_calls` 응답을 반환하는 경로를 제공합니다. OpenCode `--pure`로 모든 외부 플러그인(전역 oh-my-openagent 및 프로젝트 플러그인 포함)을 끕니다. 전역·프로젝트 설정 전체를 격리하는 것은 아니며, 여기서 덮어쓰지 않은 설정은 적용될 수 있습니다.
+
+필요한 경우 `STRATA_BASE_URL`(loopback `http://127.0.0.1:<port>/v1`만 허용), `STRATA_CONTEXT`, `STRATA_OUTPUT`으로 endpoint와 한도를 덮어쓸 수 있습니다. 기본값은 `http://127.0.0.1:18080/v1`, 32768, 8192입니다. 별도 OpenCode 프로세스나 클라이언트와의 동시 요청을 직렬화하지는 않습니다.
+
+### GJC에서 Strata 선택 사용
+
+이 로컬 환경의 `~/.gjc/agent/models.yml`에 `strata` provider와 프로필을 등록했습니다. 권장 실행은 별도 설정·기록을 사용하는 `~/.gjc/strata-agent/`입니다. 등록만으로 서버가 시작되지는 않으므로 별도 터미널에서 위의 `~/.local/share/strata/run-q2_0.sh`로 `127.0.0.1:18080` 서버를 먼저 시작한 뒤 실행합니다.
+
+```sh
+GJC_CODING_AGENT_DIR="$HOME/.gjc/strata-agent" gjc --mpreset strata --thinking off --no-title --no-mcp
+```
+
+이 설정은 Chat Completions의 Qwen chat-template에서 non-thinking을 선택합니다. GJC의 기본 첫 응답 제한 100초로는 긴 prefill을 기다릴 수 없어, 전용 설정만 첫 의미 있는 토큰을 최대 30분 기다리도록 하고 자동 재시도는 끕니다. 이는 속도나 성공의 보장이 아닙니다. 전역 프로필만 선택하면 대기 시간이 늘어나지 않으며, 기존 GJC 기본 설정과 Ollama/`gemma-mtp`는 그대로입니다.
+
+`Connection error. (transport=ConnectionRefused url=http://127.0.0.1:18080/v1/chat/completions)`는 Strata 서버가 실행 중이 아니라는 뜻입니다. GJC는 서버를 띄우지 않으므로 다른 터미널에서 `~/.local/share/strata/run-q2_0.sh`를 실행하고 `curl -s http://127.0.0.1:18080/v1/models`가 응답한 뒤 다시 요청합니다.
+
+**제한된 실제 GJC 도구 왕복은 통과했습니다.** 임시 설정 복사본에서 짧은 시스템 프롬프트·`read`만 사용하고 출력은 요청당 128토큰으로 제한했습니다. GJC가 실제 파일을 한 번 읽고, 프롬프트에 넣지 않은 무작위 파일 내용을 정확히 반환했습니다(328.4초, 종료 코드 0; 두 요청의 실제 입력 2456/2558토큰, thinking off). 60초 사전 확인과 1 Hz 감시에서 중단·스왑 증가·정리 오류가 없었고 시험 서버는 종료했습니다. 등록된 문맥 32768·출력 4096은 설정 한도이며, 전체 32K·기본 전체 도구 세션·병렬 하위 에이전트까지 검증한 것은 아닙니다.
 
 ## 무엇을 바꿨나
 
