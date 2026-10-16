@@ -776,6 +776,33 @@ describe("interactive terminal", () => {
     expect(h.calls.runtimes).toHaveLength(1)
   })
 
+  test("unselected help offers setup and accessibility rather than empty-session tools", async () => {
+    const h = harness({ fullscreen: true, lines: ["/help", "/quit"], choose: async () => undefined })
+    expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
+    const commands = h.calls.choices.find(choice => choice.title === "Commands")!.values
+      .map(value => value.split(" ")[0])
+    expect(commands).toEqual(["/help", "/model", "/theme", "/ascii", "/quit"])
+    expect(h.calls.runtimes).toEqual([])
+    expect(h.calls.discoveries).toEqual([])
+    expect(h.calls.turns).toEqual([])
+  })
+
+  test("fullscreen selection uses view facts without logging paths or empty banner rows", async () => {
+    const h = harness({ fullscreen: true, lines: ["/model local native-secondary", "/quit"] })
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "original" }, h.deps)).toEqual({ code: 0 })
+    const output = h.calls.output.join("")
+    expect(output).not.toContain("Native execution selection:")
+    expect(output).not.toContain(realpathSync(wt.worktree))
+    expect(h.calls.output).toContain("New conversation: local / native-secondary.")
+    expect(h.calls.viewFacts[0]?.selection).toEqual({ engine: "codex", model: "original" })
+    expect(h.calls.viewFacts.at(-1)?.selection).toEqual({ engine: "local", model: "native-secondary" })
+    expect(h.calls.turns).toEqual([])
+    const records = replaySession(wt.worktree, h.calls.sessionIDs.at(-1)!, { order: "asc" }).records
+    expect(records.some(record => record.kind === "notice" &&
+      record.data.text === "New conversation: local / native-secondary.")).toBe(true)
+    expect(records.some(record => typeof record.data.text === "string" && record.data.text.includes("Native execution selection:"))).toBe(false)
+  })
+
   test("reads width anew and retains selected context across cancelled and failed switches", async () => {
     const chrome: string[] = []
     let columns = 100
@@ -1093,12 +1120,12 @@ describe("interactive terminal", () => {
     expect([...h.calls.signalListeners.values()].every(listeners => listeners.size === 0)).toBe(true)
   })
 
-  test("shows planning wait before a deferred model turn returns", async () => {
+  test.each([false, true])("shows deferred model progress through the active presentation (fullscreen=%s)", async fullscreen => {
     let markTurnStarted!: () => void
     const turnStarted = new Promise<void>(resolve => { markTurnStarted = resolve })
     let resolveDelayedTurn!: (value: { text: string; plan?: unknown }) => void
     const delayedTurn = new Promise<{ text: string; plan?: unknown }>(resolve => { resolveDelayedTurn = resolve })
-    const h = harness({ lines: ["hello", "/quit"] })
+    const h = harness({ fullscreen, lines: ["hello", "/quit"] })
     const createConversation = h.deps.createConversation!
     h.deps.createConversation = (runtime, sessionID) => {
       const conversation = createConversation(runtime, sessionID)
@@ -1115,12 +1142,13 @@ describe("interactive terminal", () => {
     await turnStarted
     const waiting = "[progress] Waiting for the planning model.\n"
     const response = "[activity] Planning model response received.\n"
-    expect(h.calls.output).toContain(waiting)
+    expect(h.calls.output.includes(waiting)).toBe(!fullscreen)
     expect(h.calls.output).not.toContain(response)
+    expect(h.calls.viewFacts.at(-1)?.request.state).toBe("in-progress")
 
     resolveDelayedTurn({ text: "Delayed model response." })
     expect(await operation).toEqual({ code: 0 })
-    expect(h.calls.output).toContain(response)
+    expect(h.calls.output.includes(response)).toBe(!fullscreen)
     expect(h.calls.output.join("")).toContain("Delayed model response.")
   })
 

@@ -662,7 +662,7 @@ export async function runInteractiveSession(
       catch (error) { persistenceFailed = true; abort.abort(); throw error }
     }
     terminal.activity?.(activity)
-  }, { toolLines: !terminal.activity })
+  }, { toolLines: !terminal.activity, mainModelLines: !terminal.fullscreen })
   const queueProgress = progress.queue
   progress.queue = (message, fields) => {
     if (fields && typeof fields.task === "string") {
@@ -800,7 +800,7 @@ export async function runInteractiveSession(
         const message = input.trim()
         if (!message) continue
         const [command, ...commandArgs] = message.split(/\s+/u)
-        if ((command === "/quit" || command === "/exit") && commandArgs.length === 0) return { code: 0 }
+        if (command === "/quit" && commandArgs.length === 0) return { code: 0 }
         if (command === "/help" && hasInteractiveAction("unselected", "help")) {
           if (commandArgs.length === 0) await presentHelp(terminal, "unselected", abort.signal)
           else terminal.write("Usage: /help\n")
@@ -1058,7 +1058,7 @@ export async function runInteractiveSession(
       // SIGSTOP targets this UI process only, not its process group.
       process.kill(process.pid, "SIGSTOP")
     }
-    terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.()))
+    if (!terminal.fullscreen) terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.()))
 
     async function runOwned(resumed: boolean) {
       if (persistenceFailed) throw new InteractiveLaunchError("Session transcript persistence failed; the session remains held.")
@@ -1289,7 +1289,9 @@ export async function runInteractiveSession(
         publishView()
         await bindSkillSession(nextStore)
         if (abort.signal.aborted) return false
-        terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.(), true))
+        terminal.write(terminal.fullscreen
+          ? terminalSafeText(`${nextStore.restored ? "Selected" : "New conversation"}: ${selection.engine} / ${selection.model}.`)
+          : selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.(), true))
         if (nextStore.restored) {
           terminal.write("Restored session held. Drafts remain unsent; use /continue for an explicit Resume decision.\n")
           // Restore recomputes artifact state from disk: a tampered or missing artifact shows as incomplete, never as remembered-verified.
@@ -1535,7 +1537,7 @@ export async function runInteractiveSession(
       if (retainedSDKSessionID) {
         const sessionID = retainedSDKSessionID
         const [command, ...commandArgs] = message.split(/\s+/u)
-        if (command === "/quit" || command === "/exit") return { code: 0 }
+        if (command === "/quit") return { code: 0 }
         if (command === "/help" && commandArgs.length === 0 && hasInteractiveAction("read-only", "help")) {
           await presentHelp(terminal, "read-only", abort.signal)
           continue
@@ -1573,7 +1575,7 @@ export async function runInteractiveSession(
         continue
       }
 
-      if (message === "/quit" || message === "/exit") return { code: 0 }
+      if (message === "/quit") return { code: 0 }
       if (message === "/pause") {
         requestPause()
         continue

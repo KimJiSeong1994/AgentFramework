@@ -2,18 +2,23 @@ import { describe, expect, test } from "bun:test"
 import { commandInsertions, interactiveActions, interactiveHelp } from "../src/hosts/interactive-actions.ts"
 import { commandCompletions } from "../src/tui/skill-completion.ts"
 import { TuiApp } from "../src/tui/app.ts"
-import { wrapTranscriptLine } from "../src/tui/render.ts"
+import { transcriptViewportRows, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
 
 type AppInput = {
   input(event: unknown): void
+  draw(): void
+  driver: { write(frame: string): void }
   editor: { cursor: number }
   detailsVisible: boolean
-  choice?: object
+  themeName: string
+  asciiChrome: boolean
+  choice?: { documentOffset: number; documentAnchorLine: number; focus: string; selected: number }
   completionDismissed: boolean
   completions(): string[]
   skillCompletions(): object | undefined
   dimensions(): { columns: number; rows: number }
   currentStatusLines(): string[]
+  viewFacts?: { selection: { engine: string; model: string } }
   transcriptScrollBounds(): { pageRows: number; maximumOffset: number }
   queue: string[]
   transcript: {
@@ -45,6 +50,72 @@ describe("shared interactive actions", () => {
 })
 
 describe("exclusive application input ownership", () => {
+  test("canonical /quit remains an app control and /exit is not an alias", () => {
+    const app = new TuiApp()
+    const internal = app as unknown as AppInput
+    internal.dimensions = () => ({ columns: 80, rows: 24 })
+    const actions: string[] = []
+    app.controls(action => actions.push(action))
+
+    app.setDraft("/exit")
+    internal.input({ type: "key", key: "enter" })
+    expect(actions).toEqual([])
+
+    app.setDraft("/quit")
+    internal.input({ type: "key", key: "enter" })
+    expect(actions).toEqual(["quit"])
+    app.close()
+  })
+
+  test("empty selected view shows compact guidance and only fact-backed selection in the header", () => {
+    const app = new TuiApp()
+    const internal = app as unknown as AppInput
+    internal.dimensions = () => ({ columns: 80, rows: 24 })
+    internal.currentStatusLines = () => ["status"]
+    internal.viewFacts = { selection: { engine: "local", model: "model-known" } }
+    const frames: string[] = []
+    internal.driver.write = frame => frames.push(frame)
+
+    internal.draw()
+
+    expect(frames.at(-1)).toContain("LCA · Home · local / model-known")
+    expect(frames.at(-1)).toContain("\u001b[3;1H\u001b[2K  No messages yet.")
+    expect(frames.at(-1)).not.toContain("ready")
+    app.close()
+  })
+
+  test("unselected local transcript actions show choose-model guidance; theme and ASCII stay local", async () => {
+    const app = new TuiApp()
+    app.resume = () => {}
+    app.actionContext("unselected")
+    const internal = app as unknown as AppInput
+    const actions: string[] = []
+    app.controls(action => actions.push(action))
+    const pending = app.readInput({ title: "Chat", hint: "Enter send", prompt: "You> ", kind: "chat" }, new AbortController().signal)
+    let settled = false
+    void pending.then(() => { settled = true })
+
+    for (const command of ["/details", "/search secret", "/expand 1"]) {
+      internal.input({ type: "text", text: command })
+      internal.input({ type: "key", key: "enter" })
+    }
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    expect(internal.transcript.lines().join("\n")).toContain("Choose an engine and model with /model before using transcript tools.")
+    expect(internal.transcript.lines().join("\n")).not.toContain("/search secret")
+    expect(actions).toEqual([])
+
+    internal.input({ type: "text", text: "/theme dark" })
+    internal.input({ type: "key", key: "enter" })
+    internal.input({ type: "text", text: "/ascii" })
+    internal.input({ type: "key", key: "enter" })
+    expect(internal.themeName).toBe("dark")
+    expect(internal.asciiChrome).toBe(true)
+    expect(actions).toEqual([])
+    app.close()
+    expect(await pending).toBeUndefined()
+  })
+
   test("cancelling manual selection restores the original draft and cursor", async () => {
     const app = new TuiApp()
     app.resume = () => {}
@@ -69,6 +140,8 @@ describe("exclusive application input ownership", () => {
     const app = new TuiApp()
     app.resume = () => {}
     const internal = app as unknown as AppInput
+    const frames: string[] = []
+    internal.driver.write = frame => frames.push(frame)
     const actions: string[] = []
     app.controls(action => actions.push(action))
     const pending = app.readInput({ title: "Chat", hint: "Enter send", prompt: "You> ", kind: "chat" }, new AbortController().signal)
@@ -78,6 +151,11 @@ describe("exclusive application input ownership", () => {
     internal.input({ type: "text", text: "/sessions" })
     internal.input({ type: "paste", text: "/quit\nAPPROVE" })
     internal.input({ type: "key", key: "enter" })
+    const detailsFrame = frames.at(-1)!
+    expect(detailsFrame).toContain("Task/evidence details · evidence list focus")
+    expect(detailsFrame).not.toContain("keep this draft")
+    expect(detailsFrame).not.toContain("You> ")
+    expect(detailsFrame).toContain("\u001b[?25l")
     expect(app.draftSnapshot()).toEqual({ draft: "keep this draft", queued: [] })
     expect(internal.editor.cursor).toBe(4)
     internal.input({ type: "key", key: "ctrl+d" })
@@ -192,28 +270,79 @@ describe("exclusive application input ownership", () => {
     internal.transcript.append({ provenance: "assistant", text })
 
     const rows = wrapTranscriptLine(`[Assistant] ${text}`, columns).length
-    expect(internal.transcriptScrollBounds()).toEqual({ pageRows: 21, maximumOffset: rows - 21 })
+    const pageRows = transcriptViewportRows({ columns, rows: 24, draft: "", cursor: 0, prompt: "You> " })
+    expect(internal.transcriptScrollBounds()).toEqual({ pageRows, maximumOffset: rows - pageRows })
+    app.close()
+  })
+
+  test.each([[80, 24], [120, 40]] as const)("approval document paging follows the shared viewport and preserves bounded decision focus at %ix%i", async (columns, rows) => {
+    const app = new TuiApp()
+    const internal = app as unknown as AppInput
+    internal.dimensions = () => ({ columns, rows })
+    const frames: string[] = []
+    internal.driver.write = frame => frames.push(frame)
+    app.setDraft("private approval draft")
+    const values = ["Approve exact plan", "Reject"]
+    const document = Array.from({ length: 60 }, (_, index) => `line-${index} ${"x".repeat(68)}`).join("\n")
+    const result = app.choose("Review canonical plan", values, new AbortController().signal, {
+      kind: "approval",
+      document,
+      binding: { sessionID: "session-1", workflowID: "workflow-1", expectedRevision: 3, planSha: "a".repeat(64), path: "plan.json" },
+    })
+    expect(frames.at(-1)).toContain("Review canonical plan · document focus")
+    expect(frames.at(-1)).not.toContain("private approval draft")
+    expect(frames.at(-1)).not.toContain("You> ")
+    expect(frames.at(-1)).toContain("\u001b[?25l")
+    const bodyRows = transcriptViewportRows({ columns, rows, draft: "", cursor: 0, prompt: "" })
+    const pageRows = Math.max(1, bodyRows - 6 - values.length)
+    const totalRows = document.split("\n").flatMap(line => wrapText(line, columns)).length
+
+    internal.input({ type: "key", key: "pageDown" })
+    expect(internal.choice?.documentOffset).toBe(pageRows)
+    expect(internal.choice?.documentAnchorLine).toBe(pageRows)
+    internal.input({ type: "key", key: "pageDown" })
+    expect(internal.choice?.documentOffset).toBe(Math.min(totalRows - pageRows, pageRows * 2))
+    expect(internal.choice?.documentOffset).toBeLessThanOrEqual(totalRows - pageRows)
+    internal.input({ type: "key", key: "tab" })
+    expect(internal.choice?.focus).toBe("decisions")
+    internal.input({ type: "key", key: "down" })
+    expect(internal.choice?.selected).toBe(1)
+    internal.input({ type: "key", key: "enter" })
+    expect(await result).toBe(1)
     app.close()
   })
 
   test("filtering chooses original indexes without changing the composer or selecting on paste", async () => {
     const app = new TuiApp()
     const internal = app as unknown as AppInput
+    internal.dimensions = () => ({ columns: 80, rows: 24 })
+    const frames: string[] = []
+    internal.driver.write = frame => frames.push(frame)
     const actions: string[] = []
     app.controls(action => actions.push(action))
     app.setDraft("retained draft")
+    internal.editor.cursor = 4
     const result = app.choose("Engine", ["local", "codex", "claude"], new AbortController().signal, {
       kind: "picker", purpose: "selection", rows: ["Local", "Codex", "Claude"],
     })
     let settled = false
     void result.then(() => { settled = true })
+    internal.input({ type: "key", key: "pageDown" })
+    expect(internal.choice?.selected).toBe(2)
+    internal.input({ type: "key", key: "pageDown" })
+    expect(internal.choice?.selected).toBe(2)
     internal.input({ type: "paste", text: "claude" })
     await Promise.resolve()
     expect(settled).toBe(false)
+    expect(frames.at(-1)).toContain("Engine · filter and selection focus")
+    expect(frames.at(-1)).toContain("Filter> claude")
+    expect(frames.at(-1)).not.toContain("You> ")
+    expect(frames.at(-1)).not.toContain("retained draft")
     expect(app.draftSnapshot().draft).toBe("retained draft")
     internal.input({ type: "key", key: "enter" })
     expect(await result).toBe(2)
     expect(app.draftSnapshot().draft).toBe("retained draft")
+    expect(internal.editor.cursor).toBe(4)
     internal.input({ type: "key", key: "ctrl+d" })
     expect(actions).toEqual(["quit"])
     app.close()

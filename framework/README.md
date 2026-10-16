@@ -126,7 +126,16 @@ exits after execution; rejection exits either frontend. Model switching never
 turns recovery into a different-model replay.
 
 Bare `lca` opens a model-unselected home with `/model`, `/help`, and `/quit` actions.
-The TUI has transcript, viewport/status, and composer regions and is enabled when all
+The TUI uses a fixed header, a top-aligned content area, and anchored status/input
+regions. Pickers and details occupy a separate panel rather than appearing as chat
+messages; non-text panels hide the retained draft and do not display an active chat
+prompt. Initial selection stays in the header/status instead of dumping a path
+banner into the transcript. A new conversation is identified by one compact notice.
+Transient main-model activity stays in status rather than becoming chat messages;
+errors and unconfirmed cancellation notices remain visible.
+Unselected help offers setup, theme/ASCII accessibility controls, and `/quit`;
+transcript search and task details become available after selecting a model.
+`/quit` is the single exit command. The TUI is enabled when all
 standard streams are TTYs, raw input is supported, `TERM` is set and not `dumb`,
 and the screen is at least 80x24. `LCA_TUI=0` selects readline. Unsupported
 terminals receive a plain fallback notice; missing stdin/stderr TTYs still

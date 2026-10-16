@@ -10,11 +10,12 @@ export type StatusInput = {
   readonly columns: number
   readonly notice?: string
   readonly ascii?: boolean
+  readonly selectionInHeader?: boolean
 }
 
 type Segment = { text: string; priority: number }
 
-function factSegments(facts: InteractiveViewFacts | undefined): Segment[] {
+function factSegments(facts: InteractiveViewFacts | undefined, selectionInHeader: boolean): Segment[] {
   if (!facts) return []
   const safety: string[] = []
   if (facts.identity.mode === "retained-read-only") safety.push("read-only")
@@ -30,7 +31,7 @@ function factSegments(facts: InteractiveViewFacts | undefined): Segment[] {
   }
   if (facts.request.state === "cancellation-unconfirmed") safety.push("request-cancel:?")
   const segments: Segment[] = safety.length ? [{ text: `safety[${safety.join(" ")}]`, priority: 200 }] : []
-  segments.push({ text: `${facts.selection.engine} / ${facts.selection.model}`, priority: 50 })
+  if (!selectionInHeader) segments.push({ text: `${facts.selection.engine} / ${facts.selection.model}`, priority: 50 })
   if (facts.request.state === "in-progress") segments.push({ text: "Model request running", priority: 90 })
   if (facts.discovery === "failed") segments.push({ text: "Model list unavailable", priority: 85 })
   if (facts.hold.state === "known" && facts.hold.value.held && facts.hold.value.reason) {
@@ -65,7 +66,7 @@ function pack(segments: readonly Segment[], columns: number, separator: string):
 
 export function statusLines(input: StatusInput): string[] {
   const segments: Segment[] = [
-    ...factSegments(input.facts),
+    ...factSegments(input.facts, input.selectionInHeader === true),
     ...(input.search ? [{ text: `search: ${input.search}`, priority: 70 }] : []),
     ...(input.queued ? [{ text: `queued ${input.queued}`, priority: 75 }] : []),
     ...(input.workflow ? [{ text: input.workflow, priority: 80 }] : []),
