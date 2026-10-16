@@ -38,9 +38,13 @@ function skillRow(entry: SkillCatalogEntry): PaletteRow {
 }
 
 function skillRows(catalog: SkillCatalog | undefined): PaletteRow[] {
+  // A Codex/Claude copy of a builtin workflow is refused by name; the builtin row already covers it.
+  const builtin = new Set((catalog?.entries ?? [])
+    .filter(entry => entry.descriptor.kind === "protected-workflow" && entry.descriptor.source === "builtin")
+    .map(entry => entry.descriptor.name))
   return [
     ...(catalog?.entries ?? []).map(skillRow),
-    ...(catalog?.refusals ?? []).map(refusal => ({
+    ...(catalog?.refusals ?? []).filter(refusal => !(refusal.reason === "protected-name" && refusal.name && builtin.has(refusal.name))).map(refusal => ({
       kind: "skill" as const,
       label: `skill:${refusal.name ?? "(unnamed)"}`,
       name: refusal.name ?? "(unnamed)",

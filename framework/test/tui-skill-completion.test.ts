@@ -91,6 +91,14 @@ describe("TUI command and skill palette", () => {
     expect(formatPaletteRow({ kind: "command", label: "/a-very-long-command-name-here", name: "x", description: "d" }, 10)).toBe("/a-very-l…  d")
   })
 
+  test("a Codex copy of a builtin workflow is not listed beside the builtin", () => {
+    const shadowed: SkillCatalog = { ...catalog, refusals: [...catalog.refusals,
+      { source: "home", name: "deep-interview", identities: ["home:.codex/skills/deep-interview"], reason: "protected-name" }] }
+    const rows = palette(shadowed, "/deep")!.rows
+    expect(rows.filter(row => row.name === "deep-interview")).toHaveLength(1)
+    expect(paletteInsertion(rows[0])).toBe("/skill:deep-interview ")
+  })
+
   test("keeps protected names non-selectable unless the descriptor is builtin", () => {
     const rows = palette(catalog, "/skill:")!.rows
     expect(paletteInsertion(rows.find(row => row.name === "ralplan"))).toBeUndefined()

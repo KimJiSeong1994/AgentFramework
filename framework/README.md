@@ -319,6 +319,25 @@ the existing execution lease, and retain unresolved ownership after failures ins
 of replaying a completed or unknown process. The separate OpenCode imported-plan
 commands below retain their own admission requirements.
 
+### Interactive skills: where `/skill:<name>` comes from
+
+Typing `/` in the TUI lists commands and skills together, fuzzy-matched by name (`/depp` finds
+`skill:deep-interview`); Enter inserts `/skill:<name> ` and never invokes it. Skills are read from these roots, in
+precedence order (the first root that has a name wins; two different directories in one tier are refused as
+ambiguous, while the same directory reached through a symlink is one skill):
+
+1. Project native: `.opencode/skills`, `.agents/skills`, `.gjc/skills` (GJC's project root; a symlink to
+   `.agents/skills` adds nothing).
+2. Home native: `~/.agents/skills`, `~/.claude/skills`, `~/.config/opencode/skills`, `~/.gjc/agent/skills`,
+   `~/.gjc/skills`.
+3. Import roots, filling only names no native root has: project `.claude/skills` and `.codex/skills`, then
+   `~/.codex/skills` (GJC/oh-my-codex skills).
+
+The four builtin workflow names below always win; a Codex/Claude copy of `ralplan`, `deep-interview`, `ultragoal`
+or `autoresearch` is refused and hidden from the palette. Every skill still needs per-session source consent before
+its content is used. A refused or unsafe GJC/import root is reported for that root alone and never hides other
+skills.
+
 ### LCA workflows: truth labels and the four kinds
 
 LCA owns four workflow kinds on one authority (`workflow/workflow.json`) and never runs GJC. They are started only by

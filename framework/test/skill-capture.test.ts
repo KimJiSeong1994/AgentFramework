@@ -172,6 +172,64 @@ describe("skill discovery", () => {
     expect(result.refusals.some((item) => item.name === "home-ambiguous" && item.source === "home" && item.reason === "ambiguous")).toBe(true)
   })
 
+  test("reads GJC roots: native .gjc skills, Codex/Claude import roots, and symlinked duplicates as one skill", async () => {
+    writeSkill("gjc-project", { base: ".gjc/skills" })
+    writeSkill("gjc-user", { root: home, base: ".gjc/agent/skills" })
+    writeSkill("gjc-legacy", { root: home, base: ".gjc/skills" })
+    writeSkill("codex-only", { root: home, base: ".codex/skills" })
+    writeSkill("project-codex", { base: ".codex/skills" })
+    writeSkill("project-claude", { base: ".claude/skills" })
+    // Native wins over import: the Codex copy fills nothing when a native root has the name.
+    writeSkill("shared", { root: home, base: ".agents/skills" })
+    writeSkill("shared", { root: home, base: ".codex/skills" })
+    // ~/.claude/skills/<n> -> ../../.agents/skills/<n> is the same directory, not an ambiguity.
+    writeSkill("linked", { root: home, base: ".agents/skills" })
+    mkdirSync(join(home, ".claude/skills"), { recursive: true })
+    symlinkSync("../../.agents/skills/linked", join(home, ".claude/skills/linked"))
+    // Two distinct native directories with one name stay ambiguous.
+    writeSkill("twice", { root: home, base: ".agents/skills" })
+    writeSkill("twice", { root: home, base: ".gjc/agent/skills" })
+    // Codex internals and copies of builtin workflows never become skills.
+    mkdirSync(join(home, ".codex/skills/.system"), { recursive: true })
+    writeSkill("ralplan", { root: home, base: ".codex/skills" })
+
+    const result = await discoverSkills(roots)
+    const identity = (name: string) => result.descriptors.find((item) => item.name === name)?.identity
+    expect(identity("gjc-project")).toBe("project:.gjc/skills/gjc-project")
+    expect(identity("gjc-user")).toBe("home:.gjc/agent/skills/gjc-user")
+    expect(identity("gjc-legacy")).toBe("home:.gjc/skills/gjc-legacy")
+    expect(identity("codex-only")).toBe("home:.codex/skills/codex-only")
+    expect(identity("project-codex")).toBe("project:.codex/skills/project-codex")
+    expect(identity("project-claude")).toBe("project:.claude/skills/project-claude")
+    expect(identity("shared")).toBe("home:.agents/skills/shared")
+    expect(identity("linked")).toBe("home:.agents/skills/linked")
+    expect(identity("twice")).toBeUndefined()
+    expect(result.refusals.some((item) => item.name === "twice" && item.reason === "ambiguous")).toBe(true)
+    expect(result.refusals.some((item) => item.name === "shared" || item.name === "linked")).toBe(false)
+    expect(result.refusals.some((item) => item.name === ".system")).toBe(false)
+    expect(result.descriptors.find((item) => item.name === "ralplan")).toEqual(PROTECTED_WORKFLOWS.find((item) => item.name === "ralplan"))
+    // An import-root skill is capturable through the same identity discovery reported.
+    const captured = await captureSkill(roots, await findDescriptor("codex-only"))
+    expect(captured.descriptor.identity).toBe("home:.codex/skills/codex-only")
+  })
+
+  test("a symlinked GJC base aliasing another root adds nothing; any other symlinked base stays local to that base", async () => {
+    writeSkill("agents-skill")
+    mkdirSync(join(project, ".gjc"), { recursive: true })
+    symlinkSync("../.agents/skills", join(project, ".gjc/skills"))
+    let result = await discoverSkills(roots)
+    expect(result.descriptors.find((item) => item.name === "agents-skill")?.identity).toBe("project:.agents/skills/agents-skill")
+    expect(result.refusals).toEqual([])
+
+    rmSync(join(project, ".gjc/skills"))
+    mkdirSync(join(project, "elsewhere/other"), { recursive: true })
+    symlinkSync("../elsewhere", join(project, ".gjc/skills"))
+    result = await discoverSkills(roots)
+    // The refused optional base never hides the project's other skills.
+    expect(result.descriptors.find((item) => item.name === "agents-skill")).toBeDefined()
+    expect(result.refusals).toEqual([expect.objectContaining({ source: "project", reason: "unsafe-path", identities: ["project:.gjc/skills"] })])
+  })
+
   test("refuses malformed metadata and validates allowed-tools against the execution tool registry", async () => {
     writeSkill("malformed")
     writeFileSync(join(project, BASE, "malformed", "SKILL.md"), "---\nname: [broken\ndescription: no\n---\n")
