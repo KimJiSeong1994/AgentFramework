@@ -18,6 +18,11 @@ export type PaletteRow = Readonly<{
 export type Palette = Readonly<{ query: string; skillsOnly: boolean; rows: readonly PaletteRow[] }>
 
 const protectedWorkflowNames = new Set(["deep-interview", "ralplan", "ultragoal", "autoresearch"])
+/** Shown instead of skills before a model is chosen: no skill session (or catalog) exists yet. Not insertable. */
+const UNSELECTED_SKILLS: PaletteRow = Object.freeze({
+  kind: "command", label: "skill:…", name: "skill",
+  description: "choose a model with /model first; skills are listed once a session starts",
+})
 const LABEL_COLUMNS = 26
 
 function skillRow(entry: SkillCatalogEntry): PaletteRow {
@@ -108,7 +113,7 @@ export function palette(catalog: SkillCatalog | undefined, draft: string, contex
   const skillsAllowed = interactiveActions(context).some(action => action.id === "skill")
   const scoped = /^\/skill:([^\s]*)$/u.exec(draft)
   if (scoped) {
-    if (!skillsAllowed) return undefined
+    if (!skillsAllowed) return context === "unselected" ? { query: scoped[1] ?? "", skillsOnly: true, rows: [UNSELECTED_SKILLS] } : undefined
     const query = (scoped[1] ?? "").toLocaleLowerCase()
     const rows = skillRows(catalog).filter(row => !query || row.name.toLocaleLowerCase().includes(query) ||
       row.description.toLocaleLowerCase().includes(query) || (row.refusal !== undefined && row.source?.includes(query)))
@@ -119,9 +124,18 @@ export function palette(catalog: SkillCatalog | undefined, draft: string, contex
   const query = general[1] ?? ""
   const candidates = [...commandRows(context), ...(skillsAllowed ? skillRows(catalog) : [])]
   const ranked = candidates.flatMap((row, order) => {
-    const score = fuzzyScore(query, row.name)
+    // A skill also matches by its shown label (prefix/substring only), so `/skill` lists every `skill:<name>`.
+    const byName = fuzzyScore(query, row.name)
+    const labelScore = row.kind === "skill" && query.length >= 2 ? fuzzyScore(query, row.label) : undefined
+    const byLabel = labelScore !== undefined && labelScore < 100 ? labelScore : undefined
+    const score = byName === undefined ? byLabel : byLabel === undefined ? byName : Math.min(byName, byLabel)
     return score === undefined ? [] : [{ row, score, order }]
   }).sort((left, right) => left.score - right.score || left.order - right.order)
+  // Before a model is chosen no skill can run; say so instead of looking like no skills exist.
+  if (!skillsAllowed && context === "unselected" && query.length >= 2 && (fuzzyScore(query, "skill:") ?? 100) < 100) {
+    ranked.push({ row: UNSELECTED_SKILLS, score: 1, order: -1 })
+    ranked.sort((left, right) => left.score - right.score || left.order - right.order)
+  }
   if (!ranked.length) return undefined
   return { query, skillsOnly: false, rows: ranked.map(item => item.row) }
 }
