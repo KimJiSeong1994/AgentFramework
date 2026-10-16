@@ -3,6 +3,27 @@
 > **lca (자체 에이전트 프레임워크)**: `framework/README.md` (사용법·설정), 설계 `docs/agent-framework-review-2026-09-22.md`,
 > 구현 결과 `docs/lca-stage1-2026-09-22.md`, `docs/lca-stage2-2026-09-23.md`, `docs/lca-stage3-2026-09-23.md`(데이터 레이어), `docs/lca-stage4-2026-09-23.md`(온톨로지 진화 배치), `docs/lca-stage5-2026-09-23.md`(모델 비교). 아래는 OpenCode/Ollama 및 선택적 Strata 연동 환경 설정 문서입니다.
 
+## 설치 (한 줄)
+
+저장소가 비공개이므로 GitHub 접근 권한이 있는 계정으로 `gh auth login`이 된 상태에서 실행합니다.
+
+```sh
+gh api repos/KimJiSeong1994/AgentFramework/contents/install.sh -H "Accept: application/vnd.github.raw" | bash
+```
+
+- 저장소를 `~/.local/share/lca/AgentFramework`에 받고, 실행 의존성만 설치한 뒤 `~/.local/bin/lca`를 만듭니다.
+  `~/.local/bin`이 PATH에 없으면 셸 설정 파일(zsh `~/.zshrc`, bash, fish)에 한 블록을 추가합니다.
+- 필요 조건: macOS 또는 Linux(arm64/x64), `git`. `bun`(1.2 이상)이 없으면 공식 설치 스크립트로 설치합니다.
+- 엔진은 따로 설치합니다: 로컬 `ollama`, `codex`, `claude` 중 하나 이상이 PATH에 있어야 합니다. 설치가 끝나면 찾은 엔진을 알려 줍니다.
+- 같은 명령을 다시 실행하면 최신 `master`로 업데이트합니다. 설치 폴더를 직접 수정했다면 덮어쓰지 않고 멈춥니다.
+- 제거: `~/.local/share/lca/AgentFramework/install.sh --uninstall` — 설치기가 만든 실행 파일·소스·PATH 블록만 지우고
+  설정(`~/.config/lca`)과 세션 기록(`~/.local/state/lca`)은 남깁니다.
+- 옵션(환경 변수): `LCA_REF`(브랜치·태그·커밋), `LCA_HOME`, `LCA_BIN_DIR`, `LCA_NO_MODIFY_PATH=1`,
+  `LCA_NO_BUN_INSTALL=1`, `LCA_REPO`(예: SSH `git@github.com:KimJiSeong1994/AgentFramework.git`),
+  `LCA_FORCE=1`(설치기가 만들지 않은 기존 `lca` 실행 파일을 교체).
+
+저장소 checkout에서 바로 설치하려면 `./install.sh`를 실행합니다.
+
 ## LCA 공통 선택
 
 `lca`는 OpenCode를 자동으로 열지 않고 로컬(Ollama CLI)·Codex·Claude 엔진과 모델을 선택합니다.
