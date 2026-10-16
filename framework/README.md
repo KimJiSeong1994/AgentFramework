@@ -334,9 +334,23 @@ ambiguous, while the same directory reached through a symlink is one skill):
    `~/.codex/skills` (GJC/oh-my-codex skills).
 
 The four builtin workflow names below always win; a Codex/Claude copy of `ralplan`, `deep-interview`, `ultragoal`
-or `autoresearch` is refused and hidden from the palette. Every skill still needs per-session source consent before
-its content is used. A refused or unsafe GJC/import root is reported for that root alone and never hides other
-skills.
+or `autoresearch` is refused and hidden from the palette. A refused or unsafe GJC/import root is reported for that
+root alone and never hides other skills.
+
+Committed project skills are used directly. Other skills ask "Allow this content in this session" once per session
+unless the operator trusts them in the **user** config (`~/.config/lca/lca.jsonc`):
+
+```jsonc
+{
+  // skill names, or folders as absolute or ~/ paths
+  "skill_trust": ["code-review", "~/.codex/skills", "~/.gjc/agent/skills"]
+}
+```
+
+Trusted skills skip only that prompt, even when their content changes; tool permissions, path restrictions and
+execution approvals are unchanged. `skill_trust` in a project's `.lca/lca.jsonc` is ignored, so a cloned repository
+cannot approve skills for itself. An invalid list trusts nothing and is reported once per session; `/skills` marks
+trusted entries and `/skills grants` shows `trusted by config`.
 
 ### LCA workflows: truth labels and the four kinds
 

@@ -17,6 +17,7 @@ import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask,
 import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
 import { PROTECTED_WORKFLOWS, resolveSkillRoots } from "../skills/roots.ts"
 import { SkillSession, type PreparedSkillInvocation, type SkillCatalog } from "../skills/session.ts"
+import { readSkillTrust } from "../skills/trust.ts"
 import { attachAdmission, detachAdmission, effectiveHold, holdAdmission, resumeAdmission } from "../sessions/admission.ts"
 import { inspectSessions, MAX_CARRIED_MESSAGES, MAX_SHELL_COMMAND_BYTES, readSessionMetadata, replaySession, type SessionStore, type ReplayOptions, type ReplayResult, type TranscriptKind } from "../sessions/store.ts"
 import { persistToolActivity } from "../tui/session-transcript.ts"
@@ -588,13 +589,15 @@ function skillCatalogLines(catalog: SkillCatalog): string[] {
       ? ` · declared tools: ${descriptor.allowedTools.join(", ") || "none"}`
       : ""
     const refusal = entry.refusal ? ` · unavailable: ${terminalSafeText(entry.refusal)}` : ""
-    lines.push(`  /skill:${descriptor.name} · ${descriptor.source} · ${classification}${description ? ` · ${description}` : ""}${scope}${refusal}`)
+    const trusted = entry.trusted ? " · trusted" : ""
+    lines.push(`  /skill:${descriptor.name} · ${descriptor.source} · ${classification}${trusted}${description ? ` · ${description}` : ""}${scope}${refusal}`)
   }
   for (const refusal of catalog.refusals) {
     const name = refusal.name ? ` ${boundedTerminalDiagnostic(refusal.name, 120)}` : ""
     lines.push(`  Refused ${refusal.source}${name} · ${refusal.reason}`)
   }
   if (!catalog.entries.length && !catalog.refusals.length) lines.push("  No skills or protected workflows were discovered.")
+  if (catalog.entries.some(entry => entry.trusted)) lines.push("Trusted skills (skill_trust in the user lca.jsonc) skip the consent prompt; tool and execution approvals are unchanged.")
   lines.push("Only a submitted /skill:<name> command invokes a skill. deep-interview, ralplan, ultragoal and autoresearch start LCA-owned workflows; invoking a name is not execution consent, and unit/experiment work still needs typed approval.")
   return lines
 }
@@ -812,7 +815,9 @@ export async function runInteractiveSession(
       latestSkillCatalog = undefined
       try {
         const roots = await resolveSkillRoots({ projectRoot: worktree, homeDirectory: homedir() })
-        const candidate = await SkillSession.create({ roots, store, terminal: skillTerminal }, abort.signal)
+        const trust = readSkillTrust()
+        if (trust.problem) visibleWrite(terminalSafeText(`Skill trust ignored: ${boundedTerminalDiagnostic(trust.problem)}. Skills still ask for consent.\n`))
+        const candidate = await SkillSession.create({ roots, store, terminal: skillTerminal, trust: trust.trust }, abort.signal)
         if (abort.signal.aborted || sessionStore !== store || retainedSDKSessionID) {
           candidate.close()
           return
@@ -1809,7 +1814,7 @@ export async function runInteractiveSession(
             const grants = skillSession.listGrants()
             const grantSessionID = skillSession.store.sessionID
             visibleWrite(grants.length ? grants.map(grant =>
-              `${terminalSafeText(grantSessionID)} · ${terminalSafeText(grant.name)} · ${grant.source} · ${grant.classification} · ${grant.contentHash} · ${grant.allowedTools?.join(", ") ?? "current role tools"}`,
+              `${terminalSafeText(grantSessionID)} · ${terminalSafeText(grant.name)} · ${grant.source} · ${grant.classification}${grant.trusted ? " · trusted by config" : ""} · ${grant.contentHash} · ${grant.allowedTools?.join(", ") ?? "current role tools"}`,
             ).join("\n") + "\n" : "No session skill grants.\n")
           }
           continue
