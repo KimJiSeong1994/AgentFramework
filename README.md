@@ -1,29 +1,44 @@
-# AgentFramework — Execute to Asset
+# AgentFramework (`lca`)
 
-> **Transform execution traces into structured, local knowledge.**
+**에이전트 실행 이력을 버리지 않고 자산으로 쌓는 코딩 에이전트 프레임워크.**
 
-`lca` (Local Coding Agent) is a local-first framework designed to go beyond simple task execution. It treats every interaction—plans, tool outputs, and chat histories—as valuable assets that are automatically captured and organized into a queryable local knowledge base.
+대화는 끝나면 사라지지만, 계획·승인·도구 실행 결과는 남아야 합니다.
+`lca`는 모든 작업을 계획 → 승인 → 실행 흐름으로 기록하고, 그 이력을 검색·재사용 가능한 로컬 지식으로 축적합니다.
 
-## Core Value
-- **Assetization**: Automatically converts every execution trace (logs, sessions, tool results) into structured, permanent assets.
-- **Knowledge Loop**: Transforms raw interaction history into organized Wikis, Entities, and Reports.
-- **Rigorous Workflow**: A high-fidelity [Plan] $\to$ [Execute] $\to$ [Verify] cycle.
-- **Engine Agnostic**: Connect any LLM (Ollama, Codex, Claude) to your local asset pipeline.
+## 기능
 
-## Quick Start
+- **실행 이력 기록** — 도구 호출 결과를 append-only SQLite 로그로 남깁니다(인자·출력 본문은 저장하지 않음).
+- **지식 위키로 축적** — `lca-wiki capture`가 실행 이력을 불변 원본 스냅샷 + 리포트로 만들고, `knowledge/wiki`에 출처가 연결된 개념·엔티티 페이지로 쌓습니다.
+- **세션 보관·복원** — `/sessions`로 지난 작업을 보고 `/resume <sid>`로 이어갑니다.
+- **통제된 실행** — `/plan` → `/approve` 후에만 실행하며, 원장(ledger)으로 승인·실행 기록을 추적합니다.
+- **워크플로·스킬** — `ralplan`, `deep-interview`, `ultragoal`, `autoresearch` 내장 워크플로와 `/skill:<name>` 스킬.
+- **엔진 무관** — Ollama(로컬)·Codex·Claude CLI 중 무엇을 써도 이력은 같은 형식으로 쌓입니다.
+
+## 설치
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/KimJiSeong1994/AgentFramework/master/install.sh | bash
 ```
 
-## Usage
+macOS/Linux, `git` 필요(`bun`은 없으면 자동 설치). 엔진(`ollama`/`codex`/`claude`) 중 하나 이상이 PATH에 있어야 합니다.
+다시 실행하면 업데이트, `~/.local/share/lca/AgentFramework/install.sh --uninstall`로 제거합니다.
 
-- `lca chat`: Start an interactive session and begin generating assets.
-- `lca chat --engine <local|codex|claude>`: Select your engine.
-- `/sessions`: View and resume your accumulated asset history.
-- `/model <engine> <model>`: Switch models within a session.
+## 사용
 
-## Documentation
-- **LCA Guide**: `framework/README.md`
-- **Architecture**: `docs/agent-framework-review-2026-09-22.md`
-- **Setup**: `docs/ubuntu-setup.md`
+```sh
+lca chat                                   # 엔진·모델 선택 후 대화
+lca chat --engine codex --model gpt-5.6-sol
+bun scripts/lca-wiki.ts capture            # 실행 이력 → 지식 위키
+```
+
+대화 중: `/plan` · `/approve` · `/sessions` · `/resume <sid>` · `/model` · `/help`
+
+## 문서
+
+- 사용법·설정: [`framework/README.md`](framework/README.md)
+- 위키 스키마: [`knowledge/AGENTS.md`](knowledge/AGENTS.md)
+- 설계: [`docs/agent-framework-review-2026-09-22.md`](docs/agent-framework-review-2026-09-22.md)
+
+## 라이선스
+
+[MIT](LICENSE)
