@@ -942,6 +942,14 @@ export async function runInteractiveSession(
         if (input === undefined) return { code: 0 }
         const message = input.trim()
         if (!message) continue
+        if (message.startsWith("!")) {
+          // No session exists yet: the run is shown but not recorded.
+          const shellCommand = message.slice(1).trim()
+          if (!shellCommand) visibleWrite("Usage: !<command> runs one shell command in the worktree.\n")
+          else if (Buffer.byteLength(shellCommand, "utf8") > MAX_SHELL_COMMAND_BYTES) visibleWrite(`Shell command exceeds ${MAX_SHELL_COMMAND_BYTES} bytes; no command was run.\n`)
+          else await runShell(shellCommand, worktree)
+          continue
+        }
         const [command, ...commandArgs] = message.split(/\s+/u)
         if (command === "/quit" && commandArgs.length === 0) return { code: 0 }
         if (command === "/help" && hasInteractiveAction("unselected", "help")) {

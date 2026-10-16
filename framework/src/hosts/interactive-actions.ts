@@ -27,6 +27,7 @@ const all: readonly InteractiveAction[] = [
   { id: "ascii", syntax: "/ascii", summary: "toggle ASCII chrome for this process", contexts: ["chat", "busy", "held", "read-only", "unselected"], local: true },
   { id: "finish", syntax: "/finish", summary: "finish an active interview prompt", contexts: ["chat"] },
   { id: "plan", syntax: "/plan", summary: "send a planning prompt; it grants no execution authority", contexts: ["chat"] },
+  { id: "shell", syntax: "!<command>", summary: "run one shell command in the worktree; shown, never sent to the model", contexts: ["chat", "held", "unselected"] },
   { id: "quit", syntax: "/quit", summary: "request exit", contexts: ["chat", "busy", "held", "read-only", "selection", "unselected"] },
 ]
 

@@ -157,7 +157,14 @@ export class TuiApp implements Terminal {
     const previous = this.transcript
     this.transcript = new TranscriptModel(sessionID)
     if (previous.sessionID === "selection") {
-      for (const item of previous.items) if (item.kind === "text") this.transcript.append({ provenance: item.provenance, text: item.text })
+      for (const item of previous.items) {
+        if (item.kind === "text") this.transcript.append({ provenance: item.provenance, text: item.text })
+        else if (item.kind === "shell" && item.status !== "running") {
+          this.transcript.shellStarted(item.id, item.command, item.ordinal)
+          this.transcript.shellFinished(item.id, { status: item.status, exitCode: item.exitCode, signal: item.signal,
+            durationMs: item.durationMs ?? 0, lines: item.lines, totalLines: item.totalLines })
+        }
+      }
     }
     this.transcriptQuery = undefined
     this.scrollOffset = 0

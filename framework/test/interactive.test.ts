@@ -765,6 +765,18 @@ describe("interactive terminal", () => {
     expect(h.calls.output.join("")).toContain("No model selected; use /model to choose an engine and model. Nothing was sent.")
   })
 
+  test("!command runs before any model is selected without creating a runtime or session", async () => {
+    const h = harness({ lines: ["!echo before-model", "/help", "/quit"] })
+    expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
+    const output = h.calls.output.join("")
+    expect(output).toContain("$ echo before-model\nbefore-model\n[shell] exit 0 · ")
+    expect(output).toContain("!<command> — run one shell command in the worktree")
+    expect(output).not.toContain("No model selected")
+    expect(h.calls.runtimes).toHaveLength(0)
+    expect(h.calls.sessionIDs).toEqual([])
+    expect(h.calls.turns).toEqual([])
+  })
+
   test("engine picker cancellation returns to the unselected composer", async () => {
     const h = harness({
       fullscreen: true,
@@ -802,7 +814,7 @@ describe("interactive terminal", () => {
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     const commands = h.calls.choices.find(choice => choice.title === "Commands")!.values
       .map(value => value.split(" ")[0])
-    expect(commands).toEqual(["/help", "/model", "/theme", "/ascii", "/quit"])
+    expect(commands).toEqual(["/help", "/model", "/theme", "/ascii", "!", "/quit"])
     expect(h.calls.runtimes).toEqual([])
     expect(h.calls.discoveries).toEqual([])
     expect(h.calls.turns).toEqual([])
