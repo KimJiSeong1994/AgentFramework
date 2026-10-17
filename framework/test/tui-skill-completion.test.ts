@@ -85,9 +85,7 @@ describe("TUI command and skill palette", () => {
 
   test("skills appear only where they can be invoked; commands follow the context", () => {
     expect(palette(catalog, "/rev", "unselected")).toBeUndefined()
-    // Fuzzy: "/mo" also subsequence-matches c-o-m-b-o, but the prefix match ranks first.
-    expect(palette(catalog, "/mo", "unselected")?.rows.map(row => row.label)).toEqual(["/model", "/combo"])
-    expect(palette(catalog, "/com", "unselected")?.rows.map(row => row.label)).toEqual(["/combo"])
+    expect(palette(catalog, "/mo", "unselected")?.rows.map(row => row.label)).toEqual(["/model"])
     expect(palette(catalog, "/", "read-only")!.rows.some(row => row.kind === "skill")).toBe(false)
   })
 

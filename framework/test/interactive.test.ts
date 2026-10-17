@@ -736,7 +736,7 @@ describe("interactive terminal", () => {
     expect(chrome[2]).toContain("── Model selection · codex\n")
     expect(chrome[3]).toContain("── codex · gpt-5-codex\n")
     expect(chrome[3]).toContain("Enter send · /help commands · /model switch · /quit exit")
-    expect(h.calls.prompts).toEqual(["You> ", "Engine [1-3]: ", "Model [1-2 or native ID]: ", "You> "])
+    expect(h.calls.prompts).toEqual(["You> ", "Engine [1-4]: ", "Model [1-2 or native ID]: ", "You> "])
     expect(h.calls.approvalRequest).toBeUndefined()
   })
 
@@ -771,7 +771,7 @@ describe("interactive terminal", () => {
     const h = harness({ lines: ["/model", "codex", cancel, "hello without selection", "/quit"] })
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
 
-    expect(h.calls.prompts).toEqual(["You> ", "Engine [1-3]: ", "Model [1-2 or native ID]: ", "You> ", "You> "])
+    expect(h.calls.prompts).toEqual(["You> ", "Engine [1-4]: ", "Model [1-2 or native ID]: ", "You> ", "You> "])
     expect(h.calls.discoveries).toEqual([{ engine: "codex", worktree: realpathSync(wt.worktree) }])
     expect(h.calls.runtimes).toHaveLength(0)
     expect(h.calls.controllerCreations).toBe(0)
@@ -828,7 +828,7 @@ describe("interactive terminal", () => {
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     const commands = h.calls.choices.find(choice => choice.title === "Commands")!.values
       .map(value => value.split(" ")[0])
-    expect(commands).toEqual(["/help", "/model", "/combo", "/theme", "/ascii", "!", "/quit"])
+    expect(commands).toEqual(["/help", "/model", "/theme", "/ascii", "!", "/quit"])
     expect(h.calls.runtimes).toEqual([])
     expect(h.calls.discoveries).toEqual([])
     expect(h.calls.turns).toEqual([])
@@ -933,7 +933,7 @@ describe("interactive terminal", () => {
     h = harness({
       lines: ["hello before selection", "/model", "2", "gpt-5-codex", "hello after selection", "/quit"],
       beforeRead(prompt) {
-        if (prompt === "Engine [1-3]: ") selectionStarted = true
+        if (prompt === "Engine [1-4]: ") selectionStarted = true
         if (!selectionStarted) {
           expect(h.calls.runtimes).toHaveLength(0)
           expect(h.calls.discoveries).toEqual([])
@@ -946,7 +946,7 @@ describe("interactive terminal", () => {
     expect(result.code).toBe(0)
     expect(h.calls.prompts[0]).toBe("You> ")
     expect(h.calls.prompts[1]).toBe("You> ")
-    expect(h.calls.prompts[2]).toBe("Engine [1-3]: ")
+    expect(h.calls.prompts[2]).toBe("Engine [1-4]: ")
     expect(h.calls.output.join("")).toContain("Choose an execution engine")
     expect(h.calls.prompts[3]).toBe("Model [1-2 or native ID]: ")
     expect(h.calls.runtime).toEqual({ worktree: realpathSync(wt.worktree), engine: "codex", model: "gpt-5-codex" })
@@ -996,7 +996,7 @@ describe("interactive terminal", () => {
     await launchInteractive({ worktree: wt.worktree }, h.deps)
 
     expect(h.calls.choices.map(choice => choice.presentation?.kind)).toEqual(["picker", "picker"])
-    expect(h.calls.choices[0]?.values).toEqual(["local — Ollama CLI", "codex — Codex CLI", "claude — Claude CLI"])
+    expect(h.calls.choices[0]?.values).toEqual(["local — Ollama CLI", "codex — Codex CLI", "claude — Claude CLI", "combo — per-role models"])
     expect(h.calls.choices[1]?.title).toContain("Choose a model · codex")
     expect(h.calls.choices[1]?.presentation).toMatchObject({ kind: "picker", purpose: "selection" })
     expect(h.calls.discoveries).toEqual([{ engine: "codex", worktree: realpathSync(wt.worktree) }])
@@ -1138,7 +1138,7 @@ describe("interactive terminal", () => {
       },
     })
     await launchInteractive({ worktree: wt.worktree, model: "manual-native-id" }, modelOnly.deps)
-    expect(modelOnly.calls.prompts).toEqual(["You> ", "You> ", "Engine [1-3]: ", "You> "])
+    expect(modelOnly.calls.prompts).toEqual(["You> ", "You> ", "Engine [1-4]: ", "You> "])
     expect(modelOnly.calls.runtime?.engine).toBe("codex")
     expect(modelOnly.calls.runtime?.model).toBe("manual-native-id")
     expect(modelOnly.calls.discoveries).toEqual([])
@@ -1155,8 +1155,8 @@ describe("interactive terminal", () => {
     const result = await launchInteractive({ worktree: wt.worktree }, h.deps)
     expect(result.code).toBe(0)
     expect(h.calls.prompts[0]).toBe("You> ")
-    expect(h.calls.prompts[1]).toBe("Engine [1-3]: ")
-    expect(h.calls.prompts[2]).toBe("Engine [1-3]: ")
+    expect(h.calls.prompts[1]).toBe("Engine [1-4]: ")
+    expect(h.calls.prompts[2]).toBe("Engine [1-4]: ")
     expect(h.calls.output.join("").split("Choose an execution engine:")).toHaveLength(2)
     expect(h.calls.output.join("").split("Model choices for claude:")).toHaveLength(2)
     expect(h.calls.prompts[3]).toBe("Model [1-2 or native ID]: ")
@@ -1325,7 +1325,7 @@ describe("interactive terminal", () => {
   })
 
   test("/model combo saves a role route without switching and shows sources", async () => {
-    const h = harness({ lines: ["/model combo architect codex gpt-5.6-sol", "/model combo", "/model combo clear architect", "/model combo clear", "/model combo bogus x y", "/quit"] })
+    const h = harness({ lines: ["/model combo architect codex gpt-5.6-sol", "/model combo show", "/model combo clear architect", "/model combo clear", "/model combo bogus x y", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
     const output = h.calls.output.join("")
     expect(h.calls.comboWrites).toEqual([
@@ -1335,16 +1335,16 @@ describe("interactive terminal", () => {
     ])
     expect(output).toContain("Saved combo route architect -> codex / gpt-5.6-sol to /config/otter/otter.jsonc.")
     expect(output).toContain("architect: codex / gpt-5.6-sol (user config)")
-    expect(output).toContain("/combo apply starts a new session")
-    expect(output).toContain("Usage: /combo (menu) or /combo [show")
+    expect(output).toContain("/model combo apply starts a new session")
+    expect(output).toContain("Usage: /model combo (menu) or /model combo [show")
     expect(h.calls.runtimes).toHaveLength(1)
   })
 
-  test("/combo opens a role -> engine -> model picker that saves through the same validation", async () => {
+  test("/model combo opens a role -> engine -> model menu that saves through the same validation", async () => {
     const titles: string[] = []
     const h = harness({
       fullscreen: true,
-      lines: ["/combo", "/quit"],
+      lines: ["/model combo", "/quit"],
       choose: async (title, values) => {
         titles.push(title)
         if (title.startsWith("Combo · main")) return titles.filter(t => t.startsWith("Combo · main")).length === 1
@@ -1363,11 +1363,35 @@ describe("interactive terminal", () => {
     expect(h.calls.runtimes).toHaveLength(1)
   })
 
-  test("/combo picker: 'use the main model' clears the role, apply starts a new session, Escape saves nothing", async () => {
+  test("/model lists combo under the engines and opens the same combo menu", async () => {
+    const titles: string[] = []
+    const h = harness({
+      fullscreen: true,
+      lines: ["/model", "/quit"],
+      choose: async (title, values) => {
+        titles.push(title)
+        if (title === "Choose an execution engine") return values.indexOf("combo — per-role models")
+        if (title.startsWith("Combo · main")) return titles.filter(t => t.startsWith("Combo · main")).length === 1
+          ? values.findIndex(value => value.startsWith("critic —"))
+          : values.indexOf("Done")
+        if (title === "Combo · critic · engine") return 0
+        if (title === "Choose a model · local") return 0
+        return undefined
+      },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "original" }, h.deps)
+    expect(titles[0]).toBe("Choose an execution engine")
+    expect(titles[1]).toBe("Combo · main: codex / original")
+    expect(h.calls.comboWrites).toEqual([{ role: "critic", route: { engine: "local", model: "llama3.2" } }])
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.runtimes[0]).toMatchObject({ engine: "codex", model: "original" })
+  })
+
+  test("combo menu: 'use the main model' clears the role, apply starts a new session, Escape saves nothing", async () => {
     let mainVisits = 0
     const h = harness({
       fullscreen: true, combo: configuredCombo,
-      lines: ["/combo", "/combo", "/quit"],
+      lines: ["/model combo", "/model combo", "/quit"],
       choose: async (title, values) => {
         if (title.startsWith("Combo · main")) {
           mainVisits += 1
@@ -1385,11 +1409,12 @@ describe("interactive terminal", () => {
     expect(mainVisits).toBe(3)
   })
 
-  test("/combo works in readline with numbered menus and before a model is selected", async () => {
-    // 13 roles + "Clear all routes" (14) + "Done" (15); no Apply entry before a model is selected.
-    const h = harness({ lines: ["/combo", "2", "1", "1", "16", "15", "/quit"] })
+  test("readline /model offers combo as entry 4; the combo menu works before a model is selected", async () => {
+    // Engine 4 = combo. Role list: 13 roles + "Clear all routes" (14) + "Done" (15); no Apply entry yet.
+    const h = harness({ lines: ["/model", "4", "2", "1", "1", "16", "15", "/quit"] })
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     const output = h.calls.output.join("")
+    expect(output).toContain("4) combo  — per-role models")
     expect(output).toContain("Choose a listed number (1-15).")
     expect(output).toContain("15) Done")
     expect(output).toContain("Combo · main: not selected yet:")
@@ -1400,15 +1425,11 @@ describe("interactive terminal", () => {
     expect(h.calls.runtimes).toEqual([])
   })
 
-  test("typed /combo arguments are the same commands as /model combo", async () => {
-    const h = harness({ lines: ["/combo architect codex gpt-5.6-sol", "/combo show", "/combo clear architect", "/combo apply", "/quit"], combo: configuredCombo })
+  test("there is no top-level /combo command; combo lives under /model", async () => {
+    const h = harness({ lines: ["/combo", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
-    expect(h.calls.comboWrites).toEqual([
-      { role: "architect", route: { engine: "codex", model: "gpt-5.6-sol" } },
-      { role: "architect", route: null },
-    ])
-    expect(h.calls.output.join("")).toContain("Combo routes (main is the /model selection):")
-    expect(h.calls.output.join("")).toContain("Already using that engine, model and routes")
+    expect(h.calls.comboWrites).toEqual([])
+    expect(h.calls.choices).toEqual([])
   })
 
   test("/model combo apply is a no-op when the session already uses the saved routes", async () => {
@@ -1505,7 +1526,7 @@ describe("interactive terminal", () => {
   test("combo show, set and clear work while the session is held; only apply is refused", async () => {
     withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow("another-session",
       { instance: "fixture", pid: process.pid }, "command", "active plan", "codex")))
-    const h = harness({ lines: ["/model combo", "/model combo architect codex gpt-5.6-sol", "/model combo clear architect", "/model combo apply", "/quit"], combo: configuredCombo })
+    const h = harness({ lines: ["/model combo show", "/model combo architect codex gpt-5.6-sol", "/model combo clear architect", "/model combo apply", "/quit"], combo: configuredCombo })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
     const output = h.calls.output.join("")
     expect(h.calls.actionContexts).toContain("held")

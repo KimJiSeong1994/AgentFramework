@@ -10,8 +10,7 @@ export type InteractiveAction = Readonly<{
 
 const all: readonly InteractiveAction[] = [
   { id: "help", syntax: "/help", summary: "show contextual commands and keys", contexts: ["chat", "busy", "held", "read-only", "selection", "unselected"] },
-  { id: "model", syntax: "/model [engine native-id | default ... | combo ...]", summary: "pick a model; /model default sets the startup default; /model combo routes roles to other models", contexts: ["chat", "selection", "unselected"] },
-  { id: "combo", syntax: "/combo", summary: "pick per-role engines and models from a menu (/combo <role> <engine> <id> | clear | apply also work)", contexts: ["chat", "held", "unselected"] },
+  { id: "model", syntax: "/model [engine native-id | default ... | combo ...]", summary: "pick a model or a per-role combo; /model default sets the startup default; /model combo opens the combo menu", contexts: ["chat", "selection", "unselected"] },
   { id: "sessions", syntax: "/sessions", summary: "inspect or choose retained sessions", contexts: ["chat", "held", "read-only", "selection"] },
   { id: "resume", syntax: "/resume <sid>", summary: "open a retained session through existing checks", contexts: ["chat", "held", "read-only", "selection"] },
   { id: "new", syntax: "/new", summary: "start a new conversation after release checks", contexts: ["chat", "held", "read-only"] },

@@ -53,9 +53,9 @@ also accepted. In chat, /model shows the current selection and picker, /model <e
 switches directly, and /help lists local commands. A switch requires no active workflow, valid
 workflow state and settled execution ownership, and starts a new conversation context. Plans require a separate local human approval.
 Role combo: chat.combo in otter.jsonc routes planner/architect/critic/worker/reviewer roles to other engines and models;
-roles without a route use the main model. /combo opens a menu (role -> engine -> model) that saves it; typed forms
-/combo show, /combo <role> <engine> <native-id>, /combo clear [role] and /combo apply (which starts a new session under
-it) also work, and /model combo ... is the same command. A project route replaces the
+roles without a route use the main model. /model combo (or the "combo" entry in the /model engine list) opens a menu
+(role -> engine -> model) that saves it; typed forms /model combo show, /model combo <role> <engine> <native-id>,
+/model combo clear [role] and /model combo apply (which starts a new session under it) also work. A project route replaces the
 user's route for that role as a whole object. Every new session (a plain /model switch, /new, apply) takes its routes from the
 currently saved combo, normalized against the new main model; an invalid combo is reported and not applied. /resume and the
 common-engine recovery commands use the session's pinned routes from its metadata, never current config.

@@ -385,22 +385,29 @@ function readInput(terminal: Terminal, title: string, hint: string, prompt: stri
   return terminal.readLine(rendered.prompt, signal)
 }
 
-async function chooseEngine(terminal: Terminal, signal: AbortSignal): Promise<CliEngine | null | undefined> {
+/** `/model` engine step. With `combo`, a fourth entry opens the per-role combo menu instead of picking an engine. */
+function chooseEngine(terminal: Terminal, signal: AbortSignal): Promise<CliEngine | null | undefined>
+function chooseEngine(terminal: Terminal, signal: AbortSignal, options: { combo: true }): Promise<CliEngine | "combo" | null | undefined>
+async function chooseEngine(terminal: Terminal, signal: AbortSignal, options: { combo?: boolean } = {}): Promise<CliEngine | "combo" | null | undefined> {
   const engines: readonly CliEngine[] = ["local", "codex", "claude"]
+  const combo = options.combo === true
   if (terminal.fullscreen && terminal.choose) {
     const selected = await terminal.choose("Choose an execution engine", [
-      "local — Ollama CLI", "codex — Codex CLI", "claude — Claude CLI",
+      "local — Ollama CLI", "codex — Codex CLI", "claude — Claude CLI", ...(combo ? ["combo — per-role models"] : []),
     ], signal, {
-      kind: "picker", purpose: "selection", rows: ["Local Ollama runtime", "Codex CLI runtime", "Claude CLI runtime"],
+      kind: "picker", purpose: "selection",
+      rows: ["Local Ollama runtime", "Codex CLI runtime", "Claude CLI runtime", ...(combo ? ["Route planner/architect/critic/worker… to other engines and models."] : [])],
       hint: "Enter selects this engine only; Escape or /cancel returns to the composer.",
     })
     if (signal.aborted) return undefined
-    return selected === undefined ? null : engines[selected] ?? null
+    if (selected === undefined) return null
+    if (combo && selected === 3) return "combo"
+    return engines[selected] ?? null
   }
-  const menu = "Choose an execution engine:\n  1) local  — Ollama CLI\n  2) codex  — Codex CLI\n  3) claude — Claude CLI\nEnter /cancel, Escape or empty input to return.\n"
+  const menu = `Choose an execution engine:\n  1) local  — Ollama CLI\n  2) codex  — Codex CLI\n  3) claude — Claude CLI\n${combo ? "  4) combo  — per-role models\n" : ""}Enter /cancel, Escape or empty input to return.\n`
   terminal.write(menu.trimEnd().split("\n").map(line => inputLine(line, terminal.presentation?.())).join("\n") + "\n")
   while (!signal.aborted) {
-    const answer = await readInput(terminal, "Engine selection", "Enter a number or engine name", "Engine [1-3]: ", signal)
+    const answer = await readInput(terminal, "Engine selection", "Enter a number or engine name", combo ? "Engine [1-4]: " : "Engine [1-3]: ", signal)
     if (signal.aborted) return undefined
     if (answer === undefined) return null
     const normalized = answer.trim().toLowerCase()
@@ -408,7 +415,8 @@ async function chooseEngine(terminal: Terminal, signal: AbortSignal): Promise<Cl
     if (normalized === "1" || normalized === "local") return "local"
     if (normalized === "2" || normalized === "codex") return "codex"
     if (normalized === "3" || normalized === "claude") return "claude"
-    terminal.write("Choose local, codex, or claude (1, 2, or 3).\n")
+    if (combo && (normalized === "4" || normalized === "combo")) return "combo"
+    terminal.write(combo ? "Choose local, codex, claude, or combo (1-4).\n" : "Choose local, codex, or claude (1, 2, or 3).\n")
   }
   return undefined
 }
@@ -975,7 +983,7 @@ export async function runInteractiveSession(
       write("Usage: /model default [show | save | clear | <local|codex|claude> <native-id>]")
       return undefined
     }
-    const comboUsage = "Usage: /combo (menu) or /combo [show | <role> <local|codex|claude> <native-id> | clear [role] | apply]; /model combo ... is the same; roles: " + COMBO_ROLES.join(", ")
+    const comboUsage = "Usage: /model combo (menu) or /model combo [show | <role> <local|codex|claude> <native-id> | clear [role] | apply]; roles: " + COMBO_ROLES.join(", ")
     /**
      * `/model combo` shows the effective routes; `<role> <engine> <id>` and `clear` edit user config only. Neither
      * changes the running session: a combo applies to new sessions, via `apply`. Returns "apply" for the caller.
@@ -985,7 +993,7 @@ export async function runInteractiveSession(
       const show = (): void => {
         const lookup = deps.combo.read(worktree)
         if (lookup.state === "invalid") {
-          write(`Combo is invalid and is not applied: ${boundedTerminalDiagnostic(lookup.reason)}. Fix the config or run /combo clear.`)
+          write(`Combo is invalid and is not applied: ${boundedTerminalDiagnostic(lookup.reason)}. Fix the config or run /model combo clear.`)
           return
         }
         const routes = lookup.state === "configured" ? lookup.routes : {}
@@ -1000,11 +1008,11 @@ export async function runInteractiveSession(
           const wanted = effectiveRoutes(current.engine, current.model, routes)
           lines.push(routesKey(wanted) === routesKey(current.routes)
             ? "The current session uses these routes."
-            : `The current session ${Object.keys(current.routes).length ? `uses ${Object.keys(current.routes).length} different pinned role${Object.keys(current.routes).length === 1 ? "" : "s"}` : "uses no routes"}; /combo apply starts a new session with the saved combo.`)
+            : `The current session ${Object.keys(current.routes).length ? `uses ${Object.keys(current.routes).length} different pinned role${Object.keys(current.routes).length === 1 ? "" : "s"}` : "uses no routes"}; /model combo apply starts a new session with the saved combo.`)
         }
         write(lines.join("\n"))
       }
-      if (rest.length === 0 || (rest.length === 1 && rest[0] === "show")) { show(); return undefined }
+      if (rest.length === 1 && rest[0] === "show") { show(); return undefined }
       if (rest.length === 1 && rest[0] === "apply") return "apply"
       if (rest[0] === "clear" && rest.length <= 2) {
         const role = rest[1]
@@ -1028,7 +1036,7 @@ export async function runInteractiveSession(
           const winner = effective.state === "configured" ? effective.routes[role] : undefined
           const overridden = effective.state === "configured" && effective.sources[role] === "project" && winner &&
             (winner.engine !== route.engine || winner.model !== route.model)
-          write(`Saved combo route ${role} -> ${route.engine} / ${route.model} to ${path}.${overridden ? ` This project's .otter/otter.jsonc still routes ${role} to ${winner.engine} / ${winner.model}.` : ""} ${current ? "The current session is unchanged; /combo apply starts a new session with it." : "It applies when a model is selected."}`)
+          write(`Saved combo route ${role} -> ${route.engine} / ${route.model} to ${path}.${overridden ? ` This project's .otter/otter.jsonc still routes ${role} to ${winner.engine} / ${winner.model}.` : ""} ${current ? "The current session is unchanged; /model combo apply starts a new session with it." : "It applies when a model is selected."}`)
         } catch (error) { write(`Combo route not saved: ${boundedTerminalDiagnostic(error instanceof Error ? error.message : String(error))}`) }
         return undefined
       }
@@ -1036,7 +1044,7 @@ export async function runInteractiveSession(
       return undefined
     }
     /**
-     * `/combo`: menu-driven editing of the saved combo (role -> engine -> model). Every save and clear goes through
+     * `/model combo` (and the /model "combo" entry): menu-driven editing of the saved combo (role -> engine -> model). Every save and clear goes through
      * comboCommand, so validation and messages are identical to the typed form. Returns "apply" when the operator
      * chose to apply, undefined when they finished, and "aborted" when the turn was aborted.
      */
@@ -1149,13 +1157,13 @@ export async function runInteractiveSession(
           }
           continue
         }
-        if (command === "/combo" && commandArgs.length === 0 && hasInteractiveAction("unselected", "model")) {
-          if (await withProgressSuspended(() => comboPicker(undefined)) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
-          continue
-        }
-        if ((command === "/combo" || (command === "/model" && commandArgs[0] === "combo")) && hasInteractiveAction("unselected", "model")) {
-          const rest = command === "/combo" ? commandArgs : commandArgs.slice(1)
-          if (comboCommand(rest, undefined) === "apply") terminal.write("No model is selected yet; select one with /model, then run /combo apply.\n")
+        if (command === "/model" && commandArgs[0] === "combo" && hasInteractiveAction("unselected", "model")) {
+          const rest = commandArgs.slice(1)
+          if (rest.length === 0) {
+            if (await withProgressSuspended(() => comboPicker(undefined)) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
+          } else if (comboCommand(rest, undefined) === "apply") {
+            terminal.write("No model is selected yet; select one with /model, then run /model combo apply.\n")
+          }
           continue
         }
         if (command === "/model" && hasInteractiveAction("unselected", "model")) {
@@ -1170,8 +1178,13 @@ export async function runInteractiveSession(
           }
           let nextEngine: CliEngine | null | undefined = args.engine
           if (!nextEngine) {
-            nextEngine = await withProgressSuspended(() => chooseEngine(terminal, abort.signal))
+            const chosen = await withProgressSuspended(() => chooseEngine(terminal, abort.signal, { combo: true }))
             if (abort.signal.aborted) return signalExit(receivedSignal)
+            if (chosen === "combo") {
+              if (await withProgressSuspended(() => comboPicker(undefined)) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
+              continue
+            }
+            nextEngine = chosen
             if (!nextEngine) continue
           }
           while (!abort.signal.aborted) {
@@ -2132,21 +2145,21 @@ export async function runInteractiveSession(
         continue
       }
       // Combo show/set/clear only read or edit config, so they work while held; only apply starts a session.
-      if ((command === "/combo" || (command === "/model" && commandArgs[0] === "combo")) && (actionContext === "chat" || actionContext === "held")) {
+      /** Run the combo menu (no args) or a typed combo command; false means the chat must exit. */
+      const runCombo = async (rest: readonly string[]): Promise<boolean> => {
         const current = { engine: selection.engine, model: selection.model, routes: selection.routes }
-        const outcome = command === "/combo" && commandArgs.length === 0
-          ? await withProgressSuspended(() => comboPicker(current))
-          : comboCommand(command === "/combo" ? commandArgs : commandArgs.slice(1), current)
-        if (outcome === "aborted") {
-          if (abort.signal.aborted) return signalExit(receivedSignal)
-          continue
-        }
+        const outcome = rest.length === 0 ? await withProgressSuspended(() => comboPicker(current)) : comboCommand(rest, current)
+        if (outcome === "aborted") return !abort.signal.aborted
         if (outcome === "apply") {
           const derived = comboRoutesFor(deps.combo.read(worktree), selection.engine, selection.model)
           if (!hasInteractiveAction(actionContext, "model")) terminal.write("Combo not applied: model selection is unavailable while this session is held; resolve the active workflow first or recover execution ownership. The current session is unchanged.\n")
           else if (derived.invalid !== undefined) terminal.write(terminalSafeText(`Combo is invalid and was not applied: ${boundedTerminalDiagnostic(derived.invalid)}. The current session is unchanged.\n`))
-          else if (!await switchSelection(selection.engine, selection.model)) return signalExit(receivedSignal)
+          else if (!await switchSelection(selection.engine, selection.model)) return false
         }
+        return true
+      }
+      if (command === "/model" && commandArgs[0] === "combo" && (actionContext === "chat" || actionContext === "held")) {
+        if (!await runCombo(commandArgs.slice(1))) return signalExit(receivedSignal)
         continue
       }
       if (command === "/model" && !hasInteractiveAction(actionContext, "model")) {
@@ -2165,8 +2178,13 @@ export async function runInteractiveSession(
             continue
           }
           guard.release()
-          let nextEngine = await withProgressSuspended(() => chooseEngine(terminal, abort.signal))
+          const chosen = await withProgressSuspended(() => chooseEngine(terminal, abort.signal, { combo: true }))
           if (abort.signal.aborted) return signalExit(receivedSignal)
+          if (chosen === "combo") {
+            if (!await runCombo([])) return signalExit(receivedSignal)
+            continue
+          }
+          let nextEngine: CliEngine | null | undefined = chosen
           if (!nextEngine) continue
           let switched = false
           while (!abort.signal.aborted) {

@@ -1552,7 +1552,7 @@ def run_readline_pickers(preflight: dict[str, Any]):
                 try:
                     session.wait_output("You>")
                     session.send_text("/model\r")
-                    prompt = "Engine [1-3]:"
+                    prompt = "Engine [1-4]:"
                     session.wait_output(prompt)
                     if level == "model":
                         session.send_text("1\r")
