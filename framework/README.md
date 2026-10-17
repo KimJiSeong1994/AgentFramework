@@ -127,23 +127,35 @@ engine and model to individual roles; the model chosen with `/model` stays the *
 Roles: `interviewer`, `planner`, `architect`, `critic`, `researcher`, `contrarian`, `simplifier`, plus
 the worker-side roles (`worker`, `reviewer`, ...). `main` is not a combo role. A role uses its route
 if set, otherwise the main model; a route never silently falls back to main, and an invalid or
-unavailable combo is reported and not applied. A route equal to the main selection is dropped.
+unavailable combo is reported and not applied (chat start and `/model combo apply` print the reason
+and keep running). A route is replaced as a whole object: a project route for a role replaces the
+user's route for that role, a partial project route (for example only `engine`) is invalid, and a
+project `null` removes the user's route. Model IDs must match `[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}`,
+and a Codex route must name a bundled Codex slug. A route equal to the main selection is dropped.
 
 In chat: `/model combo` (or `/model combo show`) shows the effective routes, the source of each, and
 whether the current session uses them. `/model combo <role> <local|codex|claude> <native-id>` saves a
 route to `~/.config/otter/otter.jsonc` and does not change the current session. `/model combo clear <role>`
-and `/model combo clear` remove routes. `/model combo apply` starts a new session with the carried
+and `/model combo clear` remove user routes (any value, including a malformed one) and say so when a
+project route still applies. Show, set and clear only touch config, so they also work while a session is
+held. `/model combo apply` starts a new session with the carried
 conversation under the saved combo; it is refused while a workflow is active or ownership is unsettled.
 Status shows `engine / model +N roles`.
 
-A combo applies only to new sessions. The routes are pinned in the session metadata; `/resume` and the
+A combo applies only to new sessions. The routes are pinned in the session metadata. Every non-resume new
+session (a plain `/model <engine> <id>` switch, `/new`, `/model combo apply`) derives its routes from the
+currently saved combo, normalized against the new main model, so a route that equals an intermediate main
+model comes back when you switch away from it; an invalid combo is reported and not applied. `/resume` and the
 common-engine recovery commands (`approve`, `resume`, ...) use the pinned routes, never the current
-config, and a mismatch is refused. Ledger entries and `workflow.engine` keep the main engine; routed
+config. Recovery refuses a pinned route that differs from the execution evidence already recorded for a role;
+a role with no recorded execution yet has no such evidence and is not checked. `otter cancel` and `otter pause`
+dispatch no model and do not build routes. An unavailable route is named in the refusal (`combo route
+unavailable: <roles> -> <engine> / <model>`). Ledger entries and `workflow.engine` keep the main engine; routed
 roles are distinguished by their policy IDs.
 
 Limits: roles run one after another, not as parallel model execution. There is no prompt-cache
 continuity across roles, and no tier aliases (`opus`/`sonnet` are the engine's native names). Each
-role's context budget follows its own model, not the main one. Switching between local Ollama models
+role's input budget is set per role (`roleInputLimit`), not per model. Switching between local Ollama models
 can incur a model reload delay on the first call of each role.
 
 Either flag on its own still opens the unselected composer; `/model` then asks for the

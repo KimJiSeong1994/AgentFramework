@@ -25,7 +25,7 @@ import type {
   ExecutionRole,
   ComboRoutes,
 } from "./types.ts"
-import { EXECUTION_ROLES, isWorkflowReadOnlyRole } from "./types.ts"
+import { EXECUTION_ROLES, NATIVE_MODEL_ID_RE, isWorkflowReadOnlyRole } from "./types.ts"
 import type { ExecutionRunStore } from "./run-state.ts"
 import type { CliHostActivity } from "./cli-progress.ts"
 import { awaitSkillPermission, type SkillPermissionPermit } from "../skills/broker.ts"
@@ -288,7 +288,7 @@ function checkRequestShape(request: ExecutionRequest): void {
 
 export function createCliHost(options: CliHostOptions): ExecutionHost {
   if (!options || !["local", "codex", "claude"].includes(options.engine) ||
-      typeof options.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/.test(options.model) ||
+      typeof options.model !== "string" || !NATIVE_MODEL_ID_RE.test(options.model) ||
       !options.policy || !options.runs ||
       (options.observeActivity !== undefined && typeof options.observeActivity !== "function")) {
     throw new TypeError("invalid CLI host options")
@@ -306,7 +306,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
     for (const [role, route] of Object.entries(routes)) {
       if (role === "main" || !(EXECUTION_ROLES as readonly string[]).includes(role) || !isRecord(route) ||
           !["local", "codex", "claude"].includes(route.engine as string) ||
-          typeof route.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/.test(route.model)) {
+          typeof route.model !== "string" || !NATIVE_MODEL_ID_RE.test(route.model)) {
         throw new TypeError("invalid CLI host options")
       }
       routeTable.set(role as ExecutionRole, { engine: route.engine as CliEngine, model: route.model })
@@ -456,7 +456,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
         if (blocked) codexProfileBlocked = true
         if (available) continue
         allAvailable = false
-        const subject = roles.length ? `combo route for ${roles.join(", ")}` : undefined
+        const subject = roles.length ? `combo route for ${roles.join(", ")} -> ${target.engine} / ${target.model}` : undefined
         const text = blocked ? CODEX_PROFILE_REFUSAL : "selected CLI executable or profile is unavailable"
         problems.push(subject ? `${subject} is unavailable: ${text}` : text)
       }

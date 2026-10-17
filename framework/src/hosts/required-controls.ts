@@ -1,4 +1,4 @@
-import { EXECUTION_ROLES, isWorkflowReadOnlyRole, type ControlProfile, type ExecutionHost, type ExecutionRole } from "./types.ts"
+import { EXECUTION_ROLES, NATIVE_MODEL_ID_RE, isWorkflowReadOnlyRole, type ControlProfile, type ExecutionHost, type ExecutionRole } from "./types.ts"
 
 const LEGACY_BUDGET_CONTROLS = ["boundedInput", "boundedOutput"] as const
 const ESTIMATED_REACTIVE_BUDGET_CONTROLS = ["estimatedInput", "reactiveOutput"] as const
@@ -59,18 +59,45 @@ function validBudgetEvidence(value: unknown): boolean {
   }
 }
 
+const ROUTE_PROBLEM_RE = /^combo route for ([a-z]+(?:, [a-z]+)*) -> (local|codex|claude) \/ (\S+) is unavailable(?::|$)/
+
+/**
+ * Host preflight problems are otherwise withheld from the operator. Only the combo-route subject (role names plus
+ * engine/model) is surfaced, rebuilt from validated parts so no vendor diagnostic can pass through.
+ */
+function comboRouteDetail(problems: unknown): string | undefined {
+  try {
+    if (!Array.isArray(problems)) return undefined
+    const routes: string[] = []
+    for (const problem of problems) {
+      const match = typeof problem === "string" ? ROUTE_PROBLEM_RE.exec(problem) : null
+      if (!match) continue
+      const roles = match[1]!.split(", ")
+      if (!roles.every(role => (EXECUTION_ROLES as readonly string[]).includes(role)) || !NATIVE_MODEL_ID_RE.test(match[3]!)) continue
+      routes.push(`${roles.join(", ")} -> ${match[2]} / ${match[3]}`)
+    }
+    return routes.length ? routes.join("; ") : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export class AdmissionRefusal extends Error {
-  private constructor(message: keyof typeof ADMISSION_REFUSAL_MESSAGES) {
-    super(ADMISSION_REFUSAL_MESSAGES[message])
+  /** Sanitized failing combo routes (`role, role -> engine / model; ...`), when the refusal came from a combo route. */
+  readonly comboRoutes?: string
+
+  private constructor(message: keyof typeof ADMISSION_REFUSAL_MESSAGES, comboRoutes?: string) {
+    super(comboRoutes ? `${ADMISSION_REFUSAL_MESSAGES[message]}; combo route unavailable: ${comboRoutes}` : ADMISSION_REFUSAL_MESSAGES[message])
     this.name = "AdmissionRefusal"
+    if (comboRoutes) this.comboRoutes = comboRoutes
   }
 
   static requiredControlsUnavailable(): AdmissionRefusal {
     return new AdmissionRefusal("requiredControls")
   }
 
-  static hostIncompatible(): AdmissionRefusal {
-    return new AdmissionRefusal("hostIncompatible")
+  static hostIncompatible(comboRoutes?: string): AdmissionRefusal {
+    return new AdmissionRefusal("hostIncompatible", comboRoutes)
   }
 }
 
@@ -124,7 +151,7 @@ export function assertHostAdmission(
   try { noProblems = Array.isArray(problems) && problems.length === 0 }
   catch { /* Refuse malformed preflight values without exposing vendor diagnostics. */ }
   if (compatible !== true || !noProblems) {
-    throw AdmissionRefusal.hostIncompatible()
+    throw AdmissionRefusal.hostIncompatible(comboRouteDetail(problems))
   }
   if (controlProfile !== undefined) {
     const evidence = ownDataValue(preflight, "budgetEvidence")

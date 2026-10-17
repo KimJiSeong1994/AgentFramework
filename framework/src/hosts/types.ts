@@ -12,6 +12,8 @@ export const WORKFLOW_READ_ONLY_ROLES = Object.freeze(["interviewer", "planner",
 export const EXECUTION_ROLES = Object.freeze([...CONFIG_MODEL_ROLES, ...WORKFLOW_READ_ONLY_ROLES] as const)
 export type ExecutionRole = (typeof EXECUTION_ROLES)[number]
 export type ComboEngine = "local" | "codex" | "claude"
+/** Native model IDs the CLI host accepts as argv; combo validation and the host share this one pattern. */
+export const NATIVE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/
 export type ComboRoute = Readonly<{ engine: ComboEngine; model: string }>
 /** role -> route; only roles that differ from the anchor; keys are ExecutionRole */
 export type ComboRoutes = Readonly<Partial<Record<ExecutionRole, ComboRoute>>>

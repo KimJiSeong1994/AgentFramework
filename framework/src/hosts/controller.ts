@@ -244,9 +244,9 @@ export function createForegroundController(runtime: ExecutionRuntime) {
     for (const execution of hostExecutions) {
       if (execution.engine !== runtime.host.identity.engine) throw new Error(HOST_ENGINE_MISMATCH)
       const role = EXECUTION_ROLES.find(candidate => candidate === execution.role) as ExecutionRole | undefined
-      if (!role || !execution.policyID || execution.policyID !== runtime.policy.resolve(role).id) {
-        throw new Error(HOST_POLICY_MISMATCH)
-      }
+      if (!role || !execution.policyID) throw new Error(HOST_POLICY_MISMATCH)
+      // Stop requests (the only anyUnitKind caller) dispatch no model, so they must not depend on pinned-route policy IDs.
+      if (!anyUnitKind && execution.policyID !== runtime.policy.resolve(role).id) throw new Error(HOST_POLICY_MISMATCH)
     }
     const localActivity = allowLocalActivity && (queue.isRunning(sessionID) || !!sessionActivityBlocker(root, sessionID))
     if (allowLocalActivity) {

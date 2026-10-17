@@ -54,8 +54,10 @@ switches directly, and /help lists local commands. A switch requires no active w
 workflow state and settled execution ownership, and starts a new conversation context. Plans require a separate local human approval.
 Role combo: chat.combo in otter.jsonc routes planner/architect/critic/worker/reviewer roles to other engines and models;
 roles without a route use the main model. /model combo shows it, /model combo <role> <engine> <native-id> saves it,
-/model combo clear [role] removes it, and /model combo apply starts a new session under it. A combo applies only to new
-sessions; /resume and the common-engine recovery commands use the session's pinned routes from its metadata, never current config.
+/model combo clear [role] removes it, and /model combo apply starts a new session under it. A project route replaces the
+user's route for that role as a whole object. Every new session (a plain /model switch, /new, apply) takes its routes from the
+currently saved combo, normalized against the new main model; an invalid combo is reported and not applied. /resume and the
+common-engine recovery commands use the session's pinned routes from its metadata, never current config.
 Otter workflows (chat only; each start is a submitted /skill: command, and invoking a name is not consent to execute):
   /skill:deep-interview <request>   code-owned interview: topology, panels, closure, restatement, verified spec.md (available)
   /skill:ralplan <request>          consensus planning: planner, architect, critic, same-plan-hash join (available)
@@ -460,13 +462,10 @@ async function runCommonCommand(args: CliArgs, runtime: ExecutionRuntime): Promi
   const controller = createForegroundController(runtime)
 
   // Cancellation is deliberately a safety request, not an attachment or takeover operation.
-  if (args.command === "pause") {
-    const result = controller.pause(sessionID)
-    if (!result.ok) throw new Error(result.text)
-    return stopText(result.wf)
-  }
-  if (args.command === "cancel") {
-    const result = controller.cancel(sessionID)
+  if (args.command === "pause" || args.command === "cancel") {
+    // Stop requests never dispatch a model, so they verify only session/engine/anchor model and do not depend on pinned routes.
+    validateCliOwnerIdentity(runtime, sessionID, args.model!)
+    const result = args.command === "pause" ? controller.pause(sessionID) : controller.cancel(sessionID)
     if (!result.ok) throw new Error(result.text)
     return stopText(result.wf)
   }
@@ -577,7 +576,9 @@ export async function runCli(
       throw new Error("local human approval or rejection requires an interactive terminal")
     }
     // Recovery uses the session's pinned routes from metadata, never the current otter.jsonc combo.
-    const routes = args.session ? readSessionMetadata(root, args.session)?.routes : undefined
+    // pause/cancel only request a stop, never dispatch a model, and neither read nor construct routes.
+    const stopOnly = args.command === "pause" || args.command === "cancel"
+    const routes = args.session && !stopOnly ? readSessionMetadata(root, args.session)?.routes : undefined
     const runtime = cliRuntimeFactory({ worktree: root, engine: args.engine, model: args.model, ...(routes ? { routes } : {}) })
     return runCommonCommand(args, runtime)
   }
@@ -720,7 +721,8 @@ function failCli(error: unknown, command?: string): void {
     return
   }
   if (error instanceof AdmissionRefusal) {
-    console.error("otter: host admission refused; required host control evidence is unavailable. Use a host that can provide all required execution controls before proceeding.")
+    const route = error.comboRoutes ? ` Combo route unavailable: ${error.comboRoutes}.` : ""
+    console.error(`otter: host admission refused; required host control evidence is unavailable.${route} Use a host that can provide all required execution controls before proceeding.`)
     process.exitCode = 1
     return
   }

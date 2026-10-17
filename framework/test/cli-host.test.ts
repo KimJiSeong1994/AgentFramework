@@ -768,10 +768,9 @@ describe("route-aware common CLI host", () => {
     architect: { engine: "codex", model: "gpt-5.6-sol" },
   }
 
-  function routed(options: { failPreflightFor?: string; wrongSnapshotModel?: boolean; codexHash?: string; routes?: typeof routes } = {}) {
-    const anchor = { engine: "local" as const, model: "anchor-model" }
+  function routed(options: { failPreflightFor?: string; wrongSnapshotModel?: boolean; codexHash?: string; routes?: ComboRoutes; anchor?: { engine: "local" | "codex" | "claude"; model: string }; hashFor?: (model: string) => string } = {}) {
+    const anchor = options.anchor ?? { engine: "local" as const, model: "anchor-model" }
     const table: Record<string, { engine: string; model: string }> = { ...(options.routes ?? routes) }
-    const codex = createCodexProfile("gpt-5.6-sol")
     const snapshotFor = (role: ExecutionRole) => {
       const target = table[role] ?? anchor
       return Object.freeze({
@@ -781,7 +780,10 @@ describe("route-aware common CLI host", () => {
         maxOutputTokens: 20_000,
         tools: Object.freeze({ allowed: Object.freeze([...ALL_TOOLS]), denied: Object.freeze([] as string[]) }),
         system: Object.freeze([`fixed ${role} constraint`]),
-        ...(target.engine === "codex" ? { nativeContext: Object.freeze({ identity: codex.catalogHash, instructions: codex.instructions }) } : {}),
+        ...(target.engine === "codex" ? (() => {
+          const codex = createCodexProfile(target.model)
+          return { nativeContext: Object.freeze({ identity: codex.catalogHash, instructions: codex.instructions }) }
+        })() : {}),
         thinking: "inherit" as const,
       })
     }
@@ -812,7 +814,7 @@ describe("route-aware common CLI host", () => {
         async reconcile() { return { outcome: "terminal", quiescent: true, evidence: "fixture" } },
       }
       if (opts.engine === "codex") {
-        handle.preflight = async () => ({ compatible: !failing, nativePolicyHash: options.codexHash ?? codex.catalogHash })
+        handle.preflight = async () => ({ compatible: !failing, nativePolicyHash: options.codexHash ?? options.hashFor?.(opts.model) ?? createCodexProfile(opts.model).catalogHash })
       }
       if (failing && opts.engine !== "codex") throw new Error("fixture executable missing")
       return handle
@@ -888,6 +890,52 @@ describe("route-aware common CLI host", () => {
     expect(codexResult.controls.preExecutionToolPolicy).toBe("unsupported")
     expect(codexResult.problems.join(" ")).toContain("combo route for architect")
     expect(codex.requests).toEqual([])
+  })
+
+  test("a failing route's preflight problem names its roles and engine/model", async () => {
+    const subject = routed({ failPreflightFor: "claude/opus" })
+    const result = await subject.host.preflight(subject.host.identity.profile)
+    expect(result.problems).toEqual(["combo route for planner -> claude / opus is unavailable: selected CLI executable or profile is unavailable"])
+  })
+
+  test("a failed routed transport never falls back to creating an anchor transport", async () => {
+    const subject = routed({ failPreflightFor: "claude/opus" })
+    await expect(subject.dispatch("planner")).resolves.toMatchObject({ status: "failed", error: "CLI inference transport could not be prepared" })
+    expect(subject.transports.map(entry => `${entry.engine}/${entry.model}`)).toEqual(["claude/opus"])
+    expect(subject.requests).toEqual([])
+  })
+
+  test("two distinct Codex models are each validated against their own profile hash", async () => {
+    const anchor = { engine: "codex" as const, model: "gpt-6-astra" }
+    const codexRoutes: ComboRoutes = { architect: { engine: "codex", model: "gpt-5.6-sol" } }
+    const astra = createCodexProfile("gpt-6-astra").catalogHash
+    const sol = createCodexProfile("gpt-5.6-sol").catalogHash
+    expect(astra).not.toBe(sol)
+
+    const good = routed({ anchor, routes: codexRoutes })
+    expect(await good.host.preflight(good.host.identity.profile)).toMatchObject({ compatible: true, problems: [] })
+    expect(await good.dispatch("architect")).toEqual({ status: "completed", text: "done codex/gpt-5.6-sol" })
+    expect(await good.dispatch("worker")).toEqual({ status: "completed", text: "done codex/gpt-6-astra" })
+
+    // The route's transport reports the anchor's hash: only the route is refused, naming its role and model.
+    const swapped = routed({ anchor, routes: codexRoutes, hashFor: () => astra })
+    const result = await swapped.host.preflight(swapped.host.identity.profile)
+    expect(result.compatible).toBe(false)
+    expect(result.problems).toHaveLength(1)
+    expect(result.problems[0]).toContain("combo route for architect -> codex / gpt-5.6-sol is unavailable")
+    await expect(swapped.dispatch("architect")).resolves.toMatchObject({ status: "failed" })
+    expect(swapped.requests).toEqual([])
+    await expect(swapped.dispatch("worker")).resolves.toEqual({ status: "completed", text: "done codex/gpt-6-astra" })
+
+    // The anchor's transport reporting the route's hash refuses the anchor, leaving the matching route unnamed in problems.
+    const reversed = routed({ anchor, routes: codexRoutes, hashFor: () => sol })
+    const reversedResult = await reversed.host.preflight(reversed.host.identity.profile)
+    expect(reversedResult.compatible).toBe(false)
+    expect(reversedResult.problems).toHaveLength(1)
+    expect(reversedResult.problems[0]).toContain("Codex native profile preflight")
+    expect(reversedResult.problems[0]).not.toContain("combo route")
+    await expect(reversed.dispatch("worker")).resolves.toMatchObject({ status: "failed" })
+    await expect(reversed.dispatch("architect")).resolves.toEqual({ status: "completed", text: "done codex/gpt-5.6-sol" })
   })
 
   test("a route whose Codex profile hash mismatches is refused", async () => {

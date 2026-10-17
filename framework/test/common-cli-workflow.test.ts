@@ -258,6 +258,49 @@ describe("common CLI controlled workflow", () => {
     expect(readWorkflow(tampered.root)?.phase).toBe("pending_approval")
   })
 
+  test("cancel and pause never pass pinned routes to runtime construction", async () => {
+    for (const command of ["cancel", "pause"] as const) {
+      const routes: ComboRoutes = { planner: { engine: "claude", model: "opus" } }
+      const fixture = await pendingCommonWorkflow(routes)
+      const seen: unknown[] = []
+      const factory: typeof createCliRuntime = options => {
+        seen.push(options.routes)
+        return createCliRuntime({ ...options, createTransport: () => { throw new Error("stop requests never dispatch") } })
+      }
+      expect(readSessionMetadata(fixture.root, fixture.sessionID)?.routes).toEqual(routes)
+      const result = await runCli(parseCliArgs([command, "--worktree", fixture.root, "--engine", fixture.engine,
+        "--model", fixture.model, "--session", fixture.sessionID]), factory)
+      expect(result).toContain(command === "cancel" ? "cancel" : "pause")
+      expect(seen).toEqual([undefined])
+      wt?.cleanup()
+      wt = undefined
+    }
+  })
+
+  test("a role with no recorded execution is not covered by pinned-route evidence (documented limit)", async () => {
+    const routes: ComboRoutes = { worker: { engine: "local", model: "worker-model" } }
+    const fixture = await pendingCommonWorkflow(routes)
+    expect(await detachAdmission(fixture.runtime, fixture.sessionID, fixture.session.epoch, "test-unrecorded-role")).toBe(true)
+    // The fixture only executed planning roles; the worker route has no recorded execution.
+    const recorded = new Set(fixture.runtime.runs.status().executions.map(execution => execution.role))
+    expect(recorded.has("worker")).toBe(false)
+    const metadataPath = join(sessionDir(fixture.root, fixture.sessionID), "metadata.json")
+    const metadata = JSON.parse(readFileSync(metadataPath, "utf8")) as { routes?: unknown }
+    metadata.routes = { worker: { engine: "local", model: "tampered-unexecuted-model" } }
+    writeFileSync(metadataPath, JSON.stringify(metadata))
+    const seen: unknown[] = []
+    const factory: typeof createCliRuntime = options => {
+      seen.push(options.routes)
+      return createCliRuntime({ ...options, createTransport: () => { throw new Error("no dispatch expected") } })
+    }
+    const approval = await withTerminalLine(`APPROVE ${fixture.workflow.id} ${fixture.planSha}`, () => runCli(parseCliArgs([
+      "approve", "--worktree", fixture.root, "--engine", fixture.engine, "--model", fixture.model,
+      "--session", fixture.sessionID, "--workflow", fixture.workflow.id, "--sha", fixture.planSha,
+    ]), factory))
+    expect(approval).toBe(`workflow ${fixture.workflow.id} executing`)
+    expect(seen).toEqual([{ worker: { engine: "local", model: "tampered-unexecuted-model" } }])
+  })
+
   test("status JSON does not attach, rebind, or repair a restored owner", async () => {
     const fixture = await pendingCommonWorkflow()
     expect(await detachAdmission(fixture.runtime, fixture.sessionID, fixture.session.epoch, "test-status-readonly")).toBe(true)

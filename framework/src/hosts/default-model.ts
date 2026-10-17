@@ -5,7 +5,8 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node
 import { dirname } from "node:path"
 import { applyEdits, modify } from "jsonc-parser"
 import { ConfigError, loadConfig, parseJsonc, projectConfigPath, userConfigPath } from "../config.ts"
-import { EXECUTION_ROLES, type ComboEngine, type ComboRoute, type ComboRoutes, type ExecutionRole } from "./types.ts"
+import { createCodexProfile } from "./codex-profile.ts"
+import { EXECUTION_ROLES, NATIVE_MODEL_ID_RE, type ComboEngine, type ComboRoute, type ComboRoutes, type ExecutionRole } from "./types.ts"
 
 export type CliEngine = "local" | "codex" | "claude"
 
@@ -129,7 +130,10 @@ export function validateComboRoutes(value: unknown): ComboRoutes | string {
     if (!route || typeof route !== "object" || Array.isArray(route)) return `chat.combo.${role} must be an object with engine and model`
     const { engine, model } = route as Record<string, unknown>
     if (typeof engine !== "string" || !engines.includes(engine as CliEngine)) return `chat.combo.${role}.engine must be local, codex, or claude`
-    if (typeof model !== "string" || !validModelID(model)) return `chat.combo.${role}.model must be a native model ID without whitespace`
+    if (typeof model !== "string" || !NATIVE_MODEL_ID_RE.test(model)) return `chat.combo.${role}.model must be a native model ID (letters, digits and . _ : / @ + -; at most 256 characters)`
+    if (engine === "codex") {
+      try { createCodexProfile(model) } catch { return `chat.combo.${role}.model is not a bundled Codex model slug: ${model}` }
+    }
     routes[role] = Object.freeze({ engine: engine as ComboEngine, model })
   }
   return Object.freeze(routes)
@@ -140,37 +144,63 @@ export type ComboLookup =
   | { readonly state: "configured"; readonly routes: ComboRoutes; readonly sources: Readonly<Partial<Record<ExecutionRole, "user" | "project">>> }
   | { readonly state: "invalid"; readonly reason: string }
 
-function rawCombo(path: string): Record<string, unknown> | undefined {
+/** The raw `chat.combo` value of one config file; undefined when the file or key is absent or unreadable. */
+function rawComboValue(path: string): unknown {
   try {
     const parsed = parseJsonc<Record<string, unknown>>(readFileSync(path, "utf8"))
     const chat = parsed && typeof parsed === "object" ? parsed.chat : undefined
-    if (!chat || typeof chat !== "object" || Array.isArray(chat)) return undefined
-    const combo = (chat as Record<string, unknown>).combo
-    return combo && typeof combo === "object" && !Array.isArray(combo) ? combo as Record<string, unknown> : undefined
+    return chat && typeof chat === "object" && !Array.isArray(chat) && Object.hasOwn(chat, "combo")
+      ? (chat as Record<string, unknown>).combo
+      : undefined
   } catch {
     return undefined
   }
 }
 
-/** Effective combo after the user/project merge, with the winning file per role. An invalid combo is never partially applied. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+const COMBO_SHAPE = "chat.combo must be an object mapping roles to {engine, model}"
+
+/**
+ * Effective combo after the user/project merge, with the winning file per role. A role route is replaced as a
+ * whole object (never field-merged); a project `null` removes the user's route. An invalid combo is never partially applied.
+ */
 export function readCombo(worktree: string): ComboLookup {
-  let value: unknown
   try {
-    value = loadConfig(worktree).chat.combo
+    loadConfig(worktree)
   } catch (error) {
     return { state: "invalid", reason: error instanceof ConfigError ? error.message : "otter config could not be read" }
   }
-  if (value === undefined || value === null) return { state: "unset" }
-  if (typeof value !== "object" || Array.isArray(value)) return { state: "invalid", reason: "chat.combo must be an object mapping roles to {engine, model}" }
-  // A null role (project removing a user route) means "not routed".
-  const present = Object.fromEntries(Object.entries(value).filter(([, route]) => route !== null && route !== undefined))
-  const routes = validateComboRoutes(present)
-  if (typeof routes === "string") return { state: "invalid", reason: routes }
-  if (Object.keys(routes).length === 0) return { state: "unset" }
-  const project = rawCombo(projectConfigPath(worktree))
+  const merged: Record<string, unknown> = {}
   const sources: Partial<Record<ExecutionRole, "user" | "project">> = {}
-  for (const role of Object.keys(routes) as ExecutionRole[]) {
-    sources[role] = project !== undefined && project[role] !== undefined && project[role] !== null ? "project" : "user"
+  for (const [file, path] of [["user", userConfigPath()], ["project", projectConfigPath(worktree)]] as const) {
+    const value = rawComboValue(path)
+    if (value === undefined) continue
+    if (value === null) {
+      for (const role of Object.keys(merged)) delete merged[role]
+      continue
+    }
+    if (!isRecord(value)) return { state: "invalid", reason: COMBO_SHAPE }
+    for (const [role, route] of Object.entries(value)) {
+      if (route === null || route === undefined) {
+        delete merged[role]
+        delete sources[role as ExecutionRole]
+      } else {
+        merged[role] = route
+        sources[role as ExecutionRole] = file
+      }
+    }
+  }
+  if (Object.keys(merged).length === 0) return { state: "unset" }
+  const routes = validateComboRoutes(merged)
+  if (typeof routes === "string") {
+    // Name the file that supplies the offending role so the operator edits the right one (`clear` only edits the user file).
+    const role = /^chat\.combo\.([a-z-]+)/.exec(routes)?.[1] as ExecutionRole | undefined
+    const source = role ? sources[role] : undefined
+    const where = source === "project" ? " (from the project .otter/otter.jsonc)" : source === "user" ? " (from the user config)" : ""
+    return { state: "invalid", reason: `${routes}${where}` }
   }
   return { state: "configured", routes, sources: Object.freeze(sources) }
 }
@@ -187,8 +217,8 @@ export function saveComboRole(role: ExecutionRole, route: ComboRoute): string {
   return rewriteUserConfig(text => applyEdits(text, modify(text, ["chat", "combo", role], { engine: checked.engine, model: checked.model }, formatting)))
 }
 
-function userCombo(): Record<string, unknown> | undefined {
-  return rawCombo(userConfigPath())
+function userComboValue(): unknown {
+  return rawComboValue(userConfigPath())
 }
 
 /** Remove one user-level role route; returns whether one was present. */
@@ -196,7 +226,8 @@ export function clearComboRole(role: ExecutionRole): boolean {
   if (!isComboRole(role)) throw new TypeError(`${String(role)} is not a routable role`)
   let present = false
   rewriteUserConfig(text => {
-    present = userCombo()?.[role] !== undefined
+    const combo = userComboValue()
+    present = isRecord(combo) && Object.hasOwn(combo, role)
     return present ? applyEdits(text, modify(text, ["chat", "combo", role], undefined, formatting)) : text
   })
   return present
@@ -206,7 +237,7 @@ export function clearComboRole(role: ExecutionRole): boolean {
 export function clearCombo(): boolean {
   let present = false
   rewriteUserConfig(text => {
-    present = userCombo() !== undefined
+    present = userComboValue() !== undefined
     return present ? applyEdits(text, modify(text, ["chat", "combo"], undefined, formatting)) : text
   })
   return present

@@ -88,6 +88,45 @@ describe("chat.combo", () => {
     expect(validateComboRoutes({ planner: "claude/opus" })).toContain("planner")
   })
 
+  test("rejects ids the host regex rejects and Codex slugs the bundled catalog does not know", () => {
+    const ok = ["gpt-5.6-sol", "qwen3-coder:30b", "provider/namespace:model", "a@b+c", "x".repeat(256)]
+    for (const model of ok) expect(typeof validateComboRoutes({ planner: { engine: "local", model } })).toBe("object")
+    const bad = ["", "-rf", "a b", "a\\b", "é", "x".repeat(257), ".dot", "a$b", "a;b", "a\nb"]
+    for (const model of bad) expect(validateComboRoutes({ planner: { engine: "local", model } })).toContain("planner.model")
+    expect(validateComboRoutes({ architect: { engine: "codex", model: "gpt-5.6-sol" } })).toEqual({ architect: { engine: "codex", model: "gpt-5.6-sol" } })
+    expect(validateComboRoutes({ architect: { engine: "codex", model: "gpt-typo" } })).toContain("architect.model")
+    expect(validateComboRoutes({ architect: { engine: "claude", model: "gpt-typo" } })).toEqual({ architect: { engine: "claude", model: "gpt-typo" } })
+    put(userConfigPath(), '{ "chat": { "combo": { "architect": { "engine": "codex", "model": "gpt-typo" } } } }')
+    expect(readCombo(worktree)).toMatchObject({ state: "invalid", reason: expect.stringContaining("gpt-typo") })
+  })
+
+  test("a partial project route is invalid instead of merging into the user route; project null removes it", () => {
+    put(userConfigPath(), '{ "chat": { "combo": { "worker": { "engine": "local", "model": "qwen3" }, "planner": { "engine": "claude", "model": "opus" } } } }')
+    put(projectConfigPath(worktree), '{ "chat": { "combo": { "worker": { "engine": "codex" } } } }')
+    expect(readCombo(worktree)).toMatchObject({ state: "invalid", reason: expect.stringContaining("worker.model") })
+    expect(readCombo(worktree)).toMatchObject({ reason: expect.stringContaining("(from the project .otter/otter.jsonc)") })
+    put(projectConfigPath(worktree), '{ "chat": { "combo": { "worker": { "model": "other" } } } }')
+    expect(readCombo(worktree)).toMatchObject({ state: "invalid", reason: expect.stringContaining("worker.engine") })
+    put(projectConfigPath(worktree), '{ "chat": { "combo": { "worker": { "engine": "claude", "model": "sonnet" } } } }')
+    expect(readCombo(worktree)).toEqual({
+      state: "configured",
+      routes: { planner: { engine: "claude", model: "opus" }, worker: { engine: "claude", model: "sonnet" } },
+      sources: { planner: "user", worker: "project" },
+    })
+    put(projectConfigPath(worktree), '{ "chat": { "combo": { "worker": null } } }')
+    expect(readCombo(worktree)).toEqual({ state: "configured", routes: { planner: { engine: "claude", model: "opus" } }, sources: { planner: "user" } })
+  })
+
+  test("clear removes a non-object combo from the user config", () => {
+    put(userConfigPath(), '{ "chat": { "combo": "oops" } }')
+    expect(readCombo(worktree)).toMatchObject({ state: "invalid" })
+    expect(clearCombo()).toBe(true)
+    expect(readCombo(worktree)).toEqual({ state: "unset" })
+    put(userConfigPath(), '{ "chat": { "combo": { "planner": "oops" } } }')
+    expect(clearComboRole("planner")).toBe(true)
+    expect(readCombo(worktree)).toEqual({ state: "unset" })
+  })
+
   test("is unset by default and reads per-role sources with project overriding single roles", () => {
     expect(readCombo(worktree)).toEqual({ state: "unset" })
     put(userConfigPath(), '{ "chat": { "combo": { "planner": { "engine": "claude", "model": "opus" }, "worker": { "engine": "local", "model": "qwen3-coder:30b" } } } }')

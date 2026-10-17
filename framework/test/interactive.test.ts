@@ -1375,6 +1375,92 @@ describe("interactive terminal", () => {
     expect(bad.calls.output.join("")).toContain("Combo is invalid and was not applied")
   })
 
+  function useRealRuntime(h: ReturnType<typeof harness>) {
+    const root = realpathSync.native(wt.worktree)
+    wt.worktree = root
+    h.deps.cwd = root
+    h.deps.gitTopLevel = () => root
+    h.deps.createRuntime = options => createCliRuntime(options)
+    h.deps.admitRuntime = async () => {}
+  }
+  const typoCombo: ComboLookup = { state: "configured", routes: { architect: { engine: "codex", model: "gpt-typo" } }, sources: { architect: "user" } }
+
+  test("an unknown Codex slug in the saved combo is reported at startup and not applied (real runtime)", async () => {
+    const h = harness({ lines: ["hello", "/quit"], combo: typoCombo })
+    useRealRuntime(h)
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).toEqual({ code: 0 })
+    expect(h.calls.output.join("")).toContain("Combo ignored:")
+    expect(h.calls.output.join("")).toContain("gpt-typo")
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session")?.routes).toBeUndefined()
+    expect(h.calls.turns).toEqual(["hello"])
+  })
+
+  test("/model combo apply with an unknown Codex slug is refused and the session stays alive (real runtime)", async () => {
+    const h = harness({ lines: ["q1", "/model combo apply", "q2", "/quit"] })
+    useRealRuntime(h)
+    h.calls.combo = typoCombo
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).toEqual({ code: 0 })
+    expect(h.calls.output.join("")).toContain("Combo is invalid and was not applied")
+    expect(h.calls.turns).toEqual(["q1", "q2"])
+    expect(h.calls.sessionIDs).toEqual(["otter-fixture-session"])
+  })
+
+  test("a plain /model switch derives routes from the saved combo, so a route hidden by an intermediate anchor returns", async () => {
+    const h = harness({ lines: ["/model codex gpt-5.6-sol", "/model local native", "/new", "/quit"], combo: configuredCombo })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.runtimes[0]).toMatchObject({ routes: comboRoutes })
+    expect(h.calls.runtimes[1]).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" })
+    expect(h.calls.runtimes[1]).not.toHaveProperty("routes")
+    expect(h.calls.runtimes[2]).toMatchObject({ engine: "local", model: "native", routes: comboRoutes })
+    expect(h.calls.runtimes[3]).toMatchObject({ engine: "local", model: "native", routes: comboRoutes })
+  })
+
+  test("/new and a plain switch use the saved combo, not the current session's routes", async () => {
+    const h = harness({ lines: ["/model combo clear", "/new", "/model codex gpt-5.6-sol", "/quit"], combo: configuredCombo })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.runtimes[1]).toMatchObject({ engine: "local", model: "native" })
+    expect(h.calls.runtimes[1]).not.toHaveProperty("routes")
+  })
+
+  test("a switch with an invalid saved combo reports it and starts the session without routes", async () => {
+    const h = harness({ lines: ["/model codex gpt-5.6-sol", "/quit"], combo: configuredCombo })
+    h.calls.combo = { state: "invalid", reason: "chat.combo.main is not a routable role" }
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.runtimes[1]).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" })
+    expect(h.calls.runtimes[1]).not.toHaveProperty("routes")
+    expect(h.calls.output.join("")).toContain("Combo ignored: chat.combo.main is not a routable role")
+  })
+
+  test("combo show, set and clear work while the session is held; only apply is refused", async () => {
+    withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow("another-session",
+      { instance: "fixture", pid: process.pid }, "command", "active plan", "codex")))
+    const h = harness({ lines: ["/model combo", "/model combo architect codex gpt-5.6-sol", "/model combo clear architect", "/model combo apply", "/quit"], combo: configuredCombo })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    const output = h.calls.output.join("")
+    expect(h.calls.actionContexts).toContain("held")
+    expect(output).toContain("Combo routes (main is the /model selection)")
+    expect(output).toContain("Saved combo route architect")
+    expect(output).toContain("route architect cleared")
+    expect(output).toContain("Combo not applied: model selection is unavailable while this session is held")
+    expect(h.calls.comboWrites).toHaveLength(2)
+    expect(h.calls.runtimes).toHaveLength(1)
+  })
+
+  test("saving a route before a model is selected does not promise a new session", async () => {
+    const h = harness({ lines: ["/model combo architect codex gpt-5.6-sol", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree }, h.deps)
+    const output = h.calls.output.join("")
+    expect(output).toContain("Saved combo route architect")
+    expect(output).toContain("It applies when a model is selected.")
+    expect(output).not.toContain("starts a new session")
+  })
+
+  test("clear says when a project route still supplies the effective combo", async () => {
+    const h = harness({ lines: ["/model combo clear architect", "/quit"], combo: { state: "configured", routes: comboRoutes, sources: { architect: "project" } } })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.output.join("")).toContain("still routes architect from this project's .otter/otter.jsonc")
+  })
+
   test("/resume rebuilds the pinned routes from session metadata after config changed", async () => {
     const h = harness({ lines: ["q1", "/model combo clear", "/model combo apply", "/resume otter-fixture-session", "/quit"], combo: configuredCombo })
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)

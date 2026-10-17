@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { realpathSync } from "node:fs"
 import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
 import { createCodexProfile } from "../src/hosts/codex-profile.ts"
+import type { CliTransportHandle, CliTransportOptions } from "../src/hosts/cli-transport.ts"
 import { EXECUTION_ROLES } from "../src/hosts/types.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
 
@@ -68,9 +69,61 @@ describe("combo routes in the CLI runtime policy", () => {
 
   test("unknown Codex slug, main route, unknown role or bad model refuse runtime creation", () => {
     expect(() => createCliRuntime({ ...base(), routes: { architect: { engine: "codex", model: "not-a-bundled-slug" } } }))
-      .toThrow("unknown Codex bundled model slug")
+      .toThrow("not a bundled Codex model slug")
     expect(() => createCliRuntime({ ...base(), routes: { main: { engine: "claude", model: "opus" } } as never })).toThrow(TypeError)
     expect(() => createCliRuntime({ ...base(), routes: { nope: { engine: "claude", model: "opus" } } as never })).toThrow(TypeError)
     expect(() => createCliRuntime({ ...base(), routes: { planner: { engine: "claude", model: "--x" } } })).toThrow(TypeError)
+  })
+
+  test("createCliRuntime preflight probes the anchor and every routed target through the host", async () => {
+    const targets: string[] = []
+    const createTransport = (options: CliTransportOptions): CliTransportHandle => {
+      targets.push(`${options.engine}/${options.model}`)
+      return {
+        async run() { return { status: "completed", text: "", quiescent: true } },
+        async requestCancel() { return { requested: true, acknowledged: true, terminal: true, quiescent: true } },
+        async reconcile() { return { outcome: "terminal", quiescent: true, evidence: "fixture" } },
+      }
+    }
+    const runtime = createCliRuntime({
+      ...base(), createTransport,
+      routes: { planner: { engine: "claude", model: "opus" }, worker: { engine: "local", model: "qwen3" } },
+    })
+    const result = await runtime.host.preflight(runtime.host.identity.profile)
+    expect(result).toMatchObject({ compatible: true, problems: [] })
+    expect([...targets].sort()).toEqual(["claude/opus", "local/anchor-model", "local/qwen3"])
+  })
+
+  test("createCliRuntime dispatches each role on its own route and never on the anchor for a failed route", async () => {
+    const prepared: string[] = []
+    const createTransport = (options: CliTransportOptions): CliTransportHandle => {
+      prepared.push(`${options.engine}/${options.model}`)
+      if (options.engine === "claude") throw new Error("fixture claude unavailable")
+      return {
+        async run() { return { status: "completed", text: JSON.stringify({ type: "final", text: "ok" }), quiescent: true } },
+        async requestCancel() { return { requested: true, acknowledged: true, terminal: true, quiescent: true } },
+        async reconcile() { return { outcome: "terminal", quiescent: true, evidence: "fixture" } },
+      }
+    }
+    const dispatch = async (role: "planner" | "worker") => {
+      if (role === "worker") { wt.cleanup(); wt = tempGitWorktree(); wt.worktree = realpathSync(wt.worktree) }
+      const runtime = createCliRuntime({ ...base(), createTransport, routes: { planner: { engine: "claude", model: "opus" } } })
+      const claim = runtime.runs.claim("s", "instance", process.pid)
+      const partial = {
+        executionID: `exec-${role}`, supervisorSessionID: "s", taskID: "t", attemptID: "a", generation: claim.generation, role,
+        title: "t", cwd: wt.worktree, text: "x", deadlineAt: Date.now() + 10_000, policy: runtime.policy.resolve(role),
+      }
+      runtime.runs.registerIntent(claim, {
+        executionId: partial.executionID, ownerSession: "s", taskId: "t", attemptId: "a", generation: claim.generation, role,
+        cwd: wt.worktree, policyID: partial.policy.id, kind: "host", engine: "local", profile: "legacy-unowned",
+        controlProfile: runtime.host.identity.controlProfile,
+      })
+      const handle = await runtime.host.prepare({ ...partial, handlers: runtime.policy.handlers(partial) } as Parameters<typeof runtime.host.prepare>[0])
+      return handle.run()
+    }
+    expect(await dispatch("planner")).toMatchObject({ status: "failed", error: "CLI inference transport could not be prepared" })
+    expect(prepared).toEqual(["claude/opus"])
+    expect(await dispatch("worker")).toMatchObject({ status: "completed" })
+    expect(prepared).toEqual(["claude/opus", "local/anchor-model"])
   })
 })

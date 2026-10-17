@@ -206,6 +206,35 @@ describe("required control status checks", () => {
     expect(invoked).toBe(false)
   })
 
+  test("a failing combo route is named by sanitized roles and engine/model only", () => {
+    const allRoleControls: Preflight["controls"] = Object.fromEntries(
+      [...common, "serialWorkerLease", "readOnlyWorktree"].map(key => [key, "supported" as const]),
+    )
+    const refusal = (problems: string[]) => {
+      try { assertHostAdmission(preflight(allRoleControls, false, problems)) } catch (error) { return error }
+      throw new Error("expected host admission refusal")
+    }
+    const named = refusal([
+      "combo route for planner, critic -> claude / opus is unavailable: selected CLI executable or profile is unavailable",
+      "private vendor diagnostic",
+    ])
+    expect(named).toMatchObject({
+      name: "AdmissionRefusal",
+      message: "host incompatible: required control statuses unavailable; combo route unavailable: planner, critic -> claude / opus",
+      comboRoutes: "planner, critic -> claude / opus",
+    })
+    expect((named as Error).message).not.toContain("private vendor diagnostic")
+    // Forged subjects with unknown roles, control characters, or unlisted engines are never echoed.
+    for (const forged of [
+      "combo route for evil -> claude / opus is unavailable",
+      "combo route for planner -> claude / op\u001b[31mus is unavailable",
+      "combo route for planner -> bash / opus is unavailable",
+      "combo route for planner -> claude / --x\nsecret is unavailable",
+    ]) {
+      expect(refusal([forged])).toMatchObject({ message: "host incompatible: required control statuses unavailable" })
+    }
+  })
+
   test("legacy hook-control maps remain inadmissible under either profile", () => {
     const legacyHookMap: Preflight["controls"] = {
       session: "supported", model: "supported", system: "supported", tools: "supported",

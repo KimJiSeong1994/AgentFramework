@@ -2,7 +2,7 @@ import { realpathSync, statSync } from "node:fs"
 import { loadConfig } from "../config.ts"
 import { createCliHost } from "./cli-host.ts"
 import { createCodexProfile } from "./codex-profile.ts"
-import type { CliEngine } from "./cli-transport.ts"
+import type { CliEngine, CliTransportHandle, CliTransportOptions } from "./cli-transport.ts"
 import { createExecutionRuntime } from "./runtime.ts"
 import { validateComboRoutes } from "./default-model.ts"
 import { CONFIG_MODEL_ROLES, type ComboRoutes, type ExecutionRole, type ExecutionRuntime } from "./types.ts"
@@ -11,6 +11,8 @@ import type { CliProgressSink } from "./cli-progress.ts"
 export type CliRuntimeOptions = { worktree: string; engine: CliEngine; model: string; progress?: CliProgressSink
   /** Per-role routes pinned for this runtime; roles absent (or equal to the anchor) use engine/model. */
   routes?: ComboRoutes
+  /** Test-only transport seam; production always uses the real CLI transport. */
+  createTransport?: (options: CliTransportOptions) => CliTransportHandle
 }
 
 /** The selected model applies to every role except those with a pinned route; vendor credentials remain vendor-owned. */
@@ -59,6 +61,7 @@ export function createCliRuntime(options: CliRuntimeOptions): ExecutionRuntime {
       policy,
       runs,
       ...(options.progress ? { observeActivity: options.progress.host } : {}),
+      ...(options.createTransport ? { createTransport: options.createTransport } : {}),
     }), {
       planningOnlyMain: true,
       ...(nativeContext ? { nativeContext } : {}),
