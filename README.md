@@ -39,7 +39,7 @@ bun scripts/otter-wiki.ts capture            # 실행 이력 → 지식 위키
 ```text
 /model combo planner claude opus          # 역할별 엔진·모델 저장 (~/.config/otter/otter.jsonc)
 /model combo architect codex gpt-5.6-sol
-/model combo worker local qwen3-coder:30b
+/model combo worker local gemma4-26b-mtp:latest
 /model combo apply                        # 새 세션에 적용 (기존 세션은 고정된 콤보 유지)
 ```
 

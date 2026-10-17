@@ -118,7 +118,7 @@ engine and model to individual roles; the model chosen with `/model` stays the *
       "planner":   { "engine": "claude", "model": "opus" },
       "architect": { "engine": "codex",  "model": "gpt-5.6-sol" },
       "critic":    { "engine": "claude", "model": "sonnet" },
-      "worker":    { "engine": "local",  "model": "qwen3-coder:30b" }
+      "worker":    { "engine": "local",  "model": "gemma4-26b-mtp:latest" }
     }
   }
 }
