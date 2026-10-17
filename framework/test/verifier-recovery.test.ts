@@ -9,7 +9,7 @@ import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
 import type { ExecutionRequest, ExecutionRuntime } from "../src/hosts/types.ts"
 import { createQueue } from "../src/orchestration/queue.ts"
 import { createLegacyVerifierExecutor } from "../src/orchestration/legacy-verifier.ts"
-import { worktreeRoot } from "../src/orchestration/worktree.ts"
+import { createTaskWorktree, planWorktreeScope, worktreeRoot } from "../src/orchestration/worktree.ts"
 import { ledgerPath } from "../src/state/ledger.ts"
 import { executionRunDirectory, stateRoot } from "../src/state/store.ts"
 import { GIT_TEST_ENV, tempGitWorktree } from "./guards-helpers.ts"
@@ -477,4 +477,31 @@ test("legacy verifier coordinator crash preserves started ownership while a deta
     expect(capturedPrivateBaseline).toBeDefined()
     expect(readFileSync(capturedPrivateBaseline!.path).equals(capturedPrivateBaseline!.bytes)).toBe(true)
   }
+}, 30_000)
+
+test("under a plan worktree the verifier input is the plan-worktree snapshot, not the checkout", async () => {
+  const fixture = tempGitWorktree({ "README.md": "fixture\n", "verify_plan.sh": "test \"$(cat README.md)\" = UNMERGED_WORKER_EDIT\n" })
+  try {
+    const worktree = realpathSync(fixture.worktree)
+    const logPath = join(fixture.worktree, ".verifier-requests.log")
+    const runtime = runtimeFor(worktree, logPath, `plan-${randomUUID()}`)
+    const prepared: Array<{ cwd: string; inputSnapshotID: string; inputDigest: string }> = []
+    const verifier = runtime.verifier
+    runtime.verifier = { ...verifier, prepare: async request => {
+      prepared.push({ cwd: request.cwd, inputSnapshotID: request.inputSnapshotID, inputDigest: request.inputDigest })
+      return verifier.prepare(request)
+    } } as typeof runtime.verifier
+    const plan = (await createTaskWorktree(worktree, SESSION, planWorktreeScope("wf_verifier"), runtime.config.delegate.diff_exclude))!
+    const queue = createQueue(runtime)
+    queue.add(SESSION, [{ title: "verify inside the plan worktree", verify: "sh verify_plan.sh", wf: { id: "wf_verifier", planSha: "sha" } }])
+    expect(await queue.run(SESSION, { planWorktree: plan })).toMatchObject({ done: 1, failed: 0 })
+
+    expect(prepared).toHaveLength(1)
+    expect(prepared[0]!.cwd).toBe(plan.path)
+    const planTree = (await plan.store.snapshot(runtime.config.delegate.diff_exclude))!.tree
+    expect(prepared[0]!.inputSnapshotID).toBe(planTree) // the edited plan-worktree tree...
+    const checkoutTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: worktree, env: GIT_TEST_ENV }).toString().trim()
+    expect(prepared[0]!.inputSnapshotID).not.toBe(checkoutTree) // ...never the untouched checkout
+    expect(readFileSync(join(worktree, "README.md"), "utf8")).toBe("fixture\n")
+  } finally { fixture.cleanup() }
 }, 30_000)

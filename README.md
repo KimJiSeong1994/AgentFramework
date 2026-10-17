@@ -34,6 +34,10 @@ bun scripts/otter-wiki.ts capture            # 실행 이력 → 지식 위키
 
 대화 중: `/plan` · `/approve` · `/sessions` · `/resume <sid>` · `/model` · `/help`
 
+의도 라우팅: 모호하거나 설계 수준인 요청은 전송 전에 [채팅 계속 | deep-interview | ralplan | 취소]를 제안하고, 질문은 답변만 받습니다(계획 JSON이 와도 `/plan` 전에는 승인 대기가 되지 않음). `force:` 접두사로 건너뛰고, `chat.intent: "off"`로 끕니다.
+
+승인된 계획은 작업 트리 하나(`wf-<id>`)에서 모든 작업이 실행되고, 끝나면 변경 파일·diff 요약·패치 경로를 보여 준 뒤 [내 체크아웃에 적용 | 유지 | 버리기]를 묻습니다(적용 전에는 체크아웃이 그대로이며, 커밋이 없으면 "제자리 실행" 여부를 먼저 묻습니다). `chat.worktree: "off"`로 끕니다.
+
 멀티 모델 콤보: `/model`의 엔진 목록 맨 아래 `combo`(또는 `/model combo`)를 고르면 메뉴에서 역할 → 엔진 → 모델을 고릅니다. 고른 값은 `~/.config/otter/otter.jsonc`에 저장되고, 메뉴의 "Apply to a new session"으로 새 세션에 적용합니다(기존 세션은 고정된 콤보 유지). 직접 입력도 됩니다:
 
 ```text

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { ConfigError, DEFAULT_CONFIG, loadConfig, parseJsonc, projectConfigPath, userConfigPath } from "../src/config.ts"
+import { chatIntentMode, chatWorktreeMode, ConfigError, DEFAULT_CONFIG, loadConfig, parseJsonc, projectConfigPath, userConfigPath } from "../src/config.ts"
 
 let root: string
 let worktree: string
@@ -30,6 +30,29 @@ function refused(path: string, kind: string) {
   expect(error).toMatchObject({ path, kind })
   expect((error as Error).message).toBe(`otter: config ${path}: ${kind}`)
 }
+
+describe("chat.intent", () => {
+  test("absent means offer; off is accepted; any other value is refused at load", () => {
+    expect(chatIntentMode(loadConfig(worktree))).toBe("offer")
+    put(projectConfigPath(worktree), '{"chat":{"intent":"off"}}')
+    expect(chatIntentMode(loadConfig(worktree))).toBe("off")
+    put(projectConfigPath(worktree), '{"chat":{"intent":"always"}}')
+    refused(projectConfigPath(worktree), "invalid-chat-intent")
+    expect(DEFAULT_CONFIG.chat).toEqual({})
+  })
+})
+
+describe("chat.worktree", () => {
+  test("absent means plan; off is accepted; any other value is refused at load; the default config stays policy-neutral", () => {
+    expect(chatWorktreeMode(loadConfig(worktree))).toBe("plan")
+    put(projectConfigPath(worktree), '{"chat":{"worktree":"off"}}')
+    expect(chatWorktreeMode(loadConfig(worktree))).toBe("off")
+    put(projectConfigPath(worktree), '{"chat":{"worktree":"task"}}')
+    refused(projectConfigPath(worktree), "invalid-chat-worktree")
+    expect(DEFAULT_CONFIG.chat).toEqual({})
+    expect(DEFAULT_CONFIG.delegate.worktree).toBe(false)
+  })
+})
 
 describe("explicit verifier configuration", () => {
   test("JSONC comments never rewrite string literals into a valid verifier selector", () => {

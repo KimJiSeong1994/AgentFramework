@@ -9,9 +9,15 @@ import { durableWriteBytes } from "../state/durable.ts"
 import { readBoundedBytes, stateRoot } from "../state/store.ts"
 import { OPEN_STATUSES, tasksForWorkflow, type Ledger } from "../state/ledger.ts"
 import { sha256, readArtifactBytes } from "./artifacts.ts"
+import { planWorktreePath, planWorktreeScope } from "../orchestration/worktree.ts"
 import type { Subject } from "./types.ts"
 
-export type CheckpointWorktree = { head: string | null; statusSha: string | null }
+export type CheckpointWorktree = {
+  head: string | null
+  statusSha: string | null
+  /** Present when the digest describes the workflow's isolated plan worktree (scope id `wf-<id>`) rather than the checkout. */
+  isolatedAs?: string
+}
 
 export type RequestCheckpoint = {
   version: 1
@@ -64,6 +70,15 @@ export function worktreeDigest(worktree: string): CheckpointWorktree {
   const head = git(["rev-parse", "HEAD"])
   const status = git(["status", "--porcelain"])
   return { head: head === null ? null : head.trim(), statusSha: status === null ? null : sha256(status) }
+}
+
+/**
+ * Digest of the workflow's isolated plan worktree when one exists (units of an ultragoal share it, so their checkpoints
+ * describe the tree later units build on), otherwise of the checkout. Display evidence only, never authority.
+ */
+export function workflowWorktreeDigest(worktree: string, sessionID: string, workflowID: string): CheckpointWorktree {
+  const isolated = planWorktreePath(worktree, sessionID, workflowID)
+  return isolated ? { ...worktreeDigest(isolated), isolatedAs: planWorktreeScope(workflowID) } : worktreeDigest(worktree)
 }
 
 /** Write-once: an existing file for this token is immutable and its reference is reused. */

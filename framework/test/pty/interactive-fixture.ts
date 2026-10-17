@@ -494,6 +494,8 @@ async function main(): Promise<void> {
   /** A synthetic host under the production controller/queue: the first worker blocks until cancelled, later workers finish. */
   function flowRuntime(options: Parameters<InteractiveDependencies["createRuntime"]>[0]): ExecutionRuntime {
     const config = structuredClone(DEFAULT_CONFIG)
+    // This fixture proves the plan approval path; intent offers have their own tests (interactive.test.ts).
+    config.chat.intent = "off"
     config.delegate = { ...config.delegate, worktree: false, review: false, max_attempts: 2 }
     const runs = createExecutionRunStore(options.worktree)
     const runtime: ExecutionRuntime = {
@@ -574,7 +576,7 @@ async function main(): Promise<void> {
       directory: options.worktree,
       instance: "pty-fixture-runtime",
       host: { identity: { engine: options.engine, profile: "pty-fixture" } },
-      config: structuredClone(DEFAULT_CONFIG),
+      config: { ...structuredClone(DEFAULT_CONFIG), chat: { intent: "off" as const } },
       log() {},
       selectedEngine: options.engine,
       selectedModel: options.model,

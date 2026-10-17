@@ -14,7 +14,7 @@ import { readLedger } from "../state/ledger.ts"
 import { durableWriteBytes } from "../state/durable.ts"
 import { readArtifactBytes, sha256, verifyArtifact, workflowArtifactDirectory } from "./artifacts.ts"
 import { commitHandoff, commitRevision, readCommitted } from "./commit.ts"
-import { worktreeDigest } from "./checkpoint.ts"
+import { workflowWorktreeDigest } from "./checkpoint.ts"
 import { implementationUnitSubject, subjectSha256 } from "./execution-unit.ts"
 import {
   ULTRAGOAL_DECOMPOSE_PROMPT, ULTRAGOAL_FINAL_REVIEW_PROMPT, ULTRAGOAL_UNIT_PLAN_PROMPT, ULTRAGOAL_UNIT_REVIEW_PROMPT, type StagePrompt,
@@ -388,7 +388,7 @@ export async function runUltragoal(
         const doc: CheckpointDoc = {
           v: 1, wid: fresh.id, sid: fresh.sessionID, goalId: found.goalId, attempt: found.attempt, status: verification.ok ? "complete" : "incomplete",
           subject: found.subject, approvalRef: found.approval.receiptRef, verificationRef: verification.ref, goalsSha: data.goals!.sha256,
-          unit: found.artifacts.map(ref => ({ key: ref.key, sha256: ref.sha256 })), worktree: worktreeDigest(worktree),
+          unit: found.artifacts.map(ref => ({ key: ref.key, sha256: ref.sha256 })), worktree: workflowWorktreeDigest(worktree, fresh.sessionID, fresh.id),
         }
         const checkpoint = writeReadable(worktree, fresh, goalCheckpointKey(found.goalId, found.attempt), `${JSON.stringify(doc, null, 2)}\n`)
         return { ...reduce(fresh, { type: "goal_checkpointed", checkpoint, complete: verification.ok }), receipts: [verification.ref] }

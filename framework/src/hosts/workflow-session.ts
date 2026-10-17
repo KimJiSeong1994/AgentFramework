@@ -46,6 +46,8 @@ export type WorkflowHostContext = {
   admit(): Promise<void>
   /** Run the approved implementation unit through the foreground controller. */
   runApprovedUnit(sessionID: string, signal?: AbortSignal, resumed?: boolean): Promise<unknown>
+  /** Final-review hook for an isolated workflow: show its change and offer Apply / Keep / Discard. */
+  finishIsolation?(workflowID: string): Promise<void>
   /** Clear the session hold for the held workflow at this revision (explicit Resume), as for plan Resume. */
   resumeHeld(revision: number): Promise<void>
   /** The running operation: Escape aborts it through the session's cancel handler. */
@@ -379,7 +381,11 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
           show(approved.wf)
           continue
         }
-        case "done": write("Ultragoal complete. All goals have current verified checkpoints and completion proof."); syncStatus(); return { quit }
+        case "done":
+          write("Ultragoal complete. All goals have current verified checkpoints and completion proof.")
+          await ctx.finishIsolation?.(workflowID)
+          syncStatus()
+          return { quit }
         case "stuck": {
           if (!wf) { syncStatus(); return { quit } }
           const index = await choose(`Ultragoal is stuck: ${clip(result.reason ?? ultragoalView(wf), 600)}`, ["Retry the step", "Keep stuck (inspect with /status, stop with /cancel)"], undefined, wf.id)

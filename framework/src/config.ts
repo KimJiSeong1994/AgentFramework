@@ -120,6 +120,17 @@ export type OtterConfig = {
     default_model?: { engine: string; model: string } | null
     /** Per-role engine/model routes (role -> {engine, model}); applied to new sessions only. A null role removes a user route. */
     combo?: Record<string, { engine: string; model: string } | null> | null
+    /**
+     * CLI intent routing. Unset means "offer" (see `chatIntentMode`); it stays unset in DEFAULT_CONFIG because `chat` is
+     * carried by the runtime and compared against the frozen policy baseline.
+     */
+    intent?: "offer" | "off"
+    /**
+     * CLI run isolation. Unset means "plan" (see `chatWorktreeMode`): an approved plan runs in ONE linked worktree and
+     * reaches the checkout only through an explicit Apply. "off" runs in the checkout. Unset in DEFAULT_CONFIG for the same
+     * policy-baseline reason as `intent`; `delegate.worktree` (per-task, auto-merge) is a separate, unchanged switch.
+     */
+    worktree?: "plan" | "off"
   }
   models: {
     /** provider/model ids; undefined = inherit OpenCode default */
@@ -357,7 +368,17 @@ export function projectConfigPath(worktree: string): string {
   return join(worktree, ".otter", "otter.jsonc")
 }
 
-export type ConfigErrorKind = "unreadable" | "not-a-file" | "invalid-jsonc" | "invalid-verifier-selector"
+export type ConfigErrorKind = "unreadable" | "not-a-file" | "invalid-jsonc" | "invalid-verifier-selector" | "invalid-chat-intent" | "invalid-chat-worktree"
+
+/** Effective `chat.intent`: an absent key means the default, "offer". */
+export function chatIntentMode(config: { chat: { intent?: "offer" | "off" } }): "offer" | "off" {
+  return config.chat.intent === "off" ? "off" : "offer"
+}
+
+/** Effective `chat.worktree`: an absent key means the default, "plan". */
+export function chatWorktreeMode(config: { chat: { worktree?: "plan" | "off" } }): "plan" | "off" {
+  return config.chat.worktree === "off" ? "off" : "plan"
+}
 
 export class ConfigError extends Error {
   constructor(readonly path: string, readonly kind: ConfigErrorKind) {
@@ -417,6 +438,14 @@ export function loadConfig(worktree: string): OtterConfig {
         throw new ConfigError(p, "invalid-verifier-selector")
       }
       if (Object.hasOwn(patch.delegate, "verifier")) selectorPath = p
+    }
+    if (Object.hasOwn(patch, "chat") && patch.chat && typeof patch.chat === "object" && !Array.isArray(patch.chat) &&
+        Object.hasOwn(patch.chat, "intent") && patch.chat.intent !== "offer" && patch.chat.intent !== "off") {
+      throw new ConfigError(p, "invalid-chat-intent")
+    }
+    if (Object.hasOwn(patch, "chat") && patch.chat && typeof patch.chat === "object" && !Array.isArray(patch.chat) &&
+        Object.hasOwn(patch.chat, "worktree") && patch.chat.worktree !== "plan" && patch.chat.worktree !== "off") {
+      throw new ConfigError(p, "invalid-chat-worktree")
     }
     cfg = deepMerge(cfg, patch)
   }

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { execFileSync } from "node:child_process"
 import { join } from "node:path"
 import { DEFAULT_CONFIG, type OtterConfig } from "../src/config.ts"
 import { createExecutionRunStore } from "../src/hosts/run-state.ts"
@@ -9,14 +10,14 @@ import { createQueue, getQueue, parseVerdict, reviewerPrompt, workerPrompt } fro
 import { createLegacyVerifierExecutor } from "../src/orchestration/legacy-verifier.ts"
 import type { VerificationHandle, VerificationRequest, VerificationResult } from "../src/orchestration/verifier.ts"
 import { createSnapshotStore } from "../src/orchestration/snapshot.ts"
-import { createTaskWorktree, worktreeRoot } from "../src/orchestration/worktree.ts"
+import { createTaskWorktree, planWorktreeScope, reopenPlanWorktree, worktreeRoot } from "../src/orchestration/worktree.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { newWorkflow, withFlowTransaction } from "../src/flow/state.ts"
 import { writeWorkflow } from "./commit-fixture.ts"
 import { renderStatusSnapshot, statusJson } from "../src/flow/status.ts"
 import { addTasks, emptyLedger, readLedger, updateTask, writeLedger } from "../src/state/ledger.ts"
 import { executionRunDirectory, sessionDir, stateRoot } from "../src/state/store.ts"
-import { tempGitWorktree, verifyScript, waitFor } from "./guards-helpers.ts"
+import { GIT_TEST_ENV, tempGitWorktree, verifyScript, waitFor } from "./guards-helpers.ts"
 
 const S = "ses_main"
 let wt: ReturnType<typeof tempGitWorktree>
@@ -1856,5 +1857,107 @@ describe("prompt and reviewer contracts", () => {
     expect(parseVerdict("**Verdict:** REJECT: test-aware code")).toEqual({ verdict: "reject", reason: "test-aware code" })
     expect(parseVerdict("REJECT when tests fail.\nLooks fine").verdict).toBe("error")
     expect(parseVerdict("Looks good to me").verdict).toBe("error")
+  })
+})
+
+describe("run-level plan worktree", () => {
+  const WF = "wf_queue_plan"
+  const tag = { id: WF, planSha: "sha-plan" }
+  const gitOut = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe", env: GIT_TEST_ENV }).toString()
+  const checkout = () => gitOut(wt.worktree, "status", "--porcelain", "--untracked-files=all")
+
+  test("every task runs in the one plan worktree, accumulates there, never merges, and the checkout stays untouched", async () => {
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as OtterConfig["delegate"] })
+    const checkOne = verify("check_one.sh", "test -f one.py") // authored before the worktree so it is imported into it
+    const checkTwo = verify("check_two.sh", "test -f two.py && test -f one.py")
+    const plan = (await createTaskWorktree(wt.worktree, S, planWorktreeScope(WF), f.runtime.config.delegate.diff_exclude))!
+    const before = checkout()
+    const seen: string[] = []
+    f.replies.set("worker", request => {
+      seen.push(request.cwd)
+      if (request.text.includes("Task 1 of")) writeFileSync(join(request.cwd, "one.py"), "ONE = 1\n")
+      else writeFileSync(join(request.cwd, "two.py"), `TWO = ${existsSync(join(request.cwd, "one.py")) ? "'sees one'" : "'blind'"}\n`)
+      return { status: "completed", text: "Open issues: none" }
+    })
+    const q = createQueue(f.runtime)
+    q.add(S, [
+      { title: "one", verify: checkOne, wf: tag },
+      { title: "two", verify: checkTwo, wf: tag },
+    ])
+    const outcome = await q.run(S, { planWorktree: plan })
+    expect(outcome).toMatchObject({ done: 2, failed: 0 })
+    expect(seen).toEqual([plan.path, plan.path])
+    expect(readFileSync(join(plan.path, "two.py"), "utf8")).toBe("TWO = 'sees one'\n")
+    expect(existsSync(join(wt.worktree, "one.py"))).toBe(false)
+    expect(existsSync(join(wt.worktree, "two.py"))).toBe(false)
+    expect(checkout()).toBe(before)
+    expect(existsSync(plan.path)).toBe(true) // nothing removed after a task
+    expect(f.events).not.toContain("task worktree merged")
+    expect(existsSync(join(worktreeRoot(wt.worktree), S, readLedger(wt.worktree, S).tasks[0]!.id))).toBe(false) // no per-task worktree
+    expect((await plan.preview(f.runtime.config.delegate.diff_exclude))).toMatchObject({ ok: true, files: ["one.py", "two.py"] })
+  }, 60_000) // real git worktree + two verified tasks + snapshot preview exceed the 5s default under load
+
+  test("crash/resume reopens the SAME plan worktree with its edits; a substituted worktree is refused before any dispatch", async () => {
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as OtterConfig["delegate"] })
+    const exclude = f.runtime.config.delegate.diff_exclude
+    const plan = (await createTaskWorktree(wt.worktree, S, planWorktreeScope(WF), exclude))!
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "done before crash", wf: tag }, { title: "interrupted", wf: tag }])
+    let ledger = readLedger(wt.worktree, S)
+    const now = Date.now()
+    ledger = updateTask(ledger, ledger.tasks[0]!.id, { status: "done", attempts: 1, startedAt: now - 3000, finishedAt: now - 2000 })
+    ledger = updateTask(ledger, ledger.tasks[1]!.id, { status: "running", attempts: 1, startedAt: now - 1000 })
+    writeLedger(wt.worktree, { ...ledger, running: { taskId: ledger.tasks[1]!.id, since: now - 1000 } })
+    // the interrupted task had persisted its own snapshot baseline inside the plan worktree before the crash
+    const taskStore = (await createSnapshotStore(plan.path, join(sessionDir(wt.worktree, S), "snapshots", ledger.tasks[1]!.id)))!
+    await taskStore.baseline(exclude)
+    writeFileSync(join(plan.path, "before-crash.py"), "EARLY = 1\n")
+    const baselineFile = join(worktreeRoot(wt.worktree), ".recovery", S, planWorktreeScope(WF), "baseline", "baseline.json")
+    const baselineBytes = readFileSync(baselineFile)
+
+    // substituted: a worktree of ANOTHER workflow is not this run's worktree
+    const foreign = (await createTaskWorktree(wt.worktree, S, planWorktreeScope("wf_foreign"), exclude))!
+    expect(await q.run(S, { resumed: true, planWorktree: foreign })).toMatchObject({ aborted: true, done: 0 })
+    expect(f.requests).toHaveLength(0)
+    expect(readLedger(wt.worktree, S).tasks.map(t => t.status)).toEqual(["done", "running"])
+    // substituted: an unmanaged directory is not a plan worktree at all
+    const impostor = { ...plan, path: wt.worktree }
+    expect(await q.run(S, { resumed: true, planWorktree: impostor })).toMatchObject({ aborted: true, done: 0 })
+    expect(f.requests).toHaveLength(0)
+    // the replaced original (moved aside, a different directory at the same path) fails reopen authentication
+    const moved = `${plan.path}.moved`
+    renameSync(plan.path, moved)
+    mkdirSync(plan.path)
+    await expect(reopenPlanWorktree(wt.worktree, S, WF, exclude)).rejects.toThrow()
+    rmSync(plan.path, { recursive: true, force: true })
+    renameSync(moved, plan.path)
+
+    // authentic reopen resumes in the same tree, keeps its edits and its original baseline
+    const reopened = await reopenPlanWorktree(wt.worktree, S, WF, exclude)
+    expect(reopened.path).toBe(plan.path)
+    f.replies.set("worker", request => {
+      expect(request.cwd).toBe(plan.path)
+      expect(readFileSync(join(request.cwd, "before-crash.py"), "utf8")).toBe("EARLY = 1\n")
+      writeFileSync(join(request.cwd, "after.py"), "LATE = 1\n")
+      return { status: "completed", text: "Open issues: none" }
+    })
+    const resumedRun = await q.run(S, { resumed: true, planWorktree: reopened })
+    expect(readLedger(wt.worktree, S).tasks[1]).toMatchObject({ status: "done" })
+    expect(resumedRun).toMatchObject({ done: 1, failed: 0 })
+    expect(readFileSync(baselineFile)).toEqual(baselineBytes)
+    expect(existsSync(join(wt.worktree, "after.py"))).toBe(false)
+    expect(await reopened.preview(exclude)).toMatchObject({ ok: true, files: ["after.py", "before-crash.py"] })
+  })
+
+  test("a leftover per-task worktree beside the plan worktree is refused and preserved", async () => {
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as OtterConfig["delegate"] })
+    const exclude = f.runtime.config.delegate.diff_exclude
+    const plan = (await createTaskWorktree(wt.worktree, S, planWorktreeScope(WF), exclude))!
+    const q = createQueue(f.runtime)
+    const [task] = q.add(S, [{ title: "only", wf: tag }])
+    const stray = (await createTaskWorktree(wt.worktree, S, task!.id, exclude))!
+    expect(await q.run(S, { planWorktree: plan })).toMatchObject({ aborted: true, done: 0 })
+    expect(f.requests).toHaveLength(0)
+    expect(existsSync(stray.path)).toBe(true)
   })
 })

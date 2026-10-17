@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, 
 import { dirname, join } from "node:path"
 import { createQueue } from "../src/orchestration/queue.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
-import { createTaskWorktree, hasTaskWorktreeState, reopenTaskWorktree, taskWorktreeOwner, worktreeRoot } from "../src/orchestration/worktree.ts"
+import { createTaskWorktree, hasPlanWorktreeState, hasTaskWorktreeState, planIsolationAvailability, planWorktreePath, planWorktreeScope, reopenPlanWorktree, reopenTaskWorktree, taskWorktreeOwner, worktreeRoot } from "../src/orchestration/worktree.ts"
 import { createSnapshotStore } from "../src/orchestration/snapshot.ts"
 import { readLedger } from "../src/state/ledger.ts"
 import { fakeClient, GIT_TEST_ENV, makeDeps, tempGitWorktree, verifyScript, waitFor, type FakeClient } from "./guards-helpers.ts"
@@ -680,5 +680,97 @@ describe("queue with delegate.worktree", () => {
     expect(client.created[0]!.directory).toBe(bare.worktree)
     expect(deps.logs.some((l) => l.startsWith("task worktree unavailable"))).toBe(true)
     bare.cleanup()
+  })
+})
+
+describe("plan worktree (one worktree per approved plan)", () => {
+  const WF = "wf_plan1"
+  const checkoutBytes = () => g(wt.worktree, "status", "--porcelain", "--untracked-files=all") + "|" + read(wt.worktree, "lib.py") + read(wt.worktree, "README.md")
+  const make = async () => (await createTaskWorktree(wt.worktree, S, planWorktreeScope(WF), []))!
+
+  test("scope id is wf-<workflowID> and the managed owner round-trips", async () => {
+    const plan = await make()
+    expect(planWorktreeScope(WF)).toBe("wf_plan1".replace(/^/, "wf-"))
+    expect(plan.path).toBe(join(worktreeRoot(wt.worktree), S, `wf-${WF}`))
+    expect(taskWorktreeOwner(plan.path)).toMatchObject({ sessionID: S, taskId: `wf-${WF}` })
+    expect(hasPlanWorktreeState(wt.worktree, S, WF)).toBe(true)
+    expect(planWorktreePath(wt.worktree, S, WF)).toBe(plan.path)
+    expect(planWorktreePath(wt.worktree, S, "wf_other")).toBeUndefined()
+  })
+
+  test("tasks accumulate in one worktree and the checkout is byte-identical until Apply", async () => {
+    const before = checkoutBytes()
+    const plan = await make()
+    writeFileSync(join(plan.path, "task1.py"), "ONE = 1\n") // task 1
+    writeFileSync(join(plan.path, "lib.py"), "X = 2\n") // task 2 builds on the same tree
+    expect(read(plan.path, "task1.py")).toBe("ONE = 1\n")
+    const preview = await plan.preview([])
+    expect(preview).toMatchObject({ ok: true, files: ["lib.py", "task1.py"] })
+    if (!preview.ok) throw new Error(preview.reason)
+    expect(preview.stat).toContain("2 files changed")
+    expect(preview.patch).toBe(join(worktreeRoot(wt.worktree), S, `wf-${WF}.patch`))
+    expect(readFileSync(preview.patch, "utf8")).toContain("+ONE = 1")
+    expect(existsSync(join(wt.worktree, "task1.py"))).toBe(false)
+    expect(checkoutBytes()).toBe(before)
+    // a second preview (re-offer after Keep) replaces the preserved patch instead of failing
+    expect(await plan.preview([])).toMatchObject({ ok: true, files: ["lib.py", "task1.py"] })
+
+    const applied = await plan.merge([])
+    expect(applied).toEqual({ ok: true, files: ["lib.py", "task1.py"] })
+    expect(read(wt.worktree, "task1.py")).toBe("ONE = 1\n")
+    expect(read(wt.worktree, "lib.py")).toBe("X = 2\n")
+    await plan.remove()
+    expect(existsSync(plan.path)).toBe(false)
+    expect(hasPlanWorktreeState(wt.worktree, S, WF)).toBe(false)
+    expect(existsSync(join(worktreeRoot(wt.worktree), S, `wf-${WF}.patch`))).toBe(false)
+  })
+
+  test("an unchanged plan worktree previews as empty", async () => {
+    const plan = await make()
+    expect(await plan.preview([])).toEqual({ ok: true, files: [], stat: "", patch: "" })
+    await plan.remove()
+  })
+
+  test("a conflicting Apply keeps the worktree and the patch and leaves the checkout untouched; reopen still works", async () => {
+    const plan = await make()
+    writeFileSync(join(plan.path, "lib.py"), "X = 10\n")
+    writeFileSync(join(wt.worktree, "lib.py"), "X = 99\n") // the user edited the same line meanwhile
+    const before = checkoutBytes()
+    const applied = await plan.merge([])
+    expect(applied.ok).toBe(false)
+    if (!applied.ok) {
+      expect(applied.reason).toMatch(/does not apply/)
+      expect(readFileSync(applied.patch, "utf8")).toContain("+X = 10")
+    }
+    expect(checkoutBytes()).toBe(before)
+    expect(existsSync(plan.path)).toBe(true)
+    const reopened = await reopenPlanWorktree(wt.worktree, S, WF, [])
+    expect(read(reopened.path, "lib.py")).toBe("X = 10\n")
+    expect(await reopened.preview([])).toMatchObject({ ok: true, files: ["lib.py"] })
+    await reopened.remove()
+  })
+
+  test("Discard removes the worktree, its recovery data and the patch without touching the checkout", async () => {
+    const before = checkoutBytes()
+    const plan = await make()
+    writeFileSync(join(plan.path, "gone.py"), "G = 1\n")
+    await plan.preview([])
+    await plan.remove()
+    expect(existsSync(plan.path)).toBe(false)
+    expect(hasPlanWorktreeState(wt.worktree, S, WF)).toBe(false)
+    expect(g(wt.worktree, "worktree", "list")).not.toContain(`wf-${WF}`)
+    expect(existsSync(join(wt.worktree, "gone.py"))).toBe(false)
+    expect(checkoutBytes()).toBe(before)
+  })
+
+  test("an unborn HEAD or a non-repository is reported, and creation returns null instead of silently running in place", async () => {
+    const bare = tempGitWorktree()
+    try {
+      g(bare.worktree, "update-ref", "-d", "HEAD")
+      expect(await planIsolationAvailability(bare.worktree)).toBe("no-commit")
+      expect(await createTaskWorktree(bare.worktree, S, planWorktreeScope(WF), [])).toBeNull()
+    } finally { bare.cleanup() }
+    expect(await planIsolationAvailability(wt.worktree)).toBe("ready")
+    expect(await planIsolationAvailability("/")).toBe("no-git")
   })
 })

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { unwrapWholeQuote, detectMode, stripModeKeywords } from "../src/modes/detect.ts"
+import { unwrapWholeQuote, detectMode, stripModeKeywords, classifyIntent } from "../src/modes/detect.ts"
 
 describe("detectMode", () => {
   test("detects ultrawork / ulw case-insensitively with word boundaries", () => {
@@ -151,5 +151,71 @@ describe("whole-message quotes (opencode run keeps the shell quotes)", () => {
     // two separate quoted spans: the outer characters match but do not enclose one string
     expect(unwrapWholeQuote('"ulw" is not "plan mode"')).toBe('"ulw" is not "plan mode"')
     expect(detectMode('"ulw" is not "plan mode"')).toBeNull()
+  })
+})
+
+describe("classifyIntent", () => {
+  const table: Array<[string, string]> = [
+    // questions (EN/KO)
+    ["What is the difference between a mutex and a semaphore", "question"],
+    ["How do I refactor this?", "question"],
+    ["explain the architecture", "question"],
+    ["why does the build fail?", "question"],
+    ["이 함수가 뭐야", "question"],
+    ["왜 실패해?", "question"],
+    ["설명해줘", "question"],
+    ["수정 방법 알려줘", "question"],
+    ["ralplan이 뭐야?", "question"],
+    // implement: imperative with an anchor, or no ambiguity signal at all
+    ["Fix the failing test in src/foo.ts", "implement"],
+    ["Fix TypeError in handler", "implement"],
+    ["src/foo.ts 수정해줘", "implement"],
+    ["please add a retry to the fetch helper so that it backs off exponentially and logs each attempt to the console output", "implement"],
+    ["hello there", "implement"],
+    // ambiguous: imperative with no anchor, vague goals
+    ["fix the bug", "ambiguous"],
+    ["make it better", "ambiguous"],
+    ["Can you fix the failing test?", "ambiguous"],
+    ["개선해줘", "ambiguous"],
+    // architecture
+    ["Refactor the auth module", "architecture"],
+    ["Use ralplan to design this", "architecture"],
+    ["리팩터링 해줘", "architecture"],
+    ["여러 모듈을 마이그레이션 해줘", "architecture"],
+    ["계획부터 세워줘", "architecture"],
+    // explicit
+    ["/plan make it better", "explicit"],
+    ["/skill:ralplan refactor everything", "explicit"],
+  ]
+  test.each(table)("%s -> %s", (text, expected) => {
+    expect(classifyIntent(text).class).toBe(expected as never)
+  })
+
+  test("signals are recorded and auditable", () => {
+    expect(classifyIntent("Fix the failing test in src/foo.ts").signals).toEqual(["imperative", "anchor:path"])
+    expect(classifyIntent("make it better").signals).toEqual(["imperative", "uncertain", "no-anchor"])
+    expect(classifyIntent("Refactor the auth module").signals).toEqual(["imperative", "architecture:refactor"])
+  })
+
+  test("a quoted keyword or pasted block is not a request", () => {
+    expect(classifyIntent('"refactor everything"\n"and more"').class).toBe("implement")
+    expect(classifyIntent('what does the word "refactor" mean?').class).toBe("question")
+    expect(classifyIntent("see `refactor` in the notes").class).toBe("implement")
+    expect(classifyIntent("fix the bug described in https://example.com/migrate/refactor.html").class).not.toBe("architecture")
+  })
+
+  test("a path or symbol anchors an imperative; a bare imperative does not", () => {
+    expect(classifyIntent("rename the helper in lib/util/strings.ts").class).toBe("implement")
+    expect(classifyIntent("rename parseConfig to loadConfig").class).toBe("implement")
+    expect(classifyIntent("rename the helper").class).toBe("ambiguous")
+  })
+
+  test("force: strips the prefix, keeps the class, and flags the override; ! is not an override", () => {
+    const forced = classifyIntent("force: make it better")
+    expect(forced).toMatchObject({ class: "ambiguous", force: true, body: "make it better" })
+    expect(forced.signals[0]).toBe("force")
+    expect(classifyIntent("FORCE:  Refactor the auth module")).toMatchObject({ class: "architecture", force: true, body: "Refactor the auth module" })
+    expect(classifyIntent("!make it better")).toMatchObject({ force: false, body: "!make it better" })
+    expect(classifyIntent("make it better").force).toBe(false)
   })
 })
