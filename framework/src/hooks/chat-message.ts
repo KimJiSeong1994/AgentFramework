@@ -449,7 +449,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       if (wf && wf.sessionID === sessionID) {
         const refusal = workflowEngineRefusal(wf, runtime.host.identity.engine)
         if (refusal) {
-          part.text += `\n\nlca: ${refusal}`
+          part.text += `\n\notter: ${refusal}`
           log("chat.message: workflow engine identity refused", { sessionID, reason: refusal })
           return
         }
@@ -479,7 +479,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       }
       const refusal = persistedWorkflowRefusal()
       if (refusal) {
-        part.text += `\n\nlca: ${refusal}`
+        part.text += `\n\notter: ${refusal}`
         log("chat.message: interactive plan refused", { sessionID, reason: refusal })
         return
       }

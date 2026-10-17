@@ -29,9 +29,9 @@ BLOCK_END="# <<< otter installer <<<"
 BUN_MIN_MAJOR=1
 BUN_MIN_MINOR=2
 
-say() { printf '\033[1mlca:\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33mlca:\033[0m %s\n' "$*" >&2; }
-die() { printf '\033[1;31mlca:\033[0m %s\n' "$*" >&2; exit 1; }
+say() { printf '\033[1motter:\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33motter:\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[1;31motter:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
   sed -n '2,17p' "${BASH_SOURCE[0]:-/dev/null}" 2>/dev/null | sed 's/^# \{0,1\}//' || true

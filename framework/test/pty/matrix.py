@@ -183,7 +183,7 @@ def tmux_conf(profile: str) -> tuple[Path, str]:
     # tmux default configuration (user config bypassed with -f) with only the status line off, so the pane
     # is exactly the harness terminal size.  "extended" additionally enables extended-keys.
     text = "set -g status off\n" + ("set -s extended-keys on\n" if profile == "extended" else "")
-    directory = Path(tempfile.mkdtemp(prefix="lcatm"))
+    directory = Path(tempfile.mkdtemp(prefix="ottertm"))
     CTX.scratch.append(directory)
     path = directory / f"{profile}.conf"
     path.write_text(text, encoding="utf-8")
@@ -281,7 +281,7 @@ def transport_argv(inner: list[str], ctl: Path, env_pairs: dict[str, str], cwd: 
     tmux_sock = None
     tmux_argv: list[str] = []
     if CTX.kind in ("tmux", "ssh-tmux"):
-        sock_dir = Path(tempfile.mkdtemp(prefix="lcatm"))
+        sock_dir = Path(tempfile.mkdtemp(prefix="ottertm"))
         CTX.scratch.append(sock_dir)
         tmux_sock = sock_dir / "s"
         conf, _text = tmux_conf(profile)
