@@ -32,15 +32,14 @@ otter chat --engine codex --model gpt-5.6-sol
 bun scripts/otter-wiki.ts capture            # 실행 이력 → 지식 위키
 ```
 
-대화 중: `/plan` · `/approve` · `/sessions` · `/resume <sid>` · `/model` · `/help`
+대화 중: `/plan` · `/approve` · `/sessions` · `/resume <sid>` · `/model` · `/combo` · `/help`
 
-멀티 모델 콤보:
+멀티 모델 콤보: `/combo`를 입력하면 메뉴에서 역할 → 엔진 → 모델을 고릅니다. 고른 값은 `~/.config/otter/otter.jsonc`에 저장되고, 메뉴의 "Apply to a new session"으로 새 세션에 적용합니다(기존 세션은 고정된 콤보 유지). 직접 입력도 됩니다:
 
 ```text
-/model combo planner claude opus          # 역할별 엔진·모델 저장 (~/.config/otter/otter.jsonc)
-/model combo architect codex gpt-5.6-sol
-/model combo worker local gemma4-26b-mtp:latest
-/model combo apply                        # 새 세션에 적용 (기존 세션은 고정된 콤보 유지)
+/combo planner claude opus
+/combo worker local gemma4-26b-mtp:latest
+/combo apply
 ```
 
 ## 문서

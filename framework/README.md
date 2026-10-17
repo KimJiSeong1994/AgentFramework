@@ -133,12 +133,17 @@ user's route for that role, a partial project route (for example only `engine`) 
 project `null` removes the user's route. Model IDs must match `[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}`,
 and a Codex route must name a bundled Codex slug. A route equal to the main selection is dropped.
 
-In chat: `/model combo` (or `/model combo show`) shows the effective routes, the source of each, and
-whether the current session uses them. `/model combo <role> <local|codex|claude> <native-id>` saves a
-route to `~/.config/otter/otter.jsonc` and does not change the current session. `/model combo clear <role>`
-and `/model combo clear` remove user routes (any value, including a malformed one) and say so when a
-project route still applies. Show, set and clear only touch config, so they also work while a session is
-held. `/model combo apply` starts a new session with the carried
+In chat, `/combo` opens a menu: pick a role (each shows its current route or "main model"), then an
+engine (or "Use the main model" to remove the route), then a model from the same discovered list `/model`
+uses (or enter a native ID). Each pick is saved immediately and the menu returns to the role list; it also
+offers "Apply to a new session" (once a model is selected), "Clear all routes" and "Done". The full-screen
+TUI shows filterable pickers; readline shows numbered menus. Typed forms do the same without the menu:
+`/combo show` shows the effective routes, the source of each, and whether the current session uses them.
+`/combo <role> <local|codex|claude> <native-id>` saves a
+route to `~/.config/otter/otter.jsonc` and does not change the current session. `/combo clear <role>`
+and `/combo clear` remove user routes (any value, including a malformed one) and say so when a
+project route still applies. `/model combo ...` is the same command. Show, set and clear only touch config,
+so they also work while a session is held. `/combo apply` starts a new session with the carried
 conversation under the saved combo; it is refused while a workflow is active or ownership is unsettled.
 Status shows `engine / model +N roles`.
 
