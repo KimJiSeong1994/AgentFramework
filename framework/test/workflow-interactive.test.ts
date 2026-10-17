@@ -199,3 +199,35 @@ describe("process safety", () => {
     expect(DEFAULT_CONFIG).toBeDefined()
   })
 })
+
+describe("intent offers start the same protected workflows", () => {
+  test("picking Start deep-interview from an ambiguous offer starts exactly one deep-interview; the offer is not consent", async () => {
+    const s = await session({ lines: ["make it better", ...answers, "/quit"], choices: [1, 0, 0, 2] })
+    expect(s.exit.code).toBe(0)
+    expect(s.chooses[0]!.values).toEqual(["Continue in chat", "Start deep-interview", "Cancel"])
+    expect(s.conversationTurns).toEqual([])
+    const created = readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)
+    expect(created).toEqual(["deep-interview", "ralplan"])
+    expect(s.chooses.some(item => item.title.includes("not consent to execute"))).toBe(true)
+    expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
+    expect(committed()).toMatchObject({ kind: "ralplan", phase: "pending_approval" })
+  })
+
+  test("picking Start ralplan from an architecture offer starts exactly one ralplan", async () => {
+    const s = await session({ lines: ["Refactor the auth module", "/quit"], choices: [1, 1] })
+    expect(s.chooses[0]!.values).toEqual(["Continue in chat", "Start ralplan", "Start deep-interview first", "Cancel"])
+    expect(s.conversationTurns).toEqual([])
+    const created = readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)
+    expect(created).toEqual(["ralplan"])
+    expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
+  })
+
+  test("a live workflow held by another session shows no offer", async () => {
+    const first = await session({ lines: ["/skill:deep-interview build the widget", undefined], choices: [0] })
+    expect(first.exit.code).toBe(0)
+    const again = await session({ lines: ["make it better", "/quit"], choices: [1] })
+    expect(again.chooses).toEqual([])
+    expect(again.conversationTurns).toEqual([])
+    expect(committed()).toMatchObject({ kind: "deep-interview" })
+  })
+})

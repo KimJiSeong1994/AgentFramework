@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
+import { execFileSync } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { DEFAULT_CONFIG } from "../src/config.ts"
@@ -10,7 +11,8 @@ import { parseCliArgs, runCli } from "../src/hosts/cli.ts"
 import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
 import { createCliHost } from "../src/hosts/cli-host.ts"
 import type { CliEngine, CliTransportHandle, CliTransportOptions } from "../src/hosts/cli-transport.ts"
-import { createForegroundController } from "../src/hosts/controller.ts"
+import { createForegroundController, PlanIsolationUnavailableError } from "../src/hosts/controller.ts"
+import { worktreeRoot } from "../src/orchestration/worktree.ts"
 import { humanDecision } from "../src/hosts/operator.ts"
 import { createPlanConversation } from "../src/hosts/plan-conversation.ts"
 import { createExecutionRuntime } from "../src/hosts/runtime.ts"
@@ -19,7 +21,7 @@ import { executionRunDirectory, sessionDir } from "../src/state/store.ts"
 import { attachAdmission, detachAdmission, effectiveHold } from "../src/sessions/admission.ts"
 import { readSessionMetadata } from "../src/sessions/store.ts"
 import { ledgerPath, readLedger, writeLedger } from "../src/state/ledger.ts"
-import { tempGitWorktree } from "./guards-helpers.ts"
+import { GIT_TEST_ENV, tempGitWorktree } from "./guards-helpers.ts"
 import { planBinding, withTerminalLine } from "./operator-helpers.ts"
 
 let wt: ReturnType<typeof tempGitWorktree> | undefined
@@ -357,6 +359,86 @@ describe("common CLI controlled workflow", () => {
     expect(readWorkflow(fixture.root)?.phase).toBe("cancelled")
     expect(readFileSync(runStatePath)).toEqual(runStateBefore)
   })
+
+  test("approve -> run -> Apply: the whole plan runs in one worktree and the checkout changes only on Apply", async () => {
+    const fixture = await pendingCommonWorkflow()
+    const controller = createForegroundController(fixture.runtime, { planWorktree: true })
+    const approval = await withTerminalLine(`APPROVE ${fixture.workflow.id} ${fixture.planSha}`, () =>
+      humanDecision("approve", planBinding(fixture.sessionID, fixture.workflow, fixture.planSha)))
+    expect(controller.decide(approval, fixture.sessionID).ok).toBe(true)
+    fixture.responses.push(finalEnvelope("Open issues: none")) // a.txt already holds after-a: nothing to change or review
+    for (const letter of ["b", "c"]) {
+      fixture.responses.push(JSON.stringify({ type: "tool", name: "write", input: { path: `${letter}.txt`, content: `after-${letter}\n` } }))
+      fixture.responses.push(finalEnvelope("Open issues: none"), finalEnvelope("ACCEPT"))
+    }
+    const checkoutBefore = ["a", "b", "c"].map(letter => readFileSync(join(fixture.root, `${letter}.txt`), "utf8"))
+
+    const ran = await controller.run(fixture.sessionID)
+    expect(ran.run).toMatchObject({ done: 3, failed: 0 })
+    expect(ran.workflow.phase).toBe("done")
+    expect(ran.planWorktree).toEqual({ workflowID: fixture.workflow.id })
+    const planPath = join(worktreeRoot(fixture.root), fixture.sessionID, `wf-${fixture.workflow.id}`)
+    expect(readFileSync(join(planPath, "b.txt"), "utf8")).toBe("after-b\n") // both tasks wrote into the one worktree
+    expect(controller.pendingPlanWorktree(fixture.sessionID)).toBe(fixture.workflow.id)
+    // nothing reached the checkout during the run
+    expect(["a", "b", "c"].map(letter => readFileSync(join(fixture.root, `${letter}.txt`), "utf8"))).toEqual(checkoutBefore)
+    expect(readFileSync(join(planPath, "c.txt"), "utf8")).toBe("after-c\n")
+
+    const review = await controller.reviewPlanWorktree(fixture.sessionID, fixture.workflow.id)
+    expect(review).toMatchObject({ ok: true, path: planPath, files: ["b.txt", "c.txt"] })
+    if (!review.ok) throw new Error(review.reason)
+    expect(review.stat).toContain("2 files changed")
+    expect(existsSync(review.patch)).toBe(true)
+    expect(readFileSync(join(fixture.root, "b.txt"), "utf8")).toBe("before\n")
+
+    const applied = await controller.applyPlanWorktree(fixture.sessionID, fixture.workflow.id)
+    expect(applied).toEqual({ ok: true, workflowID: fixture.workflow.id, files: ["b.txt", "c.txt"] })
+    expect(readFileSync(join(fixture.root, "b.txt"), "utf8")).toBe("after-b\n")
+    expect(readFileSync(join(fixture.root, "c.txt"), "utf8")).toBe("after-c\n")
+    expect(existsSync(planPath)).toBe(false)
+    expect(controller.pendingPlanWorktree(fixture.sessionID)).toBeUndefined()
+  }, 60_000)
+
+  test("Discard removes the plan worktree and leaves the checkout unchanged; an Apply conflict keeps worktree and checkout", async () => {
+    const fixture = await pendingCommonWorkflow()
+    const controller = createForegroundController(fixture.runtime, { planWorktree: true })
+    const approval = await withTerminalLine(`APPROVE ${fixture.workflow.id} ${fixture.planSha}`, () =>
+      humanDecision("approve", planBinding(fixture.sessionID, fixture.workflow, fixture.planSha)))
+    expect(controller.decide(approval, fixture.sessionID).ok).toBe(true)
+    fixture.responses.push(finalEnvelope("Open issues: none"))
+    for (const letter of ["b", "c"]) {
+      fixture.responses.push(JSON.stringify({ type: "tool", name: "write", input: { path: `${letter}.txt`, content: `after-${letter}\n` } }))
+      fixture.responses.push(finalEnvelope("Open issues: none"), finalEnvelope("ACCEPT"))
+    }
+    await controller.run(fixture.sessionID)
+    writeFileSync(join(fixture.root, "b.txt"), "user edit\n") // the user edits the same line meanwhile
+    const conflict = await controller.applyPlanWorktree(fixture.sessionID, fixture.workflow.id)
+    expect(conflict.ok).toBe(false)
+    if (!conflict.ok) {
+      expect(conflict.reason).toMatch(/does not apply/)
+      expect(readFileSync(conflict.patch, "utf8")).toContain("+after-b")
+    }
+    expect(readFileSync(join(fixture.root, "b.txt"), "utf8")).toBe("user edit\n")
+    expect(readFileSync(join(fixture.root, "c.txt"), "utf8")).toBe("before\n")
+    expect(controller.pendingPlanWorktree(fixture.sessionID)).toBe(fixture.workflow.id)
+
+    await controller.discardPlanWorktree(fixture.sessionID, fixture.workflow.id)
+    expect(controller.pendingPlanWorktree(fixture.sessionID)).toBeUndefined()
+    expect(readFileSync(join(fixture.root, "b.txt"), "utf8")).toBe("user edit\n")
+    expect(readFileSync(join(fixture.root, "c.txt"), "utf8")).toBe("before\n")
+  }, 60_000)
+
+  test("without a commit the run refuses with PlanIsolationUnavailableError until the caller chooses in place explicitly", async () => {
+    const fixture = await pendingCommonWorkflow()
+    execFileSync("git", ["update-ref", "-d", "HEAD"], { cwd: fixture.root, env: GIT_TEST_ENV })
+    const controller = createForegroundController(fixture.runtime, { planWorktree: true })
+    const approval = await withTerminalLine(`APPROVE ${fixture.workflow.id} ${fixture.planSha}`, () =>
+      humanDecision("approve", planBinding(fixture.sessionID, fixture.workflow, fixture.planSha)))
+    expect(controller.decide(approval, fixture.sessionID).ok).toBe(true)
+    await expect(controller.run(fixture.sessionID)).rejects.toBeInstanceOf(PlanIsolationUnavailableError)
+    expect(fixture.dispatched).toHaveLength(2) // only the planning turn and plan review ran; nothing was dispatched silently in place
+    expect(readFileSync(join(fixture.root, "b.txt"), "utf8")).toBe("before\n")
+  }, 30_000)
 
   test("settled resume keeps completed tasks and dispatches only the open tasks", async () => {
     const fixture = await pendingCommonWorkflow()

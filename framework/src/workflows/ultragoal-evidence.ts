@@ -18,7 +18,7 @@ export type VerificationBody = {
 export type CheckpointDoc = {
   v: 1; wid: string; sid: string; goalId: string; attempt: number; status: "complete" | "incomplete"
   subject: Subject; approvalRef: string; verificationRef: string; goalsSha: string
-  unit: Array<{ key: string; sha256: string }>; worktree: { head: string | null; statusSha: string | null }
+  unit: Array<{ key: string; sha256: string }>; worktree: { head: string | null; statusSha: string | null; isolatedAs?: string }
 }
 
 type Bound = Pick<UltragoalWorkflow, "id" | "sessionID" | "artifacts" | "data">

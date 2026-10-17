@@ -24,8 +24,44 @@ export type TaskWorktree = {
   baseline: NonNullable<Snapshot>
   /** apply the worktree's changes (vs its creation state) to the main worktree; returns null or a reason */
   merge(diffExclude: string[], commit?: { guard(): boolean; applied(files: string[]): void }, expectedTree?: string): Promise<{ ok: true; files: string[] } | { ok: false; reason: string; patch: string }>
+  /**
+   * Read-only view of the worktree's cumulative change against its durable baseline: changed files, a diff stat and the
+   * path of the preserved patch. Writes only the patch file beside the worktree; `""` patch means no changes.
+   */
+  preview(diffExclude: string[]): Promise<{ ok: true; files: string[]; stat: string; patch: string } | { ok: false; reason: string }>
   /** Remove only the verified linked worktree and its durable recovery data. */
   remove(): Promise<void>
+}
+
+/** Scope id of the single worktree an approved workflow runs in (`<state>/worktrees/<session>/wf-<workflowID>`). */
+export function planWorktreeScope(workflowID: string): string {
+  return `wf-${workflowID}`
+}
+
+/** Whether a plan worktree can be created: a git repository with at least one commit. */
+export async function planIsolationAvailability(mainWorktree: string): Promise<"ready" | "no-git" | "no-commit"> {
+  if (!hasGitMetadata(mainWorktree)) return "no-git"
+  if ((await git(mainWorktree, ["rev-parse", "--is-inside-work-tree"])) !== "true") return "no-git"
+  if (await git(mainWorktree, ["rev-parse", "HEAD"])) return "ready"
+  const branch = await git(mainWorktree, ["symbolic-ref", "-q", "HEAD"])
+  if (branch && (await git(mainWorktree, ["show-ref", "--verify", branch])) === null) return "no-commit"
+  throw new Error("git-config: could not resolve HEAD")
+}
+
+/** Whether the plan worktree (or its durable recovery data) exists for this workflow. */
+export function hasPlanWorktreeState(mainWorktree: string, sessionID: string, workflowID: string): boolean {
+  return hasTaskWorktreeState(mainWorktree, sessionID, planWorktreeScope(workflowID))
+}
+
+/** Absolute path of the workflow's plan worktree when it exists; undefined otherwise. */
+export function planWorktreePath(mainWorktree: string, sessionID: string, workflowID: string): string | undefined {
+  if (!hasPlanWorktreeState(mainWorktree, sessionID, workflowID)) return undefined
+  return resolveWorktreePaths(canonicalMainWorktree(mainWorktree), sessionID, planWorktreeScope(workflowID), false).child
+}
+
+/** Reopen the workflow's plan worktree: authenticated, never recreated, baseline never recaptured. */
+export function reopenPlanWorktree(mainWorktree: string, sessionID: string, workflowID: string, diffExclude: string[]): Promise<TaskWorktree> {
+  return reopenTaskWorktree(mainWorktree, sessionID, planWorktreeScope(workflowID), diffExclude)
 }
 
 export function worktreeRoot(mainWorktree: string): string {
@@ -565,7 +601,10 @@ function bindTaskWorktree(mainWorktree: string, paths: WorktreePaths & { baseDir
       if (raw === null || names === null || !raw.length) return { ok: false, reason: "could not diff the worktree", patch: "" }
       const files = nulPaths(names)
       const patchFile = join(dirname(paths.child), `${ownership.taskId}.patch`)
-      try { writeFileSync(patchFile, raw, { flag: "wx", mode: 0o600 }) }
+      try {
+        if (lstatOrNull(patchFile)) unlinkOwnedFile(patchFile) // a preview's earlier copy of this same patch
+        writeFileSync(patchFile, raw, { flag: "wx", mode: 0o600 })
+      }
       catch { return { ok: false, reason: "could not preserve the task patch", patch: patchFile } }
       const check = await git(mainWorktree, ["apply", "--check", "--whitespace=nowarn", patchFile])
       if (check === null) return { ok: false, reason: "the task's patch does not apply to the current working tree (it changed underneath the task)", patch: patchFile }
@@ -583,6 +622,24 @@ function bindTaskWorktree(mainWorktree: string, paths: WorktreePaths & { baseDir
       commit?.applied(files)
       unlinkOwnedFile(patchFile)
       return { ok: true, files }
+    },
+    async preview(diffExclude) {
+      if (!sameStrings(diffExclude, ownership.diffExclude)) return { ok: false, reason: "task worktree exclusion set changed" }
+      try { assertOwnershipSync(mainWorktree, paths, ownership) }
+      catch { return { ok: false, reason: "task worktree ownership changed" } }
+      const after = await store.snapshot(ownership.diffExclude)
+      if (!after) return { ok: false, reason: "could not snapshot the worktree" }
+      if (after.tree === baseline.tree) return { ok: true, files: [], stat: "", patch: "" }
+      const raw = await gitBuffer(paths.child, ["diff", "--binary", baseline.tree, after.tree], store.env)
+      const names = await gitBuffer(paths.child, ["diff", "--name-only", "-z", baseline.tree, after.tree], store.env)
+      const stat = await git(paths.child, ["diff", "--stat", baseline.tree, after.tree], store.env)
+      if (raw === null || names === null || stat === null || !raw.length) return { ok: false, reason: "could not diff the worktree" }
+      const patchFile = join(dirname(paths.child), `${ownership.taskId}.patch`)
+      try {
+        if (lstatOrNull(patchFile)) unlinkOwnedFile(patchFile)
+        writeFileSync(patchFile, raw, { flag: "wx", mode: 0o600 })
+      } catch { return { ok: false, reason: "could not preserve the patch" } }
+      return { ok: true, files: nulPaths(names), stat, patch: patchFile }
     },
     async remove() {
       assertOwnershipSync(mainWorktree, paths, ownership)
@@ -602,6 +659,8 @@ function bindTaskWorktree(mainWorktree: string, paths: WorktreePaths & { baseDir
       assertWorktreeDirectories(paths, ownership.sessionID)
       unlinkOwnedFile(paths.ownershipFile)
       if (lstatOrNull(paths.applyMarker)) unlinkOwnedFile(paths.applyMarker)
+      const preserved = join(dirname(paths.child), `${ownership.taskId}.patch`)
+      if (lstatOrNull(preserved)) unlinkOwnedFile(preserved)
       rmdirSync(paths.ownerDir)
       for (const dir of [dirname(paths.ownerDir), dirname(dirname(paths.ownerDir)), dirname(paths.child)]) {
         try { rmdirSync(dir) } catch {}

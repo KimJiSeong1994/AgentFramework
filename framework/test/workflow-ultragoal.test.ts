@@ -13,6 +13,7 @@ import { createExecutionRunStore } from "../src/hosts/run-state.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
 import type { ExecutionOutcome, ExecutionRequest, ExecutionRuntime } from "../src/hosts/types.ts"
 import { createLegacyVerifierExecutor } from "../src/orchestration/legacy-verifier.ts"
+import { worktreeRoot } from "../src/orchestration/worktree.ts"
 import { attachAdmission, holdAdmission } from "../src/sessions/admission.ts"
 import { openSession } from "../src/sessions/store.ts"
 import { readLedger } from "../src/state/ledger.ts"
@@ -30,7 +31,7 @@ import { approveUnitConfirmation, nextStep, reduce, ultragoalDataOf, type Ultrag
 import { commitUltragoal } from "../src/workflows/ultragoal-commit.ts"
 import { approveUnit, retryUltragoal, runUltragoal, ultragoalView } from "../src/workflows/ultragoal-driver.ts"
 import { parseUltragoalData, ultragoalDoneKeys } from "../src/workflows/ultragoal-data.ts"
-import { renderCompletion, ultragoalEvidence } from "../src/workflows/ultragoal-evidence.ts"
+import { readRecordedText, renderCompletion, ultragoalEvidence } from "../src/workflows/ultragoal-evidence.ts"
 import { tempGitWorktree, waitFor } from "./guards-helpers.ts"
 
 const ENGINE = "fixture"
@@ -64,6 +65,8 @@ type Options = {
   /** Intercepts a read-only role request (return a promise to block the turn). */
   intercept?: (request: ExecutionRequest) => Promise<ExecutionOutcome> | undefined
   onCancel?: () => void | Promise<void>
+  /** Run every unit in the workflow's plan worktree (`chat.worktree: "plan"`). */
+  isolate?: boolean
 }
 
 function harness(options: Options) {
@@ -116,7 +119,7 @@ function harness(options: Options) {
     },
   }
   const store = attachAdmission(runtime, sid, { engine: ENGINE, model: "m" })
-  const controller = createForegroundController(runtime)
+  const controller = createForegroundController(runtime, { planWorktree: options.isolate === true })
   return {
     runtime, store, sid, controller, requests, queues,
     workers: () => requests.filter(r => r.role === "worker"),
@@ -654,4 +657,47 @@ describe("architect S3 items: shared legacy pause policy and runner failures", (
     expect(ultragoalView(stuck)).toContain("fence retained")
     expect(stuck.artifacts.map(ref => ref.key)).not.toContain("completion.json")
   }, 30_000)
+})
+
+describe("shared workflow worktree (S4)", () => {
+  const cwdWriter = (request: ExecutionRequest): ExecutionOutcome => {
+    const n = request.title.match(/make mod(\d+)/)?.[1]
+    if (n) writeFileSync(join(request.cwd, `mod${n}.py`), `VALUE = ${n}\n`)
+    return { status: "completed", text: "Open issues: none. Everything is done." }
+  }
+
+  test("units share one workflow worktree, see each other's unapplied changes, and the checkpoint digest points at it; the checkout changes only on Apply at final review", async () => {
+    scripts(2)
+    const seen: Array<{ cwd: string; hadMod1: boolean }> = []
+    const h = harness({
+      script: { planner: [goals(2), unitPlan(1), unitPlan(2)], architect: [OKAY, OKAY], critic: [OKAY] }, isolate: true,
+      worker: request => {
+        if (request.title.includes("make mod2")) seen.push({ cwd: request.cwd, hadMod1: existsSync(join(request.cwd, "mod1.py")) })
+        return cwdWriter(request)
+      },
+    })
+    await toUltragoal(h)
+    const { final } = await drive(h)
+    expect(final.status).toBe("done")
+    const done = committed()
+    const planPath = join(worktreeRoot(wt.worktree), h.sid, `wf-${done.id}`)
+    expect(new Set(h.workers().map(request => request.cwd))).toEqual(new Set([planPath]))
+    expect(seen).toEqual([{ cwd: planPath, hadMod1: true }]) // unit 2 saw unit 1's unapplied change
+    expect(existsSync(join(wt.worktree, "mod1.py"))).toBe(false)
+    expect(existsSync(join(wt.worktree, "mod2.py"))).toBe(false)
+    // each checkpoint digest describes the workflow worktree, not the checkout
+    for (const key of ["checkpoints/g1-1.json", "checkpoints/g2-1.json"]) {
+      const doc = JSON.parse(readRecordedText(wt.worktree, done, key)) as { worktree: { head: string | null; statusSha: string | null; isolatedAs?: string } }
+      expect(doc.worktree.isolatedAs).toBe(`wf-${done.id}`)
+    }
+    expect(ultragoalEvidence(wt.worktree, done, { final: true }).problems).toEqual([])
+    // Apply happens once, at final review, through the controller; until then the worktree is kept
+    expect(h.controller.pendingPlanWorktree(h.sid)).toBe(done.id)
+    expect(await h.controller.reviewPlanWorktree(h.sid, done.id)).toMatchObject({ ok: true, files: ["mod1.py", "mod2.py"] })
+    expect(existsSync(join(wt.worktree, "mod1.py"))).toBe(false)
+    expect(await h.controller.applyPlanWorktree(h.sid, done.id)).toMatchObject({ ok: true, files: ["mod1.py", "mod2.py"] })
+    expect(readFileSync(join(wt.worktree, "mod2.py"), "utf8")).toBe("VALUE = 2\n")
+    expect(existsSync(planPath)).toBe(false)
+    expect(h.controller.pendingPlanWorktree(h.sid)).toBeUndefined()
+  }, 60_000)
 })

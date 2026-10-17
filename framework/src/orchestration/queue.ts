@@ -42,9 +42,9 @@ import { LinuxAdmissionRefused, type LinuxAdmissionRefusal, type ExecutionHandle
   type ExecutionReference, type ExecutionRole, type ExecutionRuntime } from "../hosts/types.ts"
 import type { VerificationHandle, VerificationResult } from "./verifier.ts"
 import { createSnapshotStore, type Snapshot } from "./snapshot.ts"
-import { createTaskWorktree, hasTaskWorktreeState, reopenTaskWorktree, type TaskWorktree } from "./worktree.ts"
+import { createTaskWorktree, hasTaskWorktreeState, planWorktreeScope, reopenTaskWorktree, taskWorktreeOwner, type TaskWorktree } from "./worktree.ts"
 import { readAnyWorkflowChecked } from "../flow/state.ts"
-import { copyFileSync, mkdirSync } from "node:fs"
+import { copyFileSync, mkdirSync, realpathSync } from "node:fs"
 import { join } from "node:path"
 import { handoffDir } from "../state/ledger.ts"
 import { notifyQueueSettled, notifyQueueStopObserved } from "./queue-observers.ts"
@@ -71,7 +71,15 @@ export type QueueRun = {
 }
 
 /** Exact delegate provenance only; callers without host context leave lineage unknown. */
-export type QueueOrigin = { messageID?: string; resumed?: boolean }
+export type QueueOrigin = {
+  messageID?: string
+  resumed?: boolean
+  /**
+   * Run-level isolation: the already created (or authenticated-reopened) plan worktree. Every code task's worker, verifier
+   * and reviewer root is this worktree, nothing merges per task, and the queue never creates or re-baselines it.
+   */
+  planWorktree?: TaskWorktree
+}
 
 export type Queue = {
   /** append tasks to the session's ledger (does not run them) */
@@ -433,6 +441,20 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     catch { return false }
   }
 
+  /** The supplied plan worktree must be the authenticated managed worktree of this session and of every open task's workflow. */
+  function assertPlanWorktreeOwner(sessionID: string, plan: TaskWorktree, ledger: ReturnType<typeof readLedger>): void {
+    const owner = taskWorktreeOwner(plan.path)
+    if (!owner || owner.sessionID !== sessionID || owner.mainWorktree !== realpathSync.native(deps.worktree)) {
+      throw new Error("plan worktree recovery refused: the supplied worktree is not this session's managed worktree")
+    }
+    for (const task of ledger.tasks) {
+      if (task.kind === "data" || (task.status !== "running" && task.status !== "pending")) continue
+      if (!task.wf || planWorktreeScope(task.wf.id) !== owner.taskId) {
+        throw new Error(`plan worktree recovery refused for ${task.id}: the supplied worktree belongs to another workflow`)
+      }
+    }
+  }
+
   async function runLoop(sessionID: string, entry: Active, origin?: QueueOrigin): Promise<QueueRun> {
     const result: QueueRun = { taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: false }
     // Discard intentionally leaves the durable ledger untouched; track returned outcomes so its stale running task
@@ -503,7 +525,14 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     const reopenedWorktrees = new Map<string, TaskWorktree>()
     // Ownership and the original durable baseline must be authenticated before repairing any running-task
     // ledger state. In particular, do not let a missing or substituted worktree become a fresh baseline.
+    if (origin?.planWorktree) assertPlanWorktreeOwner(sessionID, origin.planWorktree, ledger)
     for (const task of ledger.tasks) {
+      if (origin?.planWorktree) {
+        if (task.kind !== "data" && hasTaskWorktreeState(deps.worktree, sessionID, task.id)) {
+          throw new Error(`task worktree recovery refused for ${task.id}: a per-task worktree exists beside the plan worktree; it was preserved`)
+        }
+        continue
+      }
       if (task.kind === "data" || (task.status !== "running" && task.status !== "pending")) continue
       const residue = hasTaskWorktreeState(deps.worktree, sessionID, task.id)
       if (!c.worktree) {
@@ -576,8 +605,11 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     let verifiedTree: string | undefined
     // Optional isolation: the task runs in its own linked git worktree (worker session + verify bound to it) and its
     // diff is applied to the main worktree only when accepted. Falls back to in-place when there is no commit yet.
-    let wt: TaskWorktree | null = reopenedWorktree ?? null
-    if (c.worktree && !wt) {
+    // Run-level isolation (`origin.planWorktree`): the root is the shared plan worktree, there is no per-task worktree and
+    // no per-task merge; the human applies the whole run's patch afterwards.
+    const planRoot = origin?.planWorktree?.path
+    let wt: TaskWorktree | null = planRoot ? null : reopenedWorktree ?? null
+    if (c.worktree && !wt && !planRoot) {
       if (hasTaskWorktreeState(deps.worktree, sessionID, task.id)) {
         entry.recoveryBlocked = true
         throw new Error(`task worktree recovery refused for ${task.id}: existing worktree was not authenticated before dispatch`)
@@ -586,7 +618,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
       if (wt) deps.log("task worktree", { sessionID, task: task.id, path: wt.path })
       else deps.log("task worktree unavailable (no git repository or no commit yet): running in place", { sessionID, task: task.id })
     }
-    const root = wt?.path ?? deps.worktree
+    const root = wt?.path ?? planRoot ?? deps.worktree
     const snapshotDirectory = join(sessionDir(deps.worktree, sessionID), "snapshots", task.id)
     // One snapshot store + one "before" tree per task: a retry is judged on the task's cumulative diff (attempt 1 may
     // already have done the work; the retry then changes little or nothing).
@@ -635,7 +667,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
 
         const worker = await runChild(deps, entry, sessionID, "worker", `otter task ${task.n}: ${task.title}`, workerPrompt(ledger, task, rejectReason, c.handoff_context_chars), c.task_ttl_ms, (child) => {
           ledger = writeLedger(deps.worktree, { ...ledger, running: { taskId: task.id, childSessionID: child, since: Date.now() } })
-        }, wt?.path, attempt)
+        }, wt?.path ?? planRoot, attempt)
         task = { ...task, workerSessionID: worker.sessionID ?? task.workerSessionID, childSessions: [...task.childSessions, ...(worker.sessionID ? [worker.sessionID] : [])] }
         if (worker.status === "aborted") return cancelled()
         task.report = head((worker.text ?? "").trim(), c.report_max_chars) || undefined
@@ -718,7 +750,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
         let review: ReviewResult = { verdict: "skipped" }
         if (c.review && !diff.truncated && worker.status === "ok" && !report.violations.length && !scan.strong.length && (!verify || verify.ok)) {
           if (!diff || diff.files.length === 0) review = { verdict: "skipped", reason: "no file changes" }
-          else review = await runReview(sessionID, entry, task, diff.diff, verify, prot, report.suspicious, scan.weak, c.review_ttl_ms, wt?.path, attempt)
+          else review = await runReview(sessionID, entry, task, diff.diff, verify, prot, report.suspicious, scan.weak, c.review_ttl_ms, wt?.path ?? planRoot, attempt)
         }
         task.review = review
         attempt!.review = review

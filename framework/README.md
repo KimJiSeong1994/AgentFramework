@@ -384,6 +384,49 @@ the existing execution lease, and retain unresolved ownership after failures ins
 of replaying a completed or unknown process. The separate OpenCode imported-plan
 commands below retain their own admission requirements.
 
+### Intent routing (chat)
+
+Before a plain chat line is sent, a code-owned heuristic (`classifyIntent`, classifier `otter-intent-v1`; no model call,
+EN and KO keyword tables) proposes a route. It runs only after the same hold, ownership and workflow-occupancy checks an
+explicit `/skill:<name>` start needs, never for slash commands, and never for `!<cmd>` (the shell escape).
+
+| Class | Trigger | Route |
+| --- | --- | --- |
+| explicit | any `/...` line | unchanged; the classifier does not run |
+| question | what/how/why/explain, 뭐/왜/어떻게/설명, trailing `?` without an imperative | answer-only turn; a plan JSON in the reply is **not** imported, a hint says to send `/plan` |
+| implement | imperative with a concrete anchor (path, symbol, error, test), or no ambiguity signal | unchanged planning conversation |
+| ambiguous | imperative with no anchor, or vague goals ("make it better", "개선해줘") | offer `Continue in chat` / `Start deep-interview` / `Cancel` |
+| architecture | refactor, migrate, redesign, architecture, multi-module, ralplan, 계획부터 | offer `Continue in chat` / `Start ralplan` / `Start deep-interview first` / `Cancel` |
+
+Offers use the terminal chooser, or a numbered readline menu without one; `Continue in chat` is always first, and only
+workflows whose `startRefusal` is empty are listed. Dismissing or choosing `Cancel` sends nothing and restores the draft.
+Starting from an offer goes through the same `workflowHost.start` path and builtin descriptor as typing `/skill:<name>`;
+it is a start request, not consent to execute. Prefix a line with `force:` to skip the offer (the prefix is not sent).
+Every decision is recorded as a transcript notice `Intent route {classifier, class, signals, offered, choice, route}`.
+The classifier is a heuristic that proposes; it does not understand the request. Set `chat.intent` in
+`otter.jsonc` to `"off"` to disable all of this (default `"offer"`; any other value is refused with `invalid-chat-intent`).
+The OpenCode `chat.message` / `detectMode` path is unchanged.
+
+### Plan worktree (chat)
+
+An approved plan run executes in ONE linked git worktree named `wf-<workflowID>` (under the state root, outside the
+repository). Every task's worker, verifier and reviewer uses it, later tasks see earlier tasks' unapplied changes, and
+nothing is merged per task. Your checkout is byte-identical until you choose **Apply**. After the run Otter prints the
+changed files, a diff stat and the patch path, then offers **Apply to my checkout | Keep worktree | Discard** (the choice is
+recorded in the transcript). Apply runs `git apply --check` first, writes the apply marker, applies, then removes the
+worktree. If the patch no longer applies (you edited the same lines meanwhile) the checkout stays untouched, the worktree
+is kept, the patch is copied to `.otter/handoffs/<sid>/plan-<workflowID>.patch`, and `/continue` offers the choice again.
+`diff_exclude` paths are not carried into the worktree.
+
+With no commit yet or outside a git repository there is no silent fallback: Otter asks **Run in place in my checkout |
+Cancel** before anything runs and records the answer. Ultragoal units share their workflow's worktree; their checkpoint
+digest describes it (`worktree.isolatedAs`), and Apply is offered once, when the ultragoal completes.
+
+Set `chat.worktree` in `otter.jsonc` to `"off"` to run in the checkout as before (default `"plan"`; any other value is
+refused with `invalid-chat-worktree`). It lives under `chat`, outside policy identity, and does not touch
+`delegate.worktree` (the per-task auto-merge mode used by OpenCode). Verify commands still run natively on the
+`legacy-unowned` profile, so the worktree isolates repository edits, not side effects outside the repository.
+
 ### Interactive skills: where `/skill:<name>` comes from
 
 Typing `/` in the TUI lists commands and skills together, fuzzy-matched by name (`/depp` finds
@@ -975,7 +1018,7 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   analyst in a child session, extracts the `SQL:` block of its answer, **re-executes it and runs a check suite in
   code** (`src/data/check.ts`: built-in `default` = runs / has rows / not NULL, plus `data/checks/<suite>.json`
   named in `verify`: SQL assertions with the answer spliced in as `{answer}`), then asks the verifier. Same retry /
-  advisory rules as code tasks; no snapshot, no files. Main's prompt gets rule 9 ("database question → delegate a
+  advisory rules as code tasks; no snapshot, no files. Main's prompt gets rule 10 ("database question → delegate a
   kind data task") only when a backend is configured, and `data mode:` routes through delegate. The verifier never
   executes anything (the design's `data_check` tool became a queue step, for the same reason the reviewer has no bash).
 - Acceptance (`scripts/otter-e2e-data.sh`, fixture `scripts/fixtures/data-vv`: a synthetic sqlite (places, vehicles,

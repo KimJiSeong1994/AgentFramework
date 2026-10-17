@@ -8,7 +8,8 @@ import { applyEvent, approveWorkflow, observeStopSettlement, requestStop, resolv
 import { flowOn, renderStatus, statusJson } from "../flow/status.ts"
 import { activeAnyWorkflow, activeWorkflow, readAnyWorkflowChecked, readWorkflow, workflowEngineRefusal, type Workflow } from "../flow/state.ts"
 import { sessionActivityBlocker } from "./runtime.ts"
-import { getQueue, type QueueRun } from "../orchestration/queue.ts"
+import { getQueue, type QueueOrigin, type QueueRun } from "../orchestration/queue.ts"
+import { createTaskWorktree, hasPlanWorktreeState, planIsolationAvailability, planWorktreeScope, reopenPlanWorktree, type TaskWorktree } from "../orchestration/worktree.ts"
 import { readLedger, OPEN_STATUSES } from "../state/ledger.ts"
 import { sessionDir, stateRoot } from "../state/store.ts"
 import { admissionEpoch, admissionFence, effectiveHold, isAdmissionCurrent } from "../sessions/admission.ts"
@@ -29,8 +30,35 @@ const COMMON_ENGINES = new Set(["local", "codex", "claude"])
 
 export type ForegroundController = ReturnType<typeof createForegroundController>
 
+export type ControllerOptions = {
+  /**
+   * Run-level isolation (`chat.worktree: "plan"`): every approved run executes in ONE linked worktree named `wf-<id>`;
+   * nothing reaches the checkout until the human applies the final patch. Off unless the CLI chat host asks for it.
+   */
+  planWorktree?: boolean
+}
+
+/** Per-run choice: `inPlace` is the explicit "Run in place in my checkout" answer when no plan worktree can be created. */
+export type RunOptions = { inPlace?: boolean }
+
+/** The approved run needs a plan worktree but the repository cannot provide one; the caller must ask the human, never fall back. */
+export class PlanIsolationUnavailableError extends Error {
+  constructor(readonly reason: "no-git" | "no-commit") {
+    super(`plan worktree unavailable (${reason === "no-git" ? "not a git repository" : "no commit yet"}); run in place explicitly or cancel`)
+    this.name = "PlanIsolationUnavailableError"
+  }
+}
+
+export type PlanWorktreeReview =
+  | { ok: true; workflowID: string; path: string; files: string[]; stat: string; patch: string }
+  | { ok: false; workflowID: string; reason: string }
+
+export type PlanWorktreeApply =
+  | { ok: true; workflowID: string; files: string[] }
+  | { ok: false; workflowID: string; reason: string; patch: string }
+
 /** No SDK/client is synthesized here. The caller supplies a complete, single-host ExecutionRuntime. */
-export function createForegroundController(runtime: ExecutionRuntime) {
+export function createForegroundController(runtime: ExecutionRuntime, options: ControllerOptions = {}) {
   const queue = getQueue(runtime)
   const root = realpathSync(runtime.worktree)
   if (root !== runtime.worktree || runtime.stateRoot !== stateRoot(root)) throw new Error("runtime worktree/state root must be canonical")
@@ -465,7 +493,28 @@ export function createForegroundController(runtime: ExecutionRuntime) {
    * and autoresearch units hand control back to their driver (verify / evaluate) and never settle here. The queue only
    * ever sees tasks tagged {parent id, subject sha}; this never starts a workflow.
    */
-  async function runInternal(sessionID: string, signal: AbortSignal | undefined, resumed: boolean): Promise<{ run: QueueRun; workflow: WorkflowEnvelope }> {
+  /**
+   * Create the workflow's plan worktree on first use, or reopen (authenticated) the existing one. It is never recreated
+   * or re-baselined: a worktree that should exist because work already started but is gone is a refusal, not a fresh copy.
+   */
+  async function planWorktreeFor(sessionID: string, wf: WorkflowEnvelope, resumed: boolean): Promise<TaskWorktree> {
+    const exclude = runtime.config.delegate.diff_exclude
+    const residue = hasPlanWorktreeState(root, sessionID, wf.id)
+    if (residue) {
+      // A plan's first dispatch never adopts leftovers; ultragoal units share one worktree across their own runs.
+      if (wf.kind === "plan" && !resumed) throw new Error(`plan worktree recovery refused for ${wf.id}: existing worktree requires an explicit resumed run`)
+      return reopenPlanWorktree(root, sessionID, wf.id, exclude)
+    }
+    const started = readLedger(root, sessionID).tasks.some(task =>
+      task.wf?.id === wf.id && task.kind !== "data" && (task.startedAt !== undefined || task.status === "done" || task.status === "failed"))
+    if (started) throw new Error(`plan worktree recovery refused for ${wf.id}: the worktree is missing although work already ran in it`)
+    const created = await createTaskWorktree(root, sessionID, planWorktreeScope(wf.id), exclude)
+    if (!created) throw new Error("plan worktree unavailable: the repository has no commit")
+    runtime.log("plan worktree", { sessionID, workflowID: wf.id, path: created.path })
+    return created
+  }
+
+  async function runInternal(sessionID: string, signal: AbortSignal | undefined, resumed: boolean, runOptions: RunOptions = {}): Promise<{ run: QueueRun; workflow: WorkflowEnvelope; planWorktree?: { workflowID: string } }> {
     runtime.linuxAdmission?.assertBootEpoch()
     const wf = workflow(sessionID, "executing", true)
     const epoch = assertAdmission(sessionID, wf.owner.instance)
@@ -521,7 +570,15 @@ export function createForegroundController(runtime: ExecutionRuntime) {
     }
     signal?.addEventListener("abort", abort, { once: true })
     try {
-      const result = await withAdmissionBoundDispatch(sessionID, epoch, () => queue.run(sessionID, resumed ? { resumed: true } : undefined))
+      let origin: QueueOrigin | undefined = resumed ? { resumed: true } : undefined
+      let isolated: { workflowID: string } | undefined
+      if (options.planWorktree && !runOptions.inPlace) {
+        const availability = await planIsolationAvailability(root)
+        if (availability !== "ready") throw new PlanIsolationUnavailableError(availability)
+        origin = { ...origin, planWorktree: await planWorktreeFor(sessionID, wf, resumed) }
+        isolated = { workflowID: wf.id }
+      }
+      const result = await withAdmissionBoundDispatch(sessionID, epoch, () => queue.run(sessionID, origin))
       assertWorkflowRecordUnchanged(wf, sessionID, epoch)
       if (result.refused) throw new LinuxAdmissionRefused(result.refused.phase, result.refused.reasons)
       if (runtime.runs.status().executions.some(e => !settled(e))) throw new Error("execution unresolved; fence retained")
@@ -539,19 +596,60 @@ export function createForegroundController(runtime: ExecutionRuntime) {
       const finished = readAnyWorkflowChecked(root).wf
       if (!finished || finished.id !== wf.id || finished.sessionID !== sessionID) throw new Error("workflow changed during foreground run")
       assertWorkflowEngine(finished)
-      return { run: result, workflow: finished }
+      return { run: result, workflow: finished, ...(isolated ? { planWorktree: isolated } : {}) }
     } finally {
       signal?.removeEventListener("abort", abort)
     }
   }
 
-  function run(sessionID: string, signal?: AbortSignal) {
-    return runInternal(sessionID, signal, false)
+  function run(sessionID: string, signal?: AbortSignal, runOptions?: RunOptions) {
+    return runInternal(sessionID, signal, false, runOptions)
   }
 
   /** Run an already-inserted approved unit (ultragoal/autoresearch) through the queue; the driver verifies afterwards. */
   function runApprovedUnit(sessionID: string, signal?: AbortSignal, resumed = false) {
     return runInternal(sessionID, signal, resumed)
+  }
+
+  // ------------------------------------------------------------------ plan worktree: review / apply / discard
+  /** The workflow whose plan worktree still exists for this session (a kept, conflicted or crashed run), if any. */
+  function pendingPlanWorktree(sessionID: string): string | undefined {
+    const ids = new Set<string>()
+    for (const task of readLedger(root, sessionID).tasks) if (task.wf?.id) ids.add(task.wf.id)
+    return [...ids].find(id => hasPlanWorktreeState(root, sessionID, id))
+  }
+
+  async function openPlanWorktree(sessionID: string, workflowID: string): Promise<TaskWorktree> {
+    if (queue.isRunning(sessionID)) throw new Error("queue is already running")
+    if (runtime.runs.status().executions.some(e => !settled(e))) throw new Error("execution unresolved; the plan worktree stays untouched")
+    return reopenPlanWorktree(root, sessionID, workflowID, runtime.config.delegate.diff_exclude)
+  }
+
+  /** Changed files, diff stat and the preserved patch path of the run so far. Read-only for the checkout. */
+  async function reviewPlanWorktree(sessionID: string, workflowID: string): Promise<PlanWorktreeReview> {
+    try {
+      const wt = await openPlanWorktree(sessionID, workflowID)
+      const preview = await wt.preview(runtime.config.delegate.diff_exclude)
+      return preview.ok ? { ok: true, workflowID, path: wt.path, files: preview.files, stat: preview.stat, patch: preview.patch } : { ok: false, workflowID, reason: preview.reason }
+    } catch (error) { return { ok: false, workflowID, reason: (error as Error).message ?? String(error) } }
+  }
+
+  /**
+   * Apply the whole run to the checkout in one step (`git apply --check` first, apply marker, apply) and remove the
+   * worktree only after it applied. A patch that does not apply leaves the checkout, the worktree and the patch intact.
+   */
+  async function applyPlanWorktree(sessionID: string, workflowID: string): Promise<PlanWorktreeApply> {
+    const wt = await openPlanWorktree(sessionID, workflowID)
+    const merged = await wt.merge(runtime.config.delegate.diff_exclude)
+    if (!merged.ok) return { ok: false, workflowID, reason: merged.reason, patch: merged.patch }
+    await wt.remove()
+    return { ok: true, workflowID, files: merged.files }
+  }
+
+  /** Remove the plan worktree and its recovery data without touching the checkout. */
+  async function discardPlanWorktree(sessionID: string, workflowID: string): Promise<void> {
+    const wt = await openPlanWorktree(sessionID, workflowID)
+    await wt.remove()
   }
 
   /** The human decision for a paused workflow: shown the residual view, answers Keep (false) or Resume (true). */
@@ -591,13 +689,13 @@ export function createForegroundController(runtime: ExecutionRuntime) {
       // Autoresearch resumes into its experiment_run stage and returns to its driver: no queue run, no worker prepare.
       if (resumed.kind === "ultragoal" && resumed.phase === "executing") {
         const result = await runInternal(sessionID, signal, true)
-        return { kept: false as const, view: outcome.view, workflow: result.workflow, run: result.run }
+        return { kept: false as const, view: outcome.view, workflow: result.workflow, run: result.run, ...(result.planWorktree ? { planWorktree: result.planWorktree } : {}) }
       }
       return { kept: false as const, view: outcome.view, workflow: after }
     }
     if (resumed.phase === "executing") {
       const result = await runInternal(sessionID, signal, true)
-      return { kept: false as const, view: outcome.view, workflow: result.workflow, run: result.run }
+      return { kept: false as const, view: outcome.view, workflow: result.workflow, run: result.run, ...(result.planWorktree ? { planWorktree: result.planWorktree } : {}) }
     }
     if (resumed.phase === "reviewing") {
       const plan = savedPlan(runtime, resumed)
@@ -629,7 +727,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
     return resumePausedWorkflow(sessionID, persisted, choose, signal)
   }
 
-  async function resume(sessionID: string, signal?: AbortSignal) {
+  async function resume(sessionID: string, signal?: AbortSignal, runOptions?: RunOptions) {
     runtime.linuxAdmission?.assertBootEpoch()
     const persisted = activeUnitHostWorkflow()
     if (persisted?.sessionID === sessionID) {
@@ -644,7 +742,7 @@ export function createForegroundController(runtime: ExecutionRuntime) {
       if (wf.sessionID !== sessionID) throw new Error("no workflow owned by this session")
     }
     workflow(sessionID, "executing")
-    return runInternal(sessionID, signal, true)
+    return runInternal(sessionID, signal, true, runOptions)
   }
 
   function status(sessionID: string, json = false) {
@@ -670,7 +768,10 @@ export function createForegroundController(runtime: ExecutionRuntime) {
   const cancel = (sessionID: string): AnyFlowResult => stop(sessionID, "cancel", "cancel requested")
   const pause = (sessionID: string): AnyFlowResult => stop(sessionID, "pause", "pause requested")
 
-  return { validateImportedPlan, importPlan, decide, run, runApprovedUnit, resume, resumePaused: resumePausedBy, status, cancel, pause, assertRecoveryIdentity }
+  return {
+    validateImportedPlan, importPlan, decide, run, runApprovedUnit, resume, resumePaused: resumePausedBy, status, cancel, pause, assertRecoveryIdentity,
+    pendingPlanWorktree, reviewPlanWorktree, applyPlanWorktree, discardPlanWorktree,
+  }
 }
 
 /** CLI status can call this with a FlowRuntime only: no host, SDK, policy, credential, claim or model construction. */

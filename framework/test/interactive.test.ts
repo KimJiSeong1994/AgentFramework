@@ -14,7 +14,7 @@ import { readSessionCommitted } from "../src/workflows/commit.ts"
 import { AdmissionRefusal } from "../src/hosts/required-controls.ts"
 import { ModelRequestError } from "../src/workflows/turn.ts"
 import { holdAdmission } from "../src/sessions/admission.ts"
-import type { ForegroundController } from "../src/hosts/controller.ts"
+import { PlanIsolationUnavailableError, type ForegroundController } from "../src/hosts/controller.ts"
 import type { ExecutionRuntime } from "../src/hosts/types.ts"
 import type { CliProgressSink } from "../src/hosts/cli-progress.ts"
 import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
@@ -48,6 +48,13 @@ type HarnessOptions = {
   beforeWrite?: (text: string) => void
   choose?: (title: string, choices: readonly string[], signal: AbortSignal, presentation?: ChoicePresentation) => Promise<number | undefined>
   beforeRun?: (signal?: AbortSignal) => void
+  /** Plan-worktree fixture: `run`/`resume` report an isolated run and the controller exposes review/apply/discard. */
+  isolated?: {
+    review?: { ok: true; workflowID: string; path: string; files: string[]; stat: string; patch: string } | { ok: false; workflowID: string; reason: string }
+    apply?: { ok: true; workflowID: string; files: string[] } | { ok: false; workflowID: string; reason: string; patch: string }
+    /** run() throws PlanIsolationUnavailableError once (no commit), then succeeds only when called with inPlace. */
+    unavailable?: "no-commit" | "no-git"
+  }
   validatePlan?: (plan: unknown) => void
   runResult?: { phase: string; done: number; failed: number; cancelled: number }
   renderedPlan?: string
@@ -65,6 +72,8 @@ type HarnessOptions = {
   defaultModel?: DefaultModelLookup
   defaultModelSaveError?: Error
   combo?: ComboLookup
+  /** chat.intent for the fixture runtime. The legacy tests exercise the plan path with vague lines, so the harness defaults to "off". */
+  intent?: "offer" | "off"
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -180,16 +189,22 @@ function harness(options: HarnessOptions = {}) {
         },
       } as unknown as ReturnType<ForegroundController["decide"]>
     },
-    async run(_sessionID: string, signal?: AbortSignal) {
-      calls.events.push("run")
+    async run(_sessionID: string, signal?: AbortSignal, runOptions?: { inPlace?: boolean }) {
+      calls.events.push(runOptions?.inPlace ? "run-in-place" : "run")
       calls.runCount++
       options.beforeRun?.(signal)
       await runGate
+      if (options.isolated?.unavailable && !runOptions?.inPlace) throw new PlanIsolationUnavailableError(options.isolated.unavailable)
       return {
         workflow: { id: workflowID, phase: options.runResult?.phase ?? "done", artifacts: [] },
         run: { done: options.runResult?.done ?? 1, failed: options.runResult?.failed ?? 0, cancelled: options.runResult?.cancelled ?? 0, skipped: 0 },
+        ...(options.isolated && !options.isolated.unavailable ? { planWorktree: { workflowID } } : {}),
       } as unknown as Awaited<ReturnType<ForegroundController["run"]>>
     },
+    pendingPlanWorktree() { return options.isolated && !options.isolated.unavailable ? workflowID : undefined },
+    async reviewPlanWorktree() { calls.events.push("review"); return options.isolated?.review },
+    async applyPlanWorktree() { calls.events.push("apply"); return options.isolated?.apply },
+    async discardPlanWorktree() { calls.events.push("discard") },
   } as unknown as ForegroundController
 
   const deps: Partial<InteractiveDependencies> = {
@@ -208,7 +223,7 @@ function harness(options: HarnessOptions = {}) {
         directory: worktree,
         instance: "interactive-test-runtime",
         host: { identity: { engine, profile: "interactive-fixture" } },
-        config: structuredClone(DEFAULT_CONFIG),
+        config: { ...structuredClone(DEFAULT_CONFIG), chat: { intent: options.intent ?? "off" } },
         log() {},
         selectedEngine: engine,
         selectedModel: model,
@@ -2419,5 +2434,181 @@ describe("interactive terminal", () => {
     expect(validModelID("bad model")).toBe(false)
     expect(validModelID(" model")).toBe(false)
     expect(validModelID("x".repeat(257))).toBe(false)
+  })
+})
+
+describe("intent routing", () => {
+  const intentRoutes = (h: ReturnType<typeof harness>) => replaySession(wt.worktree, h.calls.sessionID!, { order: "asc" }).records
+    .filter(record => record.kind === "notice" && String(record.data.text).startsWith("Intent route "))
+    .map(record => JSON.parse(String(record.data.text).slice("Intent route ".length)))
+
+  test("a question whose reply carries plan JSON is answered but never imported; the hint names /plan", async () => {
+    const h = harness({ intent: "offer", lines: ["How does the planner work?", "/quit"], turns: [{ text: "It works like this.", plan: proposedPlan }] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.turns).toEqual(["How does the planner work?"])
+    expect(h.calls.output.join("")).toContain("The reply contains a plan proposal; send /plan to submit it.")
+    expect(h.calls.events).not.toContain("import")
+    expect(h.calls.events).not.toContain("validate")
+    expect(h.calls.runCount).toBe(0)
+    expect(h.calls.choices).toEqual([])
+    expect(intentRoutes(h)).toEqual([{ classifier: "otter-intent-v1", class: "question", signals: ["question-head"], offered: [], choice: null, route: "chat" }])
+  })
+
+  test("an anchored implement request still imports the plan and reaches approval, with no offer", async () => {
+    const h = harness({ intent: "offer", lines: ["Fix the failing test in src/app.ts", "/quit"], turns: [{ text: "Plan.", plan: proposedPlan }], choose: async () => 2 })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.events).toContain("import")
+    expect(h.calls.choices.map(choice => choice.title)).toEqual(["Execution decision"])
+    expect(intentRoutes(h)[0]).toMatchObject({ class: "implement", offered: [], route: "chat" })
+  })
+
+  test("an ambiguous line offers Continue in chat first; choosing it sends the line unchanged and records the choice", async () => {
+    const h = harness({ intent: "offer", lines: ["make it better", "/quit"], choose: async () => 0 })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.choices).toHaveLength(1)
+    expect(h.calls.choices[0]!.values).toEqual(["Continue in chat", "Start deep-interview", "Cancel"])
+    expect(h.calls.turns).toEqual(["make it better"])
+    expect(intentRoutes(h)).toEqual([{ classifier: "otter-intent-v1", class: "ambiguous", signals: ["imperative", "uncertain", "no-anchor"],
+      offered: ["Continue in chat", "Start deep-interview", "Cancel"], choice: "Continue in chat", route: "chat" }])
+  })
+
+  test("an architecture line offers ralplan and deep-interview, both after Continue in chat", async () => {
+    const h = harness({ intent: "offer", lines: ["Refactor the auth module", "/quit"], choose: async () => 0 })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.choices[0]!.values).toEqual(["Continue in chat", "Start ralplan", "Start deep-interview first", "Cancel"])
+  })
+
+  test("dismissing the offer (Cancel or Escape) sends nothing and restores the draft", async () => {
+    for (const pick of [2, undefined]) {
+      const h = harness({ intent: "offer", lines: ["make it better", "/quit"], choose: async () => pick })
+      await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+      expect(h.calls.turns).toEqual([])
+      expect(h.calls.drafts).toEqual(["make it better"])
+      expect(h.calls.output.join("")).toContain("nothing was sent")
+      expect(intentRoutes(h)[0]).toMatchObject({ class: "ambiguous", route: "none" })
+      expect(replaySession(wt.worktree, h.calls.sessionID!, { order: "asc" }).records.some(record => record.kind === "user")).toBe(false)
+    }
+  })
+
+  test("force: skips the offer and sends the text without the prefix", async () => {
+    const h = harness({ intent: "offer", lines: ["force: make it better", "/quit"], choose: async () => 2 })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.choices).toEqual([])
+    expect(h.calls.turns).toEqual(["make it better"])
+    expect(intentRoutes(h)[0]).toMatchObject({ class: "ambiguous", signals: expect.arrayContaining(["force"]), offered: [], route: "chat" })
+  })
+
+  test("without a chooser the offer is a numbered readline menu; empty input dismisses", async () => {
+    const h = harness({ intent: "offer", lines: ["make it better", "", "make it better", "1", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    const output = h.calls.output.join("")
+    expect(output).toContain("  1) Continue in chat")
+    expect(output).toContain("  2) Start deep-interview")
+    expect(h.calls.turns).toEqual(["make it better"])
+    expect(h.calls.drafts).toEqual(["make it better"])
+  })
+
+  test("chat.intent off keeps the old behavior: no classifier, no offer, no notice", async () => {
+    const h = harness({ intent: "off", lines: ["make it better", "How does it work?", "/quit"], turns: [{ text: "a" }, { text: "b", plan: proposedPlan }], choose: async () => 2 })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.choices.map(choice => choice.title)).toEqual(["Execution decision"])
+    expect(h.calls.turns).toEqual(["make it better", "How does it work?"])
+    expect(h.calls.events).toContain("import")
+    expect(intentRoutes(h)).toEqual([])
+  })
+
+  test("a held session shows no offer and sends nothing", async () => {
+    const h = harness({ intent: "offer", lines: ["make it better", "/quit"], choose: async () => 0,
+      executionStatus: { generation: 1, claim: { id: "claim" }, executions: [] } as never })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.choices).toEqual([])
+    expect(h.calls.turns).toEqual([])
+    expect(h.calls.output.join("")).toContain("Conversation held")
+  })
+
+  test("!cmd still runs the shell and slash commands are never classified", async () => {
+    const h = harness({ intent: "offer", lines: ["!echo intent-shell-ok", "/plan make it better", "/quit"], choose: async () => 2 })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.output.join("")).toContain("intent-shell-ok")
+    expect(h.calls.choices).toEqual([])
+    expect(h.calls.turns).toEqual(["/plan make it better"])
+  })
+})
+
+describe("plan worktree chooser (interactive)", () => {
+  const review = (workflowID: string) => ({ ok: true as const, workflowID, path: "/state/worktrees/s/wf-x", files: ["a.txt", "b.txt"], stat: " 2 files changed, 2 insertions(+)", patch: "/state/worktrees/s/wf-x.patch" })
+  const launch = (h: ReturnType<typeof harness>) => launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+  const choices = (h: ReturnType<typeof harness>) => h.calls.choices.map(choice => choice.title)
+  const approveThenPick = (pick: number) => async (title: string) => title === "Execution decision" ? 0 : title === "Apply the plan worktree?" ? pick : undefined
+
+  test("after an isolated run it shows files, stat and patch path, then Apply applies and records the choice", async () => {
+    const h = harness({ lines: ["make the change", "/quit"], turns: [{ text: "plan", plan: proposedPlan }], choose: approveThenPick(0),
+      isolated: { review: review("wf_fixture"), apply: { ok: true, workflowID: "wf_fixture", files: ["a.txt", "b.txt"] } } })
+    await launch(h)
+    const out = h.calls.output.join("")
+    expect(out).toContain("a.txt")
+    expect(out).toContain("2 files changed")
+    expect(out).toContain("/state/worktrees/s/wf-x.patch")
+    expect(out).toContain("Your checkout is unchanged until you apply")
+    expect(h.calls.choices.find(choice => choice.title === "Apply the plan worktree?")!.values).toEqual(["Apply to my checkout", "Keep worktree", "Discard"])
+    expect(h.calls.events).toEqual(expect.arrayContaining(["review", "apply"]))
+    expect(h.calls.events).not.toContain("discard")
+    expect(out).toContain("Applied 2 file(s) to your checkout")
+    const records = replaySession(wt.worktree, "otter-fixture-session", { order: "asc" }).records
+    expect(records.some(record => record.kind === "workflow-choice" && record.data.planWorktree === "apply")).toBe(true)
+  })
+
+  test("Discard removes the worktree without applying; Keep and dismissal do neither and say /continue re-offers", async () => {
+    const discard = harness({ lines: ["make the change", "/quit"], turns: [{ text: "plan", plan: proposedPlan }], choose: approveThenPick(2), isolated: { review: review("wf_fixture") } })
+    await launch(discard)
+    expect(discard.calls.events).toContain("discard")
+    expect(discard.calls.events).not.toContain("apply")
+    for (const pick of [1, undefined]) {
+      const kept = harness({ lines: ["make the change", "/quit"], turns: [{ text: "plan", plan: proposedPlan }], choose: async (title) => title === "Execution decision" ? 0 : (pick as number | undefined), isolated: { review: review("wf_fixture") } })
+      await launch(kept)
+      expect(kept.calls.events).not.toContain("apply")
+      expect(kept.calls.events).not.toContain("discard")
+      expect(kept.calls.output.join("")).toContain("/continue offers Apply, Keep or Discard again")
+    }
+  })
+
+  test("an Apply conflict keeps the worktree, copies the patch to .otter/handoffs/<sid>/ and leaves the checkout untouched", async () => {
+    const source = join(wt.worktree, "source.patch")
+    writeFileSync(source, "conflicting patch bytes\n")
+    const h = harness({ lines: ["make the change", "/quit"], turns: [{ text: "plan", plan: proposedPlan }], choose: approveThenPick(0),
+      isolated: { review: review("wf_fixture"), apply: { ok: false, workflowID: "wf_fixture", reason: "the task's patch does not apply to the current working tree", patch: source } } })
+    await launch(h)
+    const kept = join(wt.worktree, ".otter", "handoffs", "otter-fixture-session", "plan-wf_fixture.patch")
+    expect(readFileSync(kept, "utf8")).toBe("conflicting patch bytes\n")
+    const out = h.calls.output.join("")
+    expect(out).toContain("Apply refused")
+    expect(out).toContain("checkout is untouched")
+    expect(out).toContain("/continue offers the choice again")
+    expect(h.calls.events).not.toContain("discard")
+  })
+
+  test("/continue with a kept worktree re-offers Apply/Keep/Discard", async () => {
+    const h = harness({ lines: ["/continue", "/quit"], choose: approveThenPick(0),
+      isolated: { review: review("wf_fixture"), apply: { ok: true, workflowID: "wf_fixture", files: ["a.txt"] } } })
+    await launch(h)
+    expect(choices(h)).toEqual(["Apply the plan worktree?"])
+    expect(h.calls.events).toContain("apply")
+  })
+
+  test("no commit: the run does not start silently; the explicit in-place prompt runs in place only on choice, and records it", async () => {
+    const inPlace = harness({ lines: ["make the change", "/quit"], turns: [{ text: "plan", plan: proposedPlan }],
+      choose: async (title) => title === "Execution decision" ? 0 : 0, isolated: { unavailable: "no-commit" } })
+    await launch(inPlace)
+    const prompt = inPlace.calls.choices.find(choice => choice.title.includes("Plan worktree unavailable"))!
+    expect(prompt.values).toEqual(["Run in place in my checkout", "Cancel"])
+    expect(inPlace.calls.events.filter(event => event === "run")).toHaveLength(1)
+    expect(inPlace.calls.events).toContain("run-in-place")
+    expect(replaySession(wt.worktree, "otter-fixture-session", { order: "asc" }).records.some(record => record.kind === "workflow-choice" && record.data.planIsolation === "in-place")).toBe(true)
+
+    const cancelled = harness({ lines: ["make the change", "/quit"], turns: [{ text: "plan", plan: proposedPlan }],
+      choose: async (title) => title === "Execution decision" ? 0 : 1, isolated: { unavailable: "no-commit" } })
+    await launch(cancelled)
+    expect(cancelled.calls.events).not.toContain("run-in-place")
+    expect(replaySession(wt.worktree, cancelled.calls.sessionIDs[0]!, { order: "asc" }).records.some(record => record.kind === "workflow-choice" && record.data.planIsolation === "cancelled")).toBe(true)
   })
 })

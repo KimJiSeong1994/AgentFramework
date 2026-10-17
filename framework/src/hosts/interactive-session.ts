@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto"
 import { STOP_LABEL } from "../flow/status.ts"
 import { taskPartition } from "../workflows/checkpoint.ts"
-import { readLedger } from "../state/ledger.ts"
+import { handoffDir, readLedger } from "../state/ledger.ts"
 import { isPauseSettled, stopDisplay } from "../workflows/types.ts"
 import { spawnSync } from "node:child_process"
-import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs"
+import { accessSync, constants, copyFileSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, resolve } from "node:path"
 import { createInterface } from "node:readline"
@@ -17,12 +17,14 @@ import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask,
 import type { WorkflowProgress } from "../tui/progress.ts"
 import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
 import { PROTECTED_WORKFLOWS, resolveSkillRoots } from "../skills/roots.ts"
+import { chatIntentMode, chatWorktreeMode } from "../config.ts"
+import { classifyIntent, INTENT_CLASSIFIER, type IntentClass } from "../modes/detect.ts"
 import { SkillSession, type PreparedSkillInvocation, type SkillCatalog } from "../skills/session.ts"
 import { readSkillTrust } from "../skills/trust.ts"
 import { attachAdmission, detachAdmission, effectiveHold, holdAdmission, resumeAdmission } from "../sessions/admission.ts"
 import { canonicalRoutes, inspectSessions, MAX_CARRIED_MESSAGES, routesKey, MAX_SHELL_COMMAND_BYTES, readSessionMetadata, replaySession, type SessionStore, type ReplayOptions, type ReplayResult, type TranscriptKind } from "../sessions/store.ts"
 import { persistToolActivity } from "../tui/session-transcript.ts"
-import { createForegroundController, readForegroundStatus, type ForegroundController } from "./controller.ts"
+import { createForegroundController, PlanIsolationUnavailableError, readForegroundStatus, type ForegroundController } from "./controller.ts"
 import { discoverModels as discoverModelCatalog, type ModelCatalog } from "./model-catalog.ts"
 import { incompleteArtifactSummary } from "../workflows/artifacts.ts"
 import { readSessionCommitted } from "../workflows/commit.ts"
@@ -322,6 +324,14 @@ export function createReadlineTerminal(): Terminal {
       }
     },
     write: (text) => { process.stderr.write(text) },
+    // Hand stdin to another reader (the operator decision) without ending input: the next read opens a fresh reader,
+    // so post-run prompts (the plan worktree Apply/Keep/Discard choice) can still be answered.
+    suspend: () => {
+      const current = reader
+      reader = undefined
+      current?.close()
+    },
+    resume: () => {},
     close: () => {
       inputClosed = true
       reader?.close()
@@ -341,7 +351,7 @@ export function defaultDependencies(): InteractiveDependencies {
       assertHostAdmission(await runtime.host.preflight(runtime.host.identity.profile), runtime.host.identity.controlProfile)
     },
     createConversation: (runtime, sessionID, prior) => createPlanConversation(runtime, sessionID, prior),
-    createController: createForegroundController,
+    createController: runtime => createForegroundController(runtime, { planWorktree: chatWorktreeMode(runtime.config) === "plan" }),
     discoverModels: discoverModelCatalog,
     defaultModel: fileDefaultModelStore,
     combo: fileComboStore,
@@ -440,6 +450,56 @@ async function chooseFrom(
     if (signal.aborted) return undefined
     const normalized = answer?.trim().toLowerCase() ?? ""
     if (answer === undefined || normalized === "" || normalized === "/cancel" || normalized === "escape") return null
+    if (/^[0-9]+$/u.test(normalized) && Number(normalized) >= 1 && Number(normalized) <= labels.length) return Number(normalized) - 1
+    terminal.write(`Choose a listed number (1-${labels.length}).\n`)
+  }
+  return undefined
+}
+
+/** Decision prompt for the plan worktree: the terminal chooser when present, else a numbered readline menu. undefined = dismissed. */
+async function chooseDecision(terminal: Terminal, title: string, labels: readonly string[], signal: AbortSignal): Promise<number | undefined> {
+  if (terminal.choose) return terminal.choose(title, labels, signal)
+  const presentation = terminal.presentation?.()
+  terminal.write([`${title}:`, ...labels.map((label, index) => `  ${index + 1}) ${label}`), "Enter /cancel, Escape or empty input to dismiss."]
+    .map(line => inputLine(line, presentation)).join("\n") + "\n")
+  while (!signal.aborted) {
+    const answer = await readInput(terminal, title, "Pick an option; empty input dismisses.", `Choice [1-${labels.length}]: `, signal)
+    const normalized = answer?.trim().toLowerCase() ?? ""
+    if (answer === undefined || normalized === "" || normalized === "/cancel" || normalized === "escape") return undefined
+    if (/^[0-9]+$/u.test(normalized) && Number(normalized) >= 1 && Number(normalized) <= labels.length) return Number(normalized) - 1
+    terminal.write(`Choose a listed number (1-${labels.length}).\n`)
+  }
+  return undefined
+}
+
+type IntentOption =
+  | { kind: "chat"; label: string }
+  | { kind: "cancel"; label: string }
+  | { kind: "workflow"; label: string; descriptor: (typeof PROTECTED_WORKFLOWS)[number] }
+
+function intentOptions(cls: IntentClass): IntentOption[] {
+  const workflow = (name: string, label: string): IntentOption[] => {
+    const descriptor = PROTECTED_WORKFLOWS.find(candidate => candidate.name === name)
+    return descriptor ? [{ kind: "workflow", label, descriptor }] : []
+  }
+  if (cls === "ambiguous") return [{ kind: "chat", label: "Continue in chat" }, ...workflow("deep-interview", "Start deep-interview"), { kind: "cancel", label: "Cancel" }]
+  if (cls === "architecture") {
+    return [{ kind: "chat", label: "Continue in chat" }, ...workflow("ralplan", "Start ralplan"),
+      ...workflow("deep-interview", "Start deep-interview first"), { kind: "cancel", label: "Cancel" }]
+  }
+  return []
+}
+
+/** Intent offer: the terminal chooser when present, else a numbered readline menu. undefined = dismissed (nothing is sent). */
+async function chooseIntentRoute(terminal: Terminal, title: string, labels: readonly string[], signal: AbortSignal): Promise<number | undefined> {
+  if (terminal.choose) return terminal.choose(title, labels, signal)
+  const presentation = terminal.presentation?.()
+  terminal.write([`${title}:`, ...labels.map((label, index) => `  ${index + 1}) ${label}`), "Enter /cancel, Escape or empty input to dismiss; nothing is sent."]
+    .map(line => inputLine(line, presentation)).join("\n") + "\n")
+  while (!signal.aborted) {
+    const answer = await readInput(terminal, title, "Pick a route; empty input dismisses.", `Choice [1-${labels.length}]: `, signal)
+    const normalized = answer?.trim().toLowerCase() ?? ""
+    if (answer === undefined || normalized === "" || normalized === "/cancel" || normalized === "escape") return undefined
     if (/^[0-9]+$/u.test(normalized) && Number(normalized) >= 1 && Number(normalized) <= labels.length) return Number(normalized) - 1
     terminal.write(`Choose a listed number (1-${labels.length}).\n`)
   }
@@ -1316,6 +1376,9 @@ export async function runInteractiveSession(
       persist: (kind, data) => { persist(kind, data) },
       readInput: (input, signal) => withProgressSuspended(() => readInput(terminal, input.title, input.hint, input.prompt, signal)),
       runApprovedUnit: (sessionID, signal, resumed) => selection.controller.runApprovedUnit(sessionID, signal, resumed),
+      finishIsolation: async workflowID => {
+        if (selection.controller.pendingPlanWorktree?.(selection.sessionID) === workflowID) await offerPlanWorktree(workflowID)
+      },
       admit: async () => {
         selection.runtime.linuxAdmission?.assertBootEpoch()
         await deps.admitRuntime(selection.runtime)
@@ -1431,9 +1494,23 @@ export async function runInteractiveSession(
     async function runOwned(resumed: boolean) {
       if (persistenceFailed) throw new InteractiveLaunchError("Session transcript persistence failed; the session remains held.")
       if (effectiveHold(worktree, selection.sessionID)) throw new InteractiveLaunchError("Session held; explicit Resume required.")
-      const result = resumed
-        ? await selection.controller.resume(selection.sessionID, abort.signal)
-        : await selection.controller.run(selection.sessionID, abort.signal)
+      const start = (inPlace: boolean) => resumed
+        ? selection.controller.resume(selection.sessionID, abort.signal, { inPlace })
+        : selection.controller.run(selection.sessionID, abort.signal, { inPlace })
+      let result: Awaited<ReturnType<typeof start>>
+      try { result = await start(false) }
+      catch (error) {
+        if (!(error instanceof PlanIsolationUnavailableError)) throw error
+        // No commit / not a git repository: never a silent fallback. The human picks, and the pick is recorded.
+        terminal.write(terminalSafeText(`${error.message}. Nothing has run yet. In-place edits land directly in your checkout and cannot be reviewed or discarded as one patch.\n`))
+        const picked = await chooseDecision(terminal, `Plan worktree unavailable: ${error.reason === "no-git" ? "not a git repository" : "no commit yet"}`,
+          ["Run in place in my checkout", "Cancel"], abort.signal)
+        terminal.resume?.()
+        const inPlace = picked === 0
+        persist("workflow-choice", { text: inPlace ? "Operator chose to run in place in the checkout (no plan worktree available)." : "Operator cancelled the run (no plan worktree available).", planIsolation: inPlace ? "in-place" : "cancelled", reason: error.reason })
+        if (!inPlace) return undefined
+        result = await start(true)
+      }
       if (observedTasks) {
         const tasks = readProgressTasks(worktree, selection.sessionID, observedTasks.ids)
         if (tasks) { progress.taskSnapshot(tasks); terminal.taskSnapshot?.(tasks) }
@@ -1447,7 +1524,52 @@ export async function runInteractiveSession(
         done: result.run.done, failed: result.run.failed, cancelled: result.run.cancelled,
         ...(result.run.skipped ? { skipped: result.run.skipped } : {}),
       })
+      if (result.planWorktree && !result.run.aborted && !receivedSignal) await offerPlanWorktree(result.planWorktree.workflowID)
       return result
+    }
+
+    /**
+     * The end of an isolated run: show what changed (files, diff stat, patch path) and ask Apply / Keep / Discard. Only
+     * Apply touches the checkout (`git apply --check` first). A conflict keeps the worktree, copies the patch to
+     * `.otter/handoffs/<sid>/` and leaves the checkout alone; `/continue` offers the choice again.
+     */
+    async function offerPlanWorktree(workflowID: string): Promise<void> {
+      const sessionID = selection.sessionID
+      const review = await selection.controller.reviewPlanWorktree(sessionID, workflowID)
+      if (!review.ok) {
+        terminal.write(terminalSafeText(`Plan worktree for workflow ${workflowID} could not be reviewed: ${review.reason}. It was kept; your checkout is untouched.\n`))
+        return
+      }
+      const changed = review.files.length ? review.files.map(file => `  ${file}`).join("\n") : "  (no changes)"
+      terminal.write(terminalSafeText(`\n[worktree] Workflow ${workflowID} ran in ${review.path}\nChanged files (${review.files.length}):\n${changed}\n${review.stat ? `${review.stat}\n` : ""}${review.patch ? `Patch: ${review.patch}\n` : ""}Excluded paths (diff_exclude) are not carried. Your checkout is unchanged until you apply.\n`))
+      const picked = await chooseDecision(terminal, "Apply the plan worktree?", ["Apply to my checkout", "Keep worktree", "Discard"], abort.signal)
+      terminal.resume?.()
+      const choice = picked === 0 ? "apply" : picked === 2 ? "discard" : "keep"
+      persist("workflow-choice", { text: `Operator chose ${choice} for the plan worktree of workflow ${workflowID}.`, workflowID, planWorktree: choice })
+      try {
+        if (choice === "keep") {
+          terminal.write(terminalSafeText(`Worktree kept at ${review.path}. /continue offers Apply, Keep or Discard again.\n`))
+        } else if (choice === "discard") {
+          await selection.controller.discardPlanWorktree(sessionID, workflowID)
+          terminal.write("Worktree discarded; your checkout was not changed.\n")
+        } else {
+          const applied = await selection.controller.applyPlanWorktree(sessionID, workflowID)
+          if (applied.ok) terminal.write(terminalSafeText(`Applied ${applied.files.length} file(s) to your checkout; worktree removed.\n`))
+          else {
+            let kept = applied.patch
+            try {
+              if (!applied.patch) throw new Error("no patch was produced")
+              const dir = handoffDir(worktree, sessionID)
+              mkdirSync(dir, { recursive: true })
+              kept = resolve(dir, `plan-${workflowID}.patch`)
+              copyFileSync(applied.patch, kept)
+            } catch { /* the original patch path is still reported */ }
+            terminal.write(terminalSafeText(`Apply refused: ${applied.reason}. Your checkout is untouched and the worktree was kept. Patch: ${kept || "(none)"}. /continue offers the choice again.\n`))
+          }
+        }
+      } catch (error) {
+        terminal.write(terminalSafeText(`Plan worktree ${choice} failed: ${boundedTerminalDiagnostic(String(error))}. The worktree was kept.\n`))
+      }
     }
 
     /**
@@ -1564,6 +1686,10 @@ export async function runInteractiveSession(
       progress.tasks(titledTasks, approvedTasks.total)
       terminal.taskSnapshot?.(titledTasks)
       const result = await runOwned(false)
+      if (!result) {
+        terminal.write("Run cancelled before dispatch; the approved plan stays executing. /continue retries.\n")
+        return undefined
+      }
       if (receivedSignal) return signalExit(receivedSignal)
       if (terminal.fullscreen) return undefined
       return { code: result.workflow.phase === "done" && result.run.failed === 0 && result.run.cancelled === 0 ? 0 : 1 }
@@ -2068,6 +2194,13 @@ export async function runInteractiveSession(
       }
       if (command === "/continue" && commandArgs.length === 0) {
         const planning = activeAnyWorkflow(worktree)
+        if (!planning) {
+          const kept = selection.controller.pendingPlanWorktree?.(selection.sessionID)
+          if (kept) {
+            await offerPlanWorktree(kept)
+            continue
+          }
+        }
         if (planning && planning.kind !== "plan") {
           const outcome = await workflowHost.continueActive(planning)
           terminal.resume?.()
@@ -2109,9 +2242,11 @@ export async function runInteractiveSession(
                 if (exit) return exit
               }
               else if (outcome.workflow.phase === "executing") {
-                const finished = outcome.run ? `done ${outcome.run.done}, failed ${outcome.run.failed}` : "residual run complete"
+                const ran = "run" in outcome ? outcome : undefined
+                const finished = ran ? `done ${ran.run.done}, failed ${ran.run.failed}` : "residual run complete"
                 terminal.write(`Residual tasks ran: ${finished}.\n`)
               }
+              if ("planWorktree" in outcome && outcome.planWorktree && !("run" in outcome && outcome.run.aborted)) await offerPlanWorktree(outcome.planWorktree.workflowID)
             }
           }
           catch (error) { terminal.write(`Resume refused or incomplete: ${boundedTerminalDiagnostic(String(error))}\n`) }
@@ -2303,12 +2438,52 @@ export async function runInteractiveSession(
         terminal.write(`Read-only observer: workflow belongs to ${existingWorkflow.sessionID}; open with /resume ${existingWorkflow.sessionID}. No new workflow can start here.\n`)
         continue
       }
+      // Intent step (code-owned heuristic, no model call). Runs only for plain chat lines that already passed every hold
+      // above, so an offer can appear exactly where an explicit /skill:<name> start would be allowed.
+      let outbound = message
+      let intentClass: IntentClass | undefined
+      if (!message.startsWith("/") && chatIntentMode(selection.runtime.config) === "offer") {
+        const intent = classifyIntent(message)
+        intentClass = intent.class
+        if (intent.force) outbound = intent.body
+        const options = intent.force ? [] : intentOptions(intent.class)
+        const offered = options.filter(option => option.kind === "chat" || option.kind === "cancel" ||
+          startRefusal(option.descriptor.workflow) === undefined)
+        const record = (choice: string | null, route: string) => persist("notice", {
+          text: `Intent route ${JSON.stringify({ classifier: INTENT_CLASSIFIER, class: intent.class, signals: intent.signals,
+            offered: offered.map(option => option.label), choice, route })}`,
+        })
+        if (offered.length === 0) record(null, "chat")
+        else {
+          const labels = offered.map(option => option.label)
+          const picked = await chooseIntentRoute(terminal, `This looks ${intent.class === "architecture" ? "like a design-level change" : "under-specified"}. How should I proceed?`, labels, abort.signal)
+          terminal.resume?.()
+          if (abort.signal.aborted) return signalExit(receivedSignal)
+          const option = picked === undefined ? undefined : offered[picked]
+          if (!option || option.kind === "cancel") {
+            record(option?.label ?? "Dismissed", "none")
+            if (terminal.setDraft) {
+              terminal.setDraft(message)
+              terminal.write("Cancelled; nothing was sent. Your draft was restored.\n")
+            } else terminal.write("Cancelled; nothing was sent.\n")
+            continue
+          }
+          if (option.kind === "workflow") {
+            record(option.label, option.descriptor.name)
+            const outcome = await workflowHost.start(option.descriptor, intent.body)
+            terminal.resume?.()
+            if (outcome.quit) return { code: 0 }
+            continue
+          }
+          record(option.label, "chat")
+        }
+      }
       const turnSelection = selection
       const turnStore: SessionStore | undefined = sessionStore
       const turnEpoch = turnStore?.epoch
       const turnWorkflowSnapshot = JSON.stringify(readAnyWorkflowChecked(worktree))
       const turnSkills = skillSession
-      const userFact = persist("user", { text: message })
+      const userFact = persist("user", { text: outbound })
       progress.waiting()
       operationAbort = new AbortController()
       const requestID = `${turnStore?.epoch ?? "read-only"}:request:${++requestSequence}`
@@ -2378,8 +2553,8 @@ export async function runInteractiveSession(
         requestObservation = { state: "in-progress", operationID: requestID }
         publishView()
         turn = skillInvocation
-          ? await turnSelection.conversation.turn(message, operationAbort.signal, skillInvocation)
-          : await turnSelection.conversation.turn(message, operationAbort.signal)
+          ? await turnSelection.conversation.turn(outbound, operationAbort.signal, skillInvocation)
+          : await turnSelection.conversation.turn(outbound, operationAbort.signal)
         if (operationAbort.signal.aborted && !abort.signal.aborted) {
           requestObservation = { state: "cancellation-unconfirmed", operationID: requestID }
           publishView()
@@ -2443,6 +2618,11 @@ export async function runInteractiveSession(
         }
       }
       if (turn.plan === undefined) continue
+      if (intentClass === "question") {
+        // A question is answer-only: a plan in the reply never becomes a pending approval without an explicit /plan.
+        terminal.write("The reply contains a plan proposal; send /plan to submit it.\n")
+        continue
+      }
       const ownerWorkflow = activeWorkflow(worktree)
       if (ownerWorkflow && ownerWorkflow.sessionID !== selection.sessionID) {
         terminal.write(`Plan proposal not admitted: workflow owned by ${ownerWorkflow.sessionID}. Use /resume ${ownerWorkflow.sessionID}.\n`)
