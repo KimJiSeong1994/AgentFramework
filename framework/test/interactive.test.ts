@@ -843,7 +843,7 @@ describe("interactive terminal", () => {
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     const commands = h.calls.choices.find(choice => choice.title === "Commands")!.values
       .map(value => value.split(" ")[0])
-    expect(commands).toEqual(["/help", "/model", "/theme", "/ascii", "!", "/quit"])
+    expect(commands).toEqual(["/help", "/model", "/memory", "/theme", "/ascii", "!", "/quit"])
     expect(h.calls.runtimes).toEqual([])
     expect(h.calls.discoveries).toEqual([])
     expect(h.calls.turns).toEqual([])
@@ -1560,6 +1560,31 @@ describe("interactive terminal", () => {
     expect(output).toContain("Saved combo route architect")
     expect(output).toContain("It applies when a model is selected.")
     expect(output).not.toContain("starts a new session")
+  })
+
+  test("/memory selects the recall engine from the composer, before and during a session, without a model turn", async () => {
+    const base = { endpoint: "http://127.0.0.1:8080", timeout_ms: 120_000, min_probability: 0.3, max_pages: 3 }
+    type Engine = "auto" | "jev" | "claude" | "codex" | "local" | "off"
+    let memory: { engine: Engine; model?: string; endpoint: string; timeout_ms: number; min_probability: number; max_pages: number } = { ...base, engine: "jev" }
+    const saved: unknown[] = []
+    const store = {
+      read: () => memory,
+      save: (engine: Engine, model?: string) => { saved.push([engine, model]); memory = { ...base, engine, ...(model ? { model } : {}) }; return "/u/otter.jsonc" },
+      resolve: (m: typeof memory) => m.engine === "claude" ? { ok: true as const, engine: "claude" as const, model: m.model ?? "claude-haiku-5-5", auto: false } : { ok: false as const, reason: "off" as const },
+    }
+    const unselected = harness({ lines: ["/memory", "/memory claude haiku", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree }, { ...unselected.deps, memory: store })
+    const before = unselected.calls.output.join("")
+    expect(before).toContain("Memory engine: jev (local OpenJev server at memory.endpoint)")
+    expect(before).toContain("Saved memory engine claude / haiku")
+    expect(unselected.calls.runtimes).toHaveLength(0)
+    const chat = harness({ lines: ["/memory show", "/memory off", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, { ...chat.deps, memory: store })
+    const during = chat.calls.output.join("")
+    expect(during).toContain("Memory engine: claude / haiku")
+    expect(during).toContain("Saved memory engine off")
+    expect(chat.calls.runtimes).toHaveLength(1)
+    expect(saved).toEqual([["claude", "haiku"], ["off", undefined]])
   })
 
   test("clear says when a project route still supplies the effective combo", async () => {

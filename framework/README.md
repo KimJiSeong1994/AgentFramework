@@ -1492,6 +1492,76 @@ lock they did not create. A lock whose recorded PID has exited is reported as st
 `lint`/`status`; `bun scripts/otter-wiki.ts unlock` removes it (refusing live, unreadable or
 changed locks). Git settings remain unchanged.
 
+### Wiki as agent memory (`memory` tool)
+
+The wiki is the agent's long-term memory, linked to the request by an inference engine. `memory(query)` is a
+read-only tool for `main` and the read-only planning/workflow roles (OpenCode plugin tool and the codex/claude/local
+CLI host tool set alike; worker, reviewer, data agents and OpenCode's `build`/`plan` have it denied).
+
+- Engines (`memory.engine`). The default is `auto` with `prefetch: true`, so memory works for users with no
+  local model server: `auto` uses the Claude CLI when it is on PATH (`claude-haiku-5-5`, what the `haiku` alias
+  resolves to), else the Codex CLI (`gpt-5.6-luna`), else reports `engine_missing`. It picks by installation
+  only; a failed run (login, usage limit) never silently switches vendors. `claude` / `codex` pin one vendor
+  (unset `memory.model` uses those same defaults), `local` runs an Ollama model (`memory.model` required), `jev`
+  is the local OpenJev server (same loopback transport rules as the skill router, `src/routing/jev.ts`), `off`
+  disables recall. CLI engines run tool-free through the hardened Otter CLI transport (the one combo routes use);
+  the model returns a JSON probability per label (an omitted label counts as 0; the sum must be 1 within 0.1,
+  then renormalized; unknown labels are refused). `auto`/`claude`/`codex` send the request text and the index
+  titles/descriptions to Anthropic or OpenAI; `jev`/`local` stay on this machine.
+- Select it in the Otter terminal with `/memory` (show the resolved engine, e.g. `auto → claude /
+  claude-haiku-5-5`), `/memory test` (one fresh fixed-request recall with its time), `/memory auto`,
+  `/memory claude [model]`, `/memory codex [slug]`, `/memory local <ollama-model>`, `/memory jev` or
+  `/memory off`. It writes the user config
+  (`~/.config/otter/otter.jsonc`), works before a model is selected and while held, dispatches no model turn,
+  and says when the project `.otter/otter.jsonc` overrides it. Recall re-reads the config on every call, so the
+  switch applies to the next `memory` call in the terminal and in the OpenCode plugin alike. `memory` is outside
+  role-policy identity (like `chat` and `skill_trust`), so switching never changes policy IDs.
+
+- Catalog: the `concepts/` and `entities/` links of `knowledge/wiki/index.md` (title + description, index
+  order, deduplicated, at most 16, real non-symlink pages only). Source and report pages are evidence, not
+  candidates. Only the request text (at most 2000 characters) and index titles/descriptions are sent; page
+  bodies never are. Credential-like input is refused before inference.
+- One `/v1/systemone` call: `jev-latest`, `samples: 1`, `steps: 1`, a `choice` question over the page paths
+  plus an explicit `none`. Every page with probability `>= memory.min_probability` **and** above `none` is
+  linked (memory is spread across pages, unlike a single skill), highest first, at most `memory.max_pages`.
+  Invalid responses/distributions, unknown labels, timeouts and a second concurrent recall (`busy`; one
+  inference per process, no queue or retries) link nothing and say so; there is no keyword fallback.
+- Output: path, title, probability, index description and the page opening (after the H1), within 6000
+  bytes, under a header labelling the notes as reference data, not instructions. Main's prompt rule 7 has it
+  call `memory` once with the request before nontrivial work or questions about past decisions.
+- Latency measured on this machine (2026-10-17, 11 candidates): `jev` (local MLX diffusiongemma 26B) 43-72 s;
+  the default `auto → claude-haiku-5-5` 2.7-6.2 s and 8/8 answered on eight Korean/English requests, each linked
+  to the expected page (p=0.70-0.93) and `none` for an unrelated login-page request. `codex / gpt-5.6-luna` was
+  not measured: the account was over its usage limit, which recall reports as unavailable. Probabilities are model
+  output, not calibrated relevance.
+- Why Jev is slow here (measured, not the model): OpenJev's own README puts an MLX read at ~0.4 s on an M4 Max.
+  On this 64 GiB M4 Pro, 46 GiB was wired (Ollama keeps `qwen3.6:35b` ~22 GB and gemma resident with
+  `keep_alive: Forever`), swap was 21.0/21.5 GiB, and the Jev process (26.9 GB footprint) had its weights
+  compressed/swapped out. One 2-label read caused ~15 GiB of swap-ins and took 59 s; latency grew on identical
+  repeats (44 → 64 → 71 s), and prompt size did not matter (3 vs 11 candidates, both ~60 s). Fix the memory, not
+  the code: unload idle Ollama models (`ollama stop <model>`, shorter `OLLAMA_KEEP_ALIVE`), or use `auto`.
+  `/memory test` measures the engine and names this cause when swap is ≥ 80% used.
+- Hiding latency (any engine): an identical request reuses its scores from a 32-entry, 10-minute in-process
+  cache keyed by engine, model/endpoint, the index-derived candidate text and the request (an index edit
+  re-infers; page openings are re-read every call; failures are never cached). `memory.prefetch: true` starts
+  recall of the user's message when the turn reaches main (plugin `chat.message`, terminal planning turn), in
+  parallel with the model's first step; the turn's first `memory` call takes it, later calls run fresh, a newer
+  turn cancels it, and a failed prefetch falls back to the agent's query. It is on by default and costs one
+  inference per main turn (also turns that never call memory); set `"prefetch": false` to pay only per call.
+  Measured with `claude-haiku-5-5` and 3 s of main work before the tool call: tool wait 0-1.8 s instead of
+  3-6 s. `/memory show` reports the latency observed in this process.
+- Recall never writes the wiki or its log: new memory still enters through `capture`/`register` and the
+  `llm-wiki` ingest flow below. Implementation: `src/wiki/recall.ts`, `src/tools/memory.ts` (plugin),
+  `src/hosts/cli-tools.ts` + `cli-host.ts` (CLI, the one asynchronous CLI tool).
+
+```json
+{ "memory": { "engine": "auto", "prefetch": true, "endpoint": "http://127.0.0.1:8080", "timeout_ms": 30000, "min_probability": 0.3, "max_pages": 3 } }
+```
+
+That is the default. A local-only setup is `{ "memory": { "engine": "jev", "timeout_ms": 120000 } }` (raise the
+timeout: Jev under memory pressure took up to 72 s). Validated at use (`engine` one of the six, `model` a native ID and for codex a bundled slug, `timeout_ms`
+1000..300000, `min_probability` 0.05..1, `max_pages` 1..5); an invalid block turns recall off with a stated reason.
+
 The `guard.wiki_raw` hook (`tool.execute.before`) refuses edit/write/multiedit and
 `apply_patch`/`patch` targets under `knowledge/raw/` (case variants and symlink aliases
 included; patch targets are read from `*** Add/Update/Delete File:` and `*** Move to:`

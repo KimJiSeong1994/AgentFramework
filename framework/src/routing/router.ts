@@ -4,6 +4,7 @@ import type { CoreDeps } from "../deps.ts"
 import { containsSecret } from "../security/secrets.ts"
 import { recordRoutingDecision, type RoutingDecision } from "../telemetry/routing.ts"
 import { availableCandidates, type SkillPermissionSource } from "./catalog.ts"
+import { boundedJson, choiceAnswerSchema, JEV_ENDPOINT_RULE, jevSystemOneUrl, validDistribution } from "./jev.ts"
 
 const settingsSchema = z.object({
   mode: z.enum(["off", "shadow", "suggest"]),
@@ -12,38 +13,8 @@ const settingsSchema = z.object({
   min_probability: z.number().min(0.5).max(1),
   min_margin: z.number().min(0).max(1),
 })
-const answerSchema = z.object({
-  answers: z.object({
-    route: z.object({
-      type: z.literal("choice"), choice: z.string(),
-      probabilities: z.record(z.string(), z.number().finite().min(0).max(1)),
-      confidence: z.number().finite().min(0).max(1),
-    })
-  }),
-})
+const answerSchema = choiceAnswerSchema("route")
 export type Recommendation = { skill: string | null; reason: string; decisionID?: string }
-
-async function boundedJson(response: Response): Promise<unknown> {
-  if (!response.ok || !response.body) throw new Error("unavailable")
-  const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
-  let size = 0
-  try {
-    for (; ;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      size += value.byteLength
-      if (size > 65536) throw new Error("oversized")
-      chunks.push(value)
-    }
-  } finally {
-    await reader.cancel().catch(() => { })
-  }
-  const bytes = new Uint8Array(size)
-  let offset = 0
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
-  return JSON.parse(new TextDecoder().decode(bytes))
-}
 
 /** One in-flight request per router instance, no queue/retries. Predictions never mutate mode or permission state. */
 export function createSkillRouter(deps: CoreDeps, source: SkillPermissionSource) {
@@ -79,14 +50,10 @@ export function createSkillRouter(deps: CoreDeps, source: SkillPermissionSource)
         if (!text.trim() || text.length > 2000) return { skill: null, reason: "input_bound" }
         if (containsSecret(text)) return { skill: null, reason: "sensitive_input" }
         if (active) return { skill: null, reason: "busy" }
-        let endpoint: URL
-        try {
-          endpoint = new URL(config.endpoint)
-          if (endpoint.protocol !== "http:" || !["127.0.0.1", "[::1]"].includes(endpoint.hostname)
-            || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname !== "/") throw new Error("endpoint")
-        } catch {
+        const url = jevSystemOneUrl(config.endpoint)
+        if (!url) {
           // Only the failing rule is logged, never the configured URL (it could carry credentials).
-          deps.log("skill.router", { sessionID, messageID, skill: null, reason: "invalid_endpoint", rule: "loopback-literal http://127.0.0.1 or http://[::1] root without credentials, query or hash" })
+          deps.log("skill.router", { sessionID, messageID, skill: null, reason: "invalid_endpoint", rule: JEV_ENDPOINT_RULE })
           return { skill: null, reason: "invalid_endpoint" }
         }
         const controller = new AbortController()
@@ -115,7 +82,7 @@ export function createSkillRouter(deps: CoreDeps, source: SkillPermissionSource)
           })
           if (containsSecret(body)) return { skill: null, reason: "sensitive_metadata" }
           observation.requestSent = true
-          const response = await fetch(new URL("/v1/systemone", endpoint), {
+          const response = await fetch(url, {
             method: "POST", headers: { "Content-Type": "application/json" }, body,
             redirect: "error", signal: controller.signal,
           })
@@ -124,9 +91,7 @@ export function createSkillRouter(deps: CoreDeps, source: SkillPermissionSource)
           const answer = parsed.data.answers.route
           const names = Object.keys(criteria)
           const probs = answer.probabilities
-          if (Object.keys(probs).length !== names.length || names.some((name) => !Object.hasOwn(probs, name))
-            || !Object.hasOwn(criteria, answer.choice)
-            || Math.abs(Object.values(probs).reduce((a, b) => a + b, 0) - 1) > 0.001) return { skill: null, reason: "invalid_distribution" }
+          if (!validDistribution(names, answer.choice, probs)) return { skill: null, reason: "invalid_distribution" }
           const winner = probs[answer.choice]!
           const runnerUp = Math.max(...names.filter((name) => name !== answer.choice).map((name) => probs[name]!))
           observation.scores = { choice: answer.choice, probabilities: probs, confidence: answer.confidence, margin: winner - runnerUp }

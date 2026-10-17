@@ -110,6 +110,40 @@ describe("chat.message hook", () => {
     expect(readModeState(worktree, SESSION)).toEqual(EMPTY_MODE)
   })
 
+  test("memory prefetch starts for an eligible main turn, never for commands, and a newer turn cancels it", async () => {
+    const { mkdirSync, writeFileSync } = await import("node:fs")
+    const { join } = await import("node:path")
+    const { takeMemoryPrefetch, resetMemoryRecallState } = await import("../src/wiki/recall.ts")
+    resetMemoryRecallState()
+    const states: string[] = []
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async (request) => {
+      const body = await request.json() as any
+      states.push(body.state)
+      const labels = Object.keys(body.questions.memory.criteria)
+      const probabilities = Object.fromEntries(labels.map((label) => [label, label === "none" ? 1 : 0]))
+      return Response.json({ answers: { memory: { type: "choice", choice: "none", probabilities, confidence: 1 } } })
+    } })
+    try {
+      mkdirSync(join(worktree, "knowledge", "wiki", "concepts"), { recursive: true })
+      writeFileSync(join(worktree, "knowledge", "wiki", "index.md"), "# i\n\n- [Cache](concepts/cache.md) — prefix cache.\n")
+      writeFileSync(join(worktree, "knowledge", "wiki", "concepts", "cache.md"), "# Cache\n\nbody\n")
+      mkdirSync(join(worktree, ".otter"), { recursive: true })
+      writeFileSync(join(worktree, ".otter", "otter.jsonc"), JSON.stringify({ memory: { engine: "jev", prefetch: true, endpoint: `http://127.0.0.1:${server.port}` } }))
+      await run([textPart("/stop")])
+      expect(await takeMemoryPrefetch(SESSION)).toBeUndefined()
+      await run([textPart("rename the function")])
+      const prefetched = await takeMemoryPrefetch(SESSION)
+      expect(prefetched?.status).toBe("abstained")
+      expect(states).toEqual(["rename the function"])
+      await run([textPart("second turn")])
+      await run([textPart("/stop")])
+      expect(await takeMemoryPrefetch(SESSION)).toBeUndefined()
+    } finally {
+      server.stop(true)
+      resetMemoryRecallState()
+    }
+  })
+
   test("plain message with no active mode leaves the text untouched", async () => {
     const part = textPart("rename the function")
     await run([part])

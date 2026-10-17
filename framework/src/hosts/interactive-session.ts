@@ -42,6 +42,7 @@ import type { ChoicePresentation, InteractiveViewFacts, RequestObservation, Sess
 import { commandInsertion, interactiveActions, interactiveHelp, type InteractiveContext } from "./interactive-actions.ts"
 import { fileComboStore, fileDefaultModelStore, validateComboRoutes, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
 import { runOperatorShell, type ShellResult, type ShellSnapshot } from "./operator-shell.ts"
+import { fileMemoryStore, memoryCommand, type MemoryCommandStore } from "./memory-command.ts"
 
 export type CliEngine = CliRuntimeOptions["engine"]
 export type InteractiveArgs = { worktree: string; engine?: CliEngine; model?: string }
@@ -113,6 +114,8 @@ export type InteractiveDependencies = {
   defaultModel: DefaultModelStore
   /** Persisted `chat.combo`; read when a session starts, never applied to a running or resumed session. */
   combo: ComboStore
+  /** Persisted `memory.engine`/`memory.model` for `/memory`; recall reads it per call. Defaults to the user config. */
+  memory?: MemoryCommandStore
   humanDecision: typeof humanDecision
   randomUUID: () => string
   signals: SignalSource
@@ -1210,6 +1213,11 @@ export async function runInteractiveSession(
           terminal.write(`${command} is a local full-screen TUI action; it is unavailable in readline and no model turn was dispatched.\n`)
           continue
         }
+        if (command === "/memory" && hasInteractiveAction("unselected", "memory")) {
+          if (commandArgs[0] === "test") terminal.write("Testing the memory engine with one fixed request; this can take up to memory.timeout_ms...\n")
+          terminal.write(terminalSafeText(`${await memoryCommand(commandArgs, worktree, deps.memory ?? fileMemoryStore)}\n`))
+          continue
+        }
         if (command === "/model" && commandArgs[0] === "default" && hasInteractiveAction("unselected", "model")) {
           const chosen = defaultModelCommand(commandArgs.slice(1), undefined)
           if (chosen) {
@@ -2190,6 +2198,12 @@ export async function runInteractiveSession(
       }
       if (command === "/status" && commandArgs.length === 0) {
         terminal.write(selection.controller.status(selection.sessionID) + "\n")
+        continue
+      }
+      // Config-only: selecting the memory engine never dispatches a model or touches the session.
+      if (command === "/memory") {
+        if (commandArgs[0] === "test") terminal.write("Testing the memory engine with one fixed request; this can take up to memory.timeout_ms...\n")
+        terminal.write(terminalSafeText(`${await memoryCommand(commandArgs, worktree, deps.memory ?? fileMemoryStore)}\n`))
         continue
       }
       if (command === "/continue" && commandArgs.length === 0) {

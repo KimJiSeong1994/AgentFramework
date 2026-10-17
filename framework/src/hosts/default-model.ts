@@ -4,7 +4,7 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 import { applyEdits, modify } from "jsonc-parser"
-import { ConfigError, loadConfig, parseJsonc, projectConfigPath, userConfigPath } from "../config.ts"
+import { ConfigError, loadConfig, parseJsonc, projectConfigPath, userConfigPath, type OtterConfig } from "../config.ts"
 import { createCodexProfile } from "./codex-profile.ts"
 import { EXECUTION_ROLES, NATIVE_MODEL_ID_RE, type ComboEngine, type ComboRoute, type ComboRoutes, type ExecutionRole } from "./types.ts"
 
@@ -241,6 +241,15 @@ export function clearCombo(): boolean {
     return present ? applyEdits(text, modify(text, ["chat", "combo"], undefined, formatting)) : text
   })
   return present
+}
+
+/** Persist the user-level memory engine (`/memory`); an explicit model is stored, otherwise the key is removed. */
+export function saveMemoryEngine(engine: OtterConfig["memory"]["engine"], model?: string): string {
+  return rewriteUserConfig(text => {
+    let next = applyEdits(text, modify(text, ["memory", "engine"], engine, formatting))
+    next = applyEdits(next, modify(next, ["memory", "model"], engine === "jev" || engine === "off" || engine === "auto" ? undefined : model, formatting))
+    return next
+  })
 }
 
 export type ComboStore = {

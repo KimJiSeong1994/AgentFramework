@@ -6,6 +6,7 @@ import type { ExecutionRuntime } from "./types.ts"
 import type { Terminal } from "./interactive-session.ts"
 import type { PreparedSkillInvocation } from "../skills/session.ts"
 import { bindSkillInvocation, finishSkillInvocation, skillInvocationAudit } from "../skills/context.ts"
+import { cancelMemoryPrefetch, currentMemoryConfig, startMemoryPrefetch } from "../wiki/recall.ts"
 
 export const MAX_PLAN_CONVERSATION_CHARS = 24_000
 export const MAX_PLAN_CONVERSATION_TURNS = 24
@@ -108,6 +109,9 @@ export function createPlanConversation(
         }
       }
       busy = true
+      // Opt-in: recall of this user message overlaps the main model's first step; the turn's first memory call takes it.
+      if (!skill) startMemoryPrefetch(runtime.worktree, sessionID, text, currentMemoryConfig(runtime.worktree))
+      else cancelMemoryPrefetch(sessionID)
       try {
         const title = "Otter planning conversation"
         const owned = workflow?.sessionID === sessionID ? workflow : null

@@ -59,6 +59,11 @@ roles without a route use the main model. /model combo (or the "combo" entry in 
 user's route for that role as a whole object. Every new session (a plain /model switch, /new, apply) takes its routes from the
 currently saved combo, normalized against the new main model; an invalid combo is reported and not applied. /resume and the
 common-engine recovery commands use the session's pinned routes from its metadata, never current config.
+Memory: /memory shows the engine that links requests to knowledge/wiki pages for the memory tool (default auto: the
+Claude CLI with claude-haiku-5-5, else the Codex CLI with gpt-5.6-luna; no local model server needed); /memory test
+times one fresh recall; /memory auto, /memory claude [model], /memory codex [slug], /memory local <ollama-model>,
+/memory jev or /memory off saves it to the user config (auto/claude/codex send the request and wiki index titles to
+that vendor). It applies to the next memory call.
 Otter workflows (chat only; each start is a submitted /skill: command, and invoking a name is not consent to execute):
   /skill:deep-interview <request>   code-owned interview: topology, panels, closure, restatement, verified spec.md (available)
   /skill:ralplan <request>          consensus planning: planner, architect, critic, same-plan-hash join (available)

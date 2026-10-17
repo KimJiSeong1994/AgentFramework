@@ -14,8 +14,10 @@ import { performance } from "node:perf_hooks"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { EXECUTION_ROLES, roleAllowsCliWrites, type ExecutionRole } from "./types.ts"
 import { FdTree, fdStatKind, type FdDirectory, type FdEntry } from "../skills/fd-tree.ts"
+import type { OtterConfig } from "../config.ts"
+import { memoryToolText } from "../wiki/recall.ts"
 
-export const CLI_TOOL_NAMES = ["read", "list", "glob", "grep", "write", "edit"] as const
+export const CLI_TOOL_NAMES = ["read", "list", "glob", "grep", "memory", "write", "edit"] as const
 export type CliToolName = (typeof CLI_TOOL_NAMES)[number]
 
 export type CliToolOutput = { ok: true; text: string } | { ok: false; error: string }
@@ -39,6 +41,8 @@ export type CliTools = {
   readonly available: readonly CliToolName[]
   validate(name: string, input: unknown): boolean
   execute(name: string, input: unknown): CliToolOutput
+  /** `memory` is the one asynchronous tool (local Jev inference); `execute` refuses it. */
+  recall(input: unknown, memory: OtterConfig["memory"] | undefined, signal: AbortSignal, prefetchSession?: string): Promise<CliToolOutput>
 }
 
 const MAX_READ_BYTES = 1024 * 1024
@@ -104,6 +108,10 @@ export function validateCliToolInput(name: string, input: unknown): asserts inpu
     case "grep":
       if (!hasExactKeys(input, ["pattern"], ["path"]) || !boundedString(input.pattern, 1024) || input.pattern.length === 0 ||
           (input.path !== undefined && !path(input.path))) throw new CliToolInputError()
+      return
+    case "memory":
+      if (!hasExactKeys(input, ["query"]) || typeof input.query !== "string" || input.query.includes("\0") ||
+          !input.query.trim() || input.query.length > 2000) throw new CliToolInputError()
       return
     case "write":
       if (!hasExactKeys(input, ["path", "content"]) || !path(input.path) || !boundedString(input.content, MAX_WRITE_BYTES)) throw new CliToolInputError()
@@ -727,6 +735,7 @@ function executeFileTool(
       if (isDirectory) return grepTool(root, input.pattern as string, relativePath, identity, beforeEffect)
       return publicFailure(new Error("type"))
     }
+    case "memory": return { ok: false, error: "Tool refused: memory recall is asynchronous." }
     case "write": return writeTarget(root, normalizeToolPath(input.path as string), identity, input.content as string, undefined, beforeEffect)
     case "edit": return writeTarget(root, normalizeToolPath(input.path as string), identity, input.newText as string, input.oldText as string, beforeEffect)
   }
@@ -765,6 +774,7 @@ export function createCliTools(options: CliToolsOptions): CliTools {
       try {
         validateCliToolInput(name, input)
         assertRootIdentity(root, rootIdentity)
+        if (name === "memory") return true
         if (name === "glob") normalizeToolPath(input.pattern as string)
         const relativePath = normalizeToolPath(name === "glob" ? "." : (input.path as string | undefined) ?? ".")
         let fd: number
@@ -793,6 +803,15 @@ export function createCliTools(options: CliToolsOptions): CliTools {
       try {
         assertRootIdentity(root, rootIdentity)
         return executeFileTool(root, name as CliToolName, input, rootIdentity, options.beforeEffect)
+      }
+      catch (error) { return publicFailure(error) }
+    },
+    async recall(input, memory, signal, prefetchSession) {
+      if (!availableSet.has("memory")) return { ok: false, error: "Tool refused: this Otter tool is not allowed for the execution role." }
+      validateCliToolInput("memory", input)
+      try {
+        assertRootIdentity(root, rootIdentity)
+        return { ok: true, text: safeOutput(await memoryToolText(root, input.query as string, memory, signal, prefetchSession ? { prefetchSession } : {})) }
       }
       catch (error) { return publicFailure(error) }
     },

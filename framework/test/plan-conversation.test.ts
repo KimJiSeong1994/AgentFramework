@@ -78,7 +78,7 @@ describe("common planning conversation", () => {
   test("CLI runtime selects the fixed planning-only main snapshot", () => {
     const runtime = createCliRuntime({ worktree: wt.worktree, engine: "local", model: "fixture-model" })
     const main = runtime.policy.resolve("main")
-    expect(main.tools.allowed).toEqual(["read", "list", "glob", "grep"])
+    expect(main.tools.allowed).toEqual(["read", "list", "glob", "grep", "memory"])
     expect(main.tools.denied).toEqual(expect.arrayContaining(["write", "bash", "delegate", "otter_flow"]))
     expect(main.system[0]).toContain("Never modify files, run commands, execute or approve plans, or delegate work")
     expect(main.nativeContext).toBeUndefined()
@@ -100,7 +100,7 @@ describe("common planning conversation", () => {
     await createPlanConversation(f.runtime, "chat-policy").turn("Discuss the parser")
     const request = f.requests[0]!
     expect(request.policy).toBe(f.runtime.policy.resolve("main"))
-    expect(request.policy.tools.allowed).toEqual(["read", "list", "glob", "grep"])
+    expect(request.policy.tools.allowed).toEqual(["read", "list", "glob", "grep", "memory"])
     expect(request.text).toContain("inspect files using the provided read-only tools")
     expect(request.text).toContain("Never modify files or run commands")
     expect(request.text).toContain("Do not claim work was executed")
@@ -301,7 +301,7 @@ describe("common planning conversation", () => {
     expect(result.plan).toEqual(proposal)
     expect(f.requests).toHaveLength(1)
     expect(f.requests[0]!.role).toBe("main")
-    expect(f.requests[0]!.policy.tools.allowed).toEqual(["read", "list", "glob", "grep"])
+    expect(f.requests[0]!.policy.tools.allowed).toEqual(["read", "list", "glob", "grep", "memory"])
     expect(f.requests[0]!.policy.tools.denied).toEqual(expect.arrayContaining(["write", "bash", "delegate", "otter_flow"]))
     expect(readFileSync(workflowPath(wt.worktree))).toEqual(workflowBefore)
   })

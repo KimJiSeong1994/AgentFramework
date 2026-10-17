@@ -22,6 +22,7 @@ import { createDbQueryTool } from "./tools/db-query.ts"
 import { createSchemaLookupTool } from "./tools/schema-lookup.ts"
 import { createOtterFlowTool } from "./tools/otter-flow.ts"
 import { createSkillTool } from "./tools/skill.ts"
+import { createMemoryTool } from "./tools/memory.ts"
 import { flowOn } from "./flow/status.ts"
 import { repairOnLoad } from "./flow/runtime.ts"
 import { getQueue } from "./orchestration/queue.ts"
@@ -123,7 +124,7 @@ export const OtterPlugin: Plugin = async (input) => {
   hooks["tool.execute.after"] = createToolAfterHook(deps)
   hooks.event = createEventHook(deps)
   if (enabled(config, "compaction.checkpoint")) hooks["experimental.session.compacting"] = createCompactingHook(deps)
-  hooks.tool = { skill: createSkillTool(deps) }
+  hooks.tool = { skill: createSkillTool(deps), memory: createMemoryTool(deps) }
   if (enabled(config, "tool.delegate")) hooks.tool.delegate = createDelegateTool(deps)
   if (config.data.backend !== "none" && enabled(config, "tool.data")) {
     hooks.tool.db_query = createDbQueryTool(deps)

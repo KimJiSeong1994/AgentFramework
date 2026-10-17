@@ -362,9 +362,9 @@ warn = []
 expected = {
     "worker": {"bash", "edit", "glob", "grep", "read", "write"},
     "reviewer": {"glob", "grep", "read"},
-    "main": {"bash", "delegate", "edit", "glob", "grep", "read", "skill", "todowrite", "todoread", "write"},
+    "main": {"bash", "delegate", "edit", "glob", "grep", "memory", "read", "skill", "todowrite", "todoread", "write"},
 }
-for a, hidden, steps in (("worker", ("task", "delegate", "todowrite", "webfetch", "skill"), 40), ("reviewer", ("task", "delegate", "todowrite", "bash", "write", "edit"), 15), ("main", ("task", "webfetch"), None)):
+for a, hidden, steps in (("worker", ("task", "delegate", "todowrite", "webfetch", "skill", "memory"), 40), ("reviewer", ("task", "delegate", "todowrite", "bash", "write", "edit", "memory"), 15), ("main", ("task", "webfetch"), None)):
     d = load(a)
     if not d: bad.append(f"{a}: debug agent failed"); continue
     tools = d.get("tools") or {}
