@@ -14,6 +14,7 @@ import { ledgerPath } from "../state/ledger.ts"
 import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
 import { inputColorSupported, inputLine, renderInput, type InputPresentation } from "./cli-input.ts"
 import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus } from "./cli-progress.ts"
+import type { WorkflowProgress } from "../tui/progress.ts"
 import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
 import { PROTECTED_WORKFLOWS, resolveSkillRoots } from "../skills/roots.ts"
 import { SkillSession, type PreparedSkillInvocation, type SkillCatalog } from "../skills/session.ts"
@@ -64,7 +65,8 @@ export type Terminal = {
   sessionChanged?: () => void
   skillCatalog?: (catalog: SkillCatalog) => void
   /** Committed `kind · stage · phase` of the live planning workflow in this session, or undefined when none is live. */
-  workflowStatus?: (line: string | undefined) => void
+  /** Status line for the owned planning workflow; `progress` carries the same workflow's structured stage facts. */
+  workflowStatus?: (line: string | undefined, progress?: WorkflowProgress) => void
   viewSnapshot?: (facts: InteractiveViewFacts) => void
   bindView?: (identity: ViewIdentity) => void
   transcriptSource?: (source: (options: ReplayOptions) => ReplayResult) => void

@@ -91,6 +91,29 @@ describe("exclusive application input ownership", () => {
     app.close()
   })
 
+  test("input box shows workflow step and task progress, and clears when work ends", () => {
+    const app = new TuiApp()
+    const internal = app as unknown as AppInput
+    internal.dimensions = () => ({ columns: 100, rows: 24 })
+    internal.currentStatusLines = () => ["status"]
+    internal.viewFacts = { selection: { engine: "local", model: "model-known" } }
+    const frames: string[] = []
+    internal.driver.write = frame => frames.push(frame)
+    internal.transcript.append({ provenance: "assistant", text: "hello" })
+
+    app.workflowStatus("ralplan · architect · reviewing", { kind: "ralplan", stage: "architect", phase: "reviewing" })
+    expect(plain(frames.at(-1))).toMatch(/╭─ [█░]+ step 2\/5 · ralplan · architect ─/u)
+
+    app.taskSnapshot([{ id: "t1", status: "done", title: "a" }, { id: "t2", status: "running", title: "b" }])
+    expect(plain(frames.at(-1))).toContain("1/2 tasks · 50%")
+
+    app.taskSnapshot([{ id: "t2", status: "done" }])
+    app.workflowStatus(undefined)
+    expect(plain(frames.at(-1))).not.toContain("tasks")
+    expect(plain(frames.at(-1))).not.toContain("step ")
+    app.close()
+  })
+
   test("spinner animates only while the host reports an in-progress request", async () => {
     const app = new TuiApp()
     const internal = app as unknown as AppInput & { spinnerTimer?: unknown }

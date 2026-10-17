@@ -47,6 +47,16 @@ export class TranscriptModel {
     return false
   }
   get items(): readonly TranscriptItem[] { return this.entries }
+  /** Counts over tasks observed in this process (restored, last-recorded tasks are excluded). */
+  taskCounts(): { done: number; failed: number; cancelled: number; running: number; total: number } {
+    const counts = { done: 0, failed: 0, cancelled: 0, running: 0, total: 0 }
+    for (const [id, task] of this.tasks) {
+      if (this.historicalTasks.has(id)) continue
+      counts.total += 1
+      if (task.status === "done" || task.status === "failed" || task.status === "cancelled" || task.status === "running") counts[task.status] += 1
+    }
+    return counts
+  }
   get currentTask(): string | undefined {
     for (const [id, task] of this.tasks) if (task.status === "running" && !this.historicalTasks.has(id)) return `${task.title ?? id} running`
     return undefined

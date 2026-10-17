@@ -223,7 +223,12 @@ terminal controls in model output. While the host reports an in-progress request
 status shows a spinner and elapsed seconds (`⠋ Model request running · 12s`); it never
 infers progress. Beneath it sit up to two status rows, a rule
 carrying the `⬢ engine / model` badge and scroll position, and a bordered composer.
-Pickers, command/skill suggestions and history search title the composer border and
+While work is live, the composer's top border carries a progress bar built only from observed state, most
+concrete first: a task run (`███░░ 3/5 tasks · 60%`, failed/cancelled counted as finished), ultragoal goals
+(`1/4 goals`), the owned workflow's step (`step 2/5 · ralplan · architect`; a position, not a percent, because
+revisions and interview rounds loop back), or, for a plain model turn, a sliding indeterminate bar. Waiting phases
+(pending approval, paused, stuck) keep a still bar; nothing live means a plain border.
+Pickers, command/skill suggestions and history search title the composer border instead and
 list their choices beneath it; details, approval, session lists and read failures
 occupy a bordered body panel that hides the retained draft and shows no active
 prompt. Initial selection stays on the rule instead of dumping a path banner into

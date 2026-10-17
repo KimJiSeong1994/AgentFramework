@@ -15,6 +15,7 @@ import { commandInsertion, interactiveActions, type InteractiveContext } from ".
 import { formatPaletteRow, palette, paletteInsertion, paletteLabelColumns, paletteWindow } from "./skill-completion.ts"
 import { sameViewIdentity, selectionLabel, type ChoicePresentation, type InteractiveViewFacts, type TranscriptText, type ViewIdentity } from "../hosts/interactive-view.ts"
 import { statusLines } from "./status-view.ts"
+import { progressState, renderProgress, type WorkflowProgress } from "./progress.ts"
 import { resolveTheme, type ThemeName } from "./theme.ts"
 
 const SPINNER_INTERVAL_MS = 120
@@ -94,11 +95,29 @@ export class TuiApp implements Terminal {
   private readFailure = false
   private themeName: ThemeName = "neutral"
   private asciiChrome = false
+  private workflowProgress?: WorkflowProgress
   queueAdmission(allowed: boolean): void { this.queueAllowed = allowed && !this.readFailure }
-  workflowStatus(line: string | undefined): void {
-    if (this.workflow === line) return
+  workflowStatus(line: string | undefined, progress?: WorkflowProgress): void {
+    const nextProgress = line === undefined ? undefined : progress
+    const sameProgress = this.workflowProgress?.kind === nextProgress?.kind && this.workflowProgress?.stage === nextProgress?.stage &&
+      this.workflowProgress?.phase === nextProgress?.phase && this.workflowProgress?.goals?.complete === nextProgress?.goals?.complete &&
+      this.workflowProgress?.goals?.total === nextProgress?.goals?.total
+    if (this.workflow === line && sameProgress) return
     this.workflow = line
+    this.workflowProgress = nextProgress
     this.draw()
+  }
+  /** Input-box progress line (bar + label) for live work, or undefined when nothing is live. */
+  private progressLine(width: number): string | undefined {
+    const frame = this.busySince === undefined ? 0 : Math.floor((Date.now() - this.busySince) / SPINNER_INTERVAL_MS)
+    const state = progressState({
+      tasks: this.transcript.taskCounts(),
+      ...(this.workflowProgress ? { workflow: this.workflowProgress } : {}),
+      busy: this.busySince !== undefined,
+      frame,
+      ...(this.transcript.currentTask ? { activity: this.transcript.currentTask } : this.requestStarted ? { activity: "model working" } : {}),
+    })
+    return state ? renderProgress(state, width, this.asciiChrome) : undefined
   }
   bindView(identity: ViewIdentity): void {
     if (sameViewIdentity(this.viewIdentity, identity)) return
@@ -566,6 +585,10 @@ export class TuiApp implements Terminal {
       ...(panel ? { panel } : {}),
       composerVisible,
       ...(panel?.placement === "below" ? { composerTitle: panel.title } : {}),
+      ...(composerVisible && panel?.placement !== "below" ? (() => {
+        const line = this.progressLine(Math.max(1, this.dimensions().columns - 6))
+        return line ? { progress: line } : {}
+      })() : {}),
       transcriptOffset: panel || this.readFailure ? 0 : this.scrollOffset,
       ...(!panel && !this.readFailure ? {
         transcriptOlder: this.nextPageOffset !== undefined,

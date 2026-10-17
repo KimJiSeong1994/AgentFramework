@@ -826,6 +826,8 @@ export function renderFrame(input: {
   panel?: FramePanel
   composerVisible?: boolean
   composerTitle?: string
+  /** Live-work progress shown in the input box's top border when no title claims it. */
+  progress?: string
   transcriptOffset?: number
   transcriptOlder?: boolean
   transcriptNewer?: boolean
@@ -982,9 +984,11 @@ export function renderFrame(input: {
       ? `Draft ${firstVisibleComposerRow + 1}-${firstVisibleComposerRow + composerRows}/${composer.rows.length}${separator}${input.ascii ? "^" : "↑"} ${firstVisibleComposerRow} above${separator}${input.ascii ? "v" : "↓"} ${composer.rows.length - firstVisibleComposerRow - composerRows} below`
       : undefined
     const title = overflow ?? input.composerTitle ?? belowPanel?.title
-    const titleText = title ? clipToWidth(oneLineText(title), Math.max(1, columns - 6)) : ""
+    const progress = title === undefined && input.progress ? input.progress : undefined
+    const titleText = title ? clipToWidth(oneLineText(title), Math.max(1, columns - 6))
+      : progress ? clipToWidth(oneLineText(progress), Math.max(1, columns - 6)) : ""
     frameLines[composerTop] = titleText
-      ? `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(titleText, "focus")}${paint(` ${horizontal(columns - 5 - displayWidth(titleText))}${glyph.tr}`, "border")}`
+      ? `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(titleText, progress ? "accent" : "focus")}${paint(` ${horizontal(columns - 5 - displayWidth(titleText))}${glyph.tr}`, "border")}`
       : paint(`${glyph.tl}${horizontal(columns - 2)}${glyph.tr}`, "border")
     for (let index = 0; index < composerRows; index += 1) {
       const text = composer.rows[firstVisibleComposerRow + index]?.text ?? ""

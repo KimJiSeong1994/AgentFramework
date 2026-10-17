@@ -23,7 +23,8 @@ import { consensusLine } from "../workflows/ralplan-evidence.ts"
 import { approveExperiment, autoresearchView, finishAutoresearch, productifyAutoresearch, retryAutoresearch, runAutoresearch, startAutoresearch } from "../workflows/autoresearch-driver.ts"
 import { autoresearchDataOf, runConfirmation } from "../workflows/autoresearch.ts"
 import { approveUnit, retryUltragoal, runUltragoal, startUltragoal, ultragoalView, type UnitController } from "../workflows/ultragoal-driver.ts"
-import { approveUnitConfirmation, ultragoalDataOf } from "../workflows/ultragoal.ts"
+import { approveUnitConfirmation, openGoals, ultragoalDataOf } from "../workflows/ultragoal.ts"
+import type { WorkflowProgress } from "../tui/progress.ts"
 import { startRefusal } from "../workflows/registry.ts"
 import { stopDisplay, TERMINAL, type DeepInterviewWorkflow, type StopKind, type WorkflowEnvelope } from "../workflows/types.ts"
 import type { Terminal } from "./interactive-session.ts"
@@ -59,6 +60,19 @@ const ANSWER_HINT = "Answer · /finish ends early · /pause · /cancel · /statu
 const COMMANDS_BLOCKED_WHILE_ANSWERING = /^\/(help|skills|continue|model|new|resume|sessions|plan|skill:[a-z0-9_-]*)(\s|$)/u
 
 /** `kind · stage · phase|stop label` of the committed workflow, plus the facts a reader needs; recomputed from committed state. */
+/** Structured stage facts for the input-box progress bar; goal counts only where the state records them. */
+export function workflowProgress(wf: WorkflowEnvelope): WorkflowProgress {
+  let goals: WorkflowProgress["goals"]
+  if (wf.kind === "ultragoal") {
+    try {
+      const data = ultragoalDataOf(wf as Extract<WorkflowEnvelope, { kind: "ultragoal" }>)
+      const total = data.goals?.ids.length ?? 0
+      if (total > 0) goals = { complete: total - openGoals(data).length, total }
+    } catch { /* unreadable state: stage-only progress */ }
+  }
+  return { kind: wf.kind, stage: wf.stage, phase: wf.phase, ...(goals ? { goals } : {}) }
+}
+
 export function workflowStatusLine(worktree: string, wf: WorkflowEnvelope): string {
   const stop = stopDisplay(wf)
   const parts: string[] = [wf.kind, wf.stage, stop !== "none" ? STOP_LABEL[stop] : wf.phase]
@@ -130,8 +144,9 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
   const write = (text: string) => terminal.write(terminalSafeText(text.endsWith("\n") ? text : `${text}\n`))
 
   function show(wf: WorkflowEnvelope | null): void {
-    const line = wf && wf.kind !== "plan" && wf.sessionID === ctx.sessionID() ? workflowStatusLine(worktree, wf) : undefined
-    terminal.workflowStatus?.(line)
+    const owned = wf && wf.kind !== "plan" && wf.sessionID === ctx.sessionID() ? wf : undefined
+    const line = owned ? workflowStatusLine(worktree, owned) : undefined
+    terminal.workflowStatus?.(line, owned ? workflowProgress(owned) : undefined)
     if (line === lastStatus) return
     lastStatus = line
     if (line === undefined || !wf) return
