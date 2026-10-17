@@ -244,7 +244,7 @@ test("Claude uses the verified stdin launch and emits assistant text once before
   expect(existsSync(invocation.cwd)).toBe(false)
 })
 
-test("Claude permits only the two observed safe-mode builtin plugin names", async () => {
+test("Claude permits only the observed safe-mode builtin plugin names", async () => {
   const expectedArgs = [
     "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
     "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome",
@@ -253,6 +253,8 @@ test("Claude permits only the two observed safe-mode builtin plugin names", asyn
   for (const plugins of [
     ["cc-plugin-agents-md", { name: "cc-plugin-telemetry" }],
     [{ name: "cc-plugin-agents-md" }, "cc-plugin-telemetry"],
+    // Claude CLI 2.1.301 init shape.
+    [{ name: "cc-plugin-agents-md" }, { name: "cc-plugin-telemetry" }, { name: "cc-plugin-plugin-authoring" }],
   ]) {
     const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
     testDirectories.push(resolve(marker, ".."))

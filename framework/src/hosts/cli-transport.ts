@@ -541,7 +541,9 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
         if (record[key] !== undefined && (!Array.isArray(record[key]) || record[key].length > 0)) fail(SAFE_ERRORS.tool)
       }
       if (record.plugins !== undefined) {
-        const allowedPlugins = new Set(["cc-plugin-agents-md", "cc-plugin-telemetry"])
+        // Builtins observed under --safe-mode with --tools "" (Claude CLI 2.1.301 added plugin-authoring);
+        // init still must report no tools and no MCP servers, and any other plugin is refused.
+        const allowedPlugins = new Set(["cc-plugin-agents-md", "cc-plugin-telemetry", "cc-plugin-plugin-authoring"])
         if (!Array.isArray(record.plugins) || record.plugins.some(plugin => {
           const name = typeof plugin === "string" ? plugin : isRecord(plugin) ? plugin.name : undefined
           return typeof name !== "string" || !allowedPlugins.has(name)
