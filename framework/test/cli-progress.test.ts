@@ -133,6 +133,7 @@ describe("CLI progress presenter", () => {
     progress.resume()
     expect(output.join("")).toContain("Cancellation requested; outcome is not yet settled.")
     expect(output.join("")).toContain("[tasks] t1 cancelled.")
+    expect(output.join("")).toContain("[progress] ######################## 1/1 tasks | 1 cancelled | 100%")
     progress.taskSnapshot([{ id: "t1", status: "cancelled" }])
     expect(output.join("").match(/t1 cancelled/g)).toHaveLength(1)
   })

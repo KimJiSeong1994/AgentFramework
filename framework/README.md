@@ -228,6 +228,8 @@ concrete first: a task run (`███░░ 3/5 tasks · 60%`, failed/cancelled
 (`1/4 goals`), the owned workflow's step (`step 2/5 · ralplan · architect`; a position, not a percent, because
 revisions and interview rounds loop back), or, for a plain model turn, a sliding indeterminate bar. Waiting phases
 (pending approval, paused, stuck) keep a still bar; nothing live means a plain border.
+Readline mode (`OTTER_TUI=0`, or a terminal without full-screen support) prints the same task bar as a
+`[progress] ####---- 3/5 tasks | 60%` line whenever a task finishes.
 Pickers, command/skill suggestions and history search title the composer border instead and
 list their choices beneath it; details, approval, session lists and read failures
 occupy a bordered body panel that hides the retained draft and shows no active

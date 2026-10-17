@@ -1,6 +1,7 @@
 import { CLI_TOOL_NAMES, type CliToolName } from "./cli-tools.ts"
 import { EXECUTION_ROLES, type ExecutionRole } from "./types.ts"
 import type { Phase } from "../workflows/types.ts"
+import { renderProgress } from "../tui/progress.ts"
 
 /** Exhaustive over Phase: adding a phase without deciding whether a final summary may report it fails typecheck. */
 const FINAL_PHASES: Record<Phase, true> = {
@@ -191,6 +192,17 @@ export function createCliProgressPresenter(
     tasks.set(id, { status: next, ...(attempt === undefined ? {} : { attempt }) })
     const detail = next === "running" && attempt !== undefined ? ` (attempt ${attempt})` : ""
     output(`[tasks] ${id} ${next}${detail}.`)
+    if (next === "done" || next === "failed" || next === "cancelled") output(`[progress] ${renderProgress({ kind: "tasks", counts: taskCounts() }, 56, true)}`)
+  }
+
+  /** Same counts the full-screen input box shows; tracked tasks only. */
+  const taskCounts = () => {
+    const counts = { done: 0, failed: 0, cancelled: 0, running: 0, total: 0 }
+    for (const { status: value } of tasks.values()) {
+      counts.total += 1
+      if (value === "done" || value === "failed" || value === "cancelled" || value === "running") counts[value] += 1
+    }
+    return counts
   }
 
   const taskSnapshot = (values: readonly CliProgressTask[]): void => {
