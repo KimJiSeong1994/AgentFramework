@@ -11,6 +11,10 @@ export const CONFIG_MODEL_ROLES = Object.freeze(["main", "worker", "reviewer", "
 export const WORKFLOW_READ_ONLY_ROLES = Object.freeze(["interviewer", "planner", "architect", "critic", "researcher", "contrarian", "simplifier"] as const)
 export const EXECUTION_ROLES = Object.freeze([...CONFIG_MODEL_ROLES, ...WORKFLOW_READ_ONLY_ROLES] as const)
 export type ExecutionRole = (typeof EXECUTION_ROLES)[number]
+export type ComboEngine = "local" | "codex" | "claude"
+export type ComboRoute = Readonly<{ engine: ComboEngine; model: string }>
+/** role -> route; only roles that differ from the anchor; keys are ExecutionRole */
+export type ComboRoutes = Readonly<Partial<Record<ExecutionRole, ComboRoute>>>
 export type WorkflowReadOnlyRole = (typeof WORKFLOW_READ_ONLY_ROLES)[number]
 export const EXECUTION_TOOL_NAMES = Object.freeze(["read", "glob", "grep", "list", "bash", "write", "edit", "patch", "apply_patch", "multiedit", "webfetch", "skill", "todowrite", "todoread", "delegate", "lca_flow", "db_query", "schema_lookup", "task"] as const)
 

@@ -17,6 +17,42 @@ const open = (sid = "session_store", engine = "codex") => openSession(wt.worktre
 const release = (store: ReturnType<typeof open>) => store.release({ workflowQuiescent: true, evidence: "test fixture has no dispatched work", workflowID: null, revision: null })
 
 describe("durable session store", () => {
+  test("combo routes persist, validate, stay immutable and legacy metadata without routes opens", () => {
+    const routes = { architect: { engine: "codex", model: "gpt-5.6-sol" }, planner: { engine: "claude", model: "opus" } } as const
+    const store = openSession(wt.worktree, "combo_routes", { engine: "local", model: "gemma4:31b", routes })
+    expect(store.metadata.routes).toEqual(routes)
+    expect(inspectSessions(wt.worktree).find(entry => entry.sessionID === "combo_routes")?.routes).toEqual(routes)
+    release(store)
+    expect(readSessionMetadata(wt.worktree, "combo_routes")?.routes).toEqual(routes)
+    // Same routes in a different key order reopen; different or missing routes are refused.
+    const reordered = { planner: { model: "opus", engine: "claude" }, architect: { model: "gpt-5.6-sol", engine: "codex" } }
+    release(openSession(wt.worktree, "combo_routes", { engine: "local", model: "gemma4:31b", routes: reordered as any }))
+    expect(() => openSession(wt.worktree, "combo_routes", { engine: "local", model: "gemma4:31b", routes: { planner: { engine: "claude", model: "sonnet" } } })).toThrow("immutable")
+    expect(() => openSession(wt.worktree, "combo_routes", { engine: "local", model: "gemma4:31b" })).toThrow("immutable")
+    for (const bad of [
+      { bogus: { engine: "claude", model: "opus" } },
+      { planner: { engine: "gemini", model: "opus" } },
+      { planner: { engine: "claude", model: "bad model" } },
+      { planner: { engine: "claude" } },
+      [],
+    ]) expect(() => openSession(wt.worktree, `bad_${Math.random().toString(36).slice(2)}`, { engine: "local", model: "m", routes: bad as any })).toThrow("routes")
+    // Empty routes equal absent routes.
+    const empty = openSession(wt.worktree, "combo_empty", { engine: "local", model: "m", routes: {} })
+    expect(empty.metadata.routes).toBeUndefined()
+    release(empty)
+    release(openSession(wt.worktree, "combo_empty", { engine: "local", model: "m" }))
+    // Legacy metadata (no routes) opens unchanged.
+    const legacy = open("legacy_routes")
+    release(legacy)
+    expect(readSessionMetadata(wt.worktree, "legacy_routes")?.routes).toBeUndefined()
+    expect(open("legacy_routes").metadata.routes).toBeUndefined()
+    // Tampered on-disk routes make metadata corrupt.
+    const path = join(sessionDir(wt.worktree, "combo_routes"), "metadata.json")
+    const raw = JSON.parse(readFileSync(path, "utf8"))
+    writeFileSync(path, JSON.stringify({ ...raw, routes: { planner: { engine: "gemini", model: "x" } } }))
+    expect(() => readSessionMetadata(wt.worktree, "combo_routes")).toThrow("corrupt")
+  })
+
   test("canonical plans retain explicit provenance after release and replay without entering user history", () => {
     const store = open()
     const text = "Approved document is not execution authority.\nSecond plan line."

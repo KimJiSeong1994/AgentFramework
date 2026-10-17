@@ -12,6 +12,7 @@
 - **세션 보관·복원** — `/sessions`로 지난 작업을 보고 `/resume <sid>`로 이어갑니다.
 - **통제된 실행** — `/plan` → `/approve` 후에만 실행하며, 원장(ledger)으로 승인·실행 기록을 추적합니다.
 - **워크플로·스킬** — `ralplan`, `deep-interview`, `ultragoal`, `autoresearch` 내장 워크플로와 `/skill:<name>` 스킬.
+- **멀티 모델 콤보** — 한 세션에서 역할별(planner/architect/critic/worker…)로 다른 엔진·모델을 씁니다. 지정 안 한 역할은 메인 모델.
 - **엔진 무관** — Ollama(로컬)·Codex·Claude CLI 중 무엇을 써도 이력은 같은 형식으로 쌓입니다.
 
 ## 설치
@@ -32,6 +33,15 @@ bun scripts/lca-wiki.ts capture            # 실행 이력 → 지식 위키
 ```
 
 대화 중: `/plan` · `/approve` · `/sessions` · `/resume <sid>` · `/model` · `/help`
+
+멀티 모델 콤보:
+
+```text
+/model combo planner claude opus          # 역할별 엔진·모델 저장 (~/.config/lca/lca.jsonc)
+/model combo architect codex gpt-5.6-sol
+/model combo worker local qwen3-coder:30b
+/model combo apply                        # 새 세션에 적용 (기존 세션은 고정된 콤보 유지)
+```
 
 ## 문서
 

@@ -9,6 +9,8 @@ import { durableWriteJson, ensureDurableDirectory } from "../state/durable.ts"
 import { sessionDir, stateRoot } from "../state/store.ts"
 import { pendingSkillPermissionActivityCount, pendingSkillPermissionActivityCountForSession } from "../skills/activity.ts"
 import { consumeValidatedResumeProof } from "./admission.ts"
+import { validateComboRoutes } from "../hosts/default-model.ts"
+import type { ComboRoutes } from "../hosts/types.ts"
 
 export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "shell"
 export type TranscriptRecord = { seq: number; kind: TranscriptKind; eventID: string; data: Record<string, unknown> }
@@ -16,6 +18,8 @@ export type SessionMetadata = {
   version: 1
   engine: string
   model?: string
+  /** Immutable per-role combo routes pinned at creation; absent equals empty. */
+  routes?: ComboRoutes
   held: boolean
   holdReason?: string
   createdAt?: number
@@ -28,10 +32,10 @@ export type SessionReleaseProof = {
   revision: number | null
 }
 export type SessionClearHoldProof = { authorized: true; reason: string }
-export type SessionOpenMetadata = { engine: string; model?: string }
+export type SessionOpenMetadata = { engine: string; model?: string; routes?: ComboRoutes }
 export type ReplayOptions = { offset?: number; limit?: number; query?: string; order?: "asc" | "desc"; kind?: TranscriptKind }
 export type ReplayResult = { records: TranscriptRecord[]; relatedRecords?: TranscriptRecord[]; complete: boolean; recoveryNotice?: string; nextOffset?: number; totalRecords?: number }
-export type InspectedSession = { sessionID: string; engine: string; model?: string; held: boolean; corrupt?: string }
+export type InspectedSession = { sessionID: string; engine: string; model?: string; routes?: ComboRoutes; held: boolean; corrupt?: string }
 export type SessionAttachmentInspection =
   | { state: "attached"; epoch: string; sessionID: string; worktree: string; bootID: string; pid: number; processStart: string; identity: "live" | "dead" | "ambiguous" }
   | { state: "released"; epoch: string; sessionID: string; worktree: string; workflowID: string | null; revision: number | null; releaseEvidence: string }
@@ -233,6 +237,30 @@ function boundedText(value: unknown, maxBytes: number): value is string {
   return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= maxBytes && !/[\u0000-\u001f\u007f]/.test(value)
 }
 
+const MAX_SESSION_ROUTES = 13
+
+/** Canonical (sorted-key) routes; undefined when empty so absent == empty everywhere. */
+export function canonicalRoutes(routes: ComboRoutes | undefined): ComboRoutes | undefined {
+  if (!routes) return undefined
+  const keys = Object.keys(routes).sort()
+  if (keys.length === 0) return undefined
+  const out: Record<string, { engine: string; model: string }> = {}
+  for (const key of keys) {
+    const route = (routes as Record<string, { engine: string; model: string }>)[key]!
+    out[key] = { engine: route.engine, model: route.model }
+  }
+  return out as ComboRoutes
+}
+
+export function routesKey(routes: ComboRoutes | undefined): string {
+  return JSON.stringify(canonicalRoutes(routes) ?? {})
+}
+
+function validatedRoutes(value: unknown): ComboRoutes | string {
+  if (plainObject(value) && Object.keys(value).length > MAX_SESSION_ROUTES) return "too many routes"
+  return validateComboRoutes(value)
+}
+
 function validateEngineModel(value: unknown): SessionOpenMetadata {
   if (!plainObject(value) || !boundedText(value.engine, 128) || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.engine)) throw new TypeError("invalid session engine metadata")
   if (value.engine === "opencode") {
@@ -240,8 +268,14 @@ function validateEngineModel(value: unknown): SessionOpenMetadata {
   } else if (!boundedText(value.model, 256)) {
     throw new TypeError("a model is required for this session engine")
   }
-  if (Object.keys(value).some(key => key !== "engine" && key !== "model")) throw new TypeError("unexpected session creation metadata")
-  return { engine: value.engine, ...(value.model === undefined ? {} : { model: value.model }) }
+  if (Object.keys(value).some(key => key !== "engine" && key !== "model" && key !== "routes")) throw new TypeError("unexpected session creation metadata")
+  let routes: ComboRoutes | undefined
+  if (value.routes !== undefined) {
+    const checked = validatedRoutes(value.routes)
+    if (typeof checked === "string") throw new TypeError(`invalid session routes metadata: ${checked}`)
+    routes = canonicalRoutes(checked)
+  }
+  return { engine: value.engine, ...(value.model === undefined ? {} : { model: value.model }), ...(routes ? { routes } : {}) }
 }
 
 function validateSessionMetadata(value: unknown): SessionMetadata {
@@ -256,7 +290,11 @@ function validateSessionMetadata(value: unknown): SessionMetadata {
   if (value.holdReason !== undefined && !boundedText(value.holdReason, 512)) throw new Error("session metadata is corrupt")
   if (value.createdAt !== undefined && (typeof value.createdAt !== "number" || !Number.isFinite(value.createdAt) || value.createdAt < 0)) throw new Error("session metadata is corrupt")
   if (value.updatedAt !== undefined && (typeof value.updatedAt !== "number" || !Number.isFinite(value.updatedAt) || value.updatedAt < 0)) throw new Error("session metadata is corrupt")
-  const allowed = new Set(["version", "engine", "model", "held", "holdReason", "createdAt", "updatedAt"])
+  if (value.routes !== undefined) {
+    const checked = validatedRoutes(value.routes)
+    if (typeof checked === "string") throw new Error("session metadata is corrupt")
+  }
+  const allowed = new Set(["version", "engine", "model", "routes", "held", "holdReason", "createdAt", "updatedAt"])
   if (Object.keys(value).some(key => !allowed.has(key))) throw new Error("session metadata is corrupt")
   return value as SessionMetadata
 }
@@ -980,7 +1018,8 @@ export function openSession(worktree: string, sid: string, metadata?: SessionOpe
     if (!oldMetadata && restored) throw new Error("existing session has no valid metadata; admission refused")
     const requested = metadata === undefined ? undefined : validateEngineModel(metadata)
     if (!oldMetadata && !requested) throw new TypeError("session engine/model metadata is required when creating a session")
-    if (oldMetadata && requested && (oldMetadata.engine !== requested.engine || oldMetadata.model !== requested.model)) throw new Error("session engine/model metadata is immutable")
+    if (oldMetadata && requested && (oldMetadata.engine !== requested.engine || oldMetadata.model !== requested.model || routesKey(oldMetadata.routes) !== routesKey(requested.routes))) throw new Error("session engine/model metadata is immutable")
+    const chosenRoutes = canonicalRoutes((oldMetadata ?? requested)!.routes)
     const chosen = oldMetadata ? { engine: oldMetadata.engine, ...(oldMetadata.model === undefined ? {} : { model: oldMetadata.model }) } : requested!
     const recovery = recoverTranscript(directory)
     if (recovery.problem) throw new Error(`session transcript is corrupt: ${recovery.problem}`)
@@ -992,6 +1031,7 @@ export function openSession(worktree: string, sid: string, metadata?: SessionOpe
       version: 1,
       engine: chosen.engine,
       ...(chosen.model === undefined ? {} : { model: chosen.model }),
+      ...(chosenRoutes ? { routes: chosenRoutes } : {}),
       held: true,
       ...(oldMetadata?.createdAt === undefined ? { createdAt: now } : { createdAt: oldMetadata.createdAt }),
       updatedAt: now,
@@ -1135,6 +1175,7 @@ export function inspectSessions(worktree: string): InspectedSession[] {
       sessionID: entry.name,
       engine: metadata?.engine ?? "",
       ...(metadata?.model === undefined ? {} : { model: metadata.model }),
+      ...(metadata?.routes ? { routes: metadata.routes } : {}),
       held: metadata?.held ?? true,
       ...(corrupt ? { corrupt } : {}),
     })

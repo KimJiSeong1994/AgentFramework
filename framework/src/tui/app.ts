@@ -13,7 +13,7 @@ import type { SkillCatalog } from "../skills/session.ts"
 import { restoreTranscript } from "./session-transcript.ts"
 import { commandInsertion, interactiveActions, type InteractiveContext } from "../hosts/interactive-actions.ts"
 import { formatPaletteRow, palette, paletteInsertion, paletteLabelColumns, paletteWindow } from "./skill-completion.ts"
-import { sameViewIdentity, type ChoicePresentation, type InteractiveViewFacts, type TranscriptText, type ViewIdentity } from "../hosts/interactive-view.ts"
+import { sameViewIdentity, selectionLabel, type ChoicePresentation, type InteractiveViewFacts, type TranscriptText, type ViewIdentity } from "../hosts/interactive-view.ts"
 import { statusLines } from "./status-view.ts"
 import { resolveTheme, type ThemeName } from "./theme.ts"
 
@@ -366,7 +366,7 @@ export class TuiApp implements Terminal {
     const logo = ascii
       ? ["L     CCCC  AAA ", "L    C     A   A", "L    C     AAAAA", "LLLL  CCCC A   A"]
       : ["█     ▄███▄  ▄███▄", "█     █      █   █", "█     █      █████", "████▄ ▀███▀  █   █"]
-    const selection = this.viewFacts ? `${this.viewFacts.selection.engine} / ${this.viewFacts.selection.model}` : undefined
+    const selection = this.viewFacts ? selectionLabel(this.viewFacts.selection) : undefined
     const keys = this.separator()
     return {
       title: "LCA · local coding agent",
@@ -561,7 +561,7 @@ export class TuiApp implements Terminal {
     this.driver.write(renderFrame({ ...this.dimensions(), transcript: panel?.placement === "body" ? [] : lines,
       header: {
         screen,
-        ...(this.viewFacts ? { selection: `${this.viewFacts.selection.engine} / ${this.viewFacts.selection.model}` } : {}),
+        ...(this.viewFacts ? { selection: selectionLabel(this.viewFacts.selection) } : {}),
       },
       ...(panel ? { panel } : {}),
       composerVisible,

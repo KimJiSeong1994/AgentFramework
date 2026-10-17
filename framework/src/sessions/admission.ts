@@ -3,14 +3,14 @@ import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, open
 import { join } from "node:path"
 import { settled } from "../hosts/run-state.ts"
 import { executionActivity, sessionActivityBlocker } from "../hosts/runtime.ts"
-import type { ExecutionRuntime } from "../hosts/types.ts"
+import type { ComboRoutes, ExecutionRuntime } from "../hosts/types.ts"
 import { getQueue } from "../orchestration/queue.ts"
 import { ensureHeartbeat, reattachOwner, stopHeartbeat } from "../flow/runtime.ts"
 import { readAnyWorkflowChecked as readWorkflowChecked, withFlowTransaction, readAnyWorkflowForWrite as readWorkflowForWrite, workflowEngineRefusal } from "../flow/state.ts"
 import { TERMINAL } from "../flow/machine.ts"
 import { abortPath, sessionDir } from "../state/store.ts"
 import { durableWriteJson } from "../state/durable.ts"
-import { getOwnedSession, inspectSessionAttachment, openSession, readSessionMetadata, type SessionStore } from "./store.ts"
+import { getOwnedSession, inspectSessionAttachment, openSession, readSessionMetadata, routesKey, type SessionStore } from "./store.ts"
 import { cancelSkillPermissionActivities, pendingSkillPermissionActivityCount, pendingSkillPermissionActivityCountForSession } from "../skills/activity.ts"
 import { isCancelPending } from "../workflows/types.ts"
 
@@ -387,14 +387,16 @@ function rebindHeldWorkflow(runtime: ExecutionRuntime, store: SessionStore, sid:
 export function attachAdmission(
   runtime: ExecutionRuntime,
   sid: string,
-  metadata: { engine: string; model?: string },
+  metadata: { engine: string; model?: string; routes?: ComboRoutes },
   options: { startHeld?: boolean } = {},
 ): SessionStore {
   if (metadata.engine !== runtime.host.identity.engine) throw new Error("session admission engine does not match the selected host")
+  const requestedRoutes = routesKey(metadata.routes)
   const registryKey = key(runtime.worktree, sid)
   const alreadyOwned = getOwnedSession(runtime.worktree, sid)
   if (alreadyOwned) {
     alreadyOwned.assertOwner()
+    if (routesKey(alreadyOwned.metadata.routes) !== requestedRoutes) throw new Error("session admission routes do not match the selected host")
     if (alreadyOwned.metadata.held) {
       if (pendingSkillPermissionActivityCountForSession(runtime.worktree, sid) > 0) {
         throw new Error("session permission activity is still settling; held owner cannot be rebound")
@@ -419,6 +421,7 @@ export function attachAdmission(
   if (store.metadata.engine !== metadata.engine || (metadata.model !== undefined && store.metadata.model !== metadata.model)) {
     throw new Error("session admission metadata does not match the selected host")
   }
+  if (routesKey(store.metadata.routes) !== requestedRoutes) throw new Error("session admission routes do not match the selected host")
   tokens.delete(registryKey)
 
   if (options.startHeld || store.restored || priorState || priorWorkflow) {
@@ -453,7 +456,7 @@ export function attachAdmission(
 export function attachHeldAdmission(
   runtime: ExecutionRuntime,
   sid: string,
-  metadata: { engine: string; model?: string },
+  metadata: { engine: string; model?: string; routes?: ComboRoutes },
 ): SessionStore {
   return attachAdmission(runtime, sid, metadata, { startHeld: true })
 }

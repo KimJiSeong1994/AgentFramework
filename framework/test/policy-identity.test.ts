@@ -85,3 +85,22 @@ test("CLI selection preserves frozen model keys and old serialized policy inputs
     }
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
+
+test("chat.combo in config alone changes no ID; empty routes match the frozen baseline; only a routed role differs", async () => {
+  const { DEFAULT_CONFIG } = await import("../src/config.ts")
+  const { createExecutionPolicy } = await import("../src/hosts/tool-policy.ts")
+  const roles = Object.keys(baseline.fixtures[0]!.snapshots) as never[]
+  const plain = createExecutionPolicy(DEFAULT_CONFIG, { planningOnlyMain: true })
+  const withCombo = createExecutionPolicy({ ...DEFAULT_CONFIG, chat: { combo: { planner: { engine: "claude", model: "opus" } } } } as typeof DEFAULT_CONFIG, { planningOnlyMain: true })
+  const empty = createExecutionPolicy(DEFAULT_CONFIG, { planningOnlyMain: true, routes: {} })
+  for (const role of roles) {
+    expect(withCombo.resolve(role).id).toBe(plain.resolve(role).id)
+    expect(empty.resolve(role)).toEqual(plain.resolve(role))
+  }
+  const routed = createExecutionPolicy(DEFAULT_CONFIG, { planningOnlyMain: true, routes: { planner: { model: { providerID: "claude", modelID: "opus" } } } })
+  for (const role of roles) {
+    if (role === "planner") expect(routed.resolve(role).id).not.toBe(plain.resolve(role).id)
+    else expect(routed.resolve(role)).toEqual(plain.resolve(role))
+  }
+  expect(routed.resolve("planner").model).toEqual({ providerID: "claude", modelID: "opus" })
+})

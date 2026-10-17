@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createCliHost } from "../src/hosts/cli-host.ts"
 import type { CliTransportHandle, CliTransportOptions } from "../src/hosts/cli-transport.ts"
-import type { ExecutionPolicy, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole } from "../src/hosts/types.ts"
+import type { ComboRoutes, ExecutionPolicy, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole } from "../src/hosts/types.ts"
 import type { ExecutionRunStore, ExecutionRunStatus } from "../src/hosts/run-state.ts"
 import type { CliHostActivity } from "../src/hosts/cli-progress.ts"
 import { estimateTokens } from "../src/tokens.ts"
@@ -759,5 +759,159 @@ describe("common CLI execution host", () => {
     const result = await subject.host.reconcile({ executionID: "not-owned-here" })
     expect(result).toEqual({ outcome: "unknown", quiescent: false, evidence: "no current owned CLI process evidence; replay is refused" })
     expect(subject.prompts).toHaveLength(0)
+  })
+})
+
+describe("route-aware common CLI host", () => {
+  const routes: ComboRoutes = {
+    planner: { engine: "claude", model: "opus" },
+    architect: { engine: "codex", model: "gpt-5.6-sol" },
+  }
+
+  function routed(options: { failPreflightFor?: string; wrongSnapshotModel?: boolean; codexHash?: string; routes?: typeof routes } = {}) {
+    const anchor = { engine: "local" as const, model: "anchor-model" }
+    const table: Record<string, { engine: string; model: string }> = { ...(options.routes ?? routes) }
+    const codex = createCodexProfile("gpt-5.6-sol")
+    const snapshotFor = (role: ExecutionRole) => {
+      const target = table[role] ?? anchor
+      return Object.freeze({
+        id: `policy-${role}`,
+        role,
+        model: Object.freeze({ providerID: target.engine, modelID: options.wrongSnapshotModel ? anchor.model : target.model }),
+        maxOutputTokens: 20_000,
+        tools: Object.freeze({ allowed: Object.freeze([...ALL_TOOLS]), denied: Object.freeze([] as string[]) }),
+        system: Object.freeze([`fixed ${role} constraint`]),
+        ...(target.engine === "codex" ? { nativeContext: Object.freeze({ identity: codex.catalogHash, instructions: codex.instructions }) } : {}),
+        thinking: "inherit" as const,
+      })
+    }
+    const snapshots = new Map<ExecutionRole, ReturnType<typeof snapshotFor>>()
+    const resolve = (role: ExecutionRole) => {
+      if (!snapshots.has(role)) snapshots.set(role, snapshotFor(role))
+      return snapshots.get(role)!
+    }
+    const handlers: ExecutionPolicyHandlers = {
+      beforeTool: () => ({ allow: true }),
+      toolResult: event => event.error === undefined ? { result: event.result } : { error: event.error },
+      assistantText: () => ({ cancel: false }),
+    }
+    const policy = { resolve, handlers: () => handlers, bindSession() {}, unbindSession() {}, handlersForSession: () => undefined, snapshotForSession: () => undefined } as unknown as ExecutionPolicy
+    const requests: Array<{ role: ExecutionRole; engine: string; model: string }> = []
+    const transports: Array<{ engine: string; model: string; prompt: string }> = []
+    let currentRole: ExecutionRole = "worker"
+    const createTransport = (opts: CliTransportOptions): CliTransportHandle => {
+      transports.push({ engine: opts.engine, model: opts.model, prompt: opts.prompt })
+      const failing = options.failPreflightFor === `${opts.engine}/${opts.model}`
+      const handle: CliTransportHandle = {
+        async run() {
+          requests.push({ role: currentRole, engine: opts.engine, model: opts.model })
+          opts.onText?.(JSON.stringify({ type: "final", text: `done ${opts.engine}/${opts.model}` }))
+          return { status: "completed", text: JSON.stringify({ type: "final", text: `done ${opts.engine}/${opts.model}` }), quiescent: true }
+        },
+        async requestCancel() { return { requested: true, acknowledged: true, terminal: true, quiescent: true, evidence: "fixture" } },
+        async reconcile() { return { outcome: "terminal", quiescent: true, evidence: "fixture" } },
+      }
+      if (opts.engine === "codex") {
+        handle.preflight = async () => ({ compatible: !failing, nativePolicyHash: options.codexHash ?? codex.catalogHash })
+      }
+      if (failing && opts.engine !== "codex") throw new Error("fixture executable missing")
+      return handle
+    }
+    const makeRequest = (role: ExecutionRole): ExecutionRequest => ({
+      executionID: `${EXECUTION}-${role}`,
+      supervisorSessionID: OWNER,
+      taskID: "task",
+      attemptID: "attempt",
+      generation: 7,
+      role,
+      title: "Routed fixture",
+      cwd: root,
+      text: "Answer.",
+      deadlineAt: Date.now() + 10_000,
+      policy: resolve(role),
+      handlers,
+    })
+    const state = (role: ExecutionRole): ExecutionRunStatus => ({
+      generation: 7,
+      claim: { ownerSession: OWNER, instance: "test-instance", pid: process.pid, generation: 7 },
+      executions: [{
+        executionId: `${EXECUTION}-${role}`, ownerSession: OWNER, taskId: "task", attemptId: "attempt", generation: 7,
+        role, cwd: root, policyID: `policy-${role}`, kind: "host" as const,
+        engine: anchor.engine, profile: "legacy-unowned" as const, controlProfile: CONTROL_PROFILE,
+      }],
+    })
+    let active: ExecutionRole = "worker"
+    const runs = { status: () => state(active) } as unknown as ExecutionRunStore
+    const host = createCliHost({ engine: anchor.engine, model: anchor.model, routes: options.routes ?? routes, policy, runs, createTransport })
+    return {
+      host, requests, transports, makeRequest,
+      async dispatch(role: ExecutionRole) {
+        active = role
+        currentRole = role
+        const handle = await host.prepare(makeRequest(role))
+        return handle.run()
+      },
+    }
+  }
+
+  test("each request dispatches on its role route while identity stays the anchor", async () => {
+    const subject = routed()
+    expect(subject.host.identity.engine).toBe("local")
+    expect(await subject.dispatch("planner")).toEqual({ status: "completed", text: "done claude/opus" })
+    expect(await subject.dispatch("architect")).toEqual({ status: "completed", text: "done codex/gpt-5.6-sol" })
+    expect(await subject.dispatch("worker")).toEqual({ status: "completed", text: "done local/anchor-model" })
+    expect(subject.requests).toEqual([
+      { role: "planner", engine: "claude", model: "opus" },
+      { role: "architect", engine: "codex", model: "gpt-5.6-sol" },
+      { role: "worker", engine: "local", model: "anchor-model" },
+    ])
+  })
+
+  test("preflight probes the anchor and each distinct route once, and succeeds only if all pass", async () => {
+    const subject = routed({ routes: { ...routes, critic: { engine: "claude", model: "opus" } } })
+    const result = await subject.host.preflight(subject.host.identity.profile)
+    expect(result).toMatchObject({ compatible: true, problems: [] })
+    expect(subject.transports.map(entry => `${entry.engine}/${entry.model}`).sort())
+      .toEqual(["claude/opus", "codex/gpt-5.6-sol", "local/anchor-model"])
+    expect(subject.transports.every(entry => entry.prompt === "")).toBe(true)
+  })
+
+  test("a failing route makes preflight incompatible, names the role, and never falls back", async () => {
+    const claude = routed({ failPreflightFor: "claude/opus" })
+    const claudeResult = await claude.host.preflight(claude.host.identity.profile)
+    expect(claudeResult.compatible).toBe(false)
+    expect(claudeResult.problems.join(" ")).toContain("combo route for planner")
+
+    const codex = routed({ failPreflightFor: "codex/gpt-5.6-sol" })
+    const codexResult = await codex.host.preflight(codex.host.identity.profile)
+    expect(codexResult.compatible).toBe(false)
+    expect(codexResult.controls.preExecutionToolPolicy).toBe("unsupported")
+    expect(codexResult.problems.join(" ")).toContain("combo route for architect")
+    expect(codex.requests).toEqual([])
+  })
+
+  test("a route whose Codex profile hash mismatches is refused", async () => {
+    const subject = routed({ codexHash: "wrong" })
+    const result = await subject.host.preflight(subject.host.identity.profile)
+    expect(result.compatible).toBe(false)
+    await expect(subject.dispatch("architect")).resolves.toMatchObject({ status: "failed" })
+  })
+
+  test("a routed role's snapshot carrying the anchor model is refused before dispatch", async () => {
+    const subject = routed({ wrongSnapshotModel: true })
+    await expect(subject.dispatch("planner")).rejects.toThrow("execution policy snapshot is not fixed")
+    expect(subject.requests).toEqual([])
+  })
+
+  test("invalid routes refuse host construction", () => {
+    const subject = routed()
+    const bad = (value: unknown) => () => createCliHost({
+      engine: "local", model: "anchor-model", routes: value as never,
+      policy: {} as ExecutionPolicy, runs: {} as ExecutionRunStore,
+    })
+    expect(bad({ main: { engine: "claude", model: "opus" } })).toThrow("invalid CLI host options")
+    expect(bad({ planner: { engine: "x", model: "opus" } })).toThrow("invalid CLI host options")
+    expect(bad({ planner: { engine: "codex", model: "unknown-slug" } })).toThrow("unsupported Codex model profile")
+    expect(subject.host.identity.engine).toBe("local")
   })
 })

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { projectConfigPath, userConfigPath } from "../src/config.ts"
-import { clearDefaultModel, readDefaultModel, saveDefaultModel, validateDefaultModel } from "../src/hosts/default-model.ts"
+import { clearCombo, clearComboRole, clearDefaultModel, readCombo, readDefaultModel, saveComboRole, saveDefaultModel, validateComboRoutes, validateDefaultModel } from "../src/hosts/default-model.ts"
 
 let root: string
 let worktree: string
@@ -71,6 +71,79 @@ describe("chat.default_model", () => {
     expect(readDefaultModel(worktree)).toMatchObject({ state: "configured", value: { engine: "claude", model: "sonnet" } })
     put(userConfigPath(), "{ broken")
     expect(() => saveDefaultModel({ engine: "local", model: "x" })).toThrow("invalid-jsonc")
+    expect(readFileSync(userConfigPath(), "utf8")).toBe("{ broken")
+  })
+})
+
+describe("chat.combo", () => {
+  test("validates roles, engines and model IDs and never routes main", () => {
+    expect(validateComboRoutes({ planner: { engine: "claude", model: "opus" } })).toEqual({ planner: { engine: "claude", model: "opus" } })
+    expect(validateComboRoutes({})).toEqual({})
+    expect(validateComboRoutes("x")).toContain("object")
+    expect(validateComboRoutes({ main: { engine: "claude", model: "opus" } })).toContain("main")
+    expect(validateComboRoutes({ nope: { engine: "claude", model: "opus" } })).toContain("nope")
+    expect(validateComboRoutes({ planner: { engine: "opencode", model: "x" } })).toContain("engine")
+    expect(validateComboRoutes({ planner: { engine: "local", model: "-rf" } })).toContain("model")
+    expect(validateComboRoutes({ planner: { engine: "local", model: "a b" } })).toContain("model")
+    expect(validateComboRoutes({ planner: "claude/opus" })).toContain("planner")
+  })
+
+  test("is unset by default and reads per-role sources with project overriding single roles", () => {
+    expect(readCombo(worktree)).toEqual({ state: "unset" })
+    put(userConfigPath(), '{ "chat": { "combo": { "planner": { "engine": "claude", "model": "opus" }, "worker": { "engine": "local", "model": "qwen3-coder:30b" } } } }')
+    expect(readCombo(worktree)).toEqual({
+      state: "configured",
+      routes: { planner: { engine: "claude", model: "opus" }, worker: { engine: "local", model: "qwen3-coder:30b" } },
+      sources: { planner: "user", worker: "user" },
+    })
+    put(projectConfigPath(worktree), '{ "chat": { "combo": { "worker": { "engine": "codex", "model": "gpt-5.6-sol" }, "critic": { "engine": "claude", "model": "sonnet" } } } }')
+    expect(readCombo(worktree)).toEqual({
+      state: "configured",
+      routes: {
+        planner: { engine: "claude", model: "opus" },
+        worker: { engine: "codex", model: "gpt-5.6-sol" },
+        critic: { engine: "claude", model: "sonnet" },
+      },
+      sources: { planner: "user", worker: "project", critic: "project" },
+    })
+  })
+
+  test("an invalid combo is reported whole and never partially applied", () => {
+    put(userConfigPath(), '{ "chat": { "combo": { "planner": { "engine": "claude", "model": "opus" }, "critic": { "engine": "x", "model": "m" } } } }')
+    expect(readCombo(worktree)).toMatchObject({ state: "invalid", reason: expect.stringContaining("critic") })
+    put(userConfigPath(), '{ "chat": { "combo": { "main": { "engine": "claude", "model": "opus" } } } }')
+    expect(readCombo(worktree)).toMatchObject({ state: "invalid" })
+    put(userConfigPath(), "{ not json")
+    expect(readCombo(worktree)).toMatchObject({ state: "invalid", reason: expect.stringContaining("invalid-jsonc") })
+  })
+
+  test("save preserves comments and sibling keys, clear removes one role or all", () => {
+    put(userConfigPath(), '{\n  // keep me\n  "chat": { "default_model": { "engine": "local", "model": "g" } },\n}\n')
+    expect(saveComboRole("architect", { engine: "codex", model: "gpt-5.6-sol" })).toBe(userConfigPath())
+    saveComboRole("planner", { engine: "claude", model: "opus" })
+    const saved = readFileSync(userConfigPath(), "utf8")
+    expect(saved).toContain("// keep me")
+    expect(saved).toContain('"default_model"')
+    expect(statSync(userConfigPath()).mode & 0o777).toBe(0o600)
+    expect(readCombo(worktree)).toMatchObject({ state: "configured", routes: { architect: { engine: "codex", model: "gpt-5.6-sol" }, planner: { engine: "claude", model: "opus" } } })
+
+    expect(clearComboRole("architect")).toBe(true)
+    expect(clearComboRole("architect")).toBe(false)
+    expect(readCombo(worktree)).toMatchObject({ state: "configured", routes: { planner: { engine: "claude", model: "opus" } } })
+    expect(clearCombo()).toBe(true)
+    expect(clearCombo()).toBe(false)
+    expect(readCombo(worktree)).toEqual({ state: "unset" })
+    const after = readFileSync(userConfigPath(), "utf8")
+    expect(after).toContain("// keep me")
+    expect(after).toContain('"default_model"')
+  })
+
+  test("save refuses invalid input and invalid JSONC without writing", () => {
+    expect(() => saveComboRole("main" as never, { engine: "local", model: "x" })).toThrow("main")
+    expect(() => saveComboRole("planner", { engine: "local", model: "-x" })).toThrow("model")
+    put(userConfigPath(), "{ broken")
+    expect(() => saveComboRole("planner", { engine: "local", model: "x" })).toThrow("invalid-jsonc")
+    expect(() => clearCombo()).toThrow("invalid-jsonc")
     expect(readFileSync(userConfigPath(), "utf8")).toBe("{ broken")
   })
 })

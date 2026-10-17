@@ -1,6 +1,6 @@
 import { AGENT_DEFS, DATA_ANALYST_PROMPT, DATA_VERIFIER_PROMPT, REVIEWER_PROMPT, WORKER_PROMPT, mainPrompt } from "../agents/prompts.ts"
 import { createHash } from "node:crypto"
-import { parseModelSelection, type LcaConfig } from "../config.ts"
+import { parseModelSelection, type LcaConfig, type ModelSelection } from "../config.ts"
 import { RepeatGuard, errorExcerpt, repeatBlockMessage } from "../guards/repeat.ts"
 import { RepetitionDetector } from "../guards/repetition.ts"
 import { trimToolOutput } from "../guards/trim.ts"
@@ -42,21 +42,23 @@ export type ExecutionPolicyOptions = {
   worktree?: string
   planningOnlyMain?: boolean
   nativeContext?: Readonly<{ identity: string; instructions: string }>
+  /** Per-role model (and Codex native context) overriding the runtime-wide selection; roles absent here are computed exactly as without routes. */
+  routes?: Readonly<Partial<Record<ExecutionRole, Readonly<{ model: ModelSelection; nativeContext?: Readonly<{ identity: string; instructions: string }> }>>>>
+}
+
+function freezeNativeContext(supplied: unknown): Readonly<{ identity: string; instructions: string }> {
+  const value = supplied as { identity?: unknown; instructions?: unknown } | null
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      typeof value.identity !== "string" || !value.identity.trim() ||
+      typeof value.instructions !== "string" || !value.instructions.trim()) {
+    throw new TypeError("invalid native execution context")
+  }
+  return Object.freeze({ identity: value.identity, instructions: value.instructions })
 }
 
 export function createExecutionPolicy(config: Readonly<LcaConfig>, options: ExecutionPolicyOptions = {}): ExecutionPolicy {
   const planningOnlyMain = options.planningOnlyMain === true
-  const nativeContext = options.nativeContext === undefined
-    ? undefined
-    : (() => {
-      const supplied = options.nativeContext
-      if (!supplied || typeof supplied !== "object" || Array.isArray(supplied) ||
-          typeof supplied.identity !== "string" || !supplied.identity.trim() ||
-          typeof supplied.instructions !== "string" || !supplied.instructions.trim()) {
-        throw new TypeError("invalid native execution context")
-      }
-      return Object.freeze({ identity: supplied.identity, instructions: supplied.instructions })
-    })()
+  const nativeContext = options.nativeContext === undefined ? undefined : freezeNativeContext(options.nativeContext)
   // `chat` (launch model) and `skill_trust` (user-config consent prompt skip) are host UI state; they never shape
   // execution, so they stay out of role identity.
   const { chat: _chat, skill_trust: _trust, ...identityConfig } = config as typeof config & { skill_trust?: unknown }
@@ -75,7 +77,9 @@ export function createExecutionPolicy(config: Readonly<LcaConfig>, options: Exec
       ? [...PLANNING_MAIN_TOOLS]
       : role === "reviewer" ? REVIEW_TOOLS : KNOWN_TOOLS.filter((tool) => !denied.has(tool))
     const modelSpec = workflowReadOnly ? config.models.main ?? config.models.worker : config.models[role]
-    const model = modelSpec ? parseModelSelection(modelSpec) : undefined
+    const route = options.routes?.[role]
+    const model = route ? { providerID: route.model.providerID, modelID: route.model.modelID } : modelSpec ? parseModelSelection(modelSpec) : undefined
+    const roleNativeContext = route ? (route.nativeContext === undefined ? undefined : freezeNativeContext(route.nativeContext)) : nativeContext
     const system = role !== "main"
       ? SYSTEM[role]
       : planningMain
@@ -86,7 +90,7 @@ export function createExecutionPolicy(config: Readonly<LcaConfig>, options: Exec
       maxOutputTokens: isWorkflowReadOnlyRole(role) ? config.max_output.worker : config.max_output[role] ?? config.max_output.worker,
       tools: Object.freeze({ allowed: Object.freeze([...allowed]), denied: Object.freeze([...new Set([...denied, ...(role === "reviewer" ? KNOWN_TOOLS.filter((t) => !REVIEW_TOOLS.includes(t)) : [])])]) }),
       system: Object.freeze([system]),
-      ...(nativeContext ? { nativeContext } : {}),
+      ...(roleNativeContext ? { nativeContext: roleNativeContext } : {}),
       thinking: role !== "main" && model && /ollama|:11434/i.test(model.providerID) ? "disabled" : "inherit",
     }
     const id = `lca:${role}:${createHash("sha256").update(JSON.stringify({ resolved, config: identityConfig })).digest("hex")}`

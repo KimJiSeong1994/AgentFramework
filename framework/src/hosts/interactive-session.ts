@@ -19,7 +19,7 @@ import { PROTECTED_WORKFLOWS, resolveSkillRoots } from "../skills/roots.ts"
 import { SkillSession, type PreparedSkillInvocation, type SkillCatalog } from "../skills/session.ts"
 import { readSkillTrust } from "../skills/trust.ts"
 import { attachAdmission, detachAdmission, effectiveHold, holdAdmission, resumeAdmission } from "../sessions/admission.ts"
-import { inspectSessions, MAX_CARRIED_MESSAGES, MAX_SHELL_COMMAND_BYTES, readSessionMetadata, replaySession, type SessionStore, type ReplayOptions, type ReplayResult, type TranscriptKind } from "../sessions/store.ts"
+import { canonicalRoutes, inspectSessions, MAX_CARRIED_MESSAGES, routesKey, MAX_SHELL_COMMAND_BYTES, readSessionMetadata, replaySession, type SessionStore, type ReplayOptions, type ReplayResult, type TranscriptKind } from "../sessions/store.ts"
 import { persistToolActivity } from "../tui/session-transcript.ts"
 import { createForegroundController, readForegroundStatus, type ForegroundController } from "./controller.ts"
 import { discoverModels as discoverModelCatalog, type ModelCatalog } from "./model-catalog.ts"
@@ -34,10 +34,10 @@ import { startRefusal } from "../workflows/registry.ts"
 import { ModelRequestError } from "../workflows/turn.ts"
 import { beginExecutionActivity } from "./runtime.ts"
 import { settled, type ExecutionRunStatus } from "./run-state.ts"
-import { LinuxAdmissionRefused, type ExecutionRuntime } from "./types.ts"
+import { EXECUTION_ROLES, LinuxAdmissionRefused, type ComboRoutes, type ExecutionRole, type ExecutionRuntime } from "./types.ts"
 import type { ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
 import { commandInsertion, interactiveActions, interactiveHelp, type InteractiveContext } from "./interactive-actions.ts"
-import { fileDefaultModelStore, validModelID, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
+import { fileComboStore, fileDefaultModelStore, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
 import { runOperatorShell, type ShellResult, type ShellSnapshot } from "./operator-shell.ts"
 
 export type CliEngine = CliRuntimeOptions["engine"]
@@ -107,6 +107,8 @@ export type InteractiveDependencies = {
   discoverModels: (engine: CliEngine, worktree: string, signal?: AbortSignal) => Promise<ModelCatalog>
   /** Persisted `chat.default_model`; used only when neither --engine nor --model is given. */
   defaultModel: DefaultModelStore
+  /** Persisted `chat.combo`; read when a session starts, never applied to a running or resumed session. */
+  combo: ComboStore
   humanDecision: typeof humanDecision
   randomUUID: () => string
   signals: SignalSource
@@ -340,6 +342,7 @@ export function defaultDependencies(): InteractiveDependencies {
     createController: createForegroundController,
     discoverModels: discoverModelCatalog,
     defaultModel: fileDefaultModelStore,
+    combo: fileComboStore,
     humanDecision,
     randomUUID,
     signals: {
@@ -504,11 +507,25 @@ async function chooseModel(
   return { value: undefined, discovery, backToEngine: false }
 }
 
-function selectionBanner(worktree: string, engine: CliEngine, model: string, presentation?: InputPresentation, note?: string): string {
+const COMBO_ROLES = EXECUTION_ROLES.filter(role => role !== "main")
+
+/** A route equal to the anchor is not a route; the session records only roles that differ. */
+function effectiveRoutes(engine: CliEngine, model: string, routes: ComboRoutes | undefined): ComboRoutes {
+  return canonicalRoutes(Object.fromEntries(Object.entries(routes ?? {})
+    .filter(([, route]) => route.engine !== engine || route.model !== model)) as ComboRoutes) ?? {}
+}
+
+function routeLines(routes: ComboRoutes): string[] {
+  return (Object.entries(routes) as Array<[ExecutionRole, { engine: string; model: string }]>)
+    .map(([role, route]) => `  Route ${role}: ${route.engine} / ${route.model}`)
+}
+
+function selectionBanner(worktree: string, engine: CliEngine, model: string, presentation?: InputPresentation, note?: string, routes: ComboRoutes = {}): string {
   return "\n" + [
     "Native execution selection:",
     `  Engine: ${engine}`,
     `  Model: ${model}`,
+    ...routeLines(routes),
     `  Worktree: ${worktree}`,
     ...(note ? [`  ${note}`] : []),
   ].map(line => inputLine(line, presentation)).join("\n") + "\n\n"
@@ -909,6 +926,62 @@ export async function runInteractiveSession(
       write("Usage: /model default [show | save | clear | <local|codex|claude> <native-id>]")
       return undefined
     }
+    const comboUsage = "Usage: /model combo [show | <role> <local|codex|claude> <native-id> | clear [role] | apply]; roles: " + COMBO_ROLES.join(", ")
+    /**
+     * `/model combo` shows the effective routes; `<role> <engine> <id>` and `clear` edit user config only. Neither
+     * changes the running session: a combo applies to new sessions, via `apply`. Returns "apply" for the caller.
+     */
+    const comboCommand = (rest: readonly string[], current: { engine: CliEngine; model: string; routes: ComboRoutes } | undefined): "apply" | undefined => {
+      const write = (text: string) => terminal.write(terminalSafeText(`${text}\n`))
+      const show = (): void => {
+        const lookup = deps.combo.read(worktree)
+        if (lookup.state === "invalid") {
+          write(`Combo is invalid and is not applied: ${boundedTerminalDiagnostic(lookup.reason)}. Fix the config or run /model combo clear.`)
+          return
+        }
+        const routes = lookup.state === "configured" ? lookup.routes : {}
+        const lines = ["Combo routes (main is the /model selection):"]
+        if (current) lines.push(`  main: ${current.engine} / ${current.model} (current /model)`)
+        for (const role of COMBO_ROLES) {
+          const route = routes[role]
+          if (route) lines.push(`  ${role}: ${route.engine} / ${route.model} (${lookup.state === "configured" ? lookup.sources[role] : "user"} config)`)
+        }
+        if (lookup.state === "unset") lines.push("  No roles are routed; every role uses the main model.")
+        if (current) {
+          const wanted = effectiveRoutes(current.engine, current.model, routes)
+          lines.push(routesKey(wanted) === routesKey(current.routes)
+            ? "The current session uses these routes."
+            : `The current session ${Object.keys(current.routes).length ? `uses ${Object.keys(current.routes).length} different pinned role${Object.keys(current.routes).length === 1 ? "" : "s"}` : "uses no routes"}; /model combo apply starts a new session with the saved combo.`)
+        }
+        write(lines.join("\n"))
+      }
+      if (rest.length === 0 || (rest.length === 1 && rest[0] === "show")) { show(); return undefined }
+      if (rest.length === 1 && rest[0] === "apply") return "apply"
+      if (rest[0] === "clear" && rest.length <= 2) {
+        const role = rest[1]
+        if (role !== undefined && !(COMBO_ROLES as readonly string[]).includes(role)) { write(comboUsage); return undefined }
+        try {
+          const removed = role === undefined ? deps.combo.clear() : deps.combo.clearRole(role as ExecutionRole)
+          write(`${removed ? `Combo ${role === undefined ? "cleared" : `route ${role} cleared`} from user config.` : `No user combo ${role === undefined ? "was" : `route for ${role} was`} set.`}${current ? " The current session is unchanged." : ""}`)
+        } catch (error) { write(`Combo not cleared: ${boundedTerminalDiagnostic(String(error))}`) }
+        return undefined
+      }
+      if (rest.length === 3 && ["local", "codex", "claude"].includes(rest[1]!) && (COMBO_ROLES as readonly string[]).includes(rest[0]!) && validModelID(rest[2]!)) {
+        const role = rest[0] as ExecutionRole
+        const route = { engine: rest[1] as CliEngine, model: rest[2]! }
+        try {
+          const path = deps.combo.save(role, route)
+          const effective = deps.combo.read(worktree)
+          const winner = effective.state === "configured" ? effective.routes[role] : undefined
+          const overridden = effective.state === "configured" && effective.sources[role] === "project" && winner &&
+            (winner.engine !== route.engine || winner.model !== route.model)
+          write(`Saved combo route ${role} -> ${route.engine} / ${route.model} to ${path}.${overridden ? ` This project's .lca/lca.jsonc still routes ${role} to ${winner.engine} / ${winner.model}.` : ""} The current session is unchanged; /model combo apply starts a new session with it.`)
+        } catch (error) { write(`Combo route not saved: ${boundedTerminalDiagnostic(String(error))}`) }
+        return undefined
+      }
+      write(comboUsage)
+      return undefined
+    }
     let engine: CliEngine | undefined
     let model: string | undefined
     let startupDiscovery: InteractiveViewFacts["discovery"] = "not-observed"
@@ -975,6 +1048,10 @@ export async function runInteractiveSession(
           }
           continue
         }
+        if (command === "/model" && commandArgs[0] === "combo" && hasInteractiveAction("unselected", "model")) {
+          if (comboCommand(commandArgs.slice(1), undefined) === "apply") terminal.write("No model is selected yet; select one with /model, then run /model combo apply.\n")
+          continue
+        }
         if (command === "/model" && hasInteractiveAction("unselected", "model")) {
           if (commandArgs.length === 2 && ["local", "codex", "claude"].includes(commandArgs[0]!) && validModelID(commandArgs[1]!)) {
             engine = commandArgs[0] as CliEngine
@@ -1031,16 +1108,20 @@ export async function runInteractiveSession(
     terminal.write("\nNative CLI limitations: input size is estimated and output limits are reactive; these are not strict guarantees. No process or filesystem containment is claimed.\n\n")
     const initialSessionID = defaultSessionID(deps.randomUUID())
     const initialProgress = scopedProgress()
-    const initialRuntime = deps.createRuntime({ worktree, engine, model, progress: initialProgress.sink })
+    const startupCombo: ComboLookup = deps.combo.read(worktree)
+    if (startupCombo.state === "invalid") startupNotices.push(`Combo ignored: ${boundedTerminalDiagnostic(startupCombo.reason)}. No role routes are applied; every role uses ${engine} / ${model}.`)
+    const initialRoutes = effectiveRoutes(engine, model, startupCombo.state === "configured" ? startupCombo.routes : undefined)
+    const initialRuntime = deps.createRuntime({ worktree, engine, model, progress: initialProgress.sink, ...(Object.keys(initialRoutes).length ? { routes: initialRoutes } : {}) })
     initialRuntime.linuxAdmission?.assertBootEpoch()
     await deps.admitRuntime(initialRuntime)
     if (abort.signal.aborted) return signalExit(receivedSignal)
-    sessionStore = attachAdmission(initialRuntime, initialSessionID, { engine, model })
+    sessionStore = attachAdmission(initialRuntime, initialSessionID, { engine, model, ...(Object.keys(initialRoutes).length ? { routes: initialRoutes } : {}) })
     initialProgress.bind(sessionStore)
     attachedRuntime = initialRuntime
     let selection = {
       engine,
       model,
+      routes: initialRoutes,
       sessionID: initialSessionID,
       runtime: initialRuntime,
       controller: deps.createController(initialRuntime),
@@ -1080,7 +1161,7 @@ export async function runInteractiveSession(
       } catch {}
       terminal.viewSnapshot({
         identity,
-        selection: retainedViewSelection ?? { engine: selection.engine, model: selection.model },
+        selection: retainedViewSelection ?? { engine: selection.engine, model: selection.model, ...(Object.keys(selection.routes).length ? { routes: selection.routes } : {}) },
         hold: sessionStore
           ? { state: "known", value: { held: effectiveHold(worktree, selection.sessionID), ...(sessionStore.metadata.holdReason ? { reason: sessionStore.metadata.holdReason } : {}) } }
           : { state: "known", value: { held: true, reason: "retained read-only history" } },
@@ -1224,7 +1305,7 @@ export async function runInteractiveSession(
       // SIGSTOP targets this UI process only, not its process group.
       process.kill(process.pid, "SIGSTOP")
     }
-    if (!terminal.fullscreen) terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.()))
+    if (!terminal.fullscreen) terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.(), undefined, selection.routes))
 
     async function runOwned(resumed: boolean) {
       if (persistenceFailed) throw new InteractiveLaunchError("Session transcript persistence failed; the session remains held.")
@@ -1402,11 +1483,14 @@ export async function runInteractiveSession(
       targetSessionID?: string,
       forceNew = false,
       discovery: InteractiveViewFacts["discovery"] = "not-observed",
+      requestedRoutes: ComboRoutes | undefined = selection.routes,
     ): Promise<boolean> {
-      if (!forceNew && !targetSessionID && nextEngine === selection.engine && nextModel === selection.model) {
+      // A resumed session's pinned routes are used as stored; otherwise routes equal to the new anchor are dropped.
+      const nextRoutes = targetSessionID ? canonicalRoutes(requestedRoutes) ?? {} : effectiveRoutes(nextEngine, nextModel, requestedRoutes)
+      if (!forceNew && !targetSessionID && nextEngine === selection.engine && nextModel === selection.model && routesKey(nextRoutes) === routesKey(selection.routes)) {
         discoveryObservation = discovery
         publishView()
-        terminal.write("Already using that engine and model; conversation context is unchanged.\n")
+        terminal.write("Already using that engine, model and routes; conversation context is unchanged.\n")
         return true
       }
       const guard = acquireSwitchGuard(targetSessionID !== undefined || retainedSDKSessionID !== undefined)
@@ -1432,7 +1516,7 @@ export async function runInteractiveSession(
         if (!targetSessionID && usedSessionIDs.has(sessionID)) throw new Error("new conversation identity was not unique")
         const retained = targetSessionID ? readSessionMetadata(worktree, sessionID) : undefined
         const nextProgress = scopedProgress()
-        const runtime = deps.createRuntime({ worktree, engine: nextEngine, model: nextModel, progress: nextProgress.sink })
+        const runtime = deps.createRuntime({ worktree, engine: nextEngine, model: nextModel, progress: nextProgress.sink, ...(Object.keys(nextRoutes).length ? { routes: nextRoutes } : {}) })
         if (!retained) {
           runtime.linuxAdmission?.assertBootEpoch()
           await deps.admitRuntime(runtime)
@@ -1461,7 +1545,7 @@ export async function runInteractiveSession(
         latestSkillCatalog = undefined
         terminal.skillCatalog?.({ entries: [], refusals: [] })
         terminal.sessionChanged?.()
-        const nextStore = attachAdmission(runtime, sessionID, { engine: nextEngine, model: nextModel })
+        const nextStore = attachAdmission(runtime, sessionID, { engine: nextEngine, model: nextModel, ...(Object.keys(nextRoutes).length ? { routes: nextRoutes } : {}) })
         sessionStore = nextStore
         if (carrySource && carried.length) {
           persist("carried-context", { sourceSessionID: carrySource.sessionID, engine: carrySource.engine, model: carrySource.model, messages: carried })
@@ -1472,7 +1556,7 @@ export async function runInteractiveSession(
         retainedViewSelection = undefined
         requestObservation = { state: "not-observed" }
         discoveryObservation = discovery
-        selection = { engine: nextEngine, model: nextModel, sessionID, runtime, controller, conversation }
+        selection = { engine: nextEngine, model: nextModel, routes: nextRoutes, sessionID, runtime, controller, conversation }
         usedSessionIDs.add(sessionID)
         terminal.bindSession?.(sessionID)
         terminal.bindView?.(currentViewIdentity())
@@ -1485,7 +1569,7 @@ export async function runInteractiveSession(
           terminal.write(terminalSafeText(nextStore.restored ? `Selected: ${selection.engine} / ${selection.model}.` : `Now using ${selection.engine} / ${selection.model}. ${note}`))
         } else {
           // The banner clips to the terminal width; the carry note states what is sent, so it is never clipped.
-          terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.()))
+          terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.(), undefined, selection.routes))
           if (note) terminal.write(terminalSafeText(`${note}\n`))
         }
         if (nextStore.restored) {
@@ -1599,7 +1683,7 @@ export async function runInteractiveSession(
           terminal.write("Session restore refused: no compatible saved CLI selection.\n")
           return true
         }
-        return switchSelection(saved.engine as CliEngine, saved.model, sessionID)
+        return switchSelection(saved.engine as CliEngine, saved.model, sessionID, false, "not-observed", saved.routes ?? {})
       } catch (error) {
         if (!sessionStore) throw error
         terminal.write(`Session restore refused: ${boundedTerminalDiagnostic(String(error))}\n`)
@@ -1936,6 +2020,14 @@ export async function runInteractiveSession(
       }
       if (command === "/model" && commandArgs[0] === "default" && hasInteractiveAction(actionContext, "model")) {
         defaultModelCommand(commandArgs.slice(1), { engine: selection.engine, model: selection.model })
+        continue
+      }
+      if (command === "/model" && commandArgs[0] === "combo" && hasInteractiveAction(actionContext, "model")) {
+        if (comboCommand(commandArgs.slice(1), { engine: selection.engine, model: selection.model, routes: selection.routes }) === "apply") {
+          const lookup = deps.combo.read(worktree)
+          if (lookup.state === "invalid") terminal.write(terminalSafeText(`Combo is invalid and was not applied: ${boundedTerminalDiagnostic(lookup.reason)}. The current session is unchanged.\n`))
+          else if (!await switchSelection(selection.engine, selection.model, undefined, false, "not-observed", lookup.state === "configured" ? lookup.routes : {})) return signalExit(receivedSignal)
+        }
         continue
       }
       if (command === "/model" && hasInteractiveAction(actionContext, "model")) {

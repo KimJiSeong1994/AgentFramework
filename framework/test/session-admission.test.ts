@@ -13,6 +13,7 @@ import { getOwnedSession, inspectSessionAttachment, replaySession, readSessionMe
 import {
   admissionEpoch,
   attachAdmission,
+  attachHeldAdmission,
   captureAdmissionLease,
   detachAdmission,
   effectiveHold,
@@ -93,6 +94,23 @@ describe("session admission", () => {
     for (const epoch of ["../session-ended", "../../other/attachments/epoch", `${store.epoch}/../other`, "", "inst_123_legacy"]) {
       expect(() => inspectSessionAttachment(wt.worktree, S, epoch)).toThrow("invalid session attachment epoch")
     }
+  })
+
+  test("admission refuses routes that differ from the pinned session routes", () => {
+    const host = runtime()
+    const routes = { planner: { engine: "claude", model: "opus" } } as const
+    const first = attachAdmission(host, S, { engine: "opencode", routes })
+    expect(first.metadata.routes).toEqual(routes)
+    expect(attachAdmission(host, S, { engine: "opencode", routes: { planner: { engine: "claude", model: "opus" } } })).toBe(first)
+    expect(() => attachAdmission(host, S, { engine: "opencode" })).toThrow("routes do not match")
+    expect(() => attachAdmission(host, S, { engine: "opencode", routes: { planner: { engine: "codex", model: "gpt-5.6-sol" } } })).toThrow("routes do not match")
+    holdAdmission(wt.worktree, S, "test-detach")
+    first.release({ workflowQuiescent: true, evidence: "test fixture has no execution state", workflowID: null, revision: null })
+    expect(() => attachAdmission(host, S, { engine: "opencode" })).toThrow("routes do not match")
+    expect(() => attachHeldAdmission(host, S, { engine: "opencode", routes: { critic: { engine: "local", model: "qwen" } } })).toThrow("routes do not match")
+    const restored = attachAdmission(host, S, { engine: "opencode", routes })
+    expect(restored.restored).toBe(true)
+    expect(restored.metadata.routes).toEqual(routes)
   })
 
   test("restored attachments stay held and do not acquire an initial token", () => {

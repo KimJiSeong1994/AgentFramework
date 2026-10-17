@@ -106,6 +106,46 @@ refuses to overwrite invalid JSONC, and never switches an active session. An inv
 default is reported and ignored, leaving the composer unselected; a project default that
 still overrides a saved user default is reported. Explicit flags always win.
 
+### Role combo
+
+The `models` key above is OpenCode-only. In the native chat, `chat.combo` assigns a different
+engine and model to individual roles; the model chosen with `/model` stays the *main* anchor:
+
+```jsonc
+{
+  "chat": {
+    "combo": {
+      "planner":   { "engine": "claude", "model": "opus" },
+      "architect": { "engine": "codex",  "model": "gpt-5.6-sol" },
+      "critic":    { "engine": "claude", "model": "sonnet" },
+      "worker":    { "engine": "local",  "model": "qwen3-coder:30b" }
+    }
+  }
+}
+```
+
+Roles: `interviewer`, `planner`, `architect`, `critic`, `researcher`, `contrarian`, `simplifier`, plus
+the worker-side roles (`worker`, `reviewer`, ...). `main` is not a combo role. A role uses its route
+if set, otherwise the main model; a route never silently falls back to main, and an invalid or
+unavailable combo is reported and not applied. A route equal to the main selection is dropped.
+
+In chat: `/model combo` (or `/model combo show`) shows the effective routes, the source of each, and
+whether the current session uses them. `/model combo <role> <local|codex|claude> <native-id>` saves a
+route to `~/.config/lca/lca.jsonc` and does not change the current session. `/model combo clear <role>`
+and `/model combo clear` remove routes. `/model combo apply` starts a new session with the carried
+conversation under the saved combo; it is refused while a workflow is active or ownership is unsettled.
+Status shows `engine / model +N roles`.
+
+A combo applies only to new sessions. The routes are pinned in the session metadata; `/resume` and the
+common-engine recovery commands (`approve`, `resume`, ...) use the pinned routes, never the current
+config, and a mismatch is refused. Ledger entries and `workflow.engine` keep the main engine; routed
+roles are distinguished by their policy IDs.
+
+Limits: roles run one after another, not as parallel model execution. There is no prompt-cache
+continuity across roles, and no tier aliases (`opus`/`sonnet` are the engine's native names). Each
+role's context budget follows its own model, not the main one. Switching between local Ollama models
+can incur a model reload delay on the first call of each role.
+
 Either flag on its own still opens the unselected composer; `/model` then asks for the
 missing choice. Without an explicit model, `/model` offers numbered choices or native
 model ID entry. Ollama choices come from a bounded, read-only `ollama list` probe in the same

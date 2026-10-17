@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { createHash, randomUUID } from "node:crypto"
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { launchInteractive, parseInteractiveArgs, validModelID, type InteractiveDependencies, type Terminal } from "../src/hosts/interactive.ts"
 import type { TerminalControl } from "../src/hosts/interactive-session.ts"
@@ -25,7 +25,7 @@ import { planBinding, withTerminalLine } from "./operator-helpers.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { interactiveActions } from "../src/hosts/interactive-actions.ts"
-import type { DefaultModelLookup } from "../src/hosts/default-model.ts"
+import type { ComboLookup, DefaultModelLookup } from "../src/hosts/default-model.ts"
 import { getOwnedSession, inspectSessionAttachment, openSession, replaySession, readSessionMetadata, type ReplayOptions, type ReplayResult } from "../src/sessions/store.ts"
 import { sessionDir } from "../src/state/store.ts"
 import type { ConversationMessage, SkillConversationInvocation } from "../src/hosts/plan-conversation.ts"
@@ -64,6 +64,7 @@ type HarnessOptions = {
   activityForTurn?: (selection: { engine: string; model: string }, progress?: CliProgressSink) => void
   defaultModel?: DefaultModelLookup
   defaultModelSaveError?: Error
+  combo?: ComboLookup
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -75,7 +76,7 @@ function harness(options: HarnessOptions = {}) {
     output: string[]
     events: string[]
     runtime?: { worktree: string; engine: string; model: string }
-    runtimes: Array<{ worktree: string; engine: string; model: string }>
+    runtimes: Array<{ worktree: string; engine: string; model: string; routes?: unknown }>
     sessionIDs: string[]
     turnBindings: Array<{ engine: string; model: string; sessionID: string; text: string }>
     discoveries: Array<{ engine: string; worktree: string }>
@@ -105,7 +106,9 @@ function harness(options: HarnessOptions = {}) {
     conversationRestores: Array<{ sessionID: string; prior?: readonly ConversationMessage[] }>
     defaultModel: DefaultModelLookup
     defaultModelWrites: Array<{ engine: string; model: string } | null>
-  } = { prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [], defaultModel: options.defaultModel ?? { state: "unset" }, defaultModelWrites: [] }
+    combo: ComboLookup
+    comboWrites: Array<{ role: string; route: { engine: string; model: string } | null }>
+  } = { prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [], defaultModel: options.defaultModel ?? { state: "unset" }, defaultModelWrites: [], combo: options.combo ?? { state: "unset" }, comboWrites: [] }
   let boundSessionID: string | undefined
 
   let releaseRun: (() => void) | undefined
@@ -193,10 +196,10 @@ function harness(options: HarnessOptions = {}) {
     cwd: wt.worktree,
     terminal,
     gitTopLevel: () => Object.hasOwn(options, "gitTopLevel") ? options.gitTopLevel : wt.worktree,
-    createRuntime: ({ worktree, engine, model, progress }) => {
+    createRuntime: ({ worktree, engine, model, progress, routes }) => {
       calls.events.push("runtime")
       if (options.failRuntimeFor?.(engine, model)) throw new TypeError("fixture runtime setup failed")
-      const selected = { worktree, engine, model }
+      const selected = { worktree, engine, model, ...(routes ? { routes } : {}) }
       calls.runtime = selected
       calls.runtimes.push(selected)
       if (progress) calls.progressSinks.push(progress)
@@ -268,6 +271,17 @@ function harness(options: HarnessOptions = {}) {
         calls.defaultModel = { state: "unset" }
         return present
       },
+    },
+    combo: {
+      read: () => calls.combo,
+      save: (role, route) => {
+        calls.comboWrites.push({ role, route: { ...route } })
+        const prior = calls.combo.state === "configured" ? calls.combo : undefined
+        calls.combo = { state: "configured", routes: { ...prior?.routes, [role]: route }, sources: { ...prior?.sources, [role]: "user" } }
+        return "/config/lca/lca.jsonc"
+      },
+      clearRole: role => { calls.comboWrites.push({ role, route: null }); return true },
+      clear: () => { calls.comboWrites.push({ role: "*", route: null }); calls.combo = { state: "unset" }; return true },
     },
     discoverModels: async (engine, worktree) => {
       calls.discoveries.push({ engine, worktree })
@@ -748,7 +762,7 @@ describe("interactive terminal", () => {
     expect(output).toContain("No model selected; use /model to choose an engine and model. Nothing was sent.")
     expect(output).toContain("Usage: /model or /model <local|codex|claude> <native-id>")
     expect(output).toContain("Commands (unselected):")
-    expect(output).toContain("/model [engine native-id | default ...]")
+    expect(output).toContain("/model [engine native-id | default ... | combo ...]")
     expect(output).toContain("/theme <neutral|light|dark>")
     expect(output).toContain("/details")
   })
@@ -1285,6 +1299,96 @@ describe("interactive terminal", () => {
     expect(h.calls.conversationRestores.at(-1)).toEqual({ sessionID: "lca-fixture-session-2", prior: [
       { role: "user", text: "q1" }, { role: "assistant", text: "a1" }, { role: "user", text: "q2" }, { role: "assistant", text: "a1" },
     ] })
+  })
+
+  const comboRoutes = { architect: { engine: "codex", model: "gpt-5.6-sol" } } as const
+  const configuredCombo: ComboLookup = { state: "configured", routes: comboRoutes, sources: { architect: "user" } }
+
+  test("a configured combo passes routes to the runtime and the banner lists them", async () => {
+    const h = harness({ lines: ["hello", "/quit"], combo: configuredCombo })
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).toEqual({ code: 0 })
+    expect(h.calls.runtimes[0]).toMatchObject({ engine: "local", model: "native", routes: comboRoutes })
+    expect(h.calls.output.join("")).toContain("Route architect: codex / gpt-5.6-sol")
+    expect(h.calls.viewFacts.at(-1)?.selection.routes).toEqual(comboRoutes)
+    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")?.routes).toEqual(comboRoutes)
+  })
+
+  test("a route equal to the anchor is dropped, and an invalid combo is reported and not applied", async () => {
+    const same = harness({ lines: ["/quit"], combo: configuredCombo })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5.6-sol" }, same.deps)
+    expect(same.calls.runtimes[0]).not.toHaveProperty("routes")
+    const bad = harness({ lines: ["/quit"], combo: { state: "invalid", reason: "chat.combo.main is not a routable role" } })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, bad.deps)
+    expect(bad.calls.output.join("")).toContain("Combo ignored: chat.combo.main is not a routable role")
+    expect(bad.calls.output.join("")).toContain("every role uses local / native")
+    expect(bad.calls.runtimes[0]).not.toHaveProperty("routes")
+  })
+
+  test("/model combo saves a role route without switching and shows sources", async () => {
+    const h = harness({ lines: ["/model combo architect codex gpt-5.6-sol", "/model combo", "/model combo clear architect", "/model combo clear", "/model combo bogus x y", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    const output = h.calls.output.join("")
+    expect(h.calls.comboWrites).toEqual([
+      { role: "architect", route: { engine: "codex", model: "gpt-5.6-sol" } },
+      { role: "architect", route: null },
+      { role: "*", route: null },
+    ])
+    expect(output).toContain("Saved combo route architect -> codex / gpt-5.6-sol to /config/lca/lca.jsonc.")
+    expect(output).toContain("architect: codex / gpt-5.6-sol (user config)")
+    expect(output).toContain("/model combo apply starts a new session")
+    expect(output).toContain("Usage: /model combo")
+    expect(h.calls.runtimes).toHaveLength(1)
+  })
+
+  test("/model combo apply is a no-op when the session already uses the saved routes", async () => {
+    const h = harness({ lines: ["q1", "/model combo apply", "/quit"], combo: configuredCombo })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.output.join("")).toContain("Already using that engine, model and routes")
+  })
+
+  test("/model combo apply after saving carries context under the new routes", async () => {
+    const h = harness({ lines: ["q1", "/model combo architect codex gpt-5.6-sol", "/model combo apply", "q2", "/model combo apply", "/quit"], turns: [{ text: "a1" }] })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.runtimes).toHaveLength(2)
+    expect(h.calls.runtimes[0]).not.toHaveProperty("routes")
+    expect(h.calls.runtimes[1]).toMatchObject({ engine: "local", model: "native", routes: comboRoutes })
+    expect(h.calls.conversationRestores.at(-1)).toEqual({ sessionID: "lca-fixture-session-2", prior: [{ role: "user", text: "q1" }, { role: "assistant", text: "a1" }] })
+    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")?.routes).toBeUndefined()
+    expect(readSessionMetadata(wt.worktree, "lca-fixture-session-2")?.routes).toEqual(comboRoutes)
+    expect(h.calls.output.join("")).toContain("Already using that engine, model and routes")
+    expect(h.calls.viewFacts.at(-1)?.selection.routes).toEqual(comboRoutes)
+  })
+
+  test("/model combo apply is refused while a workflow is active and with an invalid combo", async () => {
+    withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow("another-session",
+      { instance: "fixture", pid: process.pid }, "command", "active plan", "codex")))
+    const active = harness({ lines: ["/model combo apply", "/quit"], combo: configuredCombo })
+    active.calls.combo = { state: "configured", routes: { reviewer: { engine: "claude", model: "sonnet" } }, sources: { reviewer: "user" } }
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, active.deps)
+    expect(active.calls.runtimes).toHaveLength(1)
+    expect(active.calls.output.join("")).toContain("resolve the active workflow first")
+    rmSync(workflowPath(wt.worktree), { force: true })
+    const bad = harness({ lines: ["/model combo apply", "/quit"], combo: { state: "invalid", reason: "chat.combo.main is not a routable role" } })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, bad.deps)
+    expect(bad.calls.runtimes).toHaveLength(1)
+    expect(bad.calls.output.join("")).toContain("Combo is invalid and was not applied")
+  })
+
+  test("/resume rebuilds the pinned routes from session metadata after config changed", async () => {
+    const h = harness({ lines: ["q1", "/model combo clear", "/model combo apply", "/resume lca-fixture-session", "/quit"], combo: configuredCombo })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.runtimes).toHaveLength(3)
+    expect(h.calls.runtimes[1]).not.toHaveProperty("routes")
+    expect(h.calls.runtimes[2]).toMatchObject({ engine: "local", model: "native", routes: comboRoutes })
+    expect(h.calls.viewFacts.at(-1)?.selection.routes).toEqual(comboRoutes)
+    expect(readSessionMetadata(wt.worktree, "lca-fixture-session-2")?.routes).toBeUndefined()
+  })
+
+  test("/new keeps the current session's routes", async () => {
+    const h = harness({ lines: ["/new", "/quit"], combo: configuredCombo })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.runtimes.at(-1)).toMatchObject({ routes: comboRoutes })
   })
 
   test("/new starts without carried context and an unreadable conversation refuses the switch", async () => {

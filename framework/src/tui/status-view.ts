@@ -1,4 +1,4 @@
-import type { InteractiveViewFacts } from "../hosts/interactive-view.ts"
+import { selectionLabel, type InteractiveViewFacts } from "../hosts/interactive-view.ts"
 import { clipToWidth, displayWidth } from "./render.ts"
 
 export type StatusInput = {
@@ -33,7 +33,7 @@ function factSegments(facts: InteractiveViewFacts | undefined, selectionInHeader
   }
   if (facts.request.state === "cancellation-unconfirmed") safety.push("request-cancel:?")
   const segments: Segment[] = safety.length ? [{ text: `safety[${safety.join(" ")}]`, priority: 200 }] : []
-  if (!selectionInHeader) segments.push({ text: `${facts.selection.engine} / ${facts.selection.model}`, priority: 50 })
+  if (!selectionInHeader) segments.push({ text: selectionLabel(facts.selection), priority: 50 })
   if (facts.request.state === "in-progress") {
     const elapsed = request ? ` · ${request.elapsedSeconds}s` : ""
     segments.push({ text: `${request ? `${request.frame} ` : ""}Model request running${elapsed}`, priority: 90 })

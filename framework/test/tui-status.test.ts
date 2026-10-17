@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { statusLines } from "../src/tui/status-view.ts"
 import { displayWidth } from "../src/tui/render.ts"
-import type { InteractiveViewFacts } from "../src/hosts/interactive-view.ts"
+import { selectionLabel, type InteractiveViewFacts } from "../src/hosts/interactive-view.ts"
 
 const facts: InteractiveViewFacts = {
   identity: { mode: "retained-read-only", sessionID: "s" },
@@ -71,5 +71,16 @@ describe("priority status layout", () => {
         expect(rows.join(" ")).toMatch(/\+\d+ more/)
       }
     }
+  })
+
+  test("a combo shows +N roles after engine / model and is clipped before safety facts", () => {
+    const routed: InteractiveViewFacts = { ...facts, selection: { engine: "local", model: "m", routes: { architect: { engine: "codex", model: "x" }, reviewer: { engine: "claude", model: "y" } } } }
+    expect(selectionLabel(routed.selection)).toBe("local / m +2 roles")
+    expect(selectionLabel({ engine: "local", model: "m", routes: { architect: { engine: "codex", model: "x" } } })).toBe("local / m +1 role")
+    expect(selectionLabel({ engine: "local", model: "m", routes: {} })).toBe("local / m")
+    expect(statusLines({ facts: routed, activity: "", queued: 0, columns: 200 }).join(" ")).toContain("local / m +2 roles")
+    const narrow = statusLines({ facts: routed, workflow: "ultragoal · execution · active", activity: "busy", queued: 3, columns: 40 }).join(" ")
+    expect(narrow).toContain("read-only")
+    expect(narrow).not.toContain("+2 roles")
   })
 })

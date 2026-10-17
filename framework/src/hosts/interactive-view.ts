@@ -23,7 +23,7 @@ export type WorkflowView = {
 
 export type InteractiveViewFacts = {
   readonly identity: ViewIdentity
-  readonly selection: { readonly engine: string; readonly model: string }
+  readonly selection: { readonly engine: string; readonly model: string; readonly routes?: Readonly<Record<string, { readonly engine: string; readonly model: string }>> }
   readonly hold: Known<{ readonly held: boolean; readonly reason?: string }>
   readonly workflow: Known<WorkflowView | null>
   readonly owner: "current-session" | "foreign" | "none" | "unknown"
@@ -60,6 +60,12 @@ export type SessionCandidate = {
 export type TranscriptText = {
   readonly provenance: "user" | "assistant" | "notice" | "error" | "canonical-plan"
   readonly text: string
+}
+
+/** `engine / model`, plus ` +N roles` when a combo routes other roles elsewhere. */
+export function selectionLabel(selection: InteractiveViewFacts["selection"]): string {
+  const roles = selection.routes ? Object.keys(selection.routes).length : 0
+  return `${selection.engine} / ${selection.model}${roles ? ` +${roles} role${roles === 1 ? "" : "s"}` : ""}`
 }
 
 export function sameViewIdentity(left: ViewIdentity | undefined, right: ViewIdentity): boolean {

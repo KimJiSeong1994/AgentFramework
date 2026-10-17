@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { stopHeartbeat } from "../src/flow/runtime.ts"
@@ -14,9 +14,10 @@ import { createForegroundController } from "../src/hosts/controller.ts"
 import { humanDecision } from "../src/hosts/operator.ts"
 import { createPlanConversation } from "../src/hosts/plan-conversation.ts"
 import { createExecutionRuntime } from "../src/hosts/runtime.ts"
-import { EXECUTION_ROLES } from "../src/hosts/types.ts"
+import { EXECUTION_ROLES, type ComboRoutes } from "../src/hosts/types.ts"
 import { executionRunDirectory, sessionDir } from "../src/state/store.ts"
 import { attachAdmission, detachAdmission, effectiveHold } from "../src/sessions/admission.ts"
+import { readSessionMetadata } from "../src/sessions/store.ts"
 import { ledgerPath, readLedger, writeLedger } from "../src/state/ledger.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
 import { planBinding, withTerminalLine } from "./operator-helpers.ts"
@@ -44,7 +45,7 @@ const fixturePlan = {
 }
 const finalEnvelope = (text: string) => JSON.stringify({ type: "final", text })
 
-async function pendingCommonWorkflow() {
+async function pendingCommonWorkflow(routes?: ComboRoutes) {
   const files: Record<string, string> = {}
   for (const letter of ["a", "b", "c"]) {
     files[`${letter}.txt`] = letter === "a" ? "after-a\n" : "before\n"
@@ -59,7 +60,7 @@ async function pendingCommonWorkflow() {
   const root = realpathSync(wt.worktree)
   const engine: CliEngine = "local"
   const model = "fixture-model"
-  const selected = createCliRuntime({ worktree: root, engine, model })
+  const selected = createCliRuntime({ worktree: root, engine, model, ...(routes ? { routes } : {}) })
   const config = structuredClone(selected.config)
   const responses = [finalEnvelope(JSON.stringify(fixturePlan)), finalEnvelope("VERDICT: OKAY")]
   const dispatched: CliTransportOptions[] = []
@@ -90,9 +91,9 @@ async function pendingCommonWorkflow() {
     }
   }
   const runtime = createExecutionRuntime({ directory: root, worktree: root, config, log() {} }, ({ policy, runs }) =>
-    createCliHost({ engine, model, policy, runs, createTransport: transportFactory }), { planningOnlyMain: true })
+    createCliHost({ engine, model, ...(routes ? { routes } : {}), policy, runs, createTransport: transportFactory }), { planningOnlyMain: true, ...(routes ? { routes: Object.fromEntries(Object.entries(routes).map(([role, r]) => [role, { model: { providerID: r.engine, modelID: r.model } }])) } : {}) })
   const sessionID = "common-recovery-session"
-  const session = attachAdmission(runtime, sessionID, { engine, model })
+  const session = attachAdmission(runtime, sessionID, { engine, model, ...(routes ? { routes } : {}) })
   const controller = createForegroundController(runtime)
   const conversation = createPlanConversation(runtime, sessionID)
   const discussed = await conversation.turn("Plan the requested three file changes")
@@ -219,6 +220,42 @@ describe("common CLI controlled workflow", () => {
     ]), () => createCliRuntime({ worktree: rejected.root, engine: rejected.engine, model: rejected.model })))
     expect(rejection).toBe(`workflow ${rejected.workflow.id} planning`)
     expect(readWorkflow(rejected.root)?.phase).toBe("planning")
+  })
+
+  test("combo session recovers with metadata routes after config changes; tampered routes refuse before mutation", async () => {
+    const routes: ComboRoutes = { reviewer: { engine: "local", model: "review-model" } }
+    const fixture = await pendingCommonWorkflow(routes)
+    expect(readSessionMetadata(fixture.root, fixture.sessionID)?.routes).toEqual(routes)
+    expect(await detachAdmission(fixture.runtime, fixture.sessionID, fixture.session.epoch, "test-combo-recovery")).toBe(true)
+    // Current config now holds a different combo; recovery must ignore it and use the pinned routes.
+    const configDir = join(wt!.stateHome, "config", "lca")
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(join(configDir, "lca.jsonc"), JSON.stringify({ chat: { combo: { planner: { engine: "codex", model: "gpt-5.6-sol" } } } }))
+    const seen: unknown[] = []
+    const factory: typeof createCliRuntime = options => { seen.push(options.routes); return fixture.runtime }
+    const approval = await withTerminalLine(`APPROVE ${fixture.workflow.id} ${fixture.planSha}`, () => runCli(parseCliArgs([
+      "approve", "--worktree", fixture.root, "--engine", fixture.engine, "--model", fixture.model,
+      "--session", fixture.sessionID, "--workflow", fixture.workflow.id, "--sha", fixture.planSha,
+    ]), factory))
+    expect(approval).toBe(`workflow ${fixture.workflow.id} executing`)
+    expect(seen).toEqual([routes])
+    wt?.cleanup()
+    wt = undefined
+
+    const tampered = await pendingCommonWorkflow(routes)
+    expect(await detachAdmission(tampered.runtime, tampered.sessionID, tampered.session.epoch, "test-combo-tamper")).toBe(true)
+    const metadataPath = join(sessionDir(tampered.root, tampered.sessionID), "metadata.json")
+    const metadata = JSON.parse(readFileSync(metadataPath, "utf8")) as { routes?: unknown }
+    metadata.routes = { reviewer: { engine: "local", model: "tampered-model" } }
+    writeFileSync(metadataPath, JSON.stringify(metadata))
+    const before = recoverySnapshot(tampered.root, tampered.sessionID, tampered.workflow.id)
+    await expect(withTerminalLine(`APPROVE ${tampered.workflow.id} ${tampered.planSha}`, () => runCli(parseCliArgs([
+      "approve", "--worktree", tampered.root, "--engine", tampered.engine, "--model", tampered.model,
+      "--session", tampered.sessionID, "--workflow", tampered.workflow.id, "--sha", tampered.planSha,
+    ]), createCliRuntime))).rejects.toThrow("policy identity evidence")
+    const after = recoverySnapshot(tampered.root, tampered.sessionID, tampered.workflow.id)
+    expect(recoverySnapshot(tampered.root, tampered.sessionID, tampered.workflow.id)).toEqual(before)
+    expect(readWorkflow(tampered.root)?.phase).toBe("pending_approval")
   })
 
   test("status JSON does not attach, rebind, or repair a restored owner", async () => {

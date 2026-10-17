@@ -116,7 +116,11 @@ export type LcaConfig = {
     compaction_guard_ms: number
   }
   /** Interactive `lca` chat. `default_model` is the persisted startup selection (`/model default` writes it). */
-  chat: { default_model?: { engine: string; model: string } | null }
+  chat: {
+    default_model?: { engine: string; model: string } | null
+    /** Per-role engine/model routes (role -> {engine, model}); applied to new sessions only. A null role removes a user route. */
+    combo?: Record<string, { engine: string; model: string } | null> | null
+  }
   models: {
     /** provider/model ids; undefined = inherit OpenCode default */
     main?: string

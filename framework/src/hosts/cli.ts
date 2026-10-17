@@ -15,7 +15,7 @@ import { humanDecision, type DecisionBinding } from "./operator.ts"
 import { createCliRuntime } from "./cli-runtime.ts"
 import type { CliEngine } from "./cli-transport.ts"
 import { AdmissionRefusal, assertHostAdmission } from "./required-controls.ts"
-import { LinuxAdmissionRefused, type ExecutionRuntime, type FlowRuntime } from "./types.ts"
+import { EXECUTION_ROLES, LinuxAdmissionRefused, type ExecutionRuntime, type FlowRuntime } from "./types.ts"
 import { InteractiveLaunchError, launchInteractive, parseInteractiveArgs } from "./interactive.ts"
 import { createStatusWatchState, watchTick } from "./status-watch.ts"
 import { admissionEpoch, admissionFence, attachAdmission, detachAdmission, effectiveHold, isAdmissionCurrent, resumeAdmission } from "../sessions/admission.ts"
@@ -52,6 +52,10 @@ not OpenCode. The model picker lists bounded native choices when available; expl
 also accepted. In chat, /model shows the current selection and picker, /model <engine> <native-id>
 switches directly, and /help lists local commands. A switch requires no active workflow, valid
 workflow state and settled execution ownership, and starts a new conversation context. Plans require a separate local human approval.
+Role combo: chat.combo in lca.jsonc routes planner/architect/critic/worker/reviewer roles to other engines and models;
+roles without a route use the main model. /model combo shows it, /model combo <role> <engine> <native-id> saves it,
+/model combo clear [role] removes it, and /model combo apply starts a new session under it. A combo applies only to new
+sessions; /resume and the common-engine recovery commands use the session's pinned routes from its metadata, never current config.
 LCA workflows (chat only; each start is a submitted /skill: command, and invoking a name is not consent to execute):
   /skill:deep-interview <request>   code-owned interview: topology, panels, closure, restatement, verified spec.md (available)
   /skill:ralplan <request>          consensus planning: planner, architect, critic, same-plan-hash join (available)
@@ -313,9 +317,11 @@ async function withCliSession<T>(
   sessionID: string,
   action: (store: SessionStore) => Promise<T>,
 ): Promise<T> {
+  const routes = readSessionMetadata(runtime.worktree, sessionID)?.routes
   const store = attachAdmission(runtime, sessionID, {
     engine: runtime.host.identity.engine,
     ...(args.model ? { model: args.model } : {}),
+    ...(routes ? { routes } : {}),
   })
   let actionFailed = false
   try { return await action(store) }
@@ -414,6 +420,15 @@ function validateCliOwnerIdentity(runtime: ExecutionRuntime, sessionID: string, 
   if (metadata && metadata.model !== model) throw new Error(HOST_POLICY_MISMATCH)
 }
 
+/** Pinned-route evidence is checked before attachment can rebind or mutate anything: tampered metadata routes change the role policy IDs. */
+function assertPinnedPolicyEvidence(runtime: ExecutionRuntime, sessionID: string): void {
+  for (const execution of runtime.runs.status().executions) {
+    if (execution.ownerSession !== sessionID || execution.kind !== "host") continue
+    const role = EXECUTION_ROLES.find(candidate => candidate === execution.role)
+    if (!role || !execution.policyID || execution.policyID !== runtime.policy.resolve(role).id) throw new Error(HOST_POLICY_MISMATCH)
+  }
+}
+
 function readCliPlan(root: string, path: string): unknown {
   const source = realpathSync(resolve(root, path))
   const rel = relative(root, source)
@@ -456,7 +471,10 @@ async function runCommonCommand(args: CliArgs, runtime: ExecutionRuntime): Promi
     return stopText(result.wf)
   }
 
-  if (args.command !== "run" || !args.plan) validateCliOwnerIdentity(runtime, sessionID, args.model!)
+  if (args.command !== "run" || !args.plan) {
+    validateCliOwnerIdentity(runtime, sessionID, args.model!)
+    assertPinnedPolicyEvidence(runtime, sessionID)
+  }
   else if (readWorkflow(runtime.worktree)?.sessionID === sessionID) {
     throw new Error("an existing workflow must be explicitly resumed or approved before a new plan is submitted")
   }
@@ -558,7 +576,9 @@ export async function runCli(
       (!process.stdin.isTTY || !process.stderr.isTTY)) {
       throw new Error("local human approval or rejection requires an interactive terminal")
     }
-    const runtime = cliRuntimeFactory({ worktree: root, engine: args.engine, model: args.model })
+    // Recovery uses the session's pinned routes from metadata, never the current lca.jsonc combo.
+    const routes = args.session ? readSessionMetadata(root, args.session)?.routes : undefined
+    const runtime = cliRuntimeFactory({ worktree: root, engine: args.engine, model: args.model, ...(routes ? { routes } : {}) })
     return runCommonCommand(args, runtime)
   }
   const server = localServer(args.server!)

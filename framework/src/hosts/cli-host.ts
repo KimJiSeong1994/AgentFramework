@@ -23,6 +23,7 @@ import type {
   ExecutionReference,
   ExecutionRequest,
   ExecutionRole,
+  ComboRoutes,
 } from "./types.ts"
 import { EXECUTION_ROLES, isWorkflowReadOnlyRole } from "./types.ts"
 import type { ExecutionRunStore } from "./run-state.ts"
@@ -76,6 +77,8 @@ type CliTransportFactory = (options: CliTransportOptions) => CliTransportHandle
 export type CliHostOptions = {
   engine: CliEngine
   model: string
+  /** Per-role routes pinned for the session; identity.engine stays the anchor. A route never falls back to the anchor model. */
+  routes?: ComboRoutes
   policy: ExecutionPolicy
   runs: ExecutionRunStore
   /** Best-effort, content-free lifecycle events for a read-only host observer. */
@@ -295,9 +298,29 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
     try { options.observeActivity?.(activity) } catch { /* Progress observers never affect host outcomes. */ }
   }
 
-  let codexProfile: ReturnType<typeof createCodexProfile> | undefined
-  if (options.engine === "codex") {
-    try { codexProfile = createCodexProfile(options.model) }
+  type Target = { engine: CliEngine; model: string }
+  const routeTable = new Map<ExecutionRole, Target>()
+  if (options.routes !== undefined) {
+    const routes: unknown = options.routes
+    if (!isRecord(routes)) throw new TypeError("invalid CLI host options")
+    for (const [role, route] of Object.entries(routes)) {
+      if (role === "main" || !(EXECUTION_ROLES as readonly string[]).includes(role) || !isRecord(route) ||
+          !["local", "codex", "claude"].includes(route.engine as string) ||
+          typeof route.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/.test(route.model)) {
+        throw new TypeError("invalid CLI host options")
+      }
+      routeTable.set(role as ExecutionRole, { engine: route.engine as CliEngine, model: route.model })
+    }
+  }
+  const anchor: Target = { engine: options.engine, model: options.model }
+  const routeFor = (role: ExecutionRole): Target => routeTable.get(role) ?? anchor
+  const targetKey = (target: Target): string => `${target.engine}\0${target.model}`
+
+  // One immutable Codex profile per distinct Codex model (anchor and routes).
+  const codexProfiles = new Map<string, ReturnType<typeof createCodexProfile>>()
+  for (const target of [anchor, ...routeTable.values()]) {
+    if (target.engine !== "codex" || codexProfiles.has(target.model)) continue
+    try { codexProfiles.set(target.model, createCodexProfile(target.model)) }
     catch { throw new TypeError("unsupported Codex model profile") }
   }
 
@@ -351,6 +374,8 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
   }
 
   function assertFixedPolicy(request: ExecutionRequest): void {
+    const route = routeFor(request.role)
+    const codexProfile = route.engine === "codex" ? codexProfiles.get(route.model) : undefined
     let snapshot: ExecutionPolicySnapshot
     try { snapshot = options.policy.resolve(request.role) }
     catch { throw new Error("fixed execution policy is unavailable") }
@@ -359,11 +384,11 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
         !Array.isArray(snapshot.tools.allowed) || !Array.isArray(snapshot.tools.denied) ||
         !Object.isFrozen(snapshot.tools.allowed) || !Object.isFrozen(snapshot.tools.denied) ||
         !Array.isArray(snapshot.system) || !Object.isFrozen(snapshot.system) ||
-        !snapshot.model || snapshot.model.providerID !== options.engine || snapshot.model.modelID !== options.model ||
+        !snapshot.model || snapshot.model.providerID !== route.engine || snapshot.model.modelID !== route.model ||
         snapshot.system.some(instruction => typeof instruction !== "string")) {
       throw new Error("execution policy snapshot is not fixed")
     }
-    if (options.engine === "codex") {
+    if (route.engine === "codex") {
       const nativeContext = snapshot.nativeContext
       if (!codexProfile || !nativeContext || typeof nativeContext !== "object" || Array.isArray(nativeContext) ||
           !Object.isFrozen(nativeContext) || Reflect.ownKeys(nativeContext).length !== 2 ||
@@ -379,41 +404,62 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
   return {
     identity,
     async preflight(profile) {
-      const pendingProbesClear = options.engine !== "codex" || await reapPreflightTransports()
-      let available = profile === identity.profile && pendingProbesClear
-      let codexProfileVerified = options.engine !== "codex" && pendingProbesClear
-      let candidate: CliTransportHandle | undefined
-      if (pendingProbesClear) {
-        try {
-          // Construction is inert. Codex additionally performs an owned version-only probe.
-          candidate = transportFactory({
-            engine: options.engine,
-            model: options.model,
-            prompt: "",
-            deadlineAt: Date.now() + 5000,
-            maxOutputBytes: 0,
-          })
-          if (options.engine === "codex") {
-            if (typeof candidate.preflight !== "function" || !codexProfile) {
-              codexProfileVerified = false
-            } else {
-              const result = await candidate.preflight()
-              codexProfileVerified = result.compatible && result.nativePolicyHash === codexProfile.catalogHash
+      const targets = new Map<string, { target: Target; roles: ExecutionRole[] }>()
+      targets.set(targetKey(anchor), { target: anchor, roles: [] })
+      for (const [role, target] of routeTable) {
+        const entry = targets.get(targetKey(target))
+        if (entry) entry.roles.push(role)
+        else targets.set(targetKey(target), { target, roles: [role] })
+      }
+      const anyCodex = [...targets.values()].some(entry => entry.target.engine === "codex")
+      const pendingProbesClear = !anyCodex || await reapPreflightTransports()
+      const problems: string[] = []
+      let allAvailable = true
+      let codexProfileBlocked = false
+      for (const { target, roles } of targets.values()) {
+        const isCodex = target.engine === "codex"
+        const targetProfile = isCodex ? codexProfiles.get(target.model) : undefined
+        let available = profile === identity.profile && pendingProbesClear
+        let codexProfileVerified = !isCodex && pendingProbesClear
+        let candidate: CliTransportHandle | undefined
+        if (pendingProbesClear) {
+          try {
+            // Construction is inert. Codex additionally performs an owned version-only probe.
+            candidate = transportFactory({
+              engine: target.engine,
+              model: target.model,
+              prompt: "",
+              deadlineAt: Date.now() + 5000,
+              maxOutputBytes: 0,
+            })
+            if (isCodex) {
+              if (typeof candidate.preflight !== "function" || !targetProfile) {
+                codexProfileVerified = false
+              } else {
+                const result = await candidate.preflight()
+                codexProfileVerified = result.compatible && result.nativePolicyHash === targetProfile.catalogHash
+              }
             }
+          } catch {
+            available = false
           }
-        } catch {
-          available = false
         }
-      }
-      if (options.engine === "codex" && candidate && !codexProfileVerified) {
-        const reconciliation = await candidate.reconcile().catch(() => ({ outcome: "unknown" as const, quiescent: false, evidence: "Codex preflight state is unavailable" }))
-        if (!reconciliation.quiescent) {
-          preflightTransports.add(candidate)
-          await candidate.requestCancel("Codex preflight did not establish compatibility", Date.now() + 1000).catch(() => undefined)
+        if (isCodex && candidate && !codexProfileVerified) {
+          const reconciliation = await candidate.reconcile().catch(() => ({ outcome: "unknown" as const, quiescent: false, evidence: "Codex preflight state is unavailable" }))
+          if (!reconciliation.quiescent) {
+            preflightTransports.add(candidate)
+            await candidate.requestCancel("Codex preflight did not establish compatibility", Date.now() + 1000).catch(() => undefined)
+          }
         }
+        available = available && codexProfileVerified
+        const blocked = isCodex && !codexProfileVerified
+        if (blocked) codexProfileBlocked = true
+        if (available) continue
+        allAvailable = false
+        const subject = roles.length ? `combo route for ${roles.join(", ")}` : undefined
+        const text = blocked ? CODEX_PROFILE_REFUSAL : "selected CLI executable or profile is unavailable"
+        problems.push(subject ? `${subject} is unavailable: ${text}` : text)
       }
-      available = available && codexProfileVerified
-      const codexProfileBlocked = options.engine === "codex" && !codexProfileVerified
       const controls: Record<string, "supported" | "unsupported" | "unknown"> = {
         boundedInput: "unsupported",
         boundedOutput: "unsupported",
@@ -430,16 +476,14 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
       }
       // Quiescence is evidence about the owned native process group, never OS-level containment.
       return {
-        compatible: available,
+        compatible: allAvailable,
         controls,
-        problems: available ? [] : [codexProfileBlocked
-          ? CODEX_PROFILE_REFUSAL
-          : "selected CLI executable or profile is unavailable"],
+        problems: allAvailable ? [] : problems,
         budgetEvidence: BUDGET_EVIDENCE,
       }
     },
     async prepare(rawRequest) {
-      if (options.engine === "codex" && !(await reapPreflightTransports())) {
+      if ([...codexProfiles.keys()].length > 0 && !(await reapPreflightTransports())) {
         throw new Error("unresolved Codex preflight process; model dispatch refused")
       }
       checkRequestShape(rawRequest)
@@ -449,6 +493,8 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
         handlers: Object.freeze({ ...rawRequest.handlers }),
       })
       assertFixedPolicy(request)
+      const route = routeFor(request.role)
+      const routeCodexProfile = route.engine === "codex" ? codexProfiles.get(route.model) : undefined
       assertSkillExecution(request)
       const toolWaitAbort = new AbortController()
       const skillSignal = skillExecutionSignal(request, toolWaitAbort.signal)
@@ -592,8 +638,8 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             let transport: CliTransportHandle
             try {
               transport = transportFactory({
-                engine: options.engine,
-                model: options.model,
+                engine: route.engine,
+                model: route.model,
                 prompt,
                 deadlineAt: request.deadlineAt,
                 maxOutputBytes: remainingOutputBytes,
@@ -634,12 +680,12 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               return setFinal({ status: "failed", error: "CLI inference transport could not be prepared" })
             }
             currentTransport = transport
-            if (options.engine === "codex") {
+            if (route.engine === "codex") {
               let preflight: Awaited<ReturnType<NonNullable<CliTransportHandle["preflight"]>>> | undefined
               try {
                 if (typeof transport.preflight === "function") preflight = await transport.preflight()
               } catch { /* Treat probe errors as an admission refusal; do not launch inference. */ }
-              if (!preflight?.compatible || preflight.nativePolicyHash !== codexProfile?.catalogHash) {
+              if (!preflight?.compatible || preflight.nativePolicyHash !== routeCodexProfile?.catalogHash) {
                 let reconciliation: ExecutionReconciliation | undefined
                 try { reconciliation = await transport.reconcile() }
                 catch { reconciliation = undefined }
@@ -731,7 +777,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             if (finalTextDecision.cancel) return setFinal({ status: "cancelled", error: "execution cancelled by LCA policy" })
             const afterInference = checkLease(request, fixedLease)
             if (afterInference.state === "cancelled") return setFinal({ status: "cancelled", error: "execution cancellation requested" })
-            const envelope = parseEnvelope(native.text, options.engine === "local")
+            const envelope = parseEnvelope(native.text, route.engine === "local")
             if (!envelope) return setFinal({ status: "failed", error: "malformed CLI response; no fallback execution was attempted" })
             if (envelope.type === "final") return setFinal({ status: "completed", text: envelope.text })
             if (!CLI_TOOL_NAMES.includes(envelope.name as CliToolName)) return setFinal({ status: "failed", error: "unknown LCA tool refused; no fallback execution was attempted" })
