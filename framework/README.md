@@ -223,6 +223,19 @@ terminal controls in model output. While the host reports an in-progress request
 status shows a spinner and elapsed seconds (`⠋ Model request running · 12s`); it never
 infers progress. Beneath it sit up to two status rows, a rule
 carrying the `⬢ engine / model` badge and scroll position, and a bordered composer.
+
+Tool calls read like GJC: `✔ Read framework/test/cli-progress.test.ts:120-140 · 42ms`, `✔ Edit calc.py ⟦+2 / -1⟧ · 8ms`,
+`✘ Grep "todo" in src · 15ms`, with the call/task facts on a muted line beneath (`▸ #1 · execution not observed ·
+task … · t1`). The target (path, search pattern, read range, changed line counts) and duration come from a separate
+display-only host channel that reaches only the full-screen transcript; the content-free tool lifecycle used by
+progress, persistence and telemetry is unchanged, file contents are never copied, and restored sessions show the
+outcome-only row. `/expand <n>` adds the call identity, the returned line count or the bounded error.
+
+Shell commands render as titled cards: `┌─── ✔ Bash ───┐`, the full `$ command` (wrapped), an `├─── Output ───┤`
+divider with the output tail, and a `⟦exit 0 · 1.8s⟧` footer. Each queue verify command gets the same card titled
+`Verify · <task>` (and `· attempt <n>` after the first) with `⟦exit 1 · 2.4s · timeout 2m00s⟧`; it is recorded in the
+session transcript with a bounded output tail (200 lines / 64 KiB, like `!command`) so `/resume` shows it again. The
+ledger remains the authority for task outcome. Readline prints the verify run as a `[verify]` block.
 While work is live, the composer's top border carries a progress bar built only from observed state, most
 concrete first: a task run (`███░░ 3/5 tasks · 60%`, failed/cancelled counted as finished), ultragoal goals
 (`1/4 goals`), the owned workflow's step (`step 2/5 · ralplan · architect`; a position, not a percent, because

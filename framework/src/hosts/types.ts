@@ -171,9 +171,25 @@ export interface ExecutionPolicy {
   snapshotForSession(sessionID: string): ExecutionPolicySnapshot | undefined
 }
 
+/** One finished verify command, for display (bounded output; never an authority or settlement fact). */
+export type VerifyRunObservation = {
+  sessionID: string
+  taskID: string
+  attempt: number
+  command: string
+  ok: boolean
+  exitCode: number | null
+  timedOut: boolean
+  cancelled: boolean
+  durationMs: number
+  timeoutMs: number
+  output: string
+}
+
 export type ExecutionObservation = {
   task?: (fact: SkillTaskFactInput) => void
   verification?: (fact: SkillVerificationFactInput) => void
+  verifyRun?: (run: VerifyRunObservation) => void
 }
 
 export const LINUX_ADMISSION_REASONS = [

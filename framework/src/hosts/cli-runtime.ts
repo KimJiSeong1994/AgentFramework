@@ -53,6 +53,7 @@ export function createCliRuntime(options: CliRuntimeOptions): ExecutionRuntime {
     log(message, safeFields) {
       try { options.progress?.queue(message, safeFields) } catch { /* Progress observers never affect queue behavior. */ }
     },
+    ...(options.progress?.verifyRun ? { verifyRun: run => { try { options.progress?.verifyRun?.(run) } catch { /* display only */ } } } : {}),
   }, ({ policy, runs }) =>
     createCliHost({
       engine: options.engine,
@@ -61,6 +62,7 @@ export function createCliRuntime(options: CliRuntimeOptions): ExecutionRuntime {
       policy,
       runs,
       ...(options.progress ? { observeActivity: options.progress.host } : {}),
+      ...(options.progress?.toolDisplay ? { observeToolDisplay: options.progress.toolDisplay } : {}),
       ...(options.createTransport ? { createTransport: options.createTransport } : {}),
     }), {
       planningOnlyMain: true,

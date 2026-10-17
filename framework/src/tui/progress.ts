@@ -12,6 +12,16 @@ export type WorkflowProgress = {
   readonly goals?: { readonly complete: number; readonly total: number }
 }
 
+/** Elapsed or limit time for tool cards: 42ms, 1.8s, 12s, 2m05s. */
+export function formatDuration(ms: number): string {
+  const value = Number.isFinite(ms) && ms > 0 ? ms : 0
+  if (value < 1000) return `${Math.round(value)}ms`
+  if (value < 10_000) return `${(value / 1000).toFixed(1)}s`
+  const total = Math.round(value / 1000)
+  if (total < 60) return `${total}s`
+  return `${Math.floor(total / 60)}m${String(total % 60).padStart(2, "0")}s`
+}
+
 export type TaskCounts = { readonly done: number; readonly failed: number; readonly cancelled: number; readonly running: number; readonly total: number }
 
 export type ProgressState =

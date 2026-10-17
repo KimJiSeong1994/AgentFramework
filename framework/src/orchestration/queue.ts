@@ -722,6 +722,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
             verify = { command: task.verify, ok: false, exitCode: null, timedOut: false, output: "verification refused because the task diff was truncated" }
           } else {
             startCodeVerification(attempt!)
+            const verifyStartedAt = Date.now()
             const run = await runVerifierExecution(deps, entry, {
               sessionID, taskID: task.id, attemptID: attempt!.attemptID, attemptNumber: task.attempts, command: task.verify, root, store,
               config: { diff_exclude: c.diff_exclude, diff_max_chars: c.diff_max_chars, verify_timeout_ms: c.verify_timeout_ms, verify_output_chars: c.verify_output_chars },
@@ -739,6 +740,11 @@ export function createQueue(deps: ExecutionRuntime): Queue {
                 output: invalidated ? "(void: verifier changed files or its post-check snapshot failed)" :
                   r.cancelled ? `(killed: ${entry.reason ?? "aborted"})\n${r.output}` : r.output }
               deps.log("task verify", { sessionID, task: task.id, profile, ok, exitCode: r.parentExit, timedOut: r.timedOut, cancelled: r.cancelled })
+              try {
+                deps.observe?.verifyRun?.({ sessionID, taskID: task.id, attempt: task.attempts, command: task.verify, ok,
+                  exitCode: r.parentExit, timedOut: r.timedOut, cancelled: r.cancelled, durationMs: Date.now() - verifyStartedAt,
+                  timeoutMs: c.verify_timeout_ms, output: verify.output })
+              } catch { /* Display observation never changes queue behavior. */ }
             }
           }
           task.verify_result = verify

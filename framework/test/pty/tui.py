@@ -886,15 +886,19 @@ def run_workflow(temp_root: Path, action: str):
             session._wait(lambda: len([e for e in session.events() if e.get("type") == "turn.started"]) == 1, "no turn dispatched from inline-choice input", 0.25)
             logical_screen = lambda: " ".join(session.screen.current_text().split())
             def tool_row(outcome: str, expanded: bool, rest: str) -> str:
-                # Unicode or /ascii chrome: status icon, expand toggle, then the logical summary.
+                # Unicode or /ascii chrome, GJC layout: `<icon> Read · <ms>` then `<toggle> #N · <facts>`.
+                # `rest` keeps the logical form `#N read · call <outcome> · <facts>`.
                 icons = {"ok": ("✔", "+"), "error": ("✘", "x")}[outcome]
                 toggles = ("▾", "v") if expanded else ("▸", ">")
+                match = re.match(r"#(\d+) (\S+) · call (\S+)(?: · (.*))?$", rest)
+                ordinal, name, call, facts = match.group(1), match.group(2), match.group(3), match.group(4) or ""
+                meta = f"#{ordinal}" + ("" if call in ("succeeded", "running") else f" · call {call}") + (f" · {facts}" if facts else "")
                 screen = logical_screen()
                 for icon, toggle in ((icons[0], toggles[0]), (icons[1], toggles[1])):
-                    candidate = f"{icon} {toggle} {rest}"
-                    if candidate in screen:
-                        return candidate
-                return f"{icons[0]} {toggles[0]} {rest}"
+                    found = re.search(re.escape(f"{icon} {name.capitalize()}") + r"(?: · \d+(?:ms|\.\ds|s))? " + re.escape(f"{toggle} {meta}"), screen)
+                    if found:
+                        return found.group(0)
+                return f"{icons[0]} {name.capitalize()} {toggles[0]} {meta}"
             session._wait(lambda: any(tool_row("ok", False, f"#1 read · call succeeded · execution not observed · task {label} · t1") in logical_screen() for label in ("Implement", "title unavailable")), "validated task title and explicit unobserved execution")
             task_label = "Implement" if "task Implement · t1" in logical_screen() else "title unavailable"
             first_tool = tool_row("ok", False, f"#1 read · call succeeded · execution not observed · task {task_label} · t1")
@@ -902,7 +906,7 @@ def run_workflow(temp_root: Path, action: str):
             session._wait(lambda: tool_row("error", False, second_tool_text) in logical_screen(), "second failed call with explicit execution uncertainty")
             second_tool = tool_row("error", False, second_tool_text)
             visible = logical_screen()
-            if visible.count("read ·") != 2 or "#3 read" in visible:
+            if len(re.findall(r"[✔✘+x] Read", visible)) != 2 or "#3 ·" in visible:
                 raise AssertionError(f"repeated terminal tool event duplicated a tool item: {visible}")
             session.mode_proof["toolItemsBeforeFilter"] = [first_tool, second_tool]
 
@@ -916,17 +920,17 @@ def run_workflow(temp_root: Path, action: str):
             assert_no_additional_dispatch(session, turns=1, runs=1)
 
             session.send_text("/search read failed\r")
-            filtered_tool = "#2 read · call failed · execution not observed · task title unavailable · t1"
+            filtered_tool = "#2 · call failed · execution not observed · task title unavailable · t1"
             session._wait(
                 lambda: filtered_tool in logical_screen() and
-                "#1 read · call succeeded" not in logical_screen(),
+                "#1 · execution not observed" not in logical_screen(),
                 "search redraw with only the failed tool",
             )
             filtered = logical_screen()
-            if filtered.count("read ·") != 1 or "#1 read · call succeeded" in filtered:
+            if len(re.findall(r"[✔✘+x] Read", filtered)) != 1 or "#1 · execution not observed" in filtered:
                 raise AssertionError(f"/search read failed did not isolate exactly the failed read tool: {filtered}")
             session.mode_proof["searchReadFailedVisible"] = filtered_tool in filtered
-            session.mode_proof["searchReadFailedMatchCount"] = filtered.count("read ·")
+            session.mode_proof["searchReadFailedMatchCount"] = len(re.findall(r"[✔✘+x] Read", filtered))
             assert_no_additional_dispatch(session, turns=1, runs=1)
 
             session.send_text("/search\r")
@@ -938,7 +942,7 @@ def run_workflow(temp_root: Path, action: str):
                 "search-clear redraw reaches status and empty composer",
             )
             restored = logical_screen()
-            if restored.count("read ·") != 2:
+            if len(re.findall(r"[✔✘+x] Read", restored)) != 2:
                 raise AssertionError(f"/search did not clear the current-session filter: {restored}")
             session.mode_proof["emptySearchRestoredBothTools"] = True
             assert_no_additional_dispatch(session, turns=1, runs=1)

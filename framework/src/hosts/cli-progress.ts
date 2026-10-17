@@ -1,5 +1,5 @@
 import { CLI_TOOL_NAMES, type CliToolName } from "./cli-tools.ts"
-import { EXECUTION_ROLES, type ExecutionRole } from "./types.ts"
+import { EXECUTION_ROLES, type ExecutionRole, type VerifyRunObservation } from "./types.ts"
 import type { Phase } from "../workflows/types.ts"
 import { renderProgress } from "../tui/progress.ts"
 
@@ -12,11 +12,85 @@ export type CliTaskStatus = "pending" | "running" | "done" | "failed" | "cancell
 
 export type CliProgressTask = { id: string; status: CliTaskStatus; title?: string }
 
+/**
+ * What a file tool call targets, for the live transcript card only. It is never persisted (the session transcript
+ * keeps outcome-only tool records) and never carries file contents: just a path, a search pattern and line counts.
+ */
+export type CliToolDetail = {
+  path?: string
+  pattern?: string
+  /** read: 1-based first line and line count requested */
+  offset?: number
+  limit?: number
+  /** write/edit: lines added and removed by the requested change */
+  added?: number
+  removed?: number
+  /** tool-finished: lines in the returned text, and the error text (bounded) when the tool failed */
+  resultLines?: number
+  error?: string
+}
+
 export type CliHostActivity =
   | { kind: "model-started"; role: ExecutionRole; execution: number }
   | { kind: "model-returned"; role: ExecutionRole; execution: number; status: "completed" | "failed" | "cancelled" | "unresolved" | "incomplete" }
   | { kind: "tool-started"; role: ExecutionRole; execution: number; taskID: string; executionID: string; callID: string; tool: CliToolName }
   | { kind: "tool-finished"; role: ExecutionRole; execution: number; taskID: string; executionID: string; callID: string; tool: CliToolName; outcome: "succeeded" | "failed" | "denied"; ok: boolean }
+
+/**
+ * Display-only facts about one tool call (target, result size, duration). It travels on its own channel, separate
+ * from the content-free CliHostActivity that progress, persistence and telemetry consume, and only the full-screen
+ * transcript receives it.
+ */
+export type CliToolDisplay = { executionID: string; callID: string; phase: "started" | "finished"; detail?: CliToolDetail; durationMs?: number }
+
+/**
+ * Display projection of a tool call for the live transcript card: target path, search pattern, read range and
+ * changed line counts. It runs on unvalidated input (before validation) and never copies file contents.
+ */
+export function cliToolDetail(name: CliToolName, input: unknown): CliToolDetail | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined
+  const record = input as Record<string, unknown>
+  const str = (value: unknown) => typeof value === "string" && value.length > 0 ? value : undefined
+  const int = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : undefined
+  const lines = (value: unknown) => typeof value === "string" ? (value.length === 0 ? 0 : value.replace(/\n$/u, "").split("\n").length) : undefined
+  const detail: Record<string, unknown> = {}
+  const path = str(record.path)
+  if (path) detail.path = path
+  if (name === "glob" || name === "grep") { const pattern = str(record.pattern); if (pattern) detail.pattern = pattern }
+  if (name === "read") {
+    const offset = int(record.startLine); const limit = int(record.maxLines)
+    if (offset !== undefined) detail.offset = offset
+    if (limit !== undefined) detail.limit = limit
+  }
+  if (name === "write") { const added = lines(record.content); if (added !== undefined) detail.added = added }
+  if (name === "edit") {
+    const added = lines(record.newText); const removed = lines(record.oldText)
+    if (added !== undefined) detail.added = added
+    if (removed !== undefined) detail.removed = removed
+  }
+  return validatedToolDetail(detail)
+}
+
+const MAX_DETAIL_TEXT = 512
+
+/** Strict copy of a tool detail: known keys, bounded strings, non-negative integers; anything else is dropped. */
+export function validatedToolDetail(value: unknown): CliToolDetail | undefined {
+  if (!isRecord(value)) return undefined
+  const detail: CliToolDetail = {}
+  const text = (key: "path" | "pattern" | "error") => {
+    const raw = value[key]
+    if (typeof raw !== "string" || raw.length === 0) return
+    const clean = raw.replace(/[\u0000-\u001f\u007f]/gu, " ")
+    detail[key] = clean.length > MAX_DETAIL_TEXT ? `${clean.slice(0, MAX_DETAIL_TEXT - 1)}\u2026` : clean
+  }
+  const count = (key: "offset" | "limit" | "added" | "removed" | "resultLines") => {
+    const raw = value[key]
+    if (Number.isSafeInteger(raw) && (raw as number) >= 0) detail[key] = raw as number
+  }
+  text("path"); text("pattern"); text("error")
+  count("offset"); count("limit"); count("added"); count("removed"); count("resultLines")
+  return Object.keys(detail).length ? Object.freeze(detail) : undefined
+}
 
 export type CliProgressFinal = {
   workflowID?: string
@@ -30,6 +104,10 @@ export type CliProgressFinal = {
 export type CliProgressSink = {
   queue: (message: string, safeFields?: Record<string, unknown>) => void
   host: (activity: CliHostActivity) => void
+  /** Tool targets and durations for the full-screen transcript only (never persisted, logged or printed). */
+  toolDisplay?: (display: CliToolDisplay) => void
+  /** Finished verify commands for the transcript's Bash cards; display only. */
+  verifyRun?: (run: VerifyRunObservation) => void
 }
 
 export type CliProgressPresenter = CliProgressSink & {
@@ -44,7 +122,7 @@ export type CliProgressPresenter = CliProgressSink & {
   error: () => void
 }
 
-export type CliProgressPresenterOptions = { toolLines?: boolean; mainModelLines?: boolean }
+export type CliProgressPresenterOptions = { toolLines?: boolean; mainModelLines?: boolean; progressLines?: boolean }
 
 const TASK_STATUSES: readonly CliTaskStatus[] = ["pending", "running", "done", "failed", "cancelled"]
 const MODEL_STATUSES = ["completed", "failed", "cancelled", "unresolved", "incomplete"] as const
@@ -154,11 +232,14 @@ export function createCliProgressPresenter(
   if (typeof write !== "function") throw new TypeError("CLI progress writer must be a function")
   if ((observe !== undefined && typeof observe !== "function") || !options || typeof options !== "object" ||
       (options.toolLines !== undefined && typeof options.toolLines !== "boolean") ||
-      (options.mainModelLines !== undefined && typeof options.mainModelLines !== "boolean")) {
+      (options.mainModelLines !== undefined && typeof options.mainModelLines !== "boolean") ||
+      (options.progressLines !== undefined && typeof options.progressLines !== "boolean")) {
     throw new TypeError("invalid CLI progress presenter options")
   }
   const toolLines = options.toolLines !== false
   const mainModelLines = options.mainModelLines !== false
+  // The full-screen input box already shows this bar; readline gets it as a line.
+  const progressLines = options.progressLines !== false
 
   const tasks = new Map<string, { status: CliTaskStatus; attempt?: number }>()
   const seen = new Set<string>()
@@ -192,7 +273,7 @@ export function createCliProgressPresenter(
     tasks.set(id, { status: next, ...(attempt === undefined ? {} : { attempt }) })
     const detail = next === "running" && attempt !== undefined ? ` (attempt ${attempt})` : ""
     output(`[tasks] ${id} ${next}${detail}.`)
-    if (next === "done" || next === "failed" || next === "cancelled") output(`[progress] ${renderProgress({ kind: "tasks", counts: taskCounts() }, 56, true)}`)
+    if (progressLines && (next === "done" || next === "failed" || next === "cancelled")) output(`[progress] ${renderProgress({ kind: "tasks", counts: taskCounts() }, 56, true)}`)
   }
 
   /** Same counts the full-screen input box shows; tracked tasks only. */

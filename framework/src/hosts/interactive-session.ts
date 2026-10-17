@@ -13,8 +13,8 @@ import { savedPlan } from "../flow/actions.ts"
 import { ledgerPath } from "../state/ledger.ts"
 import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
 import { inputColorSupported, inputLine, renderInput, type InputPresentation } from "./cli-input.ts"
-import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus } from "./cli-progress.ts"
-import type { WorkflowProgress } from "../tui/progress.ts"
+import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus, type CliToolDisplay } from "./cli-progress.ts"
+import { formatDuration, type WorkflowProgress } from "../tui/progress.ts"
 import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
 import { PROTECTED_WORKFLOWS, resolveSkillRoots } from "../skills/roots.ts"
 import { chatIntentMode, chatWorktreeMode } from "../config.ts"
@@ -22,7 +22,7 @@ import { classifyIntent, INTENT_CLASSIFIER, type IntentClass } from "../modes/de
 import { SkillSession, type PreparedSkillInvocation, type SkillCatalog } from "../skills/session.ts"
 import { readSkillTrust } from "../skills/trust.ts"
 import { attachAdmission, detachAdmission, effectiveHold, holdAdmission, resumeAdmission } from "../sessions/admission.ts"
-import { canonicalRoutes, inspectSessions, MAX_CARRIED_MESSAGES, routesKey, MAX_SHELL_COMMAND_BYTES, readSessionMetadata, replaySession, type SessionStore, type ReplayOptions, type ReplayResult, type TranscriptKind } from "../sessions/store.ts"
+import { canonicalRoutes, inspectSessions, MAX_CARRIED_MESSAGES, routesKey, MAX_SHELL_COMMAND_BYTES, MAX_SHELL_LINES, MAX_SHELL_OUTPUT_BYTES, readSessionMetadata, replaySession, type SessionStore, type ReplayOptions, type ReplayResult, type TranscriptKind } from "../sessions/store.ts"
 import { persistToolActivity } from "../tui/session-transcript.ts"
 import { createForegroundController, PlanIsolationUnavailableError, readForegroundStatus, type ForegroundController } from "./controller.ts"
 import { discoverModels as discoverModelCatalog, type ModelCatalog } from "./model-catalog.ts"
@@ -37,7 +37,7 @@ import { startRefusal } from "../workflows/registry.ts"
 import { ModelRequestError } from "../workflows/turn.ts"
 import { beginExecutionActivity } from "./runtime.ts"
 import { settled, type ExecutionRunStatus } from "./run-state.ts"
-import { EXECUTION_ROLES, LinuxAdmissionRefused, type ComboRoutes, type ExecutionRole, type ExecutionRuntime } from "./types.ts"
+import { EXECUTION_ROLES, LinuxAdmissionRefused, type ComboRoutes, type ExecutionRole, type ExecutionRuntime, type VerifyRunObservation } from "./types.ts"
 import type { ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
 import { commandInsertion, interactiveActions, interactiveHelp, type InteractiveContext } from "./interactive-actions.ts"
 import { fileComboStore, fileDefaultModelStore, validateComboRoutes, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
@@ -60,6 +60,8 @@ export type Terminal = {
   controls?: (handler: (action: TerminalControl) => void) => void
   queueAdmission?: (allowed: boolean) => void
   activity?: (activity: CliHostActivity) => void
+  /** Full-screen only: tool target/result/duration for the live transcript row (display, never persisted). */
+  toolDisplay?: (display: CliToolDisplay) => void
   bindSession?: (sessionID: string) => void
   executionSnapshot?: (state: ExecutionRunStatus, active: boolean) => void
   taskSnapshot?: (tasks: readonly CliProgressTask[]) => void
@@ -67,6 +69,8 @@ export type Terminal = {
   sessionChanged?: () => void
   skillCatalog?: (catalog: SkillCatalog) => void
   /** Committed `kind · stage · phase` of the live planning workflow in this session, or undefined when none is live. */
+  /** Full-screen only: draw a finished queue verify command as a Bash card. */
+  verifyRun?: (run: { id: string; command: string; taskID: string; attempt: number; timeoutMs: number; result: { status: "complete" | "error" | "cancelled" | "timeout"; exitCode: number | null; signal: null; durationMs: number; lines: readonly string[]; totalLines: number } }) => void
   /** Status line for the owned planning workflow; `progress` carries the same workflow's structured stage facts. */
   workflowStatus?: (line: string | undefined, progress?: WorkflowProgress) => void
   viewSnapshot?: (facts: InteractiveViewFacts) => void
@@ -830,7 +834,7 @@ export async function runInteractiveSession(
       catch (error) { persistenceFailed = true; abort.abort(); throw error }
     }
     terminal.activity?.(activity)
-  }, { toolLines: !terminal.activity, mainModelLines: !terminal.fullscreen })
+  }, { toolLines: !terminal.activity, mainModelLines: !terminal.fullscreen, progressLines: !terminal.fullscreen })
   const queueProgress = progress.queue
   progress.queue = (message, fields) => {
     if (fields && typeof fields.task === "string") {
@@ -848,7 +852,9 @@ export async function runInteractiveSession(
       bind(store: SessionStore) { epoch = store.epoch; sessionID = store.sessionID },
       sink: {
         host(activity: CliHostActivity) { if (current()) progress.host(activity) },
+        toolDisplay(display: CliToolDisplay) { if (current()) terminal.toolDisplay?.(display) },
         queue(message: string, fields?: Record<string, unknown>) { if (current()) progress.queue(message, fields) },
+        verifyRun(run: VerifyRunObservation) { if (current()) showVerifyRun(run) },
       },
     }
   }
@@ -878,6 +884,33 @@ export async function runInteractiveSession(
         terminal.write(terminalSafeText(`Paused from ${paused.pausedFrom?.phase ?? "?"}/${paused.pausedFrom?.stage ?? "?"}: residual ${partition.residual.join(", ") || "none"}; done ${partition.done.join(", ") || "none"}. Kept held; /continue offers Keep or Resume.\n`))
       } else if (paused?.stopIntent) terminal.write(`${stopDisplay(paused) === "cancelling" ? STOP_LABEL.cancelling : STOP_LABEL.pausing}\n`)
     } catch { /* display only */ }
+  }
+  /** A queue verify command, shown as a Bash card and recorded with a bounded output tail (display only). */
+  function showVerifyRun(run: VerifyRunObservation): void {
+    const all = run.output.replace(/\r\n?/gu, "\n").replace(/\n$/u, "").split("\n")
+    const lines: string[] = []
+    let bytes = 0
+    for (let index = all.length - 1; index >= 0 && lines.length < MAX_SHELL_LINES; index--) {
+      const line = all[index]!.length > 2000 ? `${all[index]!.slice(0, 1999)}…` : all[index]!
+      bytes += Buffer.byteLength(line, "utf8") + 1
+      if (bytes > MAX_SHELL_OUTPUT_BYTES) break
+      lines.unshift(line)
+    }
+    const status = run.cancelled ? "cancelled" : run.timedOut ? "timeout" : run.ok ? "complete" : "error"
+    const command = Buffer.byteLength(run.command, "utf8") > MAX_SHELL_COMMAND_BYTES ? run.command.slice(0, 2000) : run.command
+    const id = `verify:${run.taskID}:${run.attempt}:${deps.randomUUID()}`
+    const result = { status, exitCode: run.exitCode, signal: null, durationMs: Math.max(0, Math.round(run.durationMs)), lines, totalLines: Math.max(all.length, lines.length) } as const
+    if (terminal.verifyRun) terminal.verifyRun({ id, command, taskID: run.taskID, attempt: run.attempt, timeoutMs: run.timeoutMs, result })
+    else {
+      const tail = lines.slice(-12)
+      const outcome = status === "cancelled" ? "cancelled" : status === "timeout" ? "timed out" : `exit ${run.exitCode ?? "?"}`
+      visibleWrite(terminalSafeText([`[verify] ${run.taskID} attempt ${run.attempt} $ ${command}`,
+        ...(result.totalLines > tail.length ? [`  … ${result.totalLines - tail.length} earlier line(s)`] : []),
+        ...tail.map(line => `  | ${line}`),
+        `  = ${outcome} · ${formatDuration(result.durationMs)} (timeout ${formatDuration(run.timeoutMs)})`].join("\n") + "\n"))
+    }
+    persist("verify", { taskID: run.taskID, attempt: run.attempt, command, status, exitCode: run.exitCode,
+      durationMs: result.durationMs, timeoutMs: Math.max(0, Math.round(run.timeoutMs)), lines, totalLines: result.totalLines }, id)
   }
   // Operator `!command`: the host owns the run (cwd, cancellation, persistence); the terminal only renders it.
   let shellAbort: AbortController | undefined

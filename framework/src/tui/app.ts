@@ -5,7 +5,7 @@ import { belowPanelRows, bodyPanelRows, panelInnerColumns, renderFrame, transcri
 import { TerminalDriver } from "./terminal.ts"
 import { MIN_COLUMNS, MIN_ROWS, MIN_SIZE_LABEL } from "./capability.ts"
 import { TranscriptModel } from "./transcript-model.ts"
-import type { CliHostActivity } from "../hosts/cli-progress.ts"
+import type { CliHostActivity, CliToolDisplay } from "../hosts/cli-progress.ts"
 import type { CliProgressTask } from "../hosts/cli-progress.ts"
 import type { ExecutionRunStatus } from "../hosts/run-state.ts"
 import type { ReplayOptions, ReplayResult } from "../sessions/store.ts"
@@ -274,6 +274,10 @@ export class TuiApp implements Terminal {
     const key = JSON.stringify([executionID, callID])
     if (!this.ordinals.has(key)) this.ordinals.set(key, this.ordinals.size + 1)
     return this.ordinals.get(key)!
+  }
+  toolDisplay(display: CliToolDisplay): void {
+    this.transcript.toolDisplay(display)
+    this.draw()
   }
   activity(activity: CliHostActivity): void {
     this.transcript.activity(activity, activity.kind === "tool-started" || activity.kind === "tool-finished" ? this.ordinalFor(activity.executionID, activity.callID) : undefined)
@@ -958,6 +962,12 @@ export class TuiApp implements Terminal {
     this.choiceSettled = false
     this.suspended = false
     this.driver.start()
+    this.draw()
+  }
+  /** A finished queue verify command, drawn as a Bash card with its task, attempt and timeout. */
+  verifyRun(run: { id: string; command: string; taskID: string; attempt: number; timeoutMs: number; result: { status: "complete" | "error" | "cancelled" | "timeout"; exitCode: number | null; signal: null; durationMs: number; lines: readonly string[]; totalLines: number } }): void {
+    this.transcript.shellStarted(run.id, run.command, undefined, { source: "verify", taskID: run.taskID, attempt: run.attempt, timeoutMs: run.timeoutMs })
+    this.transcript.shellFinished(run.id, run.result)
     this.draw()
   }
   shellStart(run: { id: string; command: string }): ShellView {

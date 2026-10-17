@@ -434,20 +434,26 @@ describe("renderFrame", () => {
     expect(rows[1]).toBe("  bold�[2J and code�]52;x�")
   })
 
-  test("tool rows show outcome status and keep the logical summary searchable", () => {
+  test("tool rows: GJC-style target line with duration, then the call and task facts", () => {
     const rows = transcriptDisplayRows([
-      "[+] #1 read · call succeeded · execution not observed · task Implement · t1 done",
-      "[-] #2 grep · call failed · execution unconfirmed · task Implement · t1 running",
+      "[+] #1 read framework/test/a.ts:120-140 · 42ms · call succeeded · execution not observed · task Implement · t1 done",
+      "[-] #2 grep \"todo\" in src · 15ms · call failed · execution unconfirmed · task Implement · t1 running",
       "  Call call-2 · execution exec-2 · worker",
-      "[+] #3 bash · call running · execution not observed · task Implement · t1 running",
+      "[+] #3 edit calc.py ⟦+2 / -1⟧ · 1.8s · call running · execution not observed · task Implement · t1 running",
+      "[+] #4 list · call succeeded · task t · t1",
     ], 120).map(transcriptRowText)
     expect(rows).toEqual([
-      "✔ ▸ #1 read · call succeeded · execution not observed · task Implement · t1 done",
-      "✘ ▾ #2 grep · call failed · execution unconfirmed · task Implement · t1 running",
+      "✔ Read framework/test/a.ts:120-140 · 42ms",
+      "  ▸ #1 · execution not observed · task Implement · t1 done",
+      "✘ Grep \"todo\" in src · 15ms",
+      "  ▾ #2 · call failed · execution unconfirmed · task Implement · t1 running",
       "    Call call-2 · execution exec-2 · worker",
-      "⟳ ▸ #3 bash · call running · execution not observed · task Implement · t1 running",
+      "⟳ Edit calc.py ⟦+2 / -1⟧ · 1.8s",
+      "  ▸ #3 · execution not observed · task Implement · t1 running",
+      "✔ List",
+      "  ▸ #4 · task t · t1",
     ])
-    expect(transcriptDisplayRows(["[+] #1 read · call denied · task t · t1"], 80, true).map(transcriptRowText)[0]).toBe("x > #1 read · call denied · task t · t1")
+    expect(transcriptDisplayRows(["[+] #1 read · call denied · task t · t1"], 80, true).map(transcriptRowText)).toEqual(["x Read", "  > #1 · call denied · task t · t1"])
   })
 
   test("live tool and shell icons take the spinner frame; last-recorded state stays static", () => {
@@ -461,13 +467,15 @@ describe("renderFrame", () => {
       "  = exit 0 · 0.0s",
     ]
     const rows = transcriptDisplayRows(lines, 160, false, "⠹").map(transcriptRowText)
-    expect(rows[0]).toStartWith("⠹ ▸ #1 bash")
-    expect(rows[1]).toStartWith("⟳ ▸ #2 read")
-    expect(rows[2]).toStartWith("✔ ▸ #3 grep")
-    expect(rows).toContainEqual(expect.stringMatching(/^│ ⠹ running · 2s · Esc cancels\s+│$/u))
-    expect(rows).toContainEqual(expect.stringMatching(/^│ ✔ exit 0 · 0\.0s\s+│$/u))
+    expect(rows[0]).toBe("⠹ Bash")
+    expect(rows[2]).toBe("⟳ Read")
+    expect(rows[4]).toBe("✔ Grep")
+    expect(rows).toContainEqual(expect.stringMatching(/^┌─── ⠹ Bash ─+┐$/u))
+    expect(rows).toContainEqual(expect.stringMatching(/^│ ⟦running · 2s · Esc cancels⟧\s+│$/u))
+    expect(rows).toContainEqual(expect.stringMatching(/^┌─── ✔ Bash ─+┐$/u))
+    expect(rows).toContainEqual(expect.stringMatching(/^│ ⟦exit 0 · 0\.0s⟧\s+│$/u))
     // Without a frame (not busy) the running shell keeps its static marker.
-    expect(transcriptDisplayRows(lines, 100).map(transcriptRowText)).toContainEqual(expect.stringMatching(/^│ ⟳ running/u))
+    expect(transcriptDisplayRows(lines, 100).map(transcriptRowText)).toContainEqual(expect.stringMatching(/^┌─── ⟳ Bash/u))
     // The frame never changes layout.
     expect(transcriptDisplayRows(lines, 100, false, "⠹")).toHaveLength(transcriptDisplayRows(lines, 100).length)
   })
