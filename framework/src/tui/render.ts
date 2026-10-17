@@ -538,8 +538,24 @@ export function transcriptDisplayRows(lines: readonly string[], columns: number,
         : outcome === "success" ? { text: `${ascii ? "+" : "✔"} `, styles: ["success"] }
           : { text: `${live ? spinner : ascii ? "~" : "⟳"} `, styles: ["warning"] }
       const toggle = match[1] === "+" ? (ascii ? "> " : "▸ ") : (ascii ? "v " : "▾ ")
-      wrapSpans([{ text: toggle, styles: ["muted"] }, { text: match[2]!, styles: ["focus"] }, { text: match[3]!, styles: ["muted"] }], body)
-        .forEach((line, index) => rows.push({ segments: [index === 0 ? icon : indent, ...line], role: index === 0 ? "first" : "continuation" }))
+      // GJC style: `✔ Read path:120-140 · 42ms`, then the call/task facts on a muted line below.
+      const [, ordinal, name] = /^#(\d+) (\S+)$/u.exec(match[2]!) ?? [, "", match[2]!]
+      const at = match[3]!.indexOf(" · call ")
+      const target = at >= 0 ? match[3]!.slice(0, at) : match[3]!
+      const facts = at >= 0 ? match[3]!.slice(at + 3) : ""
+      const firstSpace = target.startsWith(" ") ? target.slice(1) : target
+      const timing = / · (\d+ms|\d+(?:\.\d)?s|\d+m\d{2}s)$/u.exec(firstSpace)
+      const where = timing ? firstSpace.slice(0, timing.index) : firstSpace
+      const label = name!.charAt(0).toLocaleUpperCase() + name!.slice(1)
+      wrapSpans([
+        { text: label, styles: ["focus"] },
+        ...(where ? [{ text: ` ${where}`, styles: ["text"] as SemanticToken[] }] : []),
+        ...(timing ? [{ text: ` · ${timing[1]}`, styles: ["muted"] as SemanticToken[] }] : []),
+      ], body).forEach((line, index) => rows.push({ segments: [index === 0 ? icon : indent, ...line], role: index === 0 ? "first" : "continuation" }))
+      // The icon already says succeeded/running; failure states keep their wording (call vs. execution evidence).
+      const meta = facts.replace(/^call (?:succeeded|running)(?: · |$)/u, "")
+      wrapSpans([{ text: toggle, styles: ["muted"] }, { text: `#${ordinal}${meta ? ` · ${meta}` : ""}`, styles: ["muted"] }], body)
+        .forEach(line => rows.push({ segments: [indent, ...line], role: "continuation" }))
       for (const detail of entry.details) {
         wrapSpans([{ text: detail, styles: ["muted"] }], Math.max(1, width - 4))
           .forEach(line => rows.push({ segments: [{ text: "    ", styles: [] }, ...line], role: "continuation" }))
@@ -552,9 +568,14 @@ export function transcriptDisplayRows(lines: readonly string[], columns: number,
   return rows
 }
 
-/** A GJC-style shell window: titled top border, output, status footer, bottom border. */
+/**
+ * A GJC-style Bash card: a titled top border with the outcome icon, the full command (wrapped, `$ ` prefixed), an
+ * Output divider, the output tail, and a footer with exit status, duration and (for verify runs) the timeout.
+ */
 function shellWindowRows(entry: Extract<TranscriptEntry, { kind: "shell" }>, width: number, ascii: boolean, spinner?: string): TranscriptRow[] {
-  const box = ascii ? { h: "-", v: "|", tl: "+", tr: "+", bl: "+", br: "+" } : { h: "─", v: "│", tl: "╭", tr: "╮", bl: "╰", br: "╯" }
+  const box = ascii
+    ? { h: "-", v: "|", tl: "+", tr: "+", bl: "+", br: "+", lj: "+", rj: "+" }
+    : { h: "─", v: "│", tl: "┌", tr: "┐", bl: "└", br: "┘", lj: "├", rj: "┤" }
   const status = entry.footers.at(-1) ?? ""
   const state: { icon: string; style: SemanticToken } = status.startsWith("running")
     ? { icon: spinner ?? (ascii ? "~" : "⟳"), style: "warning" }
@@ -563,31 +584,40 @@ function shellWindowRows(entry: Extract<TranscriptEntry, { kind: "shell" }>, wid
         : { icon: ascii ? "x" : "✘", style: "error" }
   const border: SemanticToken[] = [state.style === "success" ? "border" : state.style]
   const inner = Math.max(1, width - 4)
-  const titleRoom = Math.max(1, width - 6)
-  const label = `shell · ${entry.ordinal} · `
-  const command = clipToWidth(`$ ${entry.command}`, Math.max(1, titleRoom - displayWidth(label)))
-  const title = displayWidth(label) + 1 >= titleRoom ? clipToWidth(`$ ${entry.command}`, titleRoom) : undefined
-  const titleWidth = title ? displayWidth(title) : displayWidth(label) + displayWidth(command)
-  const rows: TranscriptRow[] = [{
-    segments: [
-      { text: `${box.tl}${box.h} `, styles: border },
-      ...(title ? [{ text: title, styles: ["focus"] as SemanticToken[] }] : [
-        { text: "shell", styles: ["accent"] as SemanticToken[] },
-        { text: ` · ${entry.ordinal} · `, styles: ["muted"] as SemanticToken[] },
-        { text: command, styles: ["focus"] as SemanticToken[] },
-      ]),
-      { text: ` ${box.h.repeat(Math.max(0, width - 5 - titleWidth))}${box.tr}`, styles: border },
-    ],
-    role: "first",
-  }]
+  // A verify run carries `verify <task> · attempt <n> · timeout <t>` as its first note.
+  const verifyNote = entry.notes.find(note => note.startsWith("verify "))
+  const verify = verifyNote ? /^verify (\S+) · attempt (\d+)(?: · timeout (\S+))?$/u.exec(verifyNote) : null
+  const notes = entry.notes.filter(note => note !== verifyNote)
+  const title = verify ? `Verify · ${verify[1]}${verify[2] !== "1" ? ` · attempt ${verify[2]}` : ""}` : "Bash"
+  const ruled = (left: string, label: string, right: string, styles: SemanticToken[], labelStyles: SemanticToken[]): TranscriptRow => {
+    const lead = `${left}${box.h.repeat(3)} `
+    const room = Math.max(0, width - displayWidth(lead) - 2)
+    const text = clipToWidth(label, room)
+    return { segments: [
+      { text: lead, styles },
+      { text, styles: labelStyles },
+      { text: ` ${box.h.repeat(Math.max(0, width - displayWidth(lead) - displayWidth(text) - 2))}${right}`, styles },
+    ], role: "continuation" }
+  }
   const row = (content: TranscriptSegment[]): TranscriptRow => {
     const used = content.reduce((total, segment) => total + displayWidth(segment.text), 0)
     return { segments: [{ text: `${box.v} `, styles: border }, ...content, { text: `${" ".repeat(Math.max(0, inner - used))} ${box.v}`, styles: border }], role: "continuation" }
   }
-  for (const note of entry.notes) for (const wrapped of wrapSpans([{ text: note, styles: ["muted"] }], inner)) rows.push(row(wrapped))
-  for (const line of entry.output) for (const wrapped of hardWrap(line, ["muted"], inner)) rows.push(row(wrapped))
+  const rows: TranscriptRow[] = [{ ...ruled(box.tl, `${state.icon} ${title}`, box.tr, border, [state.style, "focus"]), role: "first" }]
+  // Wrap at spaces like GJC; a single token longer than the card still hard-wraps.
+  for (const wrapped of wrapSpans([{ text: `$ ${entry.command}`, styles: ["focus"] }], inner)) {
+    const used = wrapped.reduce((total, segment) => total + displayWidth(segment.text), 0)
+    if (used <= inner) rows.push(row(wrapped))
+    else for (const piece of hardWrap(wrapped.map(segment => segment.text).join(""), ["focus"], inner)) rows.push(row(piece))
+  }
+  if (entry.output.length || notes.length) {
+    rows.push(ruled(box.lj, "Output", box.rj, border, ["muted"]))
+    for (const note of notes) for (const wrapped of wrapSpans([{ text: note, styles: ["muted"] }], inner)) rows.push(row(wrapped))
+    for (const line of entry.output) for (const wrapped of hardWrap(line, ["muted"], inner)) rows.push(row(wrapped))
+  }
   for (const footer of entry.footers.slice(0, -1)) for (const wrapped of wrapSpans([{ text: footer, styles: ["muted"] }], inner)) rows.push(row(wrapped))
-  for (const wrapped of wrapSpans([{ text: `${state.icon} `, styles: [state.style] }, { text: status, styles: [state.style] }], inner)) rows.push(row(wrapped))
+  const limit = verify?.[3] ? ` · timeout ${verify[3]}` : ""
+  for (const wrapped of wrapSpans([{ text: ascii ? "[" : "⟦", styles: ["muted"] }, { text: `${status}${limit}`, styles: [state.style] }, { text: ascii ? "]" : "⟧", styles: ["muted"] }], inner)) rows.push(row(wrapped))
   rows.push({ segments: [{ text: `${box.bl}${box.h.repeat(Math.max(0, width - 2))}${box.br}`, styles: border }], role: "continuation" })
   return rows
 }

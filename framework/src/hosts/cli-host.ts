@@ -28,7 +28,7 @@ import type {
 } from "./types.ts"
 import { EXECUTION_ROLES, NATIVE_MODEL_ID_RE, isWorkflowReadOnlyRole } from "./types.ts"
 import type { ExecutionRunStore } from "./run-state.ts"
-import type { CliHostActivity } from "./cli-progress.ts"
+import { cliToolDetail, validatedToolDetail, type CliHostActivity, type CliToolDisplay } from "./cli-progress.ts"
 import { awaitSkillPermission, type SkillPermissionPermit } from "../skills/broker.ts"
 import {
   assertSkillExecution, consumeSkillToolEffect, finishSkillInvocation, prepareSkillToolCall,
@@ -85,6 +85,8 @@ export type CliHostOptions = {
   runs: ExecutionRunStore
   /** Best-effort, content-free lifecycle events for a read-only host observer. */
   observeActivity?: (activity: CliHostActivity) => void
+  /** Display-only tool target/duration for the live transcript; separate so `observeActivity` stays content-free. */
+  observeToolDisplay?: (display: CliToolDisplay) => void
   /** A transport factory keeps native inference replaceable in deterministic host fixtures. */
   createTransport?: CliTransportFactory
   /**
@@ -297,12 +299,16 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
   if (!options || !["local", "codex", "claude"].includes(options.engine) ||
       typeof options.model !== "string" || !NATIVE_MODEL_ID_RE.test(options.model) ||
       !options.policy || !options.runs ||
-      (options.observeActivity !== undefined && typeof options.observeActivity !== "function")) {
+      (options.observeActivity !== undefined && typeof options.observeActivity !== "function") ||
+      (options.observeToolDisplay !== undefined && typeof options.observeToolDisplay !== "function")) {
     throw new TypeError("invalid CLI host options")
   }
 
   const observeActivity = (activity: CliHostActivity): void => {
     try { options.observeActivity?.(activity) } catch { /* Progress observers never affect host outcomes. */ }
+  }
+  const observeToolDisplay = (display: CliToolDisplay): void => {
+    try { options.observeToolDisplay?.(display) } catch { /* Display observers never affect host outcomes. */ }
   }
 
   type Target = { engine: CliEngine; model: string }
@@ -799,12 +805,19 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               callID,
               tool: name,
             }
+            const toolStartedAt = Date.now()
+            const startDetail = cliToolDetail(name, envelope.input)
             observeActivity({ kind: "tool-started" as const, ...activity })
+            observeToolDisplay({ executionID: activity.executionID, callID, phase: "started", ...(startDetail ? { detail: startDetail } : {}) })
             let terminalActivitySent = false
-            const finishTool = (outcome: "succeeded" | "failed" | "denied", ok: boolean): void => {
+            const finishTool = (outcome: "succeeded" | "failed" | "denied", ok: boolean, result?: CliToolOutput): void => {
               if (terminalActivitySent) return
               terminalActivitySent = true
+              const resultDetail = result === undefined ? undefined
+                : result.ok ? { resultLines: result.text.length === 0 ? 0 : result.text.split("\n").length } : { error: result.error }
               observeActivity({ kind: "tool-finished" as const, ...activity, outcome, ok })
+              observeToolDisplay({ executionID: activity.executionID, callID, phase: "finished", durationMs: Math.max(0, Date.now() - toolStartedAt),
+                ...(resultDetail ? { detail: validatedToolDetail(resultDetail) } : {}) })
             }
             if (toolCalls >= MAX_TOOL_ROUNDS) {
               finishTool("denied", false)
@@ -929,7 +942,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               return setFinal({ status: "failed", error: "Otter tool input or implementation failed closed" })
             }
             // This reports the tool effect itself; later result-policy failures are separate execution failures.
-            finishTool(output.ok ? "succeeded" : "failed", output.ok)
+            finishTool(output.ok ? "succeeded" : "failed", output.ok, output)
             const resultEvent = {
               type: "tool-result" as const,
               sessionID: callSession,

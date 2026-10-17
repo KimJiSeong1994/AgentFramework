@@ -12,7 +12,7 @@ import { consumeValidatedResumeProof } from "./admission.ts"
 import { validateComboRoutes } from "../hosts/default-model.ts"
 import type { ComboRoutes } from "../hosts/types.ts"
 
-export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "shell"
+export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "shell" | "verify"
 export type TranscriptRecord = { seq: number; kind: TranscriptKind; eventID: string; data: Record<string, unknown> }
 export type SessionMetadata = {
   version: 1
@@ -82,7 +82,7 @@ const MAX_EVENT_ID_BYTES = 16 * 1024
 const MAX_TOOL_TEXT_BYTES = 4096
 const noFollow = fs.constants.O_NOFOLLOW ?? 0
 const directoryOnly = fs.constants.O_DIRECTORY ?? 0
-const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice", "carried-context", "shell"])
+const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice", "carried-context", "shell", "verify"])
 /** Bounds for a persisted operator shell run (see hosts/operator-shell.ts). */
 export const MAX_SHELL_LINES = 200
 export const MAX_SHELL_OUTPUT_BYTES = 64 * 1024
@@ -607,6 +607,22 @@ function validateKindData(kind: TranscriptKind, data: Record<string, unknown>): 
         lines.length > MAX_SHELL_LINES || bytes > MAX_SHELL_OUTPUT_BYTES || !Number.isSafeInteger(data.totalLines) ||
         (data.totalLines as number) < lines.length) {
       throw new TypeError("shell transcript data must be {command,status,exitCode,signal,durationMs,lines,totalLines}")
+    }
+    return
+  }
+  if (kind === "verify") {
+    // A task's verify command as the queue ran it: command, bounded output tail, exit and timing (display only;
+    // the ledger stays the authority for task outcome).
+    const lines = data.lines
+    const bytes = Array.isArray(lines) ? lines.reduce((total: number, line) => total + (typeof line === "string" ? Buffer.byteLength(line, "utf8") + 1 : Infinity), 0) : Infinity
+    if (!exactKeys(data, ["taskID", "attempt", "command", "status", "exitCode", "durationMs", "timeoutMs", "lines", "totalLines"]) ||
+        !boundedText(data.taskID, 256) || !Number.isSafeInteger(data.attempt) || (data.attempt as number) < 0 ||
+        !boundedString(data.command, MAX_SHELL_COMMAND_BYTES) || !["complete", "error", "cancelled", "timeout"].includes(data.status as string) ||
+        !(data.exitCode === null || Number.isSafeInteger(data.exitCode)) ||
+        !Number.isSafeInteger(data.durationMs) || (data.durationMs as number) < 0 || !Number.isSafeInteger(data.timeoutMs) || (data.timeoutMs as number) < 0 ||
+        !Array.isArray(lines) || lines.length > MAX_SHELL_LINES || bytes > MAX_SHELL_OUTPUT_BYTES ||
+        !Number.isSafeInteger(data.totalLines) || (data.totalLines as number) < lines.length) {
+      throw new TypeError("verify transcript data must be {taskID,attempt,command,status,exitCode,durationMs,timeoutMs,lines,totalLines}")
     }
     return
   }

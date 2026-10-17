@@ -1,7 +1,8 @@
-import type { CliHostActivity } from "../hosts/cli-progress.ts"
+import type { CliHostActivity, CliToolDetail, CliToolDisplay } from "../hosts/cli-progress.ts"
 import type { CliProgressTask } from "../hosts/cli-progress.ts"
 import { settled, type ExecutionRunStatus } from "../hosts/run-state.ts"
 import type { TranscriptText } from "../hosts/interactive-view.ts"
+import { formatDuration } from "./progress.ts"
 
 export type ExecutionDisplay = {
   state: "not-observed" | "unconfirmed" | "settled" | "historical"
@@ -13,6 +14,8 @@ export type ShellItemStatus = "running" | "complete" | "error" | "cancelled" | "
 export type ShellItem = {
   kind: "shell"; id: string; ordinal: number; command: string; lines: string[]; totalLines: number
   status: ShellItemStatus; exitCode: number | null; signal: string | null; startedAt: number; durationMs?: number; expanded: boolean
+  /** "operator" = a `!command`; "verify" = a task's verify command run by the queue. */
+  source?: "operator" | "verify"; taskID?: string; attempt?: number; timeoutMs?: number
 }
 /** Collapsed shell windows show this many trailing output lines (GJC preview). */
 export const SHELL_PREVIEW_LINES = 20
@@ -21,7 +24,9 @@ export type TranscriptItem =
   | { kind: "text"; id: string; text: string; provenance: TranscriptText["provenance"] }
   | ShellItem
   | { kind: "tool"; id: string; ordinal: number; executionID: string; callID: string; taskID: string; name: string; role: string;
-      outcome: "running" | "succeeded" | "failed" | "denied"; expanded: boolean; evidence: string[]; execution: ExecutionDisplay }
+      outcome: "running" | "succeeded" | "failed" | "denied"; expanded: boolean; evidence: string[]; execution: ExecutionDisplay
+      /** Live-only (never restored): what the call targeted, its result size or error, and how long it ran. */
+      detail?: CliToolDetail; startedAt?: number; durationMs?: number }
 export type TranscriptDetail = { id: string; summary: string; lines: string[]; expandable: boolean }
 
 /** Session-scoped facts only. It cannot approve, cancel, or settle execution. */
@@ -34,6 +39,7 @@ export class TranscriptModel {
   private readonly historicalTasks = new Set<string>()
   private readonly historicalCalls = new Set<string>()
   private readonly shells = new Map<string, ShellItem>()
+  private readonly pendingDisplay = new Map<string, Partial<CliToolDisplay>>()
   private nextShellOrdinal = 0
   constructor(readonly sessionID: string, private readonly now: () => number = Date.now) {}
   get runningShell(): boolean {
@@ -149,24 +155,45 @@ export class TranscriptModel {
         execution: { state: "not-observed", fence: false, claim: false } }
       this.calls.set(id, item)
       this.entries.push(item)
+      const pending = historical ? undefined : this.pendingDisplay.get(id)
+      if (pending) {
+        this.pendingDisplay.delete(id)
+        if (pending.detail && Object.keys(pending.detail).length) item.detail = { ...pending.detail }
+        if (pending.durationMs !== undefined) item.durationMs = pending.durationMs
+      }
     }
     if (item.name !== activity.tool || item.taskID !== activity.taskID || item.role !== activity.role) {
       throw new Error("conflicting transcript tool identity")
     }
+    if (!historical && activity.kind === "tool-started") item.startedAt ??= this.now()
     if (activity.kind === "tool-finished") {
       if (item.outcome !== "running" && item.outcome !== activity.outcome) throw new Error("conflicting transcript terminal outcome")
       item.outcome = activity.outcome
+      if (!historical && item.durationMs === undefined && item.startedAt !== undefined) item.durationMs = Math.max(0, this.now() - item.startedAt)
     }
   }
 
+  /** Live-only target/result/duration for a tool call already in the transcript (or arriving just before it). */
+  toolDisplay(display: CliToolDisplay): void {
+    const id = `tool:${JSON.stringify([display.executionID, display.callID])}`
+    const item = this.calls.get(id)
+    if (!item || this.historicalCalls.has(id)) {
+      this.pendingDisplay.set(id, { ...this.pendingDisplay.get(id), ...display, detail: { ...this.pendingDisplay.get(id)?.detail, ...display.detail } })
+      if (this.pendingDisplay.size > 256) this.pendingDisplay.delete(this.pendingDisplay.keys().next().value!)
+      return
+    }
+    if (display.detail) item.detail = { ...item.detail, ...display.detail }
+    if (display.durationMs !== undefined) item.durationMs = display.durationMs
+  }
+
   /** Start a live shell window; `id` is the durable event identity used when it is persisted. */
-  shellStarted(id: string, command: string, ordinal?: number): ShellItem {
+  shellStarted(id: string, command: string, ordinal?: number, origin?: { source: "verify"; taskID: string; attempt: number; timeoutMs: number }): ShellItem {
     const existing = this.shells.get(id)
     if (existing) return existing
     const assigned = ordinal ?? this.nextShellOrdinal + 1
     this.nextShellOrdinal = Math.max(this.nextShellOrdinal, assigned)
     const item: ShellItem = { kind: "shell", id, ordinal: assigned, command, lines: [], totalLines: 0, status: "running",
-      exitCode: null, signal: null, startedAt: this.now(), expanded: false }
+      exitCode: null, signal: null, startedAt: this.now(), expanded: false, ...(origin ?? {}) }
     this.shells.set(id, item)
     this.entries.push(item)
     return item
@@ -221,8 +248,11 @@ export class TranscriptModel {
       if (item.kind === "shell") {
         const shown = item.expanded ? item.lines : item.lines.slice(-SHELL_PREVIEW_LINES)
         const hidden = item.totalLines - shown.length
+        const origin = item.source === "verify" && item.taskID
+          ? [`  : verify ${item.taskID} · attempt ${item.attempt ?? 1}${item.timeoutMs ? ` · timeout ${formatDuration(item.timeoutMs)}` : ""}`] : []
         return [
           `[Shell] $${item.ordinal} $ ${item.command}`,
+          ...origin,
           ...(hidden > 0 ? [`  : … ${hidden} earlier line${hidden === 1 ? "" : "s"}${item.expanded ? " not retained" : ` · /expand $${item.ordinal}`}`] : []),
           ...shown.map(line => `  | ${line}`),
           `  = ${shellFooter(item, this.now())}`,
@@ -239,20 +269,44 @@ export class TranscriptModel {
         ...(item.execution.fence ? ["fence retained"] : []),
         ...(item.execution.claim ? ["claim retained"] : []),
       ]
-      const summary = `${item.expanded ? "[-]" : "[+]"} #${item.ordinal} ${item.name} · call ${outcome}${execution.length ? ` · ${execution.join("; ")}` : ""} · task ${task?.title ?? "title unavailable"} · ${item.taskID} ${taskStatus}`
-      return item.expanded ? [summary, `  Call ${item.callID} · execution ${item.executionID} · ${item.role}`, ...item.evidence.map(line => `  ${line}`)] : [summary]
+      const target = toolTarget(item.name, item.detail)
+      const timing = item.durationMs !== undefined ? ` · ${formatDuration(item.durationMs)}`
+        : item.outcome === "running" && item.startedAt !== undefined && !this.historicalCalls.has(item.id) ? ` · ${formatDuration(this.now() - item.startedAt)}` : ""
+      const summary = `${item.expanded ? "[-]" : "[+]"} #${item.ordinal} ${item.name}${target ? ` ${target}` : ""}${timing} · call ${outcome}${execution.length ? ` · ${execution.join("; ")}` : ""}${item.taskID === item.executionID && !task ? "" : ` · task ${task?.title ?? "title unavailable"} · ${item.taskID}${taskStatus ? ` ${taskStatus}` : ""}`}`
+      const result = item.detail?.error ? [`  Error: ${item.detail.error}`]
+        : item.detail?.resultLines !== undefined ? [`  Result: ${item.detail.resultLines} line${item.detail.resultLines === 1 ? "" : "s"}`] : []
+      return item.expanded ? [summary, `  Call ${item.callID} · execution ${item.executionID} · ${item.role}`, ...result, ...item.evidence.map(line => `  ${line}`)] : [summary]
     })
   }
 }
 
-function seconds(ms: number): string {
-  return ms < 10_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms / 1000)}s`
+
+/**
+ * GJC-style target for a tool row: `path:120-140`, `pattern in path`, `path ⟦+3 / -1⟧`. Counts and paths only.
+ * The `·` separator is reserved for row fields, so targets never contain it.
+ */
+export function toolTarget(name: string, detail: CliToolDetail | undefined): string {
+  if (!detail) return ""
+  const path = detail.path?.replace(/ · /gu, " - ")
+  const pattern = detail.pattern?.replace(/ · /gu, " - ")
+  if (name === "read" && path) {
+    if (detail.offset === undefined && detail.limit === undefined) return path
+    const first = detail.offset ?? 1
+    return detail.limit !== undefined ? `${path}:${first}-${first + detail.limit - 1}` : `${path}:${first}-`
+  }
+  if ((name === "glob" || name === "grep") && pattern) return path ? `${JSON.stringify(pattern)} in ${path}` : JSON.stringify(pattern)
+  if ((name === "write" || name === "edit") && path) {
+    const counts = detail.added !== undefined || detail.removed !== undefined
+      ? ` ⟦+${detail.added ?? 0} / -${detail.removed ?? 0}⟧` : ""
+    return `${path}${counts}`
+  }
+  return path ?? pattern ?? ""
 }
 
 /** Status text for a shell window; the renderer picks its icon and color from the leading word. */
 export function shellFooter(item: ShellItem, now: number): string {
   if (item.status === "running") return `running · ${Math.floor((now - item.startedAt) / 1000)}s · Esc cancels`
-  const duration = seconds(item.durationMs ?? 0)
+  const duration = formatDuration(item.durationMs ?? 0)
   if (item.status === "cancelled") return `cancelled · ${duration}`
   if (item.status === "timeout") return `timed out · ${duration}`
   if (item.signal) return `signal ${item.signal} · ${duration}`

@@ -7,4 +7,6 @@ export type CoreDeps = {
   worktree: string
   config: OtterConfig
   log: Logger
+  /** Display-only: each finished verify command (see VerifyRunObservation). */
+  verifyRun?: (run: import("./hosts/types.ts").VerifyRunObservation) => void
 }

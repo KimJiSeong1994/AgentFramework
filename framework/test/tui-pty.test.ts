@@ -662,9 +662,10 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
   ])
   expect(report.scenarios.approve.capture.modeProof).toMatchObject({
     // The approve scenario runs after /ascii, so rows use the ASCII status icons and toggle.
+    // GJC layout: `<icon> Read · <duration>` then the toggle and call facts.
     toolItemsBeforeFilter: [
-      "+ > #1 read · call succeeded · execution not observed · task Implement · t1",
-      "x > #2 read · call failed · execution not observed · task Implement · t1",
+      expect.stringMatching(/^\+ Read · \d+ms > #1 · execution not observed · task Implement · t1$/u),
+      expect.stringMatching(/^x Read · \d+ms > #2 · call failed · execution not observed · task Implement · t1$/u),
     ],
     expandedCallDetailVisible: true,
     searchReadFailedVisible: true,

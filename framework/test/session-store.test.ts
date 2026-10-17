@@ -126,7 +126,7 @@ describe("durable session store", () => {
     expect(shown[1]).toBe("  : … 280 earlier lines · /expand $1")
     expect(shown[2]).toBe("  | line 6")
     expect(shown).toContain("  = exit 0 · 1.5s")
-    expect(shown.slice(-2)).toEqual(["[Shell] $2 $ sleep 9", "  = cancelled · 0.2s"])
+    expect(shown.slice(-2)).toEqual(["[Shell] $2 $ sleep 9", "  = cancelled · 200ms"])
     model.toggle("shell:a")
     expect(model.lines()[1]).toBe("  : … 275 earlier lines not retained")
     expect(model.lines()).toContain("  | line 1")

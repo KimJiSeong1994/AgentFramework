@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { DEFAULT_CONFIG, type OtterConfig } from "../src/config.ts"
 import { createExecutionRunStore } from "../src/hosts/run-state.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
-import type { ExecutionHandle, ExecutionOutcome, ExecutionReconciliation, ExecutionRequest, ExecutionRuntime } from "../src/hosts/types.ts"
+import type { ExecutionHandle, ExecutionOutcome, ExecutionReconciliation, ExecutionRequest, ExecutionRuntime, VerifyRunObservation } from "../src/hosts/types.ts"
 import { createQueue, getQueue, parseVerdict, reviewerPrompt, workerPrompt } from "../src/orchestration/queue.ts"
 import { createLegacyVerifierExecutor } from "../src/orchestration/legacy-verifier.ts"
 import type { VerificationHandle, VerificationRequest, VerificationResult } from "../src/orchestration/verifier.ts"
@@ -1541,6 +1541,41 @@ describe("neutral execution queue", () => {
     expect(f.requests[0]?.executionID).not.toBe(f.requests[1]?.executionID)
     expect(f.runtime.runs.status().executions.filter(execution => execution.kind === "verifier").map(execution => [execution.verifierDispatch, execution.terminal?.outcome]))
       .toEqual([["started", "fail"], ["started", "ok"]])
+  })
+
+  test("each verify run is reported for display with command, output, exit, duration and timeout", async () => {
+    const f = fixture({ delegate: { review: false, max_attempts: 2 } as OtterConfig["delegate"] })
+    const runs: VerifyRunObservation[] = []
+    f.runtime.observe = { ...f.runtime.observe, verifyRun: run => { runs.push(run) } }
+    let calls = 0
+    f.replies.set("worker", () => {
+      if (++calls === 2) writeFileSync(join(wt.worktree, "ready.txt"), "ok\n")
+      return { status: "completed", text: "Open issues: none" }
+    })
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "retry", verify: verify("check_shown.sh", "echo checking; test -f ready.txt") }])
+    expect(await q.run(S)).toMatchObject({ done: 1, failed: 0 })
+    const id = readLedger(wt.worktree, S).tasks[0]!.id
+    expect(runs.map(run => ({ taskID: run.taskID, attempt: run.attempt, command: run.command, ok: run.ok, exitCode: run.exitCode })))
+      .toEqual([
+        { taskID: id, attempt: 1, command: "sh check_shown.sh", ok: false, exitCode: 1 },
+        { taskID: id, attempt: 2, command: "sh check_shown.sh", ok: true, exitCode: 0 },
+      ])
+    for (const run of runs) {
+      expect(run.output).toContain("checking")
+      expect(run.durationMs).toBeGreaterThanOrEqual(0)
+      expect(run.timeoutMs).toBe(f.runtime.config.delegate.verify_timeout_ms)
+      expect(run.sessionID).toBe(S)
+    }
+  })
+
+  test("a throwing verify display observer never changes the queue outcome", async () => {
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as OtterConfig["delegate"] })
+    f.runtime.observe = { ...f.runtime.observe, verifyRun: () => { throw new Error("display broke") } }
+    f.replies.set("worker", () => ({ status: "completed", text: "Open issues: none" }))
+    const q = createQueue(f.runtime)
+    q.add(S, [{ title: "still ok", verify: verify("check_ok.sh", "exit 0") }])
+    expect(await q.run(S)).toMatchObject({ done: 1, failed: 0 })
   })
 
   test("ACK without quiescence fences execution and blocks verifier and retry", async () => {

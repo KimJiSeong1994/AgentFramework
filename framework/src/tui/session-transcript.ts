@@ -71,6 +71,18 @@ export function restoreTranscript(
       }
       model.shellStarted(record.eventID, data.command, shellOrdinalFor?.(record.eventID))
       model.shellFinished(record.eventID, { status, exitCode: data.exitCode, signal: data.signal, durationMs: data.durationMs, lines: data.lines as string[], totalLines: data.totalLines })
+    } else if (record.kind === "verify") {
+      const status = data.status
+      if (typeof data.command !== "string" || typeof data.taskID !== "string" || typeof data.attempt !== "number" ||
+          typeof data.timeoutMs !== "number" || !Array.isArray(data.lines) || !data.lines.every(line => typeof line === "string") ||
+          typeof data.totalLines !== "number" || typeof data.durationMs !== "number" ||
+          (status !== "complete" && status !== "error" && status !== "cancelled" && status !== "timeout") ||
+          !(data.exitCode === null || typeof data.exitCode === "number")) {
+        throw new Error("invalid stored verify run")
+      }
+      model.shellStarted(record.eventID, data.command, shellOrdinalFor?.(record.eventID),
+        { source: "verify", taskID: data.taskID, attempt: data.attempt, timeoutMs: data.timeoutMs })
+      model.shellFinished(record.eventID, { status, exitCode: data.exitCode, signal: null, durationMs: data.durationMs, lines: data.lines as string[], totalLines: data.totalLines })
     } else if (record.kind === "carried-context") {
       const messages = Array.isArray(data.messages) ? data.messages as Array<{ role?: unknown; text?: unknown }> : []
       if (typeof data.engine !== "string" || typeof data.model !== "string" ||

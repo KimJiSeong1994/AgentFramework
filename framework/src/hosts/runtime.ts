@@ -108,6 +108,7 @@ export function createExecutionRuntime(
     observe: {
       task: (fact) => observeSkillTask(deps, fact),
       verification: (fact) => observeSkillVerification(deps, fact),
+      ...(deps.verifyRun ? { verifyRun: deps.verifyRun } : {}),
     },
     ...(deps.config.data.backend === "none" ? {} : {
       dataChecks: async (sql: string, suiteName: string) => {
