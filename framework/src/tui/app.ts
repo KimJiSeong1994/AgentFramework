@@ -364,8 +364,8 @@ export class TuiApp implements Terminal {
   private homeScreen(): FrameHome {
     const ascii = this.asciiChrome
     const logo = ascii
-      ? ["L     CCCC  AAA ", "L    C     A   A", "L    C     AAAAA", "LLLL  CCCC A   A"]
-      : ["█     ▄███▄  ▄███▄", "█     █      █   █", "█     █      █████", "████▄ ▀███▀  █   █"]
+      ? [" OO  TTTT TTTT EEEE RRR ", "O  O  TT   TT  EEE  R  R", "O  O  TT   TT  E    RRR ", " OO   TT   TT  EEEE R  R"]
+      : ["▄██▄ ████ ████ ████ ███▄", "█  █  ██   ██  █▄▄  █  █", "█  █  ██   ██  █    ███▀", "▀██▀  ██   ██  ████ █ ▀▄"]
     const selection = this.viewFacts ? selectionLabel(this.viewFacts.selection) : undefined
     const keys = this.separator()
     return {

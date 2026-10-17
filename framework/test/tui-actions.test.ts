@@ -81,6 +81,8 @@ describe("exclusive application input ownership", () => {
 
     const frame = plain(frames.at(-1))
     expect(frame).toContain("╭─ Otter · local coding agent ─")
+    expect(frame).toContain("▄██▄ ████ ████ ████ ███▄")
+    expect(frame).not.toContain("▄███▄  ▄███▄")
     expect(frame).toContain("⬢ local / model-known")
     expect(frame).toContain("No messages yet.")
     expect(frame).toContain("Type, then press Enter.")
