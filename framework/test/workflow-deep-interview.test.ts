@@ -752,7 +752,7 @@ describe("early exit (/finish)", () => {
 
 // ---------------------------------------------------------------------------------------------- roles and boundary
 describe("roles are read-only and typed", () => {
-  test("every execution is a read-only role whose tools are within read/list/glob/grep, and each stage uses its registered role", async () => {
+  test("every execution is a read-only role whose tools are within read/list/glob/grep/memory, and each stage uses its registered role", async () => {
     const h = harness(happy())
     const wf = begin(h)
     await run(h, wf, makeIo({ answers: twoAnswers() }).io)
@@ -765,7 +765,7 @@ describe("roles are read-only and typed", () => {
       expect(item.role).toBe(expected[item.promptId]!)
       expect(kindAllowsRole("deep-interview", item.role)).toBe(true)
       expect(item.role).not.toBe("main")
-      for (const tool of item.allowed) expect(["read", "list", "glob", "grep"]).toContain(tool)
+      for (const tool of item.allowed) expect(["read", "list", "glob", "grep", "memory"]).toContain(tool)
       expect(item.allowed.length).toBeGreaterThan(0)
     }
   })

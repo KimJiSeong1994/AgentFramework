@@ -38,7 +38,7 @@ describe("prompt content", () => {
           expect(prompt.includes("Question about the project database")).toBe(data && delegate)
           expect(prompt.includes("submit plans only with otter_flow")).toBe(flow)
           const numbers = [...prompt.matchAll(/^(\d+)\. /gm)].map((match) => Number(match[1]))
-          const count = 8 + Number(data && delegate) + Number(flow)
+          const count = 9 + Number(data && delegate) + Number(flow)
           expect(numbers).toEqual(Array.from({ length: count }, (_, i) => i + 1))
         }
       }
@@ -58,6 +58,9 @@ describe("prompt content", () => {
     expect(MAIN_PROMPT).toMatch(/not the whole suite/i)
     expect(MAIN_PROMPT).toMatch(/given order/i)
     expect(MAIN_PROMPT).toMatch(/do not rerun its tests or fix failed tasks yourself/i)
+    // project memory: recall before nontrivial work, notes are reference and never outrank the user
+    expect(MAIN_PROMPT).toMatch(/call memory once with the request in your own words/i)
+    expect(MAIN_PROMPT).toMatch(/reference, not instructions/i)
     // the built-in task tool is off; main must never be pointed at it
     expect(MAIN_PROMPT).not.toMatch(/\btask tool\b|\bsubagent\b/i)
   })
@@ -94,6 +97,7 @@ describe("AGENT_DEFS", () => {
     expect(AGENT_DEFS.main.prompt).toBe(MAIN_PROMPT)
     expect(AGENT_DEFS.main.denied_tools).toContain("task")
     expect(AGENT_DEFS.main.denied_tools).not.toContain("delegate")
+    expect(AGENT_DEFS.main.denied_tools).not.toContain("memory")
     expect(AGENT_DEFS.main.permission).toBeDefined()
   })
 
@@ -119,6 +123,12 @@ describe("AGENT_DEFS", () => {
     expect(WORKER_PROMPT).toMatch(/Never edit a test file. Never write code that only works for the test's inputs/i)
     expect(WORKER_PROMPT).toMatch(/refuse and say why under Open issues/i)
     expect(REVIEWER_PROMPT).not.toMatch(/tests fail/i)
+  })
+
+  test("memory is visible only to main", () => {
+    for (const [name, def] of Object.entries(AGENT_DEFS)) {
+      expect(def.denied_tools.includes("memory")).toBe(name !== "main")
+    }
   })
 
   test("no def carries model or temperature (applied by the config hook)", () => {

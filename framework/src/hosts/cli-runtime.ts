@@ -7,6 +7,7 @@ import { createExecutionRuntime } from "./runtime.ts"
 import { validateComboRoutes } from "./default-model.ts"
 import { CONFIG_MODEL_ROLES, type ComboRoutes, type ExecutionRole, type ExecutionRuntime } from "./types.ts"
 import type { CliProgressSink } from "./cli-progress.ts"
+import { currentMemoryConfig } from "../wiki/recall.ts"
 
 export type CliRuntimeOptions = { worktree: string; engine: CliEngine; model: string; progress?: CliProgressSink
   /** Per-role routes pinned for this runtime; roles absent (or equal to the anchor) use engine/model. */
@@ -60,6 +61,7 @@ export function createCliRuntime(options: CliRuntimeOptions): ExecutionRuntime {
       ...(Object.keys(routes).length ? { routes } : {}),
       policy,
       runs,
+      loadMemory: () => currentMemoryConfig(worktree),
       ...(options.progress ? { observeActivity: options.progress.host } : {}),
       ...(options.createTransport ? { createTransport: options.createTransport } : {}),
     }), {

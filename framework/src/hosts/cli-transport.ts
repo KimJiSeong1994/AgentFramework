@@ -157,6 +157,11 @@ function findExecutable(engine: CliEngine): string {
   throw new Error(SAFE_ERRORS.executable)
 }
 
+/** Whether the engine's CLI is an executable file on PATH (the same lookup a transport run uses). */
+export function cliExecutableAvailable(engine: CliEngine): boolean {
+  try { findExecutable(engine); return true } catch { return false }
+}
+
 function isWithin(parent: string, candidate: string): boolean {
   const path = relative(parent, candidate)
   return path === "" || (path !== ".." && !path.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(path))

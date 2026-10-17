@@ -49,7 +49,7 @@ describe("host-neutral execution tool policy", () => {
     const p = createExecutionPolicy(input)
     for (const role of WORKFLOW_READ_ONLY_ROLES) {
       const snapshot = p.resolve(role)
-      expect(snapshot.tools.allowed).toEqual(["read", "list", "glob", "grep"])
+      expect(snapshot.tools.allowed).toEqual(["read", "list", "glob", "grep", "memory"])
       expect(snapshot.tools.denied).toEqual(expect.arrayContaining(["write", "edit", "bash", "delegate", "task", "otter_flow", "skill"]))
       expect(snapshot.model).toEqual({ providerID: "local", modelID: "selected-model" })
       expect(Object.isFrozen(snapshot)).toBe(true)
@@ -83,7 +83,7 @@ describe("host-neutral execution tool policy", () => {
     expect(Object.isFrozen(main.tools.allowed)).toBe(true)
     expect(Object.isFrozen(main.tools.denied)).toBe(true)
     expect(Object.isFrozen(main.system)).toBe(true)
-    expect(main.tools.allowed).toEqual(["read", "list", "glob", "grep"])
+    expect(main.tools.allowed).toEqual(["read", "list", "glob", "grep", "memory"])
     expect(main.tools.denied).toEqual(expect.arrayContaining([
       "write", "edit", "patch", "apply_patch", "multiedit", "bash", "delegate", "otter_flow",
       "webfetch", "skill", "todowrite", "todoread", "db_query", "schema_lookup", "task",
@@ -94,6 +94,7 @@ describe("host-neutral execution tool policy", () => {
     expect(main.id).not.toBe(createExecutionPolicy(config()).resolve("main").id)
     const handlers = p.handlers(request(p, "main"))
     expect(handlers.beforeTool({ type: "tool-before", sessionID: "main", callID: "read", toolID: "t", name: "read", input: {} })).toEqual({ allow: true })
+    expect(handlers.beforeTool({ type: "tool-before", sessionID: "main", callID: "memory", toolID: "t", name: "memory", input: { query: "cache" } })).toEqual({ allow: true })
     expect(handlers.beforeTool({ type: "tool-before", sessionID: "main", callID: "bash", toolID: "t", name: "bash", input: {} })).toMatchObject({ allow: false })
   })
 

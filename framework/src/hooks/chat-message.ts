@@ -33,6 +33,7 @@ import { assertNever } from "../workflows/types.ts"
 import { hasOtterMarker, stripForgedMarkers } from "../modes/markers.ts"
 import type { ActiveMode } from "../modes/instructions.ts"
 import { createSkillRouter } from "../routing/router.ts"
+import { cancelMemoryPrefetch, currentMemoryConfig, startMemoryPrefetch } from "../wiki/recall.ts"
 import { recordRoutingAdvice } from "../telemetry/routing.ts"
 import { observeSkillTurn, observationConfigGeneration } from "../telemetry/skill-observer.ts"
 import { consumeCommandTurn } from "./command-turns.ts"
@@ -401,8 +402,9 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       log("chat.message: non-main agent, no mode detection", { sessionID, agent: input.agent })
       return
     }
-    // Any newer main-agent turn, including /stop or synthetic input, invalidates older advice.
+    // Any newer main-agent turn, including /stop or synthetic input, invalidates older advice and memory prefetch.
     router.cancel(sessionID)
+    cancelMemoryPrefetch(sessionID)
 
     const part = lastUserText(output.parts)
     if (!part) {
@@ -575,6 +577,8 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       part.text += resume
       // Explicit commands and existing continuation offers retain their own authority.
       if (input.agent !== "main" || resume || commandTurn || originalText.trimStart().startsWith("/") || readAbort(worktree, sessionID)) return
+      // Opt-in: memory inference overlaps the router and the main model's first step; the memory tool consumes it.
+      startMemoryPrefetch(worktree, sessionID, originalText, currentMemoryConfig(worktree))
       const recommendation = await router.recommend(sessionID, messageID, originalText)
       if (!admitted()) return
       let adviceInserted = false

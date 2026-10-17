@@ -22,7 +22,7 @@ export function isErrorOutput(output: string): boolean { return ERROR_OUTPUT.tes
 
 const KNOWN_TOOLS: readonly string[] = EXECUTION_TOOL_NAMES
 const REVIEW_TOOLS = ["read", "glob", "grep", "list"]
-const PLANNING_MAIN_TOOLS: readonly string[] = Object.freeze(["read", "list", "glob", "grep"])
+const PLANNING_MAIN_TOOLS: readonly string[] = Object.freeze(["read", "list", "glob", "grep", "memory"])
 const PLANNING_MAIN_PROMPT = "You are the planning role of the common Otter terminal. Discuss the request, inspect files with read-only tools, and create a concrete plan when asked. Never modify files, run commands, execute or approve plans, or delegate work. Do not imply work was executed."
 const SYSTEM: Record<ExecutionRole, string> = {
   main: "", worker: WORKER_PROMPT, reviewer: REVIEWER_PROMPT,
@@ -59,9 +59,10 @@ function freezeNativeContext(supplied: unknown): Readonly<{ identity: string; in
 export function createExecutionPolicy(config: Readonly<OtterConfig>, options: ExecutionPolicyOptions = {}): ExecutionPolicy {
   const planningOnlyMain = options.planningOnlyMain === true
   const nativeContext = options.nativeContext === undefined ? undefined : freezeNativeContext(options.nativeContext)
-  // `chat` (launch model) and `skill_trust` (user-config consent prompt skip) are host UI state; they never shape
-  // execution, so they stay out of role identity.
-  const { chat: _chat, skill_trust: _trust, ...identityConfig } = config as typeof config & { skill_trust?: unknown }
+  // `chat` (launch model), `skill_trust` (user-config consent prompt skip) and `memory` (recall engine, re-read per
+  // `memory` call and switched live by /memory) never shape a role's prompt, tools or limits, so they stay out of
+  // role identity.
+  const { chat: _chat, skill_trust: _trust, memory: _memory, ...identityConfig } = config as typeof config & { skill_trust?: unknown }
   const snapshots = new Map<ExecutionRole, ExecutionPolicySnapshot>()
   const sessions = new Map<string, ExecutionPolicyHandlers>()
   const sessionSnapshots = new Map<string, ExecutionPolicySnapshot>()

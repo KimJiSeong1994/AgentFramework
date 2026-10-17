@@ -180,7 +180,7 @@ describe("config hook", () => {
 
   test("keeps unrelated user agents untouched apart from hiding delegate", async () => {
     const c = await run({ agent: { build: { prompt: "b" }, plan: { model: "x/y" }, other: { prompt: "o" } } })
-    const hidden = { delegate: "deny", db_query: "deny", schema_lookup: "deny", "evo-semantic_*": "deny", otter_flow: "deny" }
+    const hidden = { delegate: "deny", db_query: "deny", schema_lookup: "deny", "evo-semantic_*": "deny", otter_flow: "deny", memory: "deny" }
     expect(c.agent?.build).toEqual({ prompt: "b", permission: hidden } as any)
     expect(c.agent?.plan).toEqual({ model: "x/y", permission: hidden } as any)
     expect(c.agent?.other).toEqual({ prompt: "o" })

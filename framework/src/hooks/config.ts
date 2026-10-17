@@ -131,7 +131,7 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
     // OpenCode's built-in primary agents (Tab-switchable) so their prefix does not pay for them.
     for (const other of ["build", "plan"]) {
       const a = (config.agent[other] ??= {})
-      a.permission = { ...a.permission, delegate: "deny", db_query: "deny", schema_lookup: "deny", "evo-semantic_*": "deny", otter_flow: "deny" } as AgentConfig["permission"]
+      a.permission = { ...a.permission, delegate: "deny", db_query: "deny", schema_lookup: "deny", "evo-semantic_*": "deny", otter_flow: "deny", memory: "deny" } as AgentConfig["permission"]
     }
 
     // (b3) EvoOntology semantic MCP (stdio, vendored server). Registered only with a data backend and an existing

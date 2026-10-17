@@ -85,7 +85,7 @@ describe("TUI command and skill palette", () => {
 
   test("skills appear only where they can be invoked; commands follow the context", () => {
     expect(palette(catalog, "/rev", "unselected")).toBeUndefined()
-    expect(palette(catalog, "/mo", "unselected")?.rows.map(row => row.label)).toEqual(["/model"])
+    expect(palette(catalog, "/mo", "unselected")?.rows.map(row => row.label)).toEqual(["/model", "/memory"])
     expect(palette(catalog, "/", "read-only")!.rows.some(row => row.kind === "skill")).toBe(false)
   })
 

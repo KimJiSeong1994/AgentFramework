@@ -176,6 +176,31 @@ export type OtterConfig = {
     min_probability: number
     min_margin: number
   }
+  /**
+   * Agent memory recall (`memory` tool): an inference engine links the request to knowledge/wiki pages listed in
+   * the wiki index. `auto` (default) uses the Claude CLI when it is on PATH, else the Codex CLI, so no local model
+   * server is needed; `claude`/`codex`/`local` pin that CLI (run tool-free through the Otter CLI transport);
+   * `jev` is the local OpenJev server at `endpoint`. claude/codex send the request text and the index titles to that
+   * vendor. Recall output is reference data, never instructions or authorization. Validated at use, read per call.
+   */
+  memory: {
+    engine: "auto" | "claude" | "codex" | "local" | "jev" | "off"
+    /**
+     * Native model ID for claude/codex/local. Unset claude/codex (and auto) use the built-in memory defaults
+     * (claude-haiku-5-5, gpt-5.6-luna); local requires it; jev and off ignore it.
+     */
+    model?: string
+    endpoint: string
+    timeout_ms: number
+    /** a page is linked only when its probability is at least this and above the `none` probability */
+    min_probability: number
+    max_pages: number
+    /**
+     * Start recall when a user turn reaches main, in parallel with the model's first step; the first memory call of
+     * the turn consumes it. Costs one inference per main turn (also turns that never call memory). Default off.
+     */
+    prefetch?: boolean
+  }
   /** Stage 2: serial worker delegation (delegate tool + idle-loop resume). */
   delegate: {
     /** Explicit verifier selection; Linux admission never falls back to the legacy executor. */
@@ -307,6 +332,9 @@ export const DEFAULT_CONFIG: OtterConfig = {
     min_probability: 0.95,
     min_margin: 0.2,
   },
+  // CLI engines answered in 3-6 s (claude haiku, 2026-10-17); 30 s fails fast on a stuck CLI. A local Jev server under
+  // memory pressure measured 43-72 s, so `jev` users should raise timeout_ms.
+  memory: { engine: "auto", prefetch: true, endpoint: "http://127.0.0.1:8080", timeout_ms: 30_000, min_probability: 0.3, max_pages: 3 },
   delegate: {
     verifier: "legacy-unowned",
     review: true,

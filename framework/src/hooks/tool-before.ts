@@ -81,7 +81,7 @@ export function wikiRawTarget(deps: HookDeps, tool: string, args: unknown): stri
 
 // §5.4 planning boundary allowlist: read-only tools while the owning session's workflow is planning/reviewing/
 // pending_approval or stuck(plan_invalid|no_submission). bash is allowed subject to bashPolicyProblem.
-const BOUNDARY_ALLOWED_TOOLS = new Set(["read", "glob", "grep", "list", "skill", "todowrite", "todoread", "otter_flow", "bash"])
+const BOUNDARY_ALLOWED_TOOLS = new Set(["read", "glob", "grep", "list", "memory", "skill", "todowrite", "todoread", "otter_flow", "bash"])
 const BOUNDARY_PHASES = new Set<Phase>(["planning", "reviewing", "pending_approval"])
 // While an approved plan executes, main may read, inspect with read-only bash, and resume the queue; writes go
 // through the workers only.

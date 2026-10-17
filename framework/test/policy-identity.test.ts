@@ -32,12 +32,12 @@ test("legacy role identities survive UI toggles and unrelated home skill roots",
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
-test("a persisted chat default model or skill trust list never changes role identity", async () => {
+test("a persisted chat default model, skill trust list or memory engine never changes role identity", async () => {
   const { DEFAULT_CONFIG } = await import("../src/config.ts")
   const { createExecutionPolicy } = await import("../src/hosts/tool-policy.ts")
   const plain = createExecutionPolicy(DEFAULT_CONFIG, { planningOnlyMain: true })
   const withDefault = createExecutionPolicy({ ...DEFAULT_CONFIG, chat: { default_model: { engine: "codex", model: "gpt-5-codex" } },
-    skill_trust: ["code-review", "~/.codex/skills"] } as typeof DEFAULT_CONFIG, { planningOnlyMain: true })
+    skill_trust: ["code-review", "~/.codex/skills"], memory: { ...DEFAULT_CONFIG.memory, engine: "claude", model: "haiku" } } as typeof DEFAULT_CONFIG, { planningOnlyMain: true })
   for (const role of Object.keys(baseline.fixtures[0]!.snapshots)) {
     expect(withDefault.resolve(role as never).id).toBe(plain.resolve(role as never).id)
   }
@@ -72,10 +72,12 @@ test("CLI selection preserves frozen model keys and old serialized policy inputs
       const actual = JSON.parse(result.stdout.toString())
       // The runtime carries `chat` (launch selection), but role identity is still derived from the frozen policy input.
       expect(actual.config).toEqual({ ...expectedConfig, chat: {} })
+      // `memory` is runtime recall config, outside role identity (see tool-policy.ts).
+      const { memory: _memory, ...identityConfig } = expectedConfig
       for (const [name, snapshot] of Object.entries(captured.snapshots)) {
         const { id: _id, role, ...rest } = snapshot
         const resolved = { role, model: selected, ...rest }
-        const id = `otter:${name}:${createHash("sha256").update(JSON.stringify({ resolved, config: expectedConfig })).digest("hex")}`
+        const id = `otter:${name}:${createHash("sha256").update(JSON.stringify({ resolved, config: identityConfig })).digest("hex")}`
         expect(actual.snapshots[name]).toEqual({ id, ...resolved })
       }
       for (const name of ["interviewer", "planner", "architect", "critic", "researcher", "contrarian", "simplifier"]) {

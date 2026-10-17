@@ -11,6 +11,7 @@ export type InteractiveAction = Readonly<{
 const all: readonly InteractiveAction[] = [
   { id: "help", syntax: "/help", summary: "show contextual commands and keys", contexts: ["chat", "busy", "held", "read-only", "selection", "unselected"] },
   { id: "model", syntax: "/model [engine native-id | default ... | combo ...]", summary: "pick a model or a per-role combo; /model default sets the startup default; /model combo opens the combo menu", contexts: ["chat", "selection", "unselected"] },
+  { id: "memory", syntax: "/memory [show | test | auto | claude [model] | codex [model] | local <model> | jev | off]", summary: "show, measure (test) or pick the engine that links requests to wiki memory; applies to the next memory call", contexts: ["chat", "held", "read-only", "unselected"] },
   { id: "sessions", syntax: "/sessions", summary: "inspect or choose retained sessions", contexts: ["chat", "held", "read-only", "selection"] },
   { id: "resume", syntax: "/resume <sid>", summary: "open a retained session through existing checks", contexts: ["chat", "held", "read-only", "selection"] },
   { id: "new", syntax: "/new", summary: "start a new conversation after release checks", contexts: ["chat", "held", "read-only"] },
