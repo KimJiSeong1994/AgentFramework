@@ -134,9 +134,9 @@ function recoveryHarness(options: { record?: boolean; policyID?: string; profile
   const stateHome = mkdtempSync(join(tmpdir(), "opencode-recovery-state-"))
   const worktree = mkdtempSync(join(tmpdir(), "opencode-recovery-worktree-"))
   const previousStateHome = process.env.XDG_STATE_HOME
-  const previousLcaStateHome = process.env.LCA_STATE_HOME
+  const previousOtterStateHome = process.env.OTTER_STATE_HOME
   process.env.XDG_STATE_HOME = stateHome
-  delete process.env.LCA_STATE_HOME
+  delete process.env.OTTER_STATE_HOME
   const executionAuthority = tempExecutionAuthority(worktree)
   const calls: Array<{ method: string; options: unknown }> = []
   const responses = {
@@ -177,8 +177,8 @@ function recoveryHarness(options: { record?: boolean; policyID?: string; profile
       const released = executionAuthority.release({ preserve: false })
       if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME
       else process.env.XDG_STATE_HOME = previousStateHome
-      if (previousLcaStateHome === undefined) delete process.env.LCA_STATE_HOME
-      else process.env.LCA_STATE_HOME = previousLcaStateHome
+      if (previousOtterStateHome === undefined) delete process.env.OTTER_STATE_HOME
+      else process.env.OTTER_STATE_HOME = previousOtterStateHome
       if (!released.removed) {
         throw new Error(`cannot clean OpenCode recovery fixture; execution authority retained at ${released.path}${released.reason ? ` (${released.reason})` : ""}; worktree retained at ${worktree}; stateHome retained at ${stateHome}`)
       }

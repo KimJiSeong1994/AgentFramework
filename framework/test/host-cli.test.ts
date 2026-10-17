@@ -121,7 +121,7 @@ function statusInputSnapshot() {
 }
 
 function admissionServer(worktree: string, sessionID: string) {
-  const plugin = pathToFileURL(join(realpathSync(worktree), ".opencode/plugins/lca.ts")).href
+  const plugin = pathToFileURL(join(realpathSync(worktree), ".opencode/plugins/otter.ts")).href
   const dangerous = ["edit", "write", "patch", "bash", "task", "delegate", "webfetch"]
   const denied = Object.fromEntries(dangerous.map(tool => [tool, "deny"]))
   const nativeRules = [{ permission: "*", pattern: "*", action: "allow" },
@@ -155,8 +155,8 @@ describe("foreground CLI", () => {
       const result = await invokeCli(argv)
       expect(result.exitCode).toBe(0)
       expect(result.stdout).toContain("Usage:")
-      expect(result.stdout).toContain("lca status --worktree")
-      expect(result.stdout).toContain("lca run --plan")
+      expect(result.stdout).toContain("otter status --worktree")
+      expect(result.stdout).toContain("otter run --plan")
       expect(result.stdout).toContain("Common-engine workflow commands")
       expect(result.stdout).toContain("--engine local|codex|claude --model ID --session ID")
       expect(result.stdout).toContain("Standalone commands do not start a server")
@@ -215,7 +215,7 @@ describe("foreground CLI", () => {
       expect(result.exitCode).toBe(2)
       expect(result.stdout).toBe("")
       expect(result.stderr).toContain(diagnostic)
-      expect(result.stderr).toContain("lca --help")
+      expect(result.stderr).toContain("otter --help")
       expect(result.stderr).not.toContain(secret)
       expect(existsSync(stateRoot(wt.worktree))).toBe(false)
     }
@@ -233,12 +233,12 @@ describe("foreground CLI", () => {
 
   test("runtime configuration failures remain redacted", async () => {
     const secret = "private-config-sentinel"
-    const config = join(wt.worktree, ".lca", "lca.jsonc")
-    mkdirSync(join(wt.worktree, ".lca"), { recursive: true })
+    const config = join(wt.worktree, ".otter", "otter.jsonc")
+    mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
     writeFileSync(config, `{"private":"${secret}", broken`)
     const result = await invokeCli(["status", "--worktree", wt.worktree])
     expect(result.exitCode).toBe(1)
-    expect(result.stderr).toContain("lca: command refused or failed")
+    expect(result.stderr).toContain("otter: command refused or failed")
     expect(result.stderr).not.toContain(secret)
     expect(result.stderr).not.toContain(config)
     expect(result.stdout).toBe("")
@@ -259,10 +259,10 @@ describe("foreground CLI", () => {
       risks: ["might break x"],
       revision: 1,
     }))
-    mkdirSync(join(wt.worktree, ".lca"), { recursive: true })
+    mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
 
     for (const disabledHooks of [["config.agents"], []]) {
-      writeFileSync(join(wt.worktree, ".lca/lca.jsonc"), JSON.stringify({ disabled_hooks: disabledHooks, flow: { enabled: true } }))
+      writeFileSync(join(wt.worktree, ".otter/otter.jsonc"), JSON.stringify({ disabled_hooks: disabledHooks, flow: { enabled: true } }))
       const fixture = admissionServer(wt.worktree, sessionID)
       try {
         const result = await invokeCli(["import", "--worktree", wt.worktree, "--server", `http://127.0.0.1:${fixture.server.port}`,
@@ -295,8 +295,8 @@ describe("foreground CLI", () => {
       risks: ["might break x"],
       revision: 1,
     }))
-    mkdirSync(join(wt.worktree, ".lca"), { recursive: true })
-    writeFileSync(join(wt.worktree, ".lca/lca.jsonc"), JSON.stringify({ flow: { enabled: true } }))
+    mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".otter/otter.jsonc"), JSON.stringify({ flow: { enabled: true } }))
     const fixture = admissionServer(wt.worktree, sessionID)
     try {
       const args = parseCliArgs(["run", "--worktree", wt.worktree, "--server", `http://127.0.0.1:${fixture.server.port}`,
@@ -312,13 +312,13 @@ describe("foreground CLI", () => {
 
   test("invalid server addresses are usage errors before config or server access", async () => {
     const secret = "private-config-sentinel"
-    mkdirSync(join(wt.worktree, ".lca"), { recursive: true })
-    writeFileSync(join(wt.worktree, ".lca", "lca.jsonc"), `{"private":"${secret}", broken`)
+    mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".otter", "otter.jsonc"), `{"private":"${secret}", broken`)
     const result = await invokeCli(["run", "--worktree", wt.worktree, "--server", "https://192.0.2.1:4096", "--session", "ses_local"])
     expect(result.exitCode).toBe(2)
     expect(result.stderr).toContain("loopback IP")
     expect(result.stderr).not.toContain(secret)
-    expect(result.stderr).toContain("lca --help")
+    expect(result.stderr).toContain("otter --help")
     expect(existsSync(stateRoot(wt.worktree))).toBe(false)
   })
 
@@ -342,14 +342,14 @@ describe("foreground CLI", () => {
   })
 
   test("competing plugins and conflicting reviewer configuration refuse admission before session/model execution", async () => {
-    const plugin = pathToFileURL(join(realpathSync(wt.worktree), ".opencode/plugins/lca.ts")).href
+    const plugin = pathToFileURL(join(realpathSync(wt.worktree), ".opencode/plugins/otter.ts")).href
     const dangerous = ["edit", "write", "patch", "bash", "task", "delegate", "webfetch"]
     const denied = Object.fromEntries(dangerous.map(tool => [tool, "deny"]))
     const nativeRules = [{ permission: "*", pattern: "*", action: "allow" },
       ...dangerous.map(tool => ({ permission: tool, pattern: "*", action: "deny" }))]
     let sessions = 0
     const cases = [
-      { plugins: [plugin, "oh-my-openagent"], mode: "subagent", override: false, expected: "only the project LCA plugin" },
+      { plugins: [plugin, "oh-my-openagent"], mode: "subagent", override: false, expected: "only the project Otter plugin" },
       { plugins: [plugin], mode: "primary", override: false, expected: "reviewer agent or model conflicts" },
       { plugins: [plugin], mode: "subagent", override: true, expected: "reviewer agent or model conflicts" },
     ]
@@ -378,7 +378,7 @@ describe("foreground CLI", () => {
   })
 
   test("disabled execution policy hooks refuse imported plans before child session creation or prompts", async () => {
-    const plugin = pathToFileURL(join(realpathSync(wt.worktree), ".opencode/plugins/lca.ts")).href
+    const plugin = pathToFileURL(join(realpathSync(wt.worktree), ".opencode/plugins/otter.ts")).href
     const dangerous = ["edit", "write", "patch", "bash", "task", "delegate", "webfetch"]
     const denied = Object.fromEntries(dangerous.map(tool => [tool, "deny"]))
     const nativeRules = [{ permission: "*", pattern: "*", action: "allow" },
@@ -394,10 +394,10 @@ describe("foreground CLI", () => {
       revision: 1,
     }
     writeFileSync(join(wt.worktree, "revision.json"), JSON.stringify(plan))
-    mkdirSync(join(wt.worktree, ".lca"), { recursive: true })
+    mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
 
     for (const disabledHook of ["config.agents", "chat.params"]) {
-      writeFileSync(join(wt.worktree, ".lca/lca.jsonc"), JSON.stringify({
+      writeFileSync(join(wt.worktree, ".otter/otter.jsonc"), JSON.stringify({
         disabled_hooks: [disabledHook], flow: { enabled: true },
       }))
       let parentReads = 0
@@ -444,7 +444,7 @@ describe("foreground CLI", () => {
   })
 
   test("a later native wildcard allow cannot reopen reviewer tools after explicit denials", async () => {
-    const plugin = pathToFileURL(join(realpathSync(wt.worktree), ".opencode/plugins/lca.ts")).href
+    const plugin = pathToFileURL(join(realpathSync(wt.worktree), ".opencode/plugins/otter.ts")).href
     const dangerous = ["edit", "write", "patch", "bash", "task", "delegate", "webfetch"]
     const permissions = Object.fromEntries(dangerous.map(tool => [tool, "deny"]))
     const rules = [{ permission: "*", pattern: "*", action: "allow" },
@@ -491,7 +491,7 @@ describe("foreground CLI", () => {
     mkdirSync(join(stateRoot(wt.worktree), "workflow"), { recursive: true })
     writeFileSync(workflowPath(wt.worktree), JSON.stringify({ secret: "must-not-leak" }))
     const result = await statusSubprocess([])
-    expect(result).toEqual({ exitCode: 3, stdout: "", stderr: "lca status: workflow invalid_state\n" })
+    expect(result).toEqual({ exitCode: 3, stdout: "", stderr: "otter status: workflow invalid_state\n" })
     expect(result.stderr).not.toContain("must-not-leak")
   })
 
@@ -544,11 +544,11 @@ describe("foreground CLI", () => {
       rmSync(runStatePath, { force: true })
       row.setup()
       const result = await statusSubprocess(["--session", SESSION])
-      expect(result).toEqual({ exitCode: 3, stdout: "", stderr: `lca status: ${row.source} ${row.code}\n` })
+      expect(result).toEqual({ exitCode: 3, stdout: "", stderr: `otter status: ${row.source} ${row.code}\n` })
     }
 
     const argumentError = await statusSubprocess(["--json", "--watch", "--interval", "0"])
-    expect(argumentError).toEqual({ exitCode: 2, stdout: "", stderr: "lca: --interval must be an integer from 1 to 60\nRun 'lca --help' for usage.\n" })
+    expect(argumentError).toEqual({ exitCode: 2, stdout: "", stderr: "otter: --interval must be an integer from 1 to 60\nRun 'otter --help' for usage.\n" })
   })
 
   test("status details and watch flags are scoped and validated", async () => {

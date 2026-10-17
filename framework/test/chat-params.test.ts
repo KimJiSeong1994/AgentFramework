@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import type { Hooks, ProviderContext } from "@opencode-ai/plugin"
 import type { Model, UserMessage } from "@opencode-ai/sdk"
-import type { LcaConfig } from "../src/config.ts"
+import type { OtterConfig } from "../src/config.ts"
 import { createChatParamsHook, isGemmaOnOllama } from "../src/hooks/chat-params.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
 import { BASE_CONFIG, fakeDeps } from "./helpers.ts"
@@ -50,7 +50,7 @@ function output(maxOutputTokens: number | undefined = undefined): Output {
   return { temperature: 0.7, topP: 1, topK: 40, maxOutputTokens, options: {} }
 }
 
-function deps(overrides: Partial<LcaConfig> = {}): HookDeps {
+function deps(overrides: Partial<OtterConfig> = {}): HookDeps {
   return fakeDeps(worktree.worktree, overrides)
 }
 
@@ -118,7 +118,7 @@ describe("chat.params hook", () => {
     expect(o.options.reasoningEffort).toBeUndefined()
   })
 
-  test("leaves non-lca agents untouched", async () => {
+  test("leaves non-otter agents untouched", async () => {
     const hook = createChatParamsHook(deps())
     const o = output(123_456)
     await hook(input("build"), o)

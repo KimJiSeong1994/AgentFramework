@@ -1,4 +1,4 @@
-// Closure audit prompt: an independent readiness check, never the clarity math alone. LCA-authored; see ../ATTRIBUTION.
+// Closure audit prompt: an independent readiness check, never the clarity math alone. Otter-authored; see ../ATTRIBUTION.
 import { definePrompt } from "./prompt.ts"
 import { DI_CONTEXT_MARKER, DI_READ_ONLY_RULES } from "./deep-interview.rules.ts"
 

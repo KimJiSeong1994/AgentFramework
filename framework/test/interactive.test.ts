@@ -160,7 +160,7 @@ function harness(options: HarnessOptions = {}) {
             id: workflowID,
             lastSeq: 11,
             phase: options.importResult?.phase ?? "pending_approval",
-            planRef: { mdPath: `.lca/plans/${workflowID}.md` },
+            planRef: { mdPath: `.otter/plans/${workflowID}.md` },
           },
         },
         planSha: options.planSha ?? "sha-fixture",
@@ -263,7 +263,7 @@ function harness(options: HarnessOptions = {}) {
         if (options.defaultModelSaveError) throw options.defaultModelSaveError
         calls.defaultModelWrites.push({ ...value })
         calls.defaultModel = { state: "configured", value, source: "user" }
-        return "/config/lca/lca.jsonc"
+        return "/config/otter/otter.jsonc"
       },
       clear: () => {
         calls.defaultModelWrites.push(null)
@@ -278,7 +278,7 @@ function harness(options: HarnessOptions = {}) {
         calls.comboWrites.push({ role, route: { ...route } })
         const prior = calls.combo.state === "configured" ? calls.combo : undefined
         calls.combo = { state: "configured", routes: { ...prior?.routes, [role]: route }, sources: { ...prior?.sources, [role]: "user" } }
-        return "/config/lca/lca.jsonc"
+        return "/config/otter/otter.jsonc"
       },
       clearRole: role => { calls.comboWrites.push({ role, route: null }); return true },
       clear: () => { calls.comboWrites.push({ role: "*", route: null }); calls.combo = { state: "unset" }; return true },
@@ -350,7 +350,7 @@ function useRealSkillCoordinator(h: ReturnType<typeof harness>) {
 function retainedSDKHistory(sessionID = "sdk-retained-history", includeTool = false) {
   const owner = openSession(wt.worktree, sessionID, { engine: "opencode" })
   owner.append("user", { text: "history from a deleted SDK session" })
-  owner.append("assistant", { text: "retained LCA reply" })
+  owner.append("assistant", { text: "retained Otter reply" })
   if (includeTool) {
     const activity = { executionID: "sdk-execution", callID: "sdk-call", taskID: "t1", name: "read", role: "worker" }
     owner.append("tool-start", { ...activity, outcome: "running" })
@@ -391,7 +391,7 @@ describe("interactive terminal", () => {
 
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
 
-    expect(h.calls.catalogSessions[0]).toBe("lca-fixture-session")
+    expect(h.calls.catalogSessions[0]).toBe("otter-fixture-session")
     expect(h.calls.skillCatalogs.length).toBeGreaterThanOrEqual(2)
     expect(h.calls.skillCatalogs[0]?.entries.some(entry => entry.descriptor.name === "inspect" && entry.classification === "custom")).toBe(true)
     expect(h.calls.output.join("")).toContain("/skill:inspect · project · custom · Inspect this project")
@@ -401,7 +401,7 @@ describe("interactive terminal", () => {
     expect(handoffs).toHaveLength(1)
     expect(handoffs[0]?.invocation?.prepared.name).toBe("inspect")
     expect(handoffs[0]?.invocation?.terminal?.stdinIsTTY).toBe(true)
-    const replay = replaySession(wt.worktree, "lca-fixture-session", { order: "asc" })
+    const replay = replaySession(wt.worktree, "otter-fixture-session", { order: "asc" })
     const audit = replay.records.find(record => record.kind === "notice" && String(record.data.text).startsWith("Skill invocation audit "))
     expect(audit?.data.text).toContain('"userSeq":')
     expect(audit?.data.text).toContain('"assistantSeq":')
@@ -422,7 +422,7 @@ describe("interactive terminal", () => {
 
     expect(h.calls.choices).toHaveLength(1)
     expect(h.calls.turns).toEqual([])
-    const replay = replaySession(wt.worktree, "lca-fixture-session", { order: "asc" })
+    const replay = replaySession(wt.worktree, "otter-fixture-session", { order: "asc" })
     expect(replay.records.some(record => record.kind === "user" && record.data.text === "/skill:inspect inspect files")).toBe(true)
     expect(replay.records.some(record => record.kind === "assistant")).toBe(false)
     expect(replay.records.some(record => record.kind === "notice" && String(record.data.text).startsWith("Skill invocation audit "))).toBe(false)
@@ -457,9 +457,9 @@ describe("interactive terminal", () => {
 
     expect(choiceCount).toBe(2)
     expect(h.calls.turns).toEqual(["/skill:inspect after switch"])
-    expect(handoffs.map(handoff => handoff.sessionID)).toEqual(["lca-fixture-session-2"])
-    expect(replaySession(wt.worktree, "lca-fixture-session", { order: "asc" }).records.some(record => record.kind === "assistant")).toBe(false)
-    expect(replaySession(wt.worktree, "lca-fixture-session-2", { order: "asc" }).records.some(record => record.kind === "assistant")).toBe(true)
+    expect(handoffs.map(handoff => handoff.sessionID)).toEqual(["otter-fixture-session-2"])
+    expect(replaySession(wt.worktree, "otter-fixture-session", { order: "asc" }).records.some(record => record.kind === "assistant")).toBe(false)
+    expect(replaySession(wt.worktree, "otter-fixture-session-2", { order: "asc" }).records.some(record => record.kind === "assistant")).toBe(true)
   })
 
   test("source grants do not survive switching to a new foreground session", async () => {
@@ -495,9 +495,9 @@ describe("interactive terminal", () => {
     expect(h.calls.output.join("")).toContain("Revoked 1 session skill grant(s) for inspect")
     expect(h.calls.output.join("")).toContain("No session skill grants.")
     expect(h.calls.output.join("")).not.toContain("Private source instructions.")
-    const rows = h.calls.output.join("").split("\n").filter(line => line.startsWith("lca-fixture-session · inspect · "))
+    const rows = h.calls.output.join("").split("\n").filter(line => line.startsWith("otter-fixture-session · inspect · "))
     expect(rows).toHaveLength(1)
-    expect(rows[0]).toMatch(/^lca-fixture-session · inspect · project · custom · [0-9a-f]{64} · read$/u)
+    expect(rows[0]).toMatch(/^otter-fixture-session · inspect · project · custom · [0-9a-f]{64} · read$/u)
   })
 
   test("revoking while a skill invocation is in flight cancels it with the real failure and never reports a stopped label", async () => {
@@ -548,12 +548,12 @@ describe("interactive terminal", () => {
     expect(output).not.toContain("stopped")
     expect(output).not.toContain("termination proof")
     expect(output).not.toContain("IN_FLIGHT_SKILL_BYTES")
-    const replay = replaySession(wt.worktree, "lca-fixture-session", { order: "asc" })
+    const replay = replaySession(wt.worktree, "otter-fixture-session", { order: "asc" })
     expect(replay.records.some(record => record.kind === "assistant")).toBe(false)
     expect(replay.records.some(record => record.kind === "notice" && String(record.data.text).startsWith("Skill invocation audit "))).toBe(false)
   })
 
-  test("deleted upstream SDK session restores only retained LCA history without creating an SDK runtime", async () => {
+  test("deleted upstream SDK session restores only retained Otter history without creating an SDK runtime", async () => {
     const writer = retainedSDKHistory()
     const metadataPath = join(sessionDir(wt.worktree, writer.sessionID), "metadata.json")
     const metadataBefore = readFileSync(metadataPath)
@@ -572,9 +572,9 @@ describe("interactive terminal", () => {
     expect(h.calls.runCount).toBe(0)
     expect(h.calls.boundSessions.at(-1)).toBe(writer.sessionID)
     const restored = h.calls.transcriptSources.at(-1)?.({ order: "asc" })
-    expect(restored?.records.map(record => record.data.text)).toEqual(["history from a deleted SDK session", "retained LCA reply"])
+    expect(restored?.records.map(record => record.data.text)).toEqual(["history from a deleted SDK session", "retained Otter reply"])
     expect(readFileSync(metadataPath)).toEqual(metadataBefore)
-    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")?.held).toBe(true)
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session")?.held).toBe(true)
     writer.assertOwner()
     releaseTestSession(writer)
   })
@@ -616,7 +616,7 @@ describe("interactive terminal", () => {
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "fixture" }, h.deps)
 
     expect(h.calls.turns).toEqual(["fresh CLI message"])
-    expect(h.calls.turnBindings).toMatchObject([{ sessionID: "lca-fixture-session-2", text: "fresh CLI message" }])
+    expect(h.calls.turnBindings).toMatchObject([{ sessionID: "otter-fixture-session-2", text: "fresh CLI message" }])
     expect(h.calls.runtimes).toHaveLength(2)
     expect(h.calls.runtimes.every(runtime => runtime.engine === "codex")).toBe(true)
     expect(h.calls.controllerCreations).toBe(2)
@@ -625,8 +625,8 @@ describe("interactive terminal", () => {
     expect(h.calls.discoveries).toHaveLength(0)
     expect(h.calls.runCount).toBe(0)
     expect(h.calls.conversationRestores).toHaveLength(2)
-    expect(h.calls.conversationRestores[1]).toEqual({ sessionID: "lca-fixture-session-2" })
-    expect(readSessionMetadata(wt.worktree, "lca-fixture-session-2")).toMatchObject({ engine: "codex", model: "fixture" })
+    expect(h.calls.conversationRestores[1]).toEqual({ sessionID: "otter-fixture-session-2" })
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session-2")).toMatchObject({ engine: "codex", model: "fixture" })
     expect(readFileSync(metadataPath)).toEqual(metadataBefore)
     expect(h.calls.output.join("")).toContain(`Retained SDK session ${writer.sessionID} · read-only history`)
     expect(h.calls.output.join("")).toContain("command or message was not applied")
@@ -634,7 +634,7 @@ describe("interactive terminal", () => {
     expect(h.calls.output.join("")).toContain("tool-start ·")
     expect(h.calls.queueAdmissions).toContain(false)
     expect(h.calls.events.filter(event => event === "sessionChanged").length).toBeGreaterThanOrEqual(2)
-    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")?.held).toBe(true)
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session")?.held).toBe(true)
     writer.assertOwner()
     releaseTestSession(writer)
   })
@@ -647,7 +647,7 @@ describe("interactive terminal", () => {
       lines: [`/resume ${writer.sessionID}`, "/quit"],
       executionStatus: {
         generation: 1,
-        claim: { ownerSession: "lca-fixture-session", instance: "unsettled-owner", pid: process.pid, generation: 1 },
+        claim: { ownerSession: "otter-fixture-session", instance: "unsettled-owner", pid: process.pid, generation: 1 },
         executions: [],
       },
     })
@@ -656,7 +656,7 @@ describe("interactive terminal", () => {
 
     expect(h.calls.output.join("")).toContain("execution ownership is unresolved")
     expect(h.calls.runtimes).toHaveLength(1)
-    expect(h.calls.boundSessions.at(-1)).toBe("lca-fixture-session")
+    expect(h.calls.boundSessions.at(-1)).toBe("otter-fixture-session")
     expect(readFileSync(metadataPath)).toEqual(metadataBefore)
     expect(inspectSessionAttachment(wt.worktree, writer.sessionID, writer.epoch)?.state).toBe("attached")
     writer.assertOwner()
@@ -664,48 +664,48 @@ describe("interactive terminal", () => {
   })
 
   test("switching sessions retains transcript and restored drafts never dispatch without Resume", async () => {
-    const h = harness({ lines: ["first retained message", "/new", "second retained message", "/resume lca-fixture-session", "held message", "/quit"] })
+    const h = harness({ lines: ["first retained message", "/new", "second retained message", "/resume otter-fixture-session", "held message", "/quit"] })
     let admissions = 0
     h.deps.admitRuntime = async () => {
       if (++admissions > 2) throw AdmissionRefusal.hostIncompatible()
     }
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "fixture" }, h.deps)
     expect(h.calls.turns).toEqual(["first retained message", "second retained message"])
-    const first = replaySession(wt.worktree, "lca-fixture-session")
-    const second = replaySession(wt.worktree, "lca-fixture-session-2")
+    const first = replaySession(wt.worktree, "otter-fixture-session")
+    const second = replaySession(wt.worktree, "otter-fixture-session-2")
     expect(first.complete).toBe(true)
     expect(second.complete).toBe(true)
     expect(first.records.filter(record => record.kind === "user").map(record => record.data.text)).toEqual(["first retained message"])
     expect(second.records.filter(record => record.kind === "user").map(record => record.data.text)).toEqual(["second retained message"])
-    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")?.held).toBe(true)
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session")?.held).toBe(true)
     expect(h.calls.output.join("")).toContain("Restored session held")
     expect(admissions).toBe(2)
   })
 
   test("restore prints the retained workflow id, phase, path, sha256 and an [artifacts] line recomputed from disk", async () => {
-    const mdPath = ".lca/plans/retained.md"
-    mkdirSync(join(wt.worktree, ".lca/plans"), { recursive: true })
+    const mdPath = ".otter/plans/retained.md"
+    mkdirSync(join(wt.worktree, ".otter/plans"), { recursive: true })
     writeFileSync(join(wt.worktree, mdPath), "original")
     const mdSha = createHash("sha256").update("original").digest("hex")
     const retained = publishWorkflow(wt.worktree, {
-      ...newWorkflow("lca-fixture-session", currentOwner(), "command", "retained", "codex"),
+      ...newWorkflow("otter-fixture-session", currentOwner(), "command", "retained", "codex"),
       id: "wf_retained_restore", phase: "cancelled", stage: "terminal",
       planRef: { jsonSha: "a".repeat(64), mdPath, mdSha, revision: 1 },
     })
     writeFileSync(join(wt.worktree, mdPath), "tampered after the session ended")
-    const h = harness({ lines: ["first retained message", "/new", "second retained message", "/resume lca-fixture-session", "/quit"] })
+    const h = harness({ lines: ["first retained message", "/new", "second retained message", "/resume otter-fixture-session", "/quit"] })
     let admissions = 0
     h.deps.admitRuntime = async () => { if (++admissions > 2) throw AdmissionRefusal.hostIncompatible() }
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "fixture" }, h.deps)
     const output = h.calls.output.join("")
-    const committed = readSessionCommitted(wt.worktree, "lca-fixture-session")!
+    const committed = readSessionCommitted(wt.worktree, "otter-fixture-session")!
     expect(committed.wf.id).toBe(retained.id)
     expect(output).toContain(`[workflow] wf_retained_restore cancelled · ${committed.path} · sha256 ${committed.sha256}`)
-    expect(output).toMatch(/\[artifacts\] artifacts incomplete: plan\.md \(\.lca\/plans\/retained\.md: hash mismatch\)/)
+    expect(output).toMatch(/\[artifacts\] artifacts incomplete: plan\.md \(\.otter\/plans\/retained\.md: hash mismatch\)/)
   })
 
   test("restored history remains readable when explicit Resume host preflight refuses", async () => {
-    const h = harness({ lines: ["retained", "/new", "/resume lca-fixture-session", "/continue", "RESUME", "not dispatched", "/quit"] })
+    const h = harness({ lines: ["retained", "/new", "/resume otter-fixture-session", "/continue", "RESUME", "not dispatched", "/quit"] })
     let admissions = 0
     h.deps.admitRuntime = async () => {
       if (++admissions > 2) throw AdmissionRefusal.hostIncompatible()
@@ -716,8 +716,8 @@ describe("interactive terminal", () => {
     expect(h.calls.runCount).toBe(0)
     expect(h.calls.output.join("")).toContain("Restored session held")
     expect(h.calls.output.join("")).toContain("Resume refused or incomplete:")
-    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")?.held).toBe(true)
-    expect(replaySession(wt.worktree, "lca-fixture-session").records.some(record => record.kind === "user" && record.data.text === "retained")).toBe(true)
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session")?.held).toBe(true)
+    expect(replaySession(wt.worktree, "otter-fixture-session").records.some(record => record.kind === "user" && record.data.text === "retained")).toBe(true)
   })
 
   test("opens the unselected composer before /model picker and selected-session chrome", async () => {
@@ -868,7 +868,7 @@ describe("interactive terminal", () => {
     expect(chrome.at(-1)).toContain("…")
     for (const line of chrome.at(-1)!.split("\n")) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(12)
     expect(h.calls.turnBindings).toEqual([
-      { engine: "local", model: "qwen3:8b", sessionID: "lca-fixture-session-2", text: "hello" },
+      { engine: "local", model: "qwen3:8b", sessionID: "otter-fixture-session-2", text: "hello" },
     ])
     expect(h.calls.runCount).toBe(0)
     expect([...h.calls.signalListeners.values()].every(listeners => listeners.size === 0)).toBe(true)
@@ -952,7 +952,7 @@ describe("interactive terminal", () => {
     expect(h.calls.runtime).toEqual({ worktree: realpathSync(wt.worktree), engine: "codex", model: "gpt-5-codex" })
     expect(h.calls.discoveries).toEqual([{ engine: "codex", worktree: realpathSync(wt.worktree) }])
     expect(h.calls.turnBindings).toEqual([{
-      engine: "codex", model: "gpt-5-codex", sessionID: "lca-fixture-session", text: "hello after selection",
+      engine: "codex", model: "gpt-5-codex", sessionID: "otter-fixture-session", text: "hello after selection",
     }])
     expect(h.calls.output.join(" ")).toContain("estimated")
     expect(h.calls.output.join(" ")).toContain("reactive")
@@ -1014,9 +1014,9 @@ describe("interactive terminal", () => {
 
     expect(h.calls.discoveries).toEqual([{ engine: "local", worktree: realpathSync(wt.worktree) }])
     expect(h.calls.runtimes).toHaveLength(1)
-    expect(h.calls.sessionIDs).toEqual(["lca-fixture-session"])
+    expect(h.calls.sessionIDs).toEqual(["otter-fixture-session"])
     expect(h.calls.turnBindings).toEqual([{
-      engine: "codex", model: "original", sessionID: "lca-fixture-session", text: "hello on original model",
+      engine: "codex", model: "original", sessionID: "otter-fixture-session", text: "hello on original model",
     }])
   })
 
@@ -1068,7 +1068,7 @@ describe("interactive terminal", () => {
     expect(output).toContain("No default model is set.")
     expect(output).toContain("No model is selected yet")
     expect(output).toContain("Usage: /model default")
-    expect(output).toContain("Saved default model local / native-default to /config/lca/lca.jsonc.")
+    expect(output).toContain("Saved default model local / native-default to /config/otter/otter.jsonc.")
     expect(h.calls.defaultModelWrites).toEqual([{ engine: "local", model: "native-default" }])
     expect(h.calls.discoveries).toEqual([])
     expect(h.calls.turnBindings).toMatchObject([{ engine: "local", model: "native-default", text: "hello" }])
@@ -1089,9 +1089,9 @@ describe("interactive terminal", () => {
   })
 
   test("a failed default save is reported and nothing is selected", async () => {
-    const h = harness({ lines: ["/model default local native-default", "/quit"], defaultModelSaveError: new Error("lca: config /config/lca/lca.jsonc: invalid-jsonc") })
+    const h = harness({ lines: ["/model default local native-default", "/quit"], defaultModelSaveError: new Error("otter: config /config/otter/otter.jsonc: invalid-jsonc") })
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
-    expect(h.calls.output.join("")).toContain("Default model not saved: Error: lca: config /config/lca/lca.jsonc: invalid-jsonc")
+    expect(h.calls.output.join("")).toContain("Default model not saved: Error: otter: config /config/otter/otter.jsonc: invalid-jsonc")
     expect(h.calls.runtimes).toEqual([])
   })
 
@@ -1176,7 +1176,7 @@ describe("interactive terminal", () => {
   })
 
   describe("B7 Ctrl+Z and SIGCONT", () => {
-    const SID = "lca-fixture-session"
+    const SID = "otter-fixture-session"
     function putStopped(settled: boolean) {
       const wf = {
         ...newWorkflow(SID, currentOwner(), "command", "stop fixture", "interactive-fixture"),
@@ -1272,31 +1272,31 @@ describe("interactive terminal", () => {
       { role: "user", text: "first question" }, { role: "assistant", text: "first answer" },
       { role: "user", text: "second question" }, { role: "assistant", text: "second answer" },
     ]
-    expect(h.calls.conversationRestores.at(-1)).toEqual({ sessionID: "lca-fixture-session-2", prior: carried })
-    expect(h.calls.turnBindings.at(-1)).toMatchObject({ engine: "local", model: "native-secondary", sessionID: "lca-fixture-session-2", text: "third question" })
+    expect(h.calls.conversationRestores.at(-1)).toEqual({ sessionID: "otter-fixture-session-2", prior: carried })
+    expect(h.calls.turnBindings.at(-1)).toMatchObject({ engine: "local", model: "native-secondary", sessionID: "otter-fixture-session-2", text: "third question" })
     expect(h.calls.output.join("").replace(/\s+/g, " ")).toContain("Conversation continues: 2 earlier turns from codex / gpt-5-codex, sent with your next message.")
 
-    const records = replaySession(wt.worktree, "lca-fixture-session-2", { order: "asc" }).records
-    expect(records[0]).toMatchObject({ kind: "carried-context", data: { sourceSessionID: "lca-fixture-session", engine: "codex", model: "gpt-5-codex", messages: carried } })
+    const records = replaySession(wt.worktree, "otter-fixture-session-2", { order: "asc" }).records
+    expect(records[0]).toMatchObject({ kind: "carried-context", data: { sourceSessionID: "otter-fixture-session", engine: "codex", model: "gpt-5-codex", messages: carried } })
     // The new session's own replay never attributes the earlier answers to the new model as fresh assistant records.
     // Each fixture conversation replays its scripted replies from the start; only the new turn is recorded here.
     expect(records.filter(record => record.kind === "assistant").map(record => record.data.text)).toEqual(["first answer"])
     expect(records.filter(record => record.kind === "user").map(record => record.data.text)).toEqual(["third question"])
-    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")).toMatchObject({ engine: "codex", model: "gpt-5-codex" })
-    expect(readSessionMetadata(wt.worktree, "lca-fixture-session-2")).toMatchObject({ engine: "local", model: "native-secondary" })
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session")).toMatchObject({ engine: "codex", model: "gpt-5-codex" })
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session-2")).toMatchObject({ engine: "local", model: "native-secondary" })
   })
 
   test("carried context survives resume and chains through later switches", async () => {
     const h = harness({
-      lines: ["q1", "/model local native-secondary", "q2", "/model claude sonnet", "q3", "/resume lca-fixture-session-2", "/quit"],
+      lines: ["q1", "/model local native-secondary", "q2", "/model claude sonnet", "q3", "/resume otter-fixture-session-2", "/quit"],
       turns: [{ text: "a1" }],
     })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
     // The fixture gives each new conversation the same scripted reply queue, so every first answer is "a1".
-    expect(h.calls.conversationRestores[2]).toEqual({ sessionID: "lca-fixture-session-3", prior: [
+    expect(h.calls.conversationRestores[2]).toEqual({ sessionID: "otter-fixture-session-3", prior: [
       { role: "user", text: "q1" }, { role: "assistant", text: "a1" }, { role: "user", text: "q2" }, { role: "assistant", text: "a1" },
     ] })
-    expect(h.calls.conversationRestores.at(-1)).toEqual({ sessionID: "lca-fixture-session-2", prior: [
+    expect(h.calls.conversationRestores.at(-1)).toEqual({ sessionID: "otter-fixture-session-2", prior: [
       { role: "user", text: "q1" }, { role: "assistant", text: "a1" }, { role: "user", text: "q2" }, { role: "assistant", text: "a1" },
     ] })
   })
@@ -1310,7 +1310,7 @@ describe("interactive terminal", () => {
     expect(h.calls.runtimes[0]).toMatchObject({ engine: "local", model: "native", routes: comboRoutes })
     expect(h.calls.output.join("")).toContain("Route architect: codex / gpt-5.6-sol")
     expect(h.calls.viewFacts.at(-1)?.selection.routes).toEqual(comboRoutes)
-    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")?.routes).toEqual(comboRoutes)
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session")?.routes).toEqual(comboRoutes)
   })
 
   test("a route equal to the anchor is dropped, and an invalid combo is reported and not applied", async () => {
@@ -1333,7 +1333,7 @@ describe("interactive terminal", () => {
       { role: "architect", route: null },
       { role: "*", route: null },
     ])
-    expect(output).toContain("Saved combo route architect -> codex / gpt-5.6-sol to /config/lca/lca.jsonc.")
+    expect(output).toContain("Saved combo route architect -> codex / gpt-5.6-sol to /config/otter/otter.jsonc.")
     expect(output).toContain("architect: codex / gpt-5.6-sol (user config)")
     expect(output).toContain("/model combo apply starts a new session")
     expect(output).toContain("Usage: /model combo")
@@ -1353,9 +1353,9 @@ describe("interactive terminal", () => {
     expect(h.calls.runtimes).toHaveLength(2)
     expect(h.calls.runtimes[0]).not.toHaveProperty("routes")
     expect(h.calls.runtimes[1]).toMatchObject({ engine: "local", model: "native", routes: comboRoutes })
-    expect(h.calls.conversationRestores.at(-1)).toEqual({ sessionID: "lca-fixture-session-2", prior: [{ role: "user", text: "q1" }, { role: "assistant", text: "a1" }] })
-    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")?.routes).toBeUndefined()
-    expect(readSessionMetadata(wt.worktree, "lca-fixture-session-2")?.routes).toEqual(comboRoutes)
+    expect(h.calls.conversationRestores.at(-1)).toEqual({ sessionID: "otter-fixture-session-2", prior: [{ role: "user", text: "q1" }, { role: "assistant", text: "a1" }] })
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session")?.routes).toBeUndefined()
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session-2")?.routes).toEqual(comboRoutes)
     expect(h.calls.output.join("")).toContain("Already using that engine, model and routes")
     expect(h.calls.viewFacts.at(-1)?.selection.routes).toEqual(comboRoutes)
   })
@@ -1376,13 +1376,13 @@ describe("interactive terminal", () => {
   })
 
   test("/resume rebuilds the pinned routes from session metadata after config changed", async () => {
-    const h = harness({ lines: ["q1", "/model combo clear", "/model combo apply", "/resume lca-fixture-session", "/quit"], combo: configuredCombo })
+    const h = harness({ lines: ["q1", "/model combo clear", "/model combo apply", "/resume otter-fixture-session", "/quit"], combo: configuredCombo })
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
     expect(h.calls.runtimes).toHaveLength(3)
     expect(h.calls.runtimes[1]).not.toHaveProperty("routes")
     expect(h.calls.runtimes[2]).toMatchObject({ engine: "local", model: "native", routes: comboRoutes })
     expect(h.calls.viewFacts.at(-1)?.selection.routes).toEqual(comboRoutes)
-    expect(readSessionMetadata(wt.worktree, "lca-fixture-session-2")?.routes).toBeUndefined()
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session-2")?.routes).toBeUndefined()
   })
 
   test("/new keeps the current session's routes", async () => {
@@ -1394,8 +1394,8 @@ describe("interactive terminal", () => {
   test("/new starts without carried context and an unreadable conversation refuses the switch", async () => {
     const h = harness({ lines: ["q1", "/new", "q2", "/quit"], turns: [{ text: "a1" }, { text: "a2" }] })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
-    expect(h.calls.conversationRestores.at(-1)).toEqual({ sessionID: "lca-fixture-session-2" })
-    expect(replaySession(wt.worktree, "lca-fixture-session-2", { order: "asc" }).records.some(record => record.kind === "carried-context")).toBe(false)
+    expect(h.calls.conversationRestores.at(-1)).toEqual({ sessionID: "otter-fixture-session-2" })
+    expect(replaySession(wt.worktree, "otter-fixture-session-2", { order: "asc" }).records.some(record => record.kind === "carried-context")).toBe(false)
   })
 
   test("!command runs in the worktree, prints and persists the run, and never reaches the model", async () => {
@@ -1406,7 +1406,7 @@ describe("interactive terminal", () => {
     const output = h.calls.output.join("")
     expect(output).toContain(`$ pwd; printf 'a\\nb\\n'; exit 3\n${realpathSync(wt.worktree)}\na\nb\n[shell] exit 3 · `)
     expect(output).toContain("Usage: !<command> runs one shell command in the worktree.")
-    const records = replaySession(wt.worktree, "lca-fixture-session", { order: "asc" }).records
+    const records = replaySession(wt.worktree, "otter-fixture-session", { order: "asc" }).records
     expect(records.some(record => record.kind === "user")).toBe(false)
     const shell = records.find(record => record.kind === "shell")
     expect(shell?.eventID).toStartWith("shell:")
@@ -1440,7 +1440,7 @@ describe("interactive terminal", () => {
     // The cancelled shell left the session alive: /quit was still read afterwards.
     expect(h.calls.prompts.length).toBeGreaterThanOrEqual(2)
     expect(h.calls.output.join("")).not.toContain("[shell]")
-    const shell = replaySession(wt.worktree, "lca-fixture-session", { order: "asc" }).records.find(record => record.kind === "shell")
+    const shell = replaySession(wt.worktree, "otter-fixture-session", { order: "asc" }).records.find(record => record.kind === "shell")
     expect(shell?.eventID).toBe(runs[0]!.id)
     expect(shell?.data.status).toBe("cancelled")
   })
@@ -1451,14 +1451,14 @@ describe("interactive terminal", () => {
     expect(result.code).toBe(0)
     expect(h.calls.turns).toEqual(["hello", "/plan"])
     expect(h.calls.turnBindings).toEqual([
-      { engine: "codex", model: "native-secondary", sessionID: "lca-fixture-session-2", text: "hello" },
-      { engine: "codex", model: "native-secondary", sessionID: "lca-fixture-session-2", text: "/plan" },
+      { engine: "codex", model: "native-secondary", sessionID: "otter-fixture-session-2", text: "hello" },
+      { engine: "codex", model: "native-secondary", sessionID: "otter-fixture-session-2", text: "/plan" },
     ])
     expect(h.calls.runtimes).toEqual([
       { worktree: realpathSync(wt.worktree), engine: "codex", model: "gpt-5-codex" },
       { worktree: realpathSync(wt.worktree), engine: "codex", model: "native-secondary" },
     ])
-    expect(h.calls.sessionIDs).toEqual(["lca-fixture-session", "lca-fixture-session-2"])
+    expect(h.calls.sessionIDs).toEqual(["otter-fixture-session", "otter-fixture-session-2"])
     expect(h.calls.discoveries).toEqual([{ engine: "codex", worktree: realpathSync(wt.worktree) }])
     expect(h.calls.output.join("")).toContain("Commands (chat):\n/help — show contextual commands and keys")
     expect(h.calls.output.join("")).toContain("New conversation: no earlier turns to carry.")
@@ -1485,7 +1485,7 @@ describe("interactive terminal", () => {
     expect(h.calls.viewFacts.some(fact => fact.request.state === "failed" && fact.request.category.state === "known" &&
       fact.request.category.value === "model_failed" && fact.request.retryable.state === "unknown")).toBe(true)
 
-    const records = replaySession(wt.worktree, "lca-fixture-session", { order: "asc" }).records
+    const records = replaySession(wt.worktree, "otter-fixture-session", { order: "asc" }).records
     expect(records.filter(record => record.kind === "user").map(record => record.data.text)).toEqual([
       "first manual request", "second manual request",
     ])
@@ -1500,7 +1500,7 @@ describe("interactive terminal", () => {
       lines: ["first request", "must not be read or retried"],
       turnErrors: [new ModelRequestError("model_failed", providerSecret)],
       onTurnError() {
-        const store = getOwnedSession(wt.worktree, "lca-fixture-session")
+        const store = getOwnedSession(wt.worktree, "otter-fixture-session")
         if (!store) throw new Error("fixture session store was not attached")
         const append = store.append.bind(store)
         store.append = (kind, data, eventID) => {
@@ -1546,16 +1546,16 @@ describe("interactive terminal", () => {
         turnErrors: [new ModelRequestError("empty_response", "planning model did not complete a response")],
         onTurnError() {
           if (scenario === "claim") {
-            executionStatus.claim = { ownerSession: "lca-fixture-session", instance: "fixture", pid: process.pid, generation: 1 }
+            executionStatus.claim = { ownerSession: "otter-fixture-session", instance: "fixture", pid: process.pid, generation: 1 }
           } else if (scenario === "unsettled") {
-            executionStatus.executions.push({ executionId: "unsettled", ownerSession: "lca-fixture-session", generation: 1,
+            executionStatus.executions.push({ executionId: "unsettled", ownerSession: "otter-fixture-session", generation: 1,
               reconciliation: { outcome: "running", quiescent: false } })
           } else if (scenario === "fenced") {
-            executionStatus.executions.push({ executionId: "fenced", ownerSession: "lca-fixture-session", generation: 1,
+            executionStatus.executions.push({ executionId: "fenced", ownerSession: "otter-fixture-session", generation: 1,
               kind: "host", terminal: { outcome: "failed", terminalAt: Date.now() },
               reconciliation: { outcome: "terminal", quiescent: true }, fence: { reason: "fixture fence", at: Date.now() } })
           } else if (scenario === "held") {
-            holdAdmission(realpathSync(wt.worktree), "lca-fixture-session", "fixture_hold")
+            holdAdmission(realpathSync(wt.worktree), "otter-fixture-session", "fixture_hold")
           } else {
             withFlowTransaction(wt.worktree, tx => writeWorkflow(tx,
               newWorkflow("foreign-owner", { instance: "fixture", pid: process.pid }, "command", "foreign workflow", "codex")))
@@ -1610,9 +1610,9 @@ describe("interactive terminal", () => {
       { worktree: realpathSync(wt.worktree), engine: "codex", model: "gpt-5-codex" },
       { worktree: realpathSync(wt.worktree), engine: "local", model: "qwen3:8b" },
     ])
-    expect(h.calls.sessionIDs).toEqual(["lca-fixture-session", "lca-fixture-session-2"])
+    expect(h.calls.sessionIDs).toEqual(["otter-fixture-session", "otter-fixture-session-2"])
     expect(h.calls.turnBindings).toEqual([
-      { engine: "local", model: "qwen3:8b", sessionID: "lca-fixture-session-2", text: "hello" },
+      { engine: "local", model: "qwen3:8b", sessionID: "otter-fixture-session-2", text: "hello" },
     ])
     expect(h.calls.discoveries).toEqual([])
     expect(h.calls.viewFacts.at(-1)?.discovery).toBe("not-observed")
@@ -1630,9 +1630,9 @@ describe("interactive terminal", () => {
     const h = harness({ lines: ["/model codex gpt-5-codex", "hello", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
     expect(h.calls.runtimes).toHaveLength(1)
-    expect(h.calls.sessionIDs).toEqual(["lca-fixture-session"])
+    expect(h.calls.sessionIDs).toEqual(["otter-fixture-session"])
     expect(h.calls.turnBindings[0]).toEqual({
-      engine: "codex", model: "gpt-5-codex", sessionID: "lca-fixture-session", text: "hello",
+      engine: "codex", model: "gpt-5-codex", sessionID: "otter-fixture-session", text: "hello",
     })
     expect(h.calls.output.join("")).toContain("conversation context is unchanged")
   })
@@ -1641,9 +1641,9 @@ describe("interactive terminal", () => {
     const h = harness({ lines: ["/model", "codex", "0", "bad model", "gpt-5-codex", "hello", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
     expect(h.calls.runtimes).toHaveLength(1)
-    expect(h.calls.sessionIDs).toEqual(["lca-fixture-session"])
+    expect(h.calls.sessionIDs).toEqual(["otter-fixture-session"])
     expect(h.calls.turnBindings[0]).toEqual({
-      engine: "codex", model: "gpt-5-codex", sessionID: "lca-fixture-session", text: "hello",
+      engine: "codex", model: "gpt-5-codex", sessionID: "otter-fixture-session", text: "hello",
     })
     expect(h.calls.output.join("")).toContain("Invalid model choice")
     expect(h.calls.output.join("")).toContain("Invalid model ID")
@@ -1656,9 +1656,9 @@ describe("interactive terminal", () => {
     })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
     expect(h.calls.runtimes).toHaveLength(1)
-    expect(h.calls.sessionIDs).toEqual(["lca-fixture-session"])
+    expect(h.calls.sessionIDs).toEqual(["otter-fixture-session"])
     expect(h.calls.turnBindings[0]).toEqual({
-      engine: "codex", model: "gpt-5-codex", sessionID: "lca-fixture-session", text: "hello",
+      engine: "codex", model: "gpt-5-codex", sessionID: "otter-fixture-session", text: "hello",
     })
     expect(h.calls.output.join("")).toContain("current selection and conversation are unchanged")
   })
@@ -1668,7 +1668,7 @@ describe("interactive terminal", () => {
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
     expect(h.calls.runtimes).toHaveLength(1)
     expect(h.calls.turnBindings).toEqual([
-      { engine: "codex", model: "gpt-5-codex", sessionID: "lca-fixture-session", text: "hello" },
+      { engine: "codex", model: "gpt-5-codex", sessionID: "otter-fixture-session", text: "hello" },
     ])
   })
 
@@ -1680,7 +1680,7 @@ describe("interactive terminal", () => {
     }
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
     expect(admissions).toBe(2)
-    expect(h.calls.sessionIDs).toEqual(["lca-fixture-session"])
+    expect(h.calls.sessionIDs).toEqual(["otter-fixture-session"])
     expect(h.calls.turnBindings[0]?.engine).toBe("codex")
     expect(h.calls.output.join("")).toContain("current selection and conversation are unchanged")
   })
@@ -1747,9 +1747,9 @@ describe("interactive terminal", () => {
     expect(workflow.calls.output.join(" ")).toContain("Model selection is unavailable while this session is held")
     expect(workflow.calls.discoveries).toEqual([])
     expect(workflow.calls.runtimes).toHaveLength(1)
-    expect(workflow.calls.sessionIDs).toEqual(["lca-fixture-session"])
+    expect(workflow.calls.sessionIDs).toEqual(["otter-fixture-session"])
     expect(workflow.calls.turnBindings).toEqual([])
-    expect(readSessionMetadata(wt.worktree, "lca-fixture-session")).toMatchObject({ engine: "codex", model: "gpt-5-codex" })
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session")).toMatchObject({ engine: "codex", model: "gpt-5-codex" })
 
     const claimWorktree = tempGitWorktree()
     try {
@@ -1864,9 +1864,9 @@ describe("interactive terminal", () => {
     }
     const result = await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
     const parsedPlan = { ...proposedPlan, revision: 1 }
-    const records = replaySession(wt.worktree, "lca-fixture-session", { order: "asc" }).records
+    const records = replaySession(wt.worktree, "otter-fixture-session", { order: "asc" }).records
     expect(result.code).toBe(0)
-    expect(h.calls.sessionID).toBe("lca-fixture-session")
+    expect(h.calls.sessionID).toBe("otter-fixture-session")
     expect(h.calls.validated).toEqual(parsedPlan)
     expect(h.calls.imported).toEqual(parsedPlan)
     expect(h.calls.output.join(" ")).toContain("# Canonical plan")
@@ -1964,7 +1964,7 @@ describe("interactive terminal", () => {
       ) },
     )
 
-    expect(h.calls.sessionID).toBe("lca-fixture-session")
+    expect(h.calls.sessionID).toBe("otter-fixture-session")
     expect(h.calls.turns).toEqual([
       "make the requested change",
       "revise the plan to avoid the protected test",
@@ -1977,16 +1977,16 @@ describe("interactive terminal", () => {
     expect(h.calls.events.filter(event => event === "validate")).toHaveLength(2)
     expect(h.calls.events.filter(event => event === "import")).toHaveLength(1)
     expect(h.calls.events.indexOf("import")).toBeGreaterThan(h.calls.events.lastIndexOf("validate"))
-    expect(h.calls.output.join(" ")).toContain("Plan rejected by LCA validation")
+    expect(h.calls.output.join(" ")).toContain("Plan rejected by Otter validation")
     expect(h.calls.output.join(" ")).toContain("do not edit double.test.ts")
     expect(h.calls.output.join("")).toContain("step 1: do not edit double.test.ts. \\u001b[2J\\u202e")
     expect(h.calls.output.join("")).not.toMatch(unsafeTerminalControls)
     expect(h.calls.output.join("")).not.toContain("\u001b[2J\u202e")
     expect(h.calls.output.join(" ")).toContain("Revise the plan or enter /quit")
-    const feedback = h.calls.output.find(output => output.startsWith("[error] Plan rejected by LCA validation"))
+    const feedback = h.calls.output.find(output => output.startsWith("[error] Plan rejected by Otter validation"))
     expect(feedback).toContain("...")
     expect(feedback?.length).toBeLessThanOrEqual(360)
-    expect(h.calls.output.filter(output => output.startsWith("[error] Plan rejected by LCA validation"))).toHaveLength(1)
+    expect(h.calls.output.filter(output => output.startsWith("[error] Plan rejected by Otter validation"))).toHaveLength(1)
     expect(h.calls.decision?.action).toBe("approve")
     expect(h.calls.runCount).toBe(1)
   })

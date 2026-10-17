@@ -30,7 +30,7 @@ export { abortPath }
 
 export const CONTINUE_PROMPT = "Continue with the next incomplete task from your list. Do not restate the plan."
 export const IDLE_DEBOUNCE_MS = 3000
-export const NUDGE_PROMPT = 'Submit the plan now: call lca_flow op:"plan" with 3-10 steps.'
+export const NUDGE_PROMPT = 'Submit the plan now: call otter_flow op:"plan" with 3-10 steps.'
 export const EXECUTING_RESUME_PROMPT = "Call delegate with resume:true now."
 
 export type StopReason = "aborted" | "max_iterations" | "ttl" | "stagnation" | "failures" | "todos_done"
@@ -55,7 +55,7 @@ export function checkBreakers(deps: HookDeps, sessionID: string, state: ModeStat
 
 export function resumeMessage(open: number, titles: string[]): string {
   const list = titles.slice(0, 5).map((t) => `- ${t}`).join("\n")
-  return `[lca] ${open} delegated task(s) from an interrupted run are unfinished:\n${list}${titles.length > 5 ? "\n- …" : ""}\nCall the delegate tool with resume: true to run them, or tell the user they were left unfinished.`
+  return `[otter] ${open} delegated task(s) from an interrupted run are unfinished:\n${list}${titles.length > 5 ? "\n- …" : ""}\nCall the delegate tool with resume: true to run them, or tell the user they were left unfinished.`
 }
 
 /** Best-effort: does the session's last assistant message end with a question? Failure = not asking (never blocks a nudge on a broken client). */

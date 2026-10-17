@@ -39,7 +39,7 @@ describe("S4 presentation", () => {
     for (const display of STOP_DISPLAYS) expect(display in STOP_LABEL).toBe(true)
   })
 
-  test("/pause is a completion and `lca pause` parses with the same session requirement as cancel", async () => {
+  test("/pause is a completion and `otter pause` parses with the same session requirement as cancel", async () => {
     const { commandCompletions } = await import("../src/tui/skill-completion.ts")
     expect(commandCompletions("/pa")).toEqual(["/pause"])
     const { parseCliArgs } = await import("../src/hosts/cli.ts")

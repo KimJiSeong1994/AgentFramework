@@ -131,14 +131,14 @@ describe("ralplan stage and phase order", () => {
     for (const type of ["planner_saved", "architect_verdict", "critic_verdict", "consensus_verified"]) expect(types).toContain(type)
   })
 
-  test("artifacts are hash-recorded under .lca/workflows/<sid>/<wid>/ and consensus is bound to the SAME plan hash", async () => {
+  test("artifacts are hash-recorded under .otter/workflows/<sid>/<wid>/ and consensus is bound to the SAME plan hash", async () => {
     const h = harness({ planner: [plan()], architect: [CLEAN_A], critic: [CLEAN_C] })
     const final = await toPending(h)
     const keys = final.artifacts.map(ref => ref.key)
     expect(keys.slice(0, 2)).toEqual(["pending-approval.md", "consensus.json"])
     expect(keys).toEqual(expect.arrayContaining([opener(1, "plan"), opener(1, "architect"), opener(1, "critic")]))
     for (const ref of final.artifacts) {
-      expect(ref.path.startsWith(`.lca/workflows/${SID}/${final.id}/`)).toBe(true)
+      expect(ref.path.startsWith(`.otter/workflows/${SID}/${final.id}/`)).toBe(true)
       expect(ref.sha256).toBe(sha256(readFileSync(join(wt.worktree, ref.path))))
     }
     const data = ralplanDataOf(final)
@@ -538,7 +538,7 @@ describe("input budget", () => {
     mkdirSync(directory, { recursive: true })
     const text = `# Spec\n${"requirement line.\n".repeat(Math.ceil(bytes / 18))}`
     writeFileSync(join(directory, "spec.md"), text)
-    return { workflowID: "wf_big_spec", specPath: `.lca/workflows/${SID}/wf_big_spec/spec.md`, specSha: sha256(Buffer.from(text)) }
+    return { workflowID: "wf_big_spec", specPath: `.otter/workflows/${SID}/wf_big_spec/spec.md`, specSha: sha256(Buffer.from(text)) }
   }
 
   test("an overflowing context runs exactly one read-only planner-role summarize turn, then the rebuilt request", async () => {
@@ -582,7 +582,7 @@ describe("seeded from a verified DI spec", () => {
     const directory = workflowArtifactDirectory(wt.worktree, SID, base.id)
     mkdirSync(directory, { recursive: true })
     writeFileSync(join(directory, "spec.md"), SPEC)
-    const spec = { key: "spec.md", path: `.lca/workflows/${SID}/${base.id}/spec.md`, sha256: sha256(Buffer.from(SPEC)) }
+    const spec = { key: "spec.md", path: `.otter/workflows/${SID}/${base.id}/spec.md`, sha256: sha256(Buffer.from(SPEC)) }
     return { ...live, stage: "terminal", phase: "done", artifacts: [spec] } as never as Parameters<typeof handoffToRalplan>[2]
   }
 
@@ -611,7 +611,7 @@ describe("seeded from a verified DI spec", () => {
 
   test("a seed whose spec is missing or edited is refused at start; a spec changed after the handoff fails the stage visibly", async () => {
     const h = harness({ planner: [plan()] })
-    const refused = startRalplan(h.runtime, SID, "plan it", { seed: { workflowID: "wf_x", specPath: ".lca/none.md", specSha: "a".repeat(64) } })
+    const refused = startRalplan(h.runtime, SID, "plan it", { seed: { workflowID: "wf_x", specPath: ".otter/none.md", specSha: "a".repeat(64) } })
     expect(refused.ok).toBe(false)
     const predecessor = doneInterview(h)
     const handed = handoffToRalplan(h.runtime, SID, predecessor, "plan it", [{ wf: "wf_di_seed", type: "spec_written", actor: "code" as const }])
@@ -645,7 +645,7 @@ describe("registry, prompts and persisted data", () => {
       expect(promptIntact(prompt)).toBe(true)
       expect(prompt.kind).toBe("ralplan")
       expect(kindAllowsRole("ralplan", prompt.role)).toBe(true)
-      expect(prompt.text).not.toMatch(/\bgjc\b|\.gjc\/|\/skill:|--stage_n|GJC_RALPLAN_ARTIFACT|lca_flow/i)
+      expect(prompt.text).not.toMatch(/\bgjc\b|\.gjc\/|\/skill:|--stage_n|GJC_RALPLAN_ARTIFACT|otter_flow/i)
     }
     expect(RALPLAN_CRITIC_PROMPT.text).toContain("OKAY")
     expect(RALPLAN_ARCHITECT_PROMPT.text).toContain("REQUEST_CHANGES")

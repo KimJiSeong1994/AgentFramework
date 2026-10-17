@@ -97,7 +97,7 @@ ctl = sys.argv[1]
 sys.stdout.write("\x1b[?2004h\x1b[>4;2m\x1b[>1u")
 sys.stdout.flush()
 tty.setraw(0)
-sys.stdout.write("LCA-PROBE-READY\r\n")
+sys.stdout.write("Otter-PROBE-READY\r\n")
 sys.stdout.flush()
 data = b""
 deadline = time.time() + 20
@@ -285,7 +285,7 @@ def transport_argv(inner: list[str], ctl: Path, env_pairs: dict[str, str], cwd: 
         CTX.scratch.append(sock_dir)
         tmux_sock = sock_dir / "s"
         conf, _text = tmux_conf(profile)
-        tmux_argv = ["tmux", "-u", "-S", str(tmux_sock), "-f", str(conf), "new-session", "-s", "lca", "-c", cwd, command]
+        tmux_argv = ["tmux", "-u", "-S", str(tmux_sock), "-f", str(conf), "new-session", "-s", "otter", "-c", cwd, command]
     if CTX.kind == "tmux":
         return tmux_argv, tmux_sock
     if CTX.kind == "local":
@@ -312,11 +312,11 @@ def launch_transport(inner, cwd, env, stdio, ctl, preexec, profile) -> Transport
 # --------------------------------------------------------------------------------------------------
 def load_tui(root: Path):
     path = root / "framework" / "test" / "pty" / "tui.py"
-    spec = importlib.util.spec_from_file_location("lca_pty_tui", path)
+    spec = importlib.util.spec_from_file_location("otter_pty_tui", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot import {path}")
     module = importlib.util.module_from_spec(spec)
-    sys.modules["lca_pty_tui"] = module
+    sys.modules["otter_pty_tui"] = module
     spec.loader.exec_module(module)
     return module
 
@@ -552,7 +552,7 @@ def run_key_probe(profile: str, directory: Path) -> dict[str, Any]:
         return until is None
 
     try:
-        if not pump(20, b"LCA-PROBE-READY"):
+        if not pump(20, b"Otter-PROBE-READY"):
             raise AssertionError(f"key probe never started under {CTX.kind}/{profile}: {bytes(output)[-500:]!r}")
         time.sleep(0.3)
         for packet in (SHIFT_ENTER, CTRL_J, PASTE, UNICODE, b"Q"):
@@ -646,10 +646,10 @@ def ssh_preflight(directory: Path) -> dict[str, Any]:
     known = Path(CTX.args.ssh_known_hosts)
     if not known.is_file() or known.stat().st_size == 0:
         raise AssertionError(f"dedicated ssh known_hosts missing or empty: {known}")
-    argv = [*ssh_base_argv(), CTX.args.ssh_target, "echo lca-ssh-ok; tty; id -un; command -v bun python3 tmux"]
+    argv = [*ssh_base_argv(), CTX.args.ssh_target, "echo otter-ssh-ok; tty; id -un; command -v bun python3 tmux"]
     result = subprocess.run(argv, capture_output=True, text=True, timeout=60, check=False, stdin=subprocess.DEVNULL)
     text = (result.stdout + result.stderr).strip()
-    if result.returncode != 0 or "lca-ssh-ok" not in result.stdout:
+    if result.returncode != 0 or "otter-ssh-ok" not in result.stdout:
         raise AssertionError(f"ssh authentication/strict-host-key probe FAILED (exit {result.returncode}): {text[-800:]}")
     evidence = {
         "argv": [*ssh_base_argv(), CTX.args.ssh_target], "exitCode": result.returncode, "output": text,
@@ -771,7 +771,7 @@ def main() -> int:
         "harness": {"matrixSha256": sha256_file(Path(__file__)), "tuiSha256": sha256_file(args.root / "framework/test/pty/tui.py"),
                     "fixtureSha256": sha256_file(args.root / "framework/test/pty/interactive-fixture.ts")},
         "root": str(args.root), "rootGitHead": source.stdout.strip() or None, "python": platform.python_version(),
-        "candidateSourceHash": os.environ.get("LCA_UX_SOURCE_HASH"),
+        "candidateSourceHash": os.environ.get("OTTER_UX_SOURCE_HASH"),
         "command": [sys.executable, *sys.argv],
     }
     write_json(args.out / "summary.json", summary)

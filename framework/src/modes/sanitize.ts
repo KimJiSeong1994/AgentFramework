@@ -82,7 +82,7 @@ function xmlMarkupAt(text: string, start: number): XmlMarkup | null {
 /**
  * Lenient markup removal for cancel detection: only a complete `<name ...>...</name>` element (and its body) or
  * an opaque/self-closing construct is removed; any `<` that does not start one stays plain text. `List<String>`
- * or `a<b` therefore never hide a later stop, while a quoted `<system>stop lca</system>` is still data.
+ * or `a<b` therefore never hide a later stop, while a quoted `<system>stop otter</system>` is still data.
  */
 function stripClosedElements(text: string): string {
   // One tokenizing pass, then same-name open/close pairing with per-name stacks: linear in the input, so pasted

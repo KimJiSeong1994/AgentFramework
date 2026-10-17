@@ -87,9 +87,9 @@ type Fixture = ReturnType<typeof fixture>
 const STEPS = [1, 2].map(n => ({ title: `module ${n}`, files: [`mod${n}.py`], detail: `write module ${n}`, verify: `sh check_${n}.sh` }))
 const WID = "wf_ug_unit"
 
-function docDir(): string { return join(wt.worktree, ".lca", "workflows", SESSION, WID, "units") }
-const docPath = ".lca/workflows/" + SESSION + "/" + WID + "/units/g1-1.md"
-const jsonDocPath = ".lca/workflows/" + SESSION + "/" + WID + "/units/g1-1.json"
+function docDir(): string { return join(wt.worktree, ".otter", "workflows", SESSION, WID, "units") }
+const docPath = ".otter/workflows/" + SESSION + "/" + WID + "/units/g1-1.md"
+const jsonDocPath = ".otter/workflows/" + SESSION + "/" + WID + "/units/g1-1.json"
 
 function unitInput(overrides: Partial<SubjectInput> = {}): SubjectInput {
   return {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Isolated actual-host skill acceptance probes. Every result is synthetic, never production evidence.
 
-Called by lca-e2e.sh after its XDG isolation and fixture setup. Raw OpenCode CLI output is kept
+Called by otter-e2e.sh after its XDG isolation and fixture setup. Raw OpenCode CLI output is kept
 only in the scratch log directory; receipts contain bounded, sanitized metadata and fingerprints.
 """
 import argparse
@@ -54,7 +54,7 @@ def scratch_env(work):
             env[key] = str(Path(env[key]).resolve())
     for key in ("OPENCODE_CONFIG_DIR", "ORCA_OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG",
                 "OPENCODE_CONFIG_CONTENT", "OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_USERNAME",
-                "LCA_STATE_HOME"):
+                "OTTER_STATE_HOME"):
         env.pop(key, None)
     isolated_home = Path(env["XDG_CONFIG_HOME"]).resolve().parent / "home"
     isolated_home.mkdir(parents=True, exist_ok=True)
@@ -115,7 +115,7 @@ def run_control(argv, work, env, timeout=15):
 
 
 def configure_scenario(work, scenario, observer=None, router_endpoint=None):
-    config_path = work / ".lca" / "lca.jsonc"
+    config_path = work / ".otter" / "otter.jsonc"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     if scenario == "missing-skill":
         skills = config.setdefault("skills", {}).setdefault("allow", [])
@@ -315,7 +315,7 @@ def host_owner_session(db_path, candidate_sessions, marker):
 
 def read_verify_failure_ledger(work, owner_session_id):
     work_key = hashlib.sha1(str(work.resolve()).encode()).hexdigest()[:12]
-    ledger_path = Path(os.environ["XDG_STATE_HOME"]) / "lca" / work_key / "sessions" / owner_session_id / "ledger.json"
+    ledger_path = Path(os.environ["XDG_STATE_HOME"]) / "otter" / work_key / "sessions" / owner_session_id / "ledger.json"
     if not ledger_path.is_file():
         raise ProbeFailure("owner_task_ledger_unavailable", "unsupported")
     try:
@@ -393,7 +393,7 @@ def verify_failure_acceptance(work, host_db, observation_db, candidate_sessions,
     owner_id = host_owner_session(host_db, candidate_sessions, marker)
     task, child_id = read_verify_failure_ledger(work, owner_id)
     task_id = task["id"]
-    config_path = work / ".lca" / "lca.jsonc"
+    config_path = work / ".otter" / "otter.jsonc"
     require(hashlib.sha256(config_path.read_bytes()).hexdigest() == config_sha256,
             "verify_failure_scratch_config_was_modified")
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -771,12 +771,12 @@ def main():
     report_path = Path(args.report)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     campaign_id = "isolated-skill-probe"
-    control = Path(__file__).resolve().with_name("lca-skill-observation.ts")
+    control = Path(__file__).resolve().with_name("otter-skill-observation.ts")
     work = Path(args.work).resolve()
     isolated_base = Path(os.environ["XDG_STATE_HOME"]).resolve().parent
     require(work.is_relative_to(isolated_base / "work"), "probe_root_not_isolated")
     require((work / ".opencode/skills/observation-fixture/SKILL.md").is_file(), "synthetic_fixture_missing")
-    observation_state = Path(os.environ["XDG_STATE_HOME"]) / "lca" / hashlib.sha1(str(work).encode()).hexdigest()[:12]
+    observation_state = Path(os.environ["XDG_STATE_HOME"]) / "otter" / hashlib.sha1(str(work).encode()).hexdigest()[:12]
     observation_db = observation_state / "skill-observations.sqlite"
     require(not observation_db.exists(), "probe_requires_fresh_isolated_root")
     env = scratch_env(work)
@@ -847,7 +847,7 @@ def main():
         verify_config_sha256 = None
         verify_skill_sha256 = None
         if args.scenario == "verify-failure":
-            verify_config_sha256 = hashlib.sha256((work / ".lca" / "lca.jsonc").read_bytes()).hexdigest()
+            verify_config_sha256 = hashlib.sha256((work / ".otter" / "otter.jsonc").read_bytes()).hexdigest()
             verify_skill_sha256 = hashlib.sha256(
                 (work / ".opencode" / "skills" / FIXTURE_SKILL / "SKILL.md").read_bytes()).hexdigest()
 
@@ -939,7 +939,7 @@ def main():
                           "It is intentionally absent; do not substitute another skill or use other tools.")
             elif args.scenario == "verify-failure":
                 prompt = (
-                    "ulw: This is the LCA_VERIFY_FAILURE_ACCEPTANCE probe. Delegate exactly one code task and do not "
+                    "ulw: This is the OTTER_VERIFY_FAILURE_ACCEPTANCE probe. Delegate exactly one code task and do not "
                     "implement it yourself. Use title 'Write the fixture result marker', detail 'Call the skill tool "
                     "with name observation-fixture exactly once and follow its instruction. Then create only "
                     "worker-result.txt containing OBSERVATION_FIXTURE_LOADED. One attempt only; do not repair the "
@@ -965,7 +965,7 @@ def main():
             if run_meta["returnCode"] != 0 or not session_ids:
                 raise ProbeFailure("host_run_or_session_evidence_unavailable", "unsupported")
             if args.scenario == "verify-failure":
-                marker = "LCA_VERIFY_FAILURE_ACCEPTANCE"
+                marker = "OTTER_VERIFY_FAILURE_ACCEPTANCE"
                 evidence = verify_failure_acceptance(work, args.db, observation_db, session_ids, marker,
                                                      verify_config_sha256, verify_skill_sha256)
                 calls = evidence.pop("calls")
@@ -1032,7 +1032,7 @@ def main():
                                 message = json.loads(message_raw)
                                 part = json.loads(part_raw)
                                 if message.get("role") == "user" and part.get("type") == "text" \
-                                        and "<lca-skill-advice>Potentially relevant skill: observation-fixture." in (part.get("text") or ""):
+                                        and "<otter-skill-advice>Potentially relevant skill: observation-fixture." in (part.get("text") or ""):
                                     actual_advice_parts += 1
                     report["hostMessageEvidence"] = {"adviceInsertedInActualUserParts": actual_advice_parts > 0,
                                                       "matchingActualUserTextPartCount": actual_advice_parts}

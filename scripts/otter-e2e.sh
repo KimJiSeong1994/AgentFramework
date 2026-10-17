@@ -1,36 +1,36 @@
 #!/bin/bash
-# lca-e2e.sh — ISOLATED acceptance run for the lca plugin (docs/agent-framework-review §6).
+# otter-e2e.sh — ISOLATED acceptance run for the otter plugin (docs/agent-framework-review §6).
 #   --fixture fib   (default) stage 1: main alone implements fib.py            criteria E01-E04
 #   --fixture ulw3            stage 2: ulw -> delegate 3 tasks to worker sessions  criteria E01-E14
 #   --fixture ulw-fail        stage 2 negative: one task's test cannot pass -> [done, failed, done], queue goes on
 #
-#   scripts/lca-e2e.sh --dry-run     # print every step and the exact command; touches nothing
-#   scripts/lca-e2e.sh --check       # build the isolated env and verify isolation; NO model call
-#   scripts/lca-e2e.sh --skill-probe # real skill load in isolated synthetic fixture; sanitized capability receipt
-#   scripts/lca-e2e.sh --skill-probe-off # same host load with observation disabled
-#   scripts/lca-e2e.sh --skill-probe-scenario NAME # main|missing-skill|advice-only|worker-denied|worker-allowed|verify-failure
-#   scripts/lca-e2e.sh --smoke-command NAME  # isolated env like --check, then `opencode run --command NAME`
+#   scripts/otter-e2e.sh --dry-run     # print every step and the exact command; touches nothing
+#   scripts/otter-e2e.sh --check       # build the isolated env and verify isolation; NO model call
+#   scripts/otter-e2e.sh --skill-probe # real skill load in isolated synthetic fixture; sanitized capability receipt
+#   scripts/otter-e2e.sh --skill-probe-off # same host load with observation disabled
+#   scripts/otter-e2e.sh --skill-probe-scenario NAME # main|missing-skill|advice-only|worker-denied|worker-allowed|verify-failure
+#   scripts/otter-e2e.sh --smoke-command NAME  # isolated env like --check, then `opencode run --command NAME`
 #                                     (120s cap); PASS when the transcript's user text contains the code-rendered
-#                                     marker for that command (e.g. "[lca status]" for /status, M0 AC0.9)
-#   scripts/lca-e2e.sh               # full run: opencode run ... (loads the model, GPU, up to --timeout s)
+#                                     marker for that command (e.g. "[otter status]" for /status, M0 AC0.9)
+#   scripts/otter-e2e.sh               # full run: opencode run ... (loads the model, GPU, up to --timeout s)
 #
-# Options: --fixture NAME (fib)  --scratch DIR (default ~/.cache/lca/e2e, env LCA_E2E_SCRATCH)
+# Options: --fixture NAME (fib)  --scratch DIR (default ~/.cache/otter/e2e, env OTTER_E2E_SCRATCH)
 #          --probe-timeout S (skill scenario cap; 180s default, verify-failure 900s)
 #          --timeout S (fib 600 / ulw3 1800)  --max-wall S (fib 300 / ulw3 900)  --budget-tokens N (8000)
 #          --worker-budget N / --reviewer-budget N (defaults: DEFAULT_CONFIG.budget)  --prompt "..."  --agent NAME (main)
 #          --no-auto (do not pass --auto to opencode run)  --keep (keep the work dir on success)
 #
 # M1 plan-workflow flags (ralplan section 6, AC1.1-AC1.9):
-#   --flow plan                    drive lca_flow's /plan -> /approve -> delegate cycle instead of a plain prompt
+#   --flow plan                    drive otter_flow's /plan -> /approve -> delegate cycle instead of a plain prompt
 #   --entry command|keyword (command)   command: `opencode run --command plan "<request>"`;
 #                                        keyword: plain `opencode run ... "ralplan <request>"`
 #   --repeat N --stop-after pending_approval   AC1.7: N fresh scratch repos + isolated state, each stops at the
-#                                        first pending_approval or 600s; writes ~/.cache/lca/e2e/flow-repeat-<ts>.json
+#                                        first pending_approval or 600s; writes ~/.cache/otter/e2e/flow-repeat-<ts>.json
 #   --seed-open-task                F07: pre-seed an untagged open ledger task before /approve
-#   scripts/lca-e2e.sh --flow plan --fixture plan3                       F01-F05
-#   scripts/lca-e2e.sh --flow plan --entry keyword --fixture plan3       F01-F06
-#   scripts/lca-e2e.sh --flow plan --fixture plan3 --seed-open-task      F07
-#   scripts/lca-e2e.sh --flow plan --fixture plan3 --repeat 10 --stop-after pending_approval   AC1.7
+#   scripts/otter-e2e.sh --flow plan --fixture plan3                       F01-F05
+#   scripts/otter-e2e.sh --flow plan --entry keyword --fixture plan3       F01-F06
+#   scripts/otter-e2e.sh --flow plan --fixture plan3 --seed-open-task      F07
+#   scripts/otter-e2e.sh --flow plan --fixture plan3 --repeat 10 --stop-after pending_approval   AC1.7
 # Exit: 0 all criteria met, 1 warnings only (check mode), 2 a criterion/check failed, 3 setup failed.
 #
 # Isolation design (verified on opencode 1.18.32, 2026-09-22 — `opencode debug paths` / `opencode debug config`):
@@ -42,8 +42,8 @@
 #     also loads oh-my-openagent). It, ORCA_OPENCODE_CONFIG_DIR, OPENCODE_CONFIG, OPENCODE_CONFIG_CONTENT and
 #     OPENCODE_SERVER_PASSWORD/USERNAME are unset for every scratch OpenCode call here.
 #   * ~/.opencode/opencode.json(c) is also probed by OpenCode and is NOT covered by XDG; --check warns if it exists.
-#   * --pure is NOT used: it would drop the project plugin (lca) as well.
-#   * The lca plugin is loaded per project via <work>/.opencode/plugins/lca.ts re-exporting the absolute path of
+#   * --pure is NOT used: it would drop the project plugin (otter) as well.
+#   * The otter plugin is loaded per project via <work>/.opencode/plugins/otter.ts re-exporting the absolute path of
 #     framework/src/index.ts (same mechanism as the repo's own loader). No `plugin` key in the scratch config.
 #   * `opencode debug config` truncates at 64 KiB when stdout is a pipe -> always redirected to a file.
 #   * `opencode run` blocks on an open stdin -> always `</dev/null`; timeout via `perl -e 'alarm N; exec @ARGV'`.
@@ -51,7 +51,7 @@
 #     hang on a permission prompt; the work dir is a throwaway git repo under the scratch dir. Use --no-auto to drop it.
 #
 # Success criteria (stage 1): tests pass after the run, wall < --max-wall, first-call input <= --budget-tokens,
-# repeated identical tool calls == 0 (measured with scripts/lca-baseline.py on the isolated DB).
+# repeated identical tool calls == 0 (measured with scripts/otter-baseline.py on the isolated DB).
 # Stage 2 (ulw3 / ulw-fail) adds: E05 ledger statuses match the fixture, E06 each task's worker session is a child
 # of main with agent=worker (every attempt), E07 main cache misses <= 1 (GGUF reports 1, MLX 0), worker misses <= 1 (reviewer misses reported), E08 worker/reviewer prefix within
 # their own budgets (DEFAULT_CONFIG.budget), E09 every review ACCEPT (ulw3) / skipped for the failed task (ulw-fail),
@@ -61,15 +61,15 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRATCH_DEFAULT="$HOME/.cache/lca/e2e"
-SCRATCH="${LCA_E2E_SCRATCH:-$SCRATCH_DEFAULT}"
+SCRATCH_DEFAULT="$HOME/.cache/otter/e2e"
+SCRATCH="${OTTER_E2E_SCRATCH:-$SCRATCH_DEFAULT}"
 MODE=run; TIMEOUT=""; MAX_WALL=""; BUDGET=8000; WORKER_BUDGET=""; REVIEWER_BUDGET=""; AGENT=main; AUTO=1; KEEP=0
 FIXTURE_NAME=fib; PROMPT=""; WORKTREE=0; SMOKE_COMMAND=""
 FLOW=""; ENTRY=command; REPEAT=""; STOP_AFTER=""; SEED_OPEN_TASK=0
 PROBE_OBSERVE=on; PROBE_SCENARIO=main; PROBE_TIMEOUT=180; PROBE_TIMEOUT_EXPLICIT=0
 USER_JSONC="$HOME/.config/opencode/opencode.jsonc"
-BASELINE="$ROOT/scripts/lca-baseline.py"
-STATUS_MARKER_TXT="[lca status]"  # framework/src/flow/status.ts STATUS_MARKER
+BASELINE="$ROOT/scripts/otter-baseline.py"
+STATUS_MARKER_TXT="[otter status]"  # framework/src/flow/status.ts STATUS_MARKER
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -135,7 +135,7 @@ fi
 # --flow plan: keyword entry prepends the ralplan keyword to the same request text instead of using --command plan.
 if [ -n "$FLOW" ] && [ "$ENTRY" = keyword ]; then FLOW_PROMPT="ralplan $PROMPT"; else FLOW_PROMPT="$PROMPT"; fi
 
-E2E="$SCRATCH/lca-e2e"
+E2E="$SCRATCH/otter-e2e"
 CFG_HOME="$E2E/config"; DATA_HOME="$E2E/data"; STATE_HOME="$E2E/state"; LOGS="$E2E/logs"
 SCRATCH_CFG="$CFG_HOME/opencode/opencode.json"
 ISO_DB="$DATA_HOME/opencode/opencode.db"
@@ -155,15 +155,15 @@ with_timeout() { perl -e 'alarm shift; exec @ARGV or exit 127' "$@"; }
 # every opencode invocation goes through here
 oc() {
   env -u OPENCODE_CONFIG_DIR -u ORCA_OPENCODE_CONFIG_DIR -u OPENCODE_CONFIG -u OPENCODE_CONFIG_CONTENT \
-      -u OPENCODE_SERVER_PASSWORD -u OPENCODE_SERVER_USERNAME -u LCA_STATE_HOME \
+      -u OPENCODE_SERVER_PASSWORD -u OPENCODE_SERVER_USERNAME -u OTTER_STATE_HOME \
       XDG_CONFIG_HOME="$CFG_HOME" XDG_DATA_HOME="$DATA_HOME" XDG_STATE_HOME="$STATE_HOME" "$@"
 }
 RUN_CMD="perl -e 'alarm $TIMEOUT; exec @ARGV' opencode run --format json --agent $AGENT $AUTO_FLAG \"$PROMPT\" </dev/null"
-FLOW_HELPER="$ROOT/scripts/lca-flow-e2e-helper.py"
+FLOW_HELPER="$ROOT/scripts/otter-flow-e2e-helper.py"
 
 # ------------------------------------------------------------------ dry run
 if [ "$MODE" = dry ]; then
-  say "lca-e2e dry run (nothing is created)"
+  say "otter-e2e dry run (nothing is created)"
   say "  repo root        : $ROOT"
   say "  scratch          : $E2E"
   say "  XDG_CONFIG_HOME  : $CFG_HOME   -> writes $SCRATCH_CFG"
@@ -171,7 +171,7 @@ if [ "$MODE" = dry ]; then
   say "  XDG_STATE_HOME   : $STATE_HOME"
   say "  unset            : OPENCODE_CONFIG_DIR ORCA_OPENCODE_CONFIG_DIR OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT"
   say "  scratch config   : provider.ollama + model + small_model copied from $USER_JSONC; NO plugin key"
-  say "  fixture          : $FIXTURE_NAME ($FIXTURE) -> $WORK (git init + commit; .opencode/plugins/lca.ts -> $ROOT/framework/src/index.ts)"
+  say "  fixture          : $FIXTURE_NAME ($FIXTURE) -> $WORK (git init + commit; .opencode/plugins/otter.ts -> $ROOT/framework/src/index.ts)"
   say "  command          : cd $WORK && $RUN_CMD"
   say "  outputs          : $LOGS/run-$STAMP.jsonl / .err / .meta"
   say "  verify           : python3 -m pytest -q; wall < ${MAX_WALL}s;"
@@ -185,7 +185,7 @@ fi
 step "setup: isolated XDG dirs under $E2E"
 mkdir -p "$CFG_HOME/opencode" "$DATA_HOME" "$STATE_HOME" "$LOGS" "$E2E/work" || { echo "cannot create $E2E" >&2; exit 3; }
 [ -f "$USER_JSONC" ] || { echo "user config $USER_JSONC not found (need provider.ollama block)" >&2; exit 3; }
-python3 - "$USER_JSONC" "$SCRATCH_CFG" "${LCA_E2E_MODEL:-}" <<'PY' || exit 3
+python3 - "$USER_JSONC" "$SCRATCH_CFG" "${OTTER_E2E_MODEL:-}" <<'PY' || exit 3
 import json, re, sys
 src, dst, model_override = sys.argv[1], sys.argv[2], sys.argv[3]
 t = open(src).read()
@@ -205,7 +205,7 @@ cfg = {
     "model": model_override or u.get("model", "ollama/gemma4:26b-a4b-it-mtp-q4_K_M"),
     "small_model": u.get("small_model", u.get("model")),
     "provider": {"ollama": prov},
-    # no "plugin": lca is loaded per project from <work>/.opencode/plugins/lca.ts
+    # no "plugin": otter is loaded per project from <work>/.opencode/plugins/otter.ts
 }
 json.dump(cfg, open(dst, "w"), indent=2)
 print(f"wrote {dst}: model={cfg['model']} small_model={cfg['small_model']} plugin=<absent>")
@@ -215,13 +215,13 @@ step "setup: work dir from fixture"
 [ -d "$FIXTURE" ] || { echo "fixture missing: $FIXTURE" >&2; exit 3; }
 mkdir -p "$WORK/.opencode/plugins" && cp -R "$FIXTURE/." "$WORK/" || exit 3
 rm -rf "$WORK/__pycache__" "$WORK/.pytest_cache"
-printf '// e2e loader: lca plugin from the repo under test (absolute path).\nexport { LcaPlugin } from "%s/framework/src/index.ts"\n' "$ROOT" > "$WORK/.opencode/plugins/lca.ts"
-if [ "$WORKTREE" = 1 ]; then mkdir -p "$WORK/.lca" && printf '{ "delegate": { "worktree": true } }\n' > "$WORK/.lca/lca.jsonc"; fi
-( cd "$WORK" && git init -q && git add -A && git -c user.name=lca-e2e -c user.email=lca-e2e@localhost commit -q -m "fixture: $FIXTURE_NAME" ) || exit 3
+printf '// e2e loader: otter plugin from the repo under test (absolute path).\nexport { OtterPlugin } from "%s/framework/src/index.ts"\n' "$ROOT" > "$WORK/.opencode/plugins/otter.ts"
+if [ "$WORKTREE" = 1 ]; then mkdir -p "$WORK/.otter" && printf '{ "delegate": { "worktree": true } }\n' > "$WORK/.otter/otter.jsonc"; fi
+( cd "$WORK" && git init -q && git add -A && git -c user.name=otter-e2e -c user.email=otter-e2e@localhost commit -q -m "fixture: $FIXTURE_NAME" ) || exit 3
 say "work dir: $WORK"
 
 if [ "$MODE" = skill-probe ]; then
-  oc python3 "$ROOT/scripts/lca-skill-probe.py" --work "$WORK" --db "$ISO_DB" \
+  oc python3 "$ROOT/scripts/otter-skill-probe.py" --work "$WORK" --db "$ISO_DB" \
     --report "$LOGS/skill-probe-$STAMP.json" --timeout "$PROBE_TIMEOUT" --observation "$PROBE_OBSERVE" \
     --scenario "$PROBE_SCENARIO"
   exit $?
@@ -254,8 +254,8 @@ print("valid=1")
 plugins = [p if isinstance(p, str) else p[0] for p in (d.get("plugin") or [])]
 print("plugins=" + " ".join(plugins))
 print("omo=" + ("1" if any("oh-my-openagent" in p for p in plugins) else "0"))
-print("lca=" + ("1" if any(p.endswith("/.opencode/plugins/lca.ts") for p in plugins) else "0"))
-print("foreign=" + " ".join(p for p in plugins if not p.endswith("/.opencode/plugins/lca.ts")))
+print("otter=" + ("1" if any(p.endswith("/.opencode/plugins/otter.ts") for p in plugins) else "0"))
+print("foreign=" + " ".join(p for p in plugins if not p.endswith("/.opencode/plugins/otter.ts")))
 print("model=" + str(d.get("model")))
 print("provider_ollama=" + ("1" if "ollama" in (d.get("provider") or {}) else "0"))
 ag = d.get("agent") or {}
@@ -270,12 +270,12 @@ PY
   else
     res PASS C04 "opencode debug config valid under isolated env ($(wc -c < "$LOGS/config.json" | tr -d ' ') bytes)"
     if [ "$(v omo)" = 1 ]; then res FAIL C05 "oh-my-openagent still in plugin list: [$(v plugins)]"
-    elif [ -n "$(v foreign)" ]; then res WARN C05 "unexpected plugins beside lca: [$(v foreign)]"
+    elif [ -n "$(v foreign)" ]; then res WARN C05 "unexpected plugins beside otter: [$(v foreign)]"
     else res PASS C05 "plugin list = [$(v plugins)] (no oh-my-openagent, no global plugins)"; fi
-    [ "$(v lca)" = 1 ] && res PASS C06 "lca project loader picked up" || res FAIL C06 "lca loader not in plugin list: [$(v plugins)]"
+    [ "$(v otter)" = 1 ] && res PASS C06 "otter project loader picked up" || res FAIL C06 "otter loader not in plugin list: [$(v plugins)]"
     [ "$(v provider_ollama)" = 1 ] && res PASS C07 "provider.ollama present, model=$(v model)" || res FAIL C07 "provider.ollama missing in effective config"
-    if [ "$(v agents)" = "main,worker,reviewer" ]; then res PASS C08 "lca agents injected: $(v agents); permission.task=$(v tools_task); default_agent=$(v default_agent)"
-    else res WARN C08 "lca agents incomplete: [$(v agents)] all=[$(v agents_all)] (plugin still being written?) stderr: $(grep -iE 'error|lca' "$LOGS/config.err" | head -1)"; fi
+    if [ "$(v agents)" = "main,worker,reviewer" ]; then res PASS C08 "otter agents injected: $(v agents); permission.task=$(v tools_task); default_agent=$(v default_agent)"
+    else res WARN C08 "otter agents incomplete: [$(v agents)] all=[$(v agents_all)] (plugin still being written?) stderr: $(grep -iE 'error|otter' "$LOGS/config.err" | head -1)"; fi
     [ "$(v default_agent)" = "$AGENT" ] && res PASS C09 "default_agent=$AGENT" || res WARN C09 "default_agent=$(v default_agent) (run uses --agent $AGENT explicitly)"
   fi
   [ -f "$ISO_DB" ] && res PASS C10 "isolated DB created: $ISO_DB" || res WARN C10 "isolated DB not created yet (appears on first run)"
@@ -341,19 +341,19 @@ fi
 # ------------------------------------------------------------------ --flow plan --repeat N --stop-after pending_approval
 # AC1.7: N fresh scratch repos + isolated state, each stops at the first pending_approval or 600s. Metric: runs
 # with >= 1 plan_submitted event. Never runs against the real model beyond what the caller invokes; this script
-# itself does not fake the model. Summary JSON -> ~/.cache/lca/e2e/flow-repeat-<ts>.json.
+# itself does not fake the model. Summary JSON -> ~/.cache/otter/e2e/flow-repeat-<ts>.json.
 if [ -n "$FLOW" ] && [ -n "$REPEAT" ]; then
   [ "$STOP_AFTER" = pending_approval ] || { echo "--repeat requires --stop-after pending_approval" >&2; exit 3; }
   REPEAT_TIMEOUT=600
-  SUMMARY_DIR="$HOME/.cache/lca/e2e"; mkdir -p "$SUMMARY_DIR"
+  SUMMARY_DIR="$HOME/.cache/otter/e2e"; mkdir -p "$SUMMARY_DIR"
   SUMMARY_JSON="$SUMMARY_DIR/flow-repeat-$STAMP.json"
-  RESULTS_TMP="$(mktemp -d "${TMPDIR:-/tmp}/lca-e2e-repeat.XXXXXX")"
+  RESULTS_TMP="$(mktemp -d "${TMPDIR:-/tmp}/otter-e2e-repeat.XXXXXX")"
   trap 'rm -rf "$RESULTS_TMP"' EXIT
   n_pass=0
   for i in $(seq 1 "$REPEAT"); do
     step "repeat $i/$REPEAT: fresh scratch repo + isolated state"
     RSCRATCH="$RESULTS_TMP/run-$i"
-    RE2E="$RSCRATCH/lca-e2e"; RCFG="$RE2E/config"; RDATA="$RE2E/data"; RSTATE="$RE2E/state"; RLOGS="$RE2E/logs"
+    RE2E="$RSCRATCH/otter-e2e"; RCFG="$RE2E/config"; RDATA="$RE2E/data"; RSTATE="$RE2E/state"; RLOGS="$RE2E/logs"
     mkdir -p "$RCFG/opencode" "$RDATA" "$RSTATE" "$RLOGS" "$RE2E/work"
     RCFGJSON="$RCFG/opencode/opencode.json"
     python3 - "$USER_JSONC" "$RCFGJSON" "" <<'PY' >/dev/null || exit 3
@@ -372,9 +372,9 @@ PY
     RWORK="$RE2E/work/plan3-$i"
     mkdir -p "$RWORK/.opencode/plugins" && cp -R "$FIXTURE/." "$RWORK/"
     rm -rf "$RWORK/__pycache__" "$RWORK/.pytest_cache"
-    printf '// e2e loader\nexport { LcaPlugin } from "%s/framework/src/index.ts"\n' "$ROOT" > "$RWORK/.opencode/plugins/lca.ts"
-    ( cd "$RWORK" && git init -q && git add -A && git -c user.name=lca-e2e -c user.email=lca-e2e@localhost commit -q -m plan3 ) || exit 3
-    roc() { env -u OPENCODE_CONFIG_DIR -u ORCA_OPENCODE_CONFIG_DIR -u OPENCODE_CONFIG -u OPENCODE_CONFIG_CONTENT -u LCA_STATE_HOME \
+    printf '// e2e loader\nexport { OtterPlugin } from "%s/framework/src/index.ts"\n' "$ROOT" > "$RWORK/.opencode/plugins/otter.ts"
+    ( cd "$RWORK" && git init -q && git add -A && git -c user.name=otter-e2e -c user.email=otter-e2e@localhost commit -q -m plan3 ) || exit 3
+    roc() { env -u OPENCODE_CONFIG_DIR -u ORCA_OPENCODE_CONFIG_DIR -u OPENCODE_CONFIG -u OPENCODE_CONFIG_CONTENT -u OTTER_STATE_HOME \
         XDG_CONFIG_HOME="$RCFG" XDG_DATA_HOME="$RDATA" XDG_STATE_HOME="$RSTATE" "$@"; }
     RSTATE_ROOT="$(python3 "$FLOW_HELPER" state-root "$RSTATE" "$RWORK")"
     RCMD=command; RREQ="$PROMPT"; [ "$ENTRY" = keyword ] && { RCMD=""; RREQ="ralplan $PROMPT"; }
@@ -604,9 +604,9 @@ PY
     python3 "$BASELINE" --db "$ISO_DB" --session "$(m id)" > "$LOGS/timeline-$STAMP.txt" 2>&1; say "timeline: $LOGS/timeline-$STAMP.txt"
     if [ "$N_TASKS" -gt 0 ]; then
       # ---- stage 2 criteria: ledger (outside the worktree, under XDG_STATE_HOME) + child sessions
-      LEDGER="$(find "$STATE_HOME/lca" -path "*/sessions/$(m id)/ledger.json" 2>/dev/null | head -1)"
+      LEDGER="$(find "$STATE_HOME/otter" -path "*/sessions/$(m id)/ledger.json" 2>/dev/null | head -1)"
       if [ -n "$LEDGER" ] && [ -f "$LEDGER" ]; then
-        cp "$LEDGER" "$LOGS/ledger-$STAMP.json"; [ -d "$WORK/.lca/handoffs" ] && cp -R "$WORK/.lca/handoffs" "$LOGS/handoffs-$STAMP"
+        cp "$LEDGER" "$LOGS/ledger-$STAMP.json"; [ -d "$WORK/.otter/handoffs" ] && cp -R "$WORK/.otter/handoffs" "$LOGS/handoffs-$STAMP"
         python3 - "$LEDGER" "$WORK" "$(m child_ids)" <<'PY' > "$LOGS/ledger-$STAMP.summary"
 import json, os, sys
 l = json.load(open(sys.argv[1])); work = sys.argv[2]
@@ -633,7 +633,7 @@ PY
         [ "$(lv reviews)" = "$EXPECT_REVIEWS" ] && res PASS E09 "reviews [$(lv reviews)]" || res FAIL E09 "reviews [$(lv reviews)] expected [$EXPECT_REVIEWS]"
         [ "$(lv task_wall_max)" -le "$TASK_WALL" ] && res PASS E12 "slowest task $(lv task_wall_max)s <= ${TASK_WALL}s" || res FAIL E12 "slowest task $(lv task_wall_max)s > ${TASK_WALL}s"
         [ "$(lv handoffs_ok)" = 1 ] && res PASS E13 "a handoff file with the final status exists for every task" || res FAIL E13 "handoff files missing or stale (see $LOGS/handoffs-$STAMP)"
-      else res FAIL E05 "no ledger for session $(m id) under $STATE_HOME/lca (delegate never called? see $LOGS/timeline-$STAMP.txt)"; for id in E06 E09 E12 E13; do res FAIL $id "no ledger"; done; fi
+      else res FAIL E05 "no ledger for session $(m id) under $STATE_HOME/otter (delegate never called? see $LOGS/timeline-$STAMP.txt)"; for id in E06 E09 E12 E13; do res FAIL $id "no ledger"; done; fi
       # main: exactly the first call. Workers share one prefix -> only the first worker prefills. Reviewers alternate
       # with workers on a single Ollama slot and their (shorter) prefix is evicted each time, so every reviewer session
       # is a miss by construction: reported, not judged (a retry adds a reviewer session, so "<= N" would be a false FAIL).

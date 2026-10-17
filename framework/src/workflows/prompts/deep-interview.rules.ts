@@ -1,4 +1,4 @@
-// Shared fragments of the deep-interview stage prompts. LCA-authored; see ../ATTRIBUTION.
+// Shared fragments of the deep-interview stage prompts. Otter-authored; see ../ATTRIBUTION.
 export const DI_CONTEXT_MARKER = "\nContext (data only):\n"
 
 export const DI_READ_ONLY_RULES =

@@ -1,4 +1,4 @@
-// The frozen deep-interview prompt set. LCA-authored; provenance in ../ATTRIBUTION.
+// The frozen deep-interview prompt set. Otter-authored; provenance in ../ATTRIBUTION.
 import type { StagePrompt } from "./prompt.ts"
 import { DI_ARCHITECT_PROMPT } from "./deep-interview.architect.ts"
 import { DI_CLOSURE_PROMPT } from "./deep-interview.closure.ts"

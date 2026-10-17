@@ -3,7 +3,7 @@ import { existsSync, lstatSync, readFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 
 const FLAGS = [
-  "-c", "core.hooksPath=/opt/lca/git/no-hooks", "-c", "core.fsmonitor=false",
+  "-c", "core.hooksPath=/opt/otter/git/no-hooks", "-c", "core.fsmonitor=false",
   "-c", "diff.external=", "-c", "credential.helper=", "-c", "core.sshCommand=/bin/false",
   "-c", "protocol.allow=never", "-c", "core.pager=cat", "-c", "gpg.program=/bin/false",
   "-c", "core.attributesFile=/dev/null", "-c", "advice.addEmbeddedRepo=false",
@@ -12,7 +12,7 @@ const FLAGS = [
 // Do not inherit GIT_CONFIG_COUNT, GIT_DIR, GIT_EXEC_PATH, askpass, dynamic loader hooks, etc.
 export function controlledGitEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return {
-    PATH: "/usr/bin:/bin", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/opt/lca/git/config",
+    PATH: "/usr/bin:/bin", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/opt/otter/git/config",
     GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/bin/false", GIT_SSH_COMMAND: "/bin/false",
     GIT_ALLOW_PROTOCOL: "", GIT_NO_REPLACE_OBJECTS: "1", ...extra,
   }

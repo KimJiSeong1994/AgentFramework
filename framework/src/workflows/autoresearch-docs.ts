@@ -1,4 +1,4 @@
-// Readable autoresearch artifacts: `<worktree>/.lca/workflows/<sid>/<wid>/<key>` as hash-recorded, worktree-relative refs.
+// Readable autoresearch artifacts: `<worktree>/.otter/workflows/<sid>/<wid>/<key>` as hash-recorded, worktree-relative refs.
 import { join } from "node:path"
 import { durableWriteBytes } from "../state/durable.ts"
 import { sha256, workflowArtifactDirectory } from "./artifacts.ts"
@@ -20,5 +20,5 @@ export function writeDoc(worktree: string, wf: { sessionID: string; id: string; 
     return { key, path: existing.path, sha256: digest }
   }
   durableWriteBytes(join(workflowArtifactDirectory(worktree, wf.sessionID, wf.id), key), bytes)
-  return { key, path: join(".lca", "workflows", wf.sessionID, wf.id, key), sha256: digest }
+  return { key, path: join(".otter", "workflows", wf.sessionID, wf.id, key), sha256: digest }
 }

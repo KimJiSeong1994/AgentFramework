@@ -7,7 +7,7 @@ import { sha256 } from "../src/skillopt/pilot.ts"
 
 const identity = (version: string): ExecutableIdentity => ({ launcherSha256: "a".repeat(64), observedVersion: version, basis: "resolved-launcher-file-and-version-command" })
 const root = resolve(import.meta.dir, "../..")
-const cli = resolve(root, "scripts/lca-skillopt.ts")
+const cli = resolve(root, "scripts/otter-skillopt.ts")
 
 test("fixed public listener is not accepted as fixed internal runner containment", () => {
   const receipt = classifyCapability(identity("1.18.33"), identity("0.34.3"), true)

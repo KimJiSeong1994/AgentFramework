@@ -2,9 +2,9 @@
 """Copy the fixture's EvoOntology workspace and remove the pieces that were added after the first stage-3 e2e runs
 (the "가금" term + mapping, the inclusive-window and radius-self conventions, the counting-word aliases of the
 wild-bird term). On that degraded workspace HPAI-MAP-002/003 fail again, which gives the stage-4 evolution driver a
-real gap to close: `python3 scripts/lca-evo-evolve.py --workspace <out>/.evoontology`.
+real gap to close: `python3 scripts/otter-evo-evolve.py --workspace <out>/.evoontology`.
 
-    python3 scripts/fixtures/data-vv/degrade_ontology.py ~/.cache/lca/e2e/evo-degraded
+    python3 scripts/fixtures/data-vv/degrade_ontology.py ~/.cache/otter/e2e/evo-degraded
 """
 import json
 import shutil

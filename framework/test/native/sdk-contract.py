@@ -25,9 +25,9 @@ from typing import Any
 MESSAGE_COUNT = 105
 START_TIMEOUT_SECONDS = 45.0
 HTTP_TIMEOUT_SECONDS = 5.0
-COMMAND_NAME = "lca-contract"
-PROVIDER_ID = "lca-contract-spy"
-MODEL_ID = "lca-contract-model"
+COMMAND_NAME = "otter-contract"
+PROVIDER_ID = "otter-contract-spy"
+MODEL_ID = "otter-contract-model"
 AGENT_NAME = "build"
 
 
@@ -164,7 +164,7 @@ class BackendSpy:
                 }
                 with owner.lock:
                     owner.requests.append(entry)
-                response = b"LCA contract spy rejects all provider traffic; no fake completion is available.\n"
+                response = b"Otter contract spy rejects all provider traffic; no fake completion is available.\n"
                 self.send_response(503, "Inference disabled by SDK contract probe")
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.send_header("Content-Length", str(len(response)))
@@ -248,10 +248,10 @@ def isolated_environment(run_dir: Path, config: dict[str, Any], evidence_path: P
             "OPENCODE_DISABLE_AUTOUPDATE": "1",
             "OPENCODE_DISABLE_MODELS_FETCH": "1",
             "OPENCODE_CONFIG_CONTENT": json.dumps(config, ensure_ascii=False, separators=(",", ":")),
-            "LCA_CONTRACT_EVIDENCE": str(evidence_path),
-            "LCA_CONTRACT_CHAT_MESSAGE_EVIDENCE": str(run_dir / "first-chat-message.json"),
-            "LCA_CONTRACT_SENTINEL": sentinel,
-            "LCA_CONTRACT_INPUT": str(run_dir / "plugin-input.json"),
+            "OTTER_CONTRACT_EVIDENCE": str(evidence_path),
+            "OTTER_CONTRACT_CHAT_MESSAGE_EVIDENCE": str(run_dir / "first-chat-message.json"),
+            "OTTER_CONTRACT_SENTINEL": sentinel,
+            "OTTER_CONTRACT_INPUT": str(run_dir / "plugin-input.json"),
         }
     )
     return env
@@ -387,7 +387,7 @@ def main() -> int:
         ensure(opencode.is_file() and os.access(opencode, os.X_OK), f"--opencode is not an executable file: {opencode}")
         plugin_path = Path(__file__).resolve().with_name("sdk-contract-plugin.ts")
         ensure(plugin_path.is_file(), f"required plugin file is missing: {plugin_path}")
-        sentinel = f"LCA_SDK_CONTRACT_BEFORE_LLM_{secrets.token_hex(12)}"
+        sentinel = f"OTTER_SDK_CONTRACT_BEFORE_LLM_{secrets.token_hex(12)}"
 
         spy_port = spy.start()
         config = {
@@ -398,14 +398,14 @@ def main() -> int:
             "provider": {
                 PROVIDER_ID: {
                     "npm": "@ai-sdk/openai-compatible",
-                    "name": "LCA SDK contract loopback spy",
+                    "name": "Otter SDK contract loopback spy",
                     "options": {
                         "baseURL": f"http://127.0.0.1:{spy_port}/v1",
-                        "apiKey": "lca-contract-no-real-credential",
+                        "apiKey": "otter-contract-no-real-credential",
                     },
                     "models": {
                         MODEL_ID: {
-                            "name": "LCA contract control-plane fixture",
+                            "name": "Otter contract control-plane fixture",
                             "limit": {"context": 8192, "output": 1024},
                         }
                     },
@@ -604,7 +604,7 @@ def main() -> int:
 
         status, commands, error = request_json(api_evidence, base_url, "GET", f"/command?{directory_query}")
         ensure(status == 200 and isinstance(commands, list), f"native command list failed (HTTP {status}): {commands!r} {error or ''}")
-        ensure(any(isinstance(item, dict) and item.get("name") == COMMAND_NAME for item in commands), "reserved lca-contract command was not injected into native command listing")
+        ensure(any(isinstance(item, dict) and item.get("name") == COMMAND_NAME for item in commands), "reserved otter-contract command was not injected into native command listing")
 
         command_payload = {
             "command": COMMAND_NAME,

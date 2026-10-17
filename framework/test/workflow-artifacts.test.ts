@@ -89,8 +89,8 @@ describe("verifyArtifact states", () => {
     expect(verifyArtifact(wt.worktree, forged)).toMatchObject({ state: "incomplete", reason: "hash mismatch" })
   })
 
-  test("the readable artifact directory is <worktree>/.lca/workflows/<sid>/<wid>/", () => {
-    expect(workflowArtifactDirectory(wt.worktree, "ses_a", "wf_b")).toBe(join(wt.worktree, ".lca", "workflows", "ses_a", "wf_b"))
+  test("the readable artifact directory is <worktree>/.otter/workflows/<sid>/<wid>/", () => {
+    expect(workflowArtifactDirectory(wt.worktree, "ses_a", "wf_b")).toBe(join(wt.worktree, ".otter", "workflows", "ses_a", "wf_b"))
   })
 })
 
@@ -153,11 +153,11 @@ describe("display and restore recompute artifact state", () => {
   })
 
   test("generic artifact refs on the envelope are verified alongside the plan view", () => {
-    put(".lca/workflows/ses_artifacts/wf_artifacts/notes.md", "notes")
+    put(".otter/workflows/ses_artifacts/wf_artifacts/notes.md", "notes")
     const { wf } = committedPlanWorkflow({
       artifacts: [
-        { key: "notes", path: ".lca/workflows/ses_artifacts/wf_artifacts/notes.md", sha256: sha256("notes") },
-        { key: "absent", path: ".lca/workflows/ses_artifacts/wf_artifacts/absent.md", sha256: sha256("absent") },
+        { key: "notes", path: ".otter/workflows/ses_artifacts/wf_artifacts/notes.md", sha256: sha256("notes") },
+        { key: "absent", path: ".otter/workflows/ses_artifacts/wf_artifacts/absent.md", sha256: sha256("absent") },
       ],
     })
     const results = describeArtifacts(wt.worktree, readWorkflow(wt.worktree)!)

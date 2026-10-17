@@ -17,13 +17,13 @@ import type { ExecutionRuntime } from "../src/hosts/types.ts"
 import type { DeepInterviewWorkflow, RalplanWorkflow, WorkflowEnvelope } from "../src/workflows/types.ts"
 import { createForegroundController } from "../src/hosts/controller.ts"
 
-const rawEngine = process.env.LCA_WORKFLOW_LIVE_ENGINE || "local"
+const rawEngine = process.env.OTTER_WORKFLOW_LIVE_ENGINE || "local"
 if (rawEngine !== "local" && rawEngine !== "codex" && rawEngine !== "claude") throw new Error(`invalid live engine ${rawEngine}`)
 const engine = rawEngine
-const model = process.env.LCA_WORKFLOW_LIVE_MODEL || "qwen3.6:35b-a3b-coding-mtp-q4_K_M"
-const out = process.env.LCA_WORKFLOW_LIVE_OUT || ""
-const smokes = (process.env.LCA_WORKFLOW_LIVE_SMOKES || "deep-interview,ralplan,ultragoal,autoresearch").split(",").map(s => s.trim()).filter(Boolean)
-const attemptsPerSmoke = Math.max(1, Math.min(5, Number(process.env.LCA_WORKFLOW_LIVE_RETRIES || (engine === "local" ? "3" : "1")) || 1))
+const model = process.env.OTTER_WORKFLOW_LIVE_MODEL || "qwen3.6:35b-a3b-coding-mtp-q4_K_M"
+const out = process.env.OTTER_WORKFLOW_LIVE_OUT || ""
+const smokes = (process.env.OTTER_WORKFLOW_LIVE_SMOKES || "deep-interview,ralplan,ultragoal,autoresearch").split(",").map(s => s.trim()).filter(Boolean)
+const attemptsPerSmoke = Math.max(1, Math.min(5, Number(process.env.OTTER_WORKFLOW_LIVE_RETRIES || (engine === "local" ? "3" : "1")) || 1))
 
 type Smoke = { name: string; ok: boolean; worktree: string; evidence: Record<string, unknown>; error?: string }
 type Attempt = { attempt: number; ok: boolean; worktree: string; status: string; error?: string }
@@ -100,7 +100,7 @@ function smokeOk(name: string, evidence: Record<string, unknown>): boolean {
   return false
 }
 function tempWorktree(name: string) {
-  const dir = mkdtempSync(join(tmpdir(), `lca-live-${name}-`))
+  const dir = mkdtempSync(join(tmpdir(), `otter-live-${name}-`))
   execFileSync("git", ["init", "--quiet"], { cwd: dir })
   execFileSync("git", ["config", "user.name", "Workflow live smoke"], { cwd: dir })
   execFileSync("git", ["config", "user.email", "workflow-live@localhost"], { cwd: dir })

@@ -134,7 +134,7 @@ describe("session admission", () => {
     expect(isAdmissionCurrent(wt.worktree, S, oldEpoch)).toBe(false)
   })
 
-  test("preexisting LCA state without session-store metadata attaches held", () => {
+  test("preexisting Otter state without session-store metadata attaches held", () => {
     const host = runtime()
     mkdirSync(sessionDir(wt.worktree, S), { recursive: true, mode: 0o700 })
     writeFileSync(join(sessionDir(wt.worktree, S), "ledger.json"), "legacy ledger")

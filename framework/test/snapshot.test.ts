@@ -108,7 +108,7 @@ describe("snapshot / diff", () => {
     const binaryName = ":(exclude) binary.bin"
     const binary = Buffer.from([0x00, 0xff, 0x41, 0x0a])
     try {
-      writeFileSync(join(wt.worktree, ".gitignore"), "__pycache__/\n*.pyc\n.lca/plans/\n")
+      writeFileSync(join(wt.worktree, ".gitignore"), "__pycache__/\n*.pyc\n.otter/plans/\n")
       const indexPath = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-path", "index"], { cwd: wt.worktree }).toString().trim()
       const index = readFileSync(indexPath)
       const objects = execFileSync("git", ["count-objects", "-v"], { cwd: wt.worktree }).toString()
@@ -116,9 +116,9 @@ describe("snapshot / diff", () => {
       expect(before).not.toBeNull()
 
       mkdirSync(join(wt.worktree, "pkg/__pycache__"), { recursive: true })
-      mkdirSync(join(wt.worktree, ".lca/plans"), { recursive: true })
+      mkdirSync(join(wt.worktree, ".otter/plans"), { recursive: true })
       writeFileSync(join(wt.worktree, "pkg/__pycache__/cache.cpython-313.pyc"), "ignored cache")
-      writeFileSync(join(wt.worktree, ".lca/plans/approval.md"), "ignored plan")
+      writeFileSync(join(wt.worktree, ".otter/plans/approval.md"), "ignored plan")
       writeFileSync(join(wt.worktree, exactName), "exact path\n")
       writeFileSync(join(wt.worktree, binaryName), binary)
 
@@ -255,7 +255,7 @@ describe("snapshot / diff", () => {
     symlinkSync(outside, join(state, "sessions"))
     await expect(createSnapshotStore(wt.worktree, join(state, "sessions", "s1", "snapshots", "task"))).rejects.toThrow(/control directory is unsafe/)
 
-    symlinkSync(outside, join(wt.worktree, ".lca"))
+    symlinkSync(outside, join(wt.worktree, ".otter"))
     const store = (await createSnapshotStore(wt.worktree))!
     try { expect(await store.snapshot()).toBeNull() }
     finally { store.dispose() }
@@ -360,16 +360,16 @@ describe("snapshot / diff", () => {
     }
   })
 
-  test("the plugin's own .lca/ runtime files are never part of a task diff", async () => {
+  test("the plugin's own .otter/ runtime files are never part of a task diff", async () => {
     const before = await snapshotTree(wt.worktree)
-    mkdirSync(join(wt.worktree, ".lca/state/sessions/s1"), { recursive: true })
-    writeFileSync(join(wt.worktree, ".lca/state/sessions/s1/session.json"), "{}")
+    mkdirSync(join(wt.worktree, ".otter/state/sessions/s1"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".otter/state/sessions/s1/session.json"), "{}")
     writeFileSync(join(wt.worktree, "code.py"), "x\n")
     const after = await snapshotTree(wt.worktree)
     const d = await diffSnapshots(wt.worktree, before, after, 10_000)
     expect(d?.files).toEqual(["code.py"])
     const onlyState = await snapshotTree(wt.worktree)
-    writeFileSync(join(wt.worktree, ".lca/state/sessions/s1/ledger.json"), "{}")
+    writeFileSync(join(wt.worktree, ".otter/state/sessions/s1/ledger.json"), "{}")
     expect((await diffSnapshots(wt.worktree, onlyState, await snapshotTree(wt.worktree), 100))?.files).toEqual([])
   })
 

@@ -1,5 +1,5 @@
 // Plan workflow persistence (ralplan §5.1, P5a). Control plane lives in the state root (outside the worktree, so a
-// worker cannot edit it); only the human-readable plan view is rendered into <worktree>/.lca/plans/.
+// worker cannot edit it); only the human-readable plan view is rendered into <worktree>/.otter/plans/.
 //   <stateRoot>/workflow/workflow.json        v2 index {version,id,sessionID,kind,revision,path,sha256}: the single commit point
 //   <stateRoot>/sessions/<sid>/workflows/<wid>/revisions/<seq>.json  immutable snapshots (workflows/commit.ts)
 //   <stateRoot>/workflow/heartbeat.json       non-authoritative owner liveness sidecar (display only)

@@ -432,7 +432,7 @@ describe("/continue explicit owner Resume", () => {
     const hook = await commandHook()
     const workflow = putWorkflow({
       phase: "executing", stage: "unit",
-      planRef: { jsonSha: "a".repeat(64), mdPath: ".lca/plans/gone.md", mdSha: "b".repeat(64), revision: 1 },
+      planRef: { jsonSha: "a".repeat(64), mdPath: ".otter/plans/gone.md", mdSha: "b".repeat(64), revision: 1 },
     })
     const runtime = getOpenCodeRuntime(deps)
     expect(requestStop(runtime, S, "pause", "p", { workflowID: workflow.id }).result.ok).toBe(true)

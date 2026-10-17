@@ -1,8 +1,8 @@
-// `config` hook: inject lca agents + runtime contract into the OpenCode Config (mutated in place).
+// `config` hook: inject otter agents + runtime contract into the OpenCode Config (mutated in place).
 import type { Config, Hooks } from "@opencode-ai/plugin"
 import type { AgentConfig } from "@opencode-ai/sdk"
 import type { Config as ConfigV2 } from "@opencode-ai/sdk/v2"
-import { AGENT_DEFS, DATA_AGENT_NAMES, EVO_TOOLS_ALLOWED, mainPrompt, type LcaAgentDef, type LcaAgentName } from "../agents/prompts.ts"
+import { AGENT_DEFS, DATA_AGENT_NAMES, EVO_TOOLS_ALLOWED, mainPrompt, type OtterAgentDef, type OtterAgentName } from "../agents/prompts.ts"
 import { existsSync } from "node:fs"
 import { dirname, isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -26,9 +26,9 @@ import { captureOpenCodeAgentConfigSafety } from "../hosts/opencode-system.ts"
  * re-declaring them.
  */
 type ConfigExtras = Pick<ConfigV2, "default_agent" | "subagent_depth" | "compaction">
-export type LcaOpenCodeConfig = Config & ConfigExtras
+export type OtterOpenCodeConfig = Config & ConfigExtras
 
-const CORE_AGENT_NAMES: LcaAgentName[] = ["main", "worker", "reviewer"]
+const CORE_AGENT_NAMES: OtterAgentName[] = ["main", "worker", "reviewer"]
 
 /** Vendored EvoOntology MCP server (framework/vendor/evoontology/evoontology/runtime/mcp_server.py). */
 export function vendoredEvoServer(): string {
@@ -41,7 +41,7 @@ function pluginName(entry: string | [string, unknown]): string {
   return typeof entry === "string" ? entry : entry[0]
 }
 
-/** Merge lca defaults with a user-defined agent of the same name. User wins per key; `tools` and `permission` merge one level deep. */
+/** Merge otter defaults with a user-defined agent of the same name. User wins per key; `tools` and `permission` merge one level deep. */
 function mergeAgent(base: AgentConfig, user: AgentConfig): AgentConfig {
   const out: AgentConfig = { ...base, ...user }
   if (base.tools || user.tools) out.tools = { ...base.tools, ...user.tools }
@@ -51,13 +51,13 @@ function mergeAgent(base: AgentConfig, user: AgentConfig): AgentConfig {
 
 export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
   return async (input) => {
-    const config = input as LcaOpenCodeConfig
+    const config = input as OtterOpenCodeConfig
 
     // OMO also owns config.agent wholesale; the two plugins would fight over it. Warn, never remove.
     const plugins = (config.plugin ?? []).map(pluginName)
     if (plugins.some((p) => p.startsWith(OMO_PREFIX))) {
       deps.log(
-        `WARNING: ${OMO_PREFIX} is loaded alongside lca. Both overwrite config.agent; disable one of them.`,
+        `WARNING: ${OMO_PREFIX} is loaded alongside otter. Both overwrite config.agent; disable one of them.`,
         { plugins },
       )
     }
@@ -68,9 +68,9 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
     config.agent ??= {}
     const merged: string[] = []
     const dataOn = deps.config.data.backend !== "none" && enabled(deps.config, "tool.data")
-    const AGENT_NAMES: LcaAgentName[] = dataOn ? [...CORE_AGENT_NAMES, ...DATA_AGENT_NAMES] : CORE_AGENT_NAMES
+    const AGENT_NAMES: OtterAgentName[] = dataOn ? [...CORE_AGENT_NAMES, ...DATA_AGENT_NAMES] : CORE_AGENT_NAMES
     for (const name of AGENT_NAMES) {
-      const { denied_tools, ...def } = AGENT_DEFS[name] as LcaAgentDef
+      const { denied_tools, ...def } = AGENT_DEFS[name] as OtterAgentDef
       const injected: AgentConfig = { ...def }
       if (name === "main") injected.prompt = mainPrompt(enabled(deps.config, "tool.delegate"), dataOn, flowOn(deps.config))
       const model = deps.config.models[name]
@@ -131,7 +131,7 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
     // OpenCode's built-in primary agents (Tab-switchable) so their prefix does not pay for them.
     for (const other of ["build", "plan"]) {
       const a = (config.agent[other] ??= {})
-      a.permission = { ...a.permission, delegate: "deny", db_query: "deny", schema_lookup: "deny", "evo-semantic_*": "deny", lca_flow: "deny" } as AgentConfig["permission"]
+      a.permission = { ...a.permission, delegate: "deny", db_query: "deny", schema_lookup: "deny", "evo-semantic_*": "deny", otter_flow: "deny" } as AgentConfig["permission"]
     }
 
     // (b3) EvoOntology semantic MCP (stdio, vendored server). Registered only with a data backend and an existing
@@ -154,8 +154,8 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
     }
 
     // (b2) owner/session commands (handled in hooks/command.ts). A user-defined command with the same name
-    // wins (spread after the lca default); `injectedNames` records only the names lca actually wrote so
-    // hooks/command.ts never acts on a shadowed name (ARCH-13). `lca_flow` is not registered in M0 (ARCH-06).
+    // wins (spread after the otter default); `injectedNames` records only the names otter actually wrote so
+    // hooks/command.ts never acts on a shadowed name (ARCH-13). `otter_flow` is not registered in M0 (ARCH-06).
     const injectedNames = new Set<string>()
     if (enabled(deps.config, "command.stop")) {
       config.command = { [STOP_COMMAND]: { template: STOP_TEMPLATE, description: STOP_DESCRIPTION }, ...config.command }
@@ -169,7 +169,7 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
       config.command = { [STATUS_COMMAND]: { template: STATUS_TEMPLATE, description: STATUS_DESCRIPTION }, ...config.command }
       if (config.command[STATUS_COMMAND]?.template === STATUS_TEMPLATE) injectedNames.add(STATUS_COMMAND)
     }
-    // M1: plan/approve/reject/cancel, gated on flow being on (same feature switch as lca_flow/the boundary/status).
+    // M1: plan/approve/reject/cancel, gated on flow being on (same feature switch as otter_flow/the boundary/status).
     if (flowOn(deps.config)) {
       const flowCmds: Array<[string, string, string]> = [
         [PLAN_COMMAND, PLAN_TEMPLATE, PLAN_DESCRIPTION],

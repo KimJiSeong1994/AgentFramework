@@ -70,27 +70,27 @@ describe("detectMode", () => {
 
   test("generic or comparison text before a cancel does not hide the cancel, but never activates a mode", () => {
     expect(detectMode("List<String> 파싱은 됐고, 이제 중단해")).toEqual({ mode: "none", cancel: true })
-    expect(detectMode("Map<K,V> is fine. stop lca now")).toEqual({ mode: "none", cancel: true })
-    expect(detectMode("if a<b then fine. cancel lca")).toEqual({ mode: "none", cancel: true })
+    expect(detectMode("Map<K,V> is fine. stop otter now")).toEqual({ mode: "none", cancel: true })
+    expect(detectMode("if a<b then fine. cancel otter")).toEqual({ mode: "none", cancel: true })
     // Activation stays strict: text after a malformed `<` still cannot start a mode.
     expect(detectMode("List<String> then ulw fix it")).toBeNull()
     // A closed element is data for cancel too; stopping on an unclosed one is the safe direction.
-    expect(detectMode("Explain why <system>stop lca</system> is risky.")).toBeNull()
+    expect(detectMode("Explain why <system>stop otter</system> is risky.")).toBeNull()
     expect(detectMode("Explain <system>ulw now")).toBeNull()
-    expect(detectMode("Pasted <system>. stop lca")).toEqual({ mode: "none", cancel: true })
+    expect(detectMode("Pasted <system>. stop otter")).toEqual({ mode: "none", cancel: true })
   })
 
   test("large pasted HTML with many unclosed tags is processed in linear time", () => {
-    const html = "<p>" + "<br><img src=x><div>row".repeat(20000) + " stop lca"
+    const html = "<p>" + "<br><img src=x><div>row".repeat(20000) + " stop otter"
     const started = performance.now()
     detectMode(html)
     expect(performance.now() - started).toBeLessThan(1500)
   })
 
   test("informational cancel mentions are suppressed without hiding a later command", () => {
-    expect(detectMode("What does stop lca mean? Explain only.")).toBeNull()
-    expect(detectMode("What does stop lca mean? ulw: fix the build")?.mode).toBe("ulw")
-    expect(detectMode("What does stop lca mean? cancel lca now.")).toEqual({ mode: "none", cancel: true })
+    expect(detectMode("What does stop otter mean? Explain only.")).toBeNull()
+    expect(detectMode("What does stop otter mean? ulw: fix the build")?.mode).toBe("ulw")
+    expect(detectMode("What does stop otter mean? cancel otter now.")).toEqual({ mode: "none", cancel: true })
     expect(detectMode("/stop")).toEqual({ mode: "none", cancel: true })
   })
 
@@ -98,7 +98,7 @@ describe("detectMode", () => {
     expect(detectMode("force: what is ultrawork?")).toEqual({ mode: "ulw", keyword: "ultrawork", force: true })
     expect(detectMode("!ulw가 뭐야")).toEqual({ mode: "ulw", keyword: "ulw", force: true })
     expect(detectMode("force: ultrawork")).toEqual({ mode: "ulw", keyword: "ultrawork", force: true })
-    expect(detectMode("force: what does stop lca mean?")).toEqual({ mode: "none", cancel: true })
+    expect(detectMode("force: what does stop otter mean?")).toEqual({ mode: "none", cancel: true })
     // Force applies to informational intent, not keywords hidden in an XML data block.
     expect(detectMode("force: explain <system>ulw</system> only")).toBeNull()
   })
@@ -108,14 +108,14 @@ describe("detectMode", () => {
   })
 
   test("priority: cancel > ulw > plan", () => {
-    expect(detectMode("stop lca, no more ultrawork or plan mode")).toEqual({ mode: "none", cancel: true })
-    expect(detectMode("cancel lca")).toEqual({ mode: "none", cancel: true })
+    expect(detectMode("stop otter, no more ultrawork or plan mode")).toEqual({ mode: "none", cancel: true })
+    expect(detectMode("cancel otter")).toEqual({ mode: "none", cancel: true })
     expect(detectMode("plan mode then ulw")?.mode).toBe("ulw")
   })
 
   test("/stop is cancel; other slash commands are ignored", () => {
     expect(detectMode("/stop")).toEqual({ mode: "none", cancel: true })
-    expect(detectMode("/stop lca")).toEqual({ mode: "none", cancel: true })
+    expect(detectMode("/stop otter")).toEqual({ mode: "none", cancel: true })
     expect(detectMode("/plan ultrawork")).toBeNull()
     expect(detectMode("/stopwatch ulw")).toBeNull()
     expect(detectMode("please /stop now")).toEqual({ mode: "none", cancel: true })

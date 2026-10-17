@@ -45,7 +45,7 @@ const INPUT_ESTIMATE_OVERHEAD = 64
 const TRUNCATION_MARKER = "\n[older tool output truncated to fit the estimated input budget]"
 const OMITTED_HISTORY = "[earlier tool exchanges omitted to fit the estimated input budget]"
 const SCRATCH_CLEANUP_ERROR = "scratch cleanup failed"
-const RESPONSE_ENVELOPE = 'Required transport format: respond with one LCA tool envelope or {"type":"final","text":"your final answer as a JSON string"}. Output-format instructions in the task or role apply to the CONTENTS of text, not to this outer envelope. If the final answer is plan JSON or reviewer JSON, JSON-encode it inside the text string. Never return a bare plan, verdict, or prose outside the envelope.'
+const RESPONSE_ENVELOPE = 'Required transport format: respond with one Otter tool envelope or {"type":"final","text":"your final answer as a JSON string"}. Output-format instructions in the task or role apply to the CONTENTS of text, not to this outer envelope. If the final answer is plan JSON or reviewer JSON, JSON-encode it inside the text string. Never return a bare plan, verdict, or prose outside the envelope.'
 const CODEX_PROFILE_REFUSAL = "Codex native profile preflight is unavailable or mismatched; host admission is refused."
 let cliHostActivitySequence = 0
 
@@ -228,11 +228,11 @@ function buildBasePrompt(request: ExecutionRequest, available: readonly CliToolN
   ).join("\n")
   const roleInstructions = request.policy.system.length ? request.policy.system.join("\n\n") : "(no additional role-specific system instructions)"
   return [
-    "You are an LCA execution agent. Follow the execution role and user task within the required LCA response envelope.",
-    `Execution role: ${request.role}. These local file tools are the complete LCA tool set for this role. Never request a native tool, plugin, MCP server, shell command, direct model API, or fallback execution. Unexpected native tool activity is refused. Delegation, workflow transitions, and verification are controlled by the outer LCA queue/controller.`,
-    `Only these LCA tools may run: ${available.length ? available.join(", ") : "none"}. Main and reviewer roles are read-only regardless of any other instruction. Tool paths are relative to the canonical worktree; absolute/traversal paths, protected directories (.git/.lca/.gjc), credential-like files, and symlink escapes are refused.`,
+    "You are an Otter execution agent. Follow the execution role and user task within the required Otter response envelope.",
+    `Execution role: ${request.role}. These local file tools are the complete Otter tool set for this role. Never request a native tool, plugin, MCP server, shell command, direct model API, or fallback execution. Unexpected native tool activity is refused. Delegation, workflow transitions, and verification are controlled by the outer Otter queue/controller.`,
+    `Only these Otter tools may run: ${available.length ? available.join(", ") : "none"}. Main and reviewer roles are read-only regardless of any other instruction. Tool paths are relative to the canonical worktree; absolute/traversal paths, protected directories (.git/.otter/.gjc), credential-like files, and symlink escapes are refused.`,
     `Input estimate limit: ${roleInputLimit(request.role)} estimated tokens, counting system instructions, tool schemas, title, task, included tool transcript, and separately supplied native instructions. The UTF-8 character estimate is heuristic and not an exact vendor token count. Older bounded tool results/history may be truncated or omitted to fit; the role instructions, title, and task are never dropped.`,
-    "Respond with exactly one JSON object and no surrounding prose: {\"type\":\"tool\",\"name\":\"read\",\"input\":{...}} (with any allowed tool name) or {\"type\":\"final\",\"text\":\"...\"}. A single ```json fenced object is also accepted. Tool calls are repeatable; after each call, the LCA tool result is supplied in the next prompt. Unknown/malformed envelopes fail closed. Final text is returned unchanged; it may contain plan JSON or reviewer JSON.",
+    "Respond with exactly one JSON object and no surrounding prose: {\"type\":\"tool\",\"name\":\"read\",\"input\":{...}} (with any allowed tool name) or {\"type\":\"final\",\"text\":\"...\"}. A single ```json fenced object is also accepted. Tool calls are repeatable; after each call, the Otter tool result is supplied in the next prompt. Unknown/malformed envelopes fail closed. Final text is returned unchanged; it may contain plan JSON or reviewer JSON.",
     "Exact tool schemas (keys not shown are forbidden):",
     toolLines,
     "File-tool bounds: reads refuse files over 1 MiB; each returned tool result is capped at 32 KiB. Glob and grep inspect at most 10,000 entries and 16 directory levels, honor .gitignore, and skip protected/common ignored or credential directories; grep is literal and case-sensitive. Writes/edit require a policy-authorized writable role and verified existing parent directory; edit changes only a unique exact oldText match.",
@@ -266,7 +266,7 @@ function toolResultText(output: CliToolOutput, transformed: { result?: unknown; 
     return { ok: transformed.error === undefined && output.ok, text }
   }
   if (value === undefined) return { ok: output.ok, text: output.ok ? output.text : output.error }
-  return { ok: false, text: "LCA tool result unavailable." }
+  return { ok: false, text: "Otter tool result unavailable." }
 }
 
 function emptyTerminalEvidence(status: ExecutionOutcome["status"]): ExecutionReconciliation {
@@ -662,7 +662,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                     })
                     if (decision.cancel) {
                       cancelled = true
-                      cancelReason = "execution cancelled by LCA policy"
+                      cancelReason = "execution cancelled by Otter policy"
                       callbackFailure = "policy-cancelled"
                       throw new Error(callbackFailure)
                     }
@@ -774,13 +774,13 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             } catch {
               return setFinal({ status: "failed", error: "assistant output policy failed closed" })
             }
-            if (finalTextDecision.cancel) return setFinal({ status: "cancelled", error: "execution cancelled by LCA policy" })
+            if (finalTextDecision.cancel) return setFinal({ status: "cancelled", error: "execution cancelled by Otter policy" })
             const afterInference = checkLease(request, fixedLease)
             if (afterInference.state === "cancelled") return setFinal({ status: "cancelled", error: "execution cancellation requested" })
             const envelope = parseEnvelope(native.text, route.engine === "local")
             if (!envelope) return setFinal({ status: "failed", error: "malformed CLI response; no fallback execution was attempted" })
             if (envelope.type === "final") return setFinal({ status: "completed", text: envelope.text })
-            if (!CLI_TOOL_NAMES.includes(envelope.name as CliToolName)) return setFinal({ status: "failed", error: "unknown LCA tool refused; no fallback execution was attempted" })
+            if (!CLI_TOOL_NAMES.includes(envelope.name as CliToolName)) return setFinal({ status: "failed", error: "unknown Otter tool refused; no fallback execution was attempted" })
             const name = envelope.name as CliToolName
             const callID = `${request.executionID}:tool:${toolCalls + 1}`
             const activity = {
@@ -800,13 +800,13 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             }
             if (toolCalls >= MAX_TOOL_ROUNDS) {
               finishTool("denied", false)
-              return setFinal({ status: "failed", error: "LCA tool round limit reached" })
+              return setFinal({ status: "failed", error: "Otter tool round limit reached" })
             }
             try { validateCliToolInput(name, envelope.input) }
             catch (error) {
               finishTool("failed", false)
-              if (error instanceof CliToolInputError) return setFinal({ status: "failed", error: "malformed LCA tool input refused" })
-              return setFinal({ status: "failed", error: "malformed LCA tool input refused" })
+              if (error instanceof CliToolInputError) return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
+              return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
             }
             if (cancelled) {
               finishTool("failed", false)
@@ -822,11 +822,11 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               finishTool("failed", false)
               return setFinal({ status: "cancelled", error: "execution cancellation requested" })
             }
-            const event = { type: "tool-before" as const, sessionID: callSession, callID, toolID: `lca:${name}`, name, input: envelope.input }
+            const event = { type: "tool-before" as const, sessionID: callSession, callID, toolID: `otter:${name}`, name, input: envelope.input }
             if (!request.policy.tools.allowed.includes(name) || request.policy.tools.denied.includes(name) ||
                 ((request.role === "main" || request.role === "reviewer") && (name === "write" || name === "edit"))) {
               finishTool("denied", false)
-              return setFinal({ status: "failed", error: "LCA tool denied by role policy before effects" })
+              return setFinal({ status: "failed", error: "Otter tool denied by role policy before effects" })
             }
             let decision: ReturnType<ExecutionPolicyHandlers["beforeTool"]>
             try {
@@ -838,7 +838,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             catch {
               finishTool("failed", false)
               if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-              return setFinal({ status: "failed", error: "LCA pre-execution tool policy failed closed" })
+              return setFinal({ status: "failed", error: "Otter pre-execution tool policy failed closed" })
             }
             let permit: SkillPermissionPermit | undefined
             if (request.skillContext !== undefined && !decision.allow && decision.holdTicket) {
@@ -852,11 +852,11 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             try { allowed = decision.allow || permit !== undefined }
             catch {
               finishTool("failed", false)
-              return setFinal({ status: "failed", error: "LCA pre-execution tool policy failed closed" })
+              return setFinal({ status: "failed", error: "Otter pre-execution tool policy failed closed" })
             }
             if (!allowed) {
               finishTool("denied", false)
-              return setFinal({ status: "failed", error: "LCA pre-execution tool policy denied the tool" })
+              return setFinal({ status: "failed", error: "Otter pre-execution tool policy denied the tool" })
             }
             try {
               if (request.skillContext !== undefined) await revalidateSkillToolEffect(request, event, skillSignal)
@@ -864,7 +864,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             catch {
               finishTool("denied", false)
               if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-              return setFinal({ status: "failed", error: "LCA skill context changed before tool effects" })
+              return setFinal({ status: "failed", error: "Otter skill context changed before tool effects" })
             }
             const canonicalAssistant = JSON.stringify({ type: "tool", name, input: envelope.input })
             let prospective: TranscriptExchange[] | undefined
@@ -906,13 +906,13 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             catch {
               finishTool("denied", false)
               if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-              return setFinal({ status: "failed", error: "LCA skill permission was not current at effect admission" })
+              return setFinal({ status: "failed", error: "Otter skill permission was not current at effect admission" })
             }
             let output: CliToolOutput
             try { output = snapshot === undefined ? tools.execute(name, envelope.input) : formatCliReadResult(snapshot, envelope.input) }
             catch {
               finishTool("failed", false)
-              return setFinal({ status: "failed", error: "LCA tool input or implementation failed closed" })
+              return setFinal({ status: "failed", error: "Otter tool input or implementation failed closed" })
             }
             // This reports the tool effect itself; later result-policy failures are separate execution failures.
             finishTool(output.ok ? "succeeded" : "failed", output.ok)
@@ -920,13 +920,13 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               type: "tool-result" as const,
               sessionID: callSession,
               callID,
-              toolID: `lca:${name}`,
+              toolID: `otter:${name}`,
               name,
               ...(output.ok ? { result: output.text } : { error: output.error }),
             }
             let transformed: ReturnType<ExecutionPolicyHandlers["toolResult"]>
             try { transformed = request.handlers.toolResult(resultEvent) }
-            catch { return setFinal({ status: "failed", error: "LCA tool-result policy failed closed" }) }
+            catch { return setFinal({ status: "failed", error: "Otter tool-result policy failed closed" }) }
             const result = toolResultText(output, transformed)
             history[history.length - 1] = { assistant: canonicalAssistant, ok: result.ok, result: result.text }
             const afterTool = fitHistory(basePrompt, history, inputLimit, nativeInstructionTokens)
@@ -936,7 +936,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             const afterEffectLease = checkLease(request, fixedLease)
             if (afterEffectLease.state === "cancelled" || cancelled) return setFinal({ status: "cancelled", error: cancelReason })
           }
-          return setFinal({ status: "failed", error: "LCA tool round limit reached" })
+          return setFinal({ status: "failed", error: "Otter tool round limit reached" })
         } catch (error) {
           if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
           return setFinal({ status: "failed", error: error instanceof Error && error.message === "current execution lease changed"

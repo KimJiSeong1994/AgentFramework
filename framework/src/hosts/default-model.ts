@@ -1,4 +1,4 @@
-// Configured chat default (`chat.default_model`) in ~/.config/lca/lca.jsonc or <worktree>/.lca/lca.jsonc.
+// Configured chat default (`chat.default_model`) in ~/.config/otter/otter.jsonc or <worktree>/.otter/otter.jsonc.
 // The default is the operator's explicit, persisted opt-in: it selects an engine/model at launch exactly like
 // `--engine` + `--model`, without model discovery. It never substitutes a different model on failure.
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
@@ -57,7 +57,7 @@ export function readDefaultModel(worktree: string): DefaultModelLookup {
   try {
     value = loadConfig(worktree).chat.default_model
   } catch (error) {
-    return { state: "invalid", reason: error instanceof ConfigError ? error.message : "lca config could not be read" }
+    return { state: "invalid", reason: error instanceof ConfigError ? error.message : "otter config could not be read" }
   }
   if (value === undefined || value === null) return { state: "unset" }
   const validated = validateDefaultModel(value)
@@ -158,7 +158,7 @@ export function readCombo(worktree: string): ComboLookup {
   try {
     value = loadConfig(worktree).chat.combo
   } catch (error) {
-    return { state: "invalid", reason: error instanceof ConfigError ? error.message : "lca config could not be read" }
+    return { state: "invalid", reason: error instanceof ConfigError ? error.message : "otter config could not be read" }
   }
   if (value === undefined || value === null) return { state: "unset" }
   if (typeof value !== "object" || Array.isArray(value)) return { state: "invalid", reason: "chat.combo must be an object mapping roles to {engine, model}" }

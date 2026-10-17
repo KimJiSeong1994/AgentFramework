@@ -1,7 +1,7 @@
-# lca — controlled coding agent
+# otter — controlled coding agent
 
 Common terminal for installed Ollama, Codex and Claude Code CLIs, with a retained
-OpenCode plugin and imported-plan runner. LCA fixes its role policy at session start;
+OpenCode plugin and imported-plan runner. Otter fixes its role policy at session start;
 approval, tool restrictions, output trimming and orchestration are enforced in code,
 not granted by model output. Native CLI budget and containment limits are described below.
 
@@ -16,7 +16,7 @@ not granted by model output. Native CLI budget and containment limits are descri
 | OpenCode adapter | `src/hosts/{opencode,opencode-runtime}.ts` | Retained plugin and imported-plan host integration. |
 | Workflow entry points | `src/hosts/{cli,controller}.ts`, `src/flow/`, `src/hooks/`, `src/tools/` | Import, approval, delegation, review, cancellation and status. |
 | Task execution | `src/orchestration/{queue,snapshot,worktree,git-boundary,shell,verifier,legacy-verifier}.ts` | Serial tasks, snapshots, verification and accepted changes. The default verifier remains `legacy-unowned`. |
-| Owned-verifier qualification | `src/hosts/linux-domain.ts`, `src/orchestration/linux-verifier.ts`, `scripts/linux-verifier/`, `scripts/lca-linux-verifier-{e2.py,queue.ts}` | Opt-in Linux/systemd verifier boundary; not default admission or worker/reviewer containment. |
+| Owned-verifier qualification | `src/hosts/linux-domain.ts`, `src/orchestration/linux-verifier.ts`, `scripts/linux-verifier/`, `scripts/otter-linux-verifier-{e2.py,queue.ts}` | Opt-in Linux/systemd verifier boundary; not default admission or worker/reviewer containment. |
 
 Review the runtime, queue, workflow callers and their tests as one integration change:
 committing the queue without its new host contracts leaves unresolved imports. Native-host
@@ -61,9 +61,9 @@ active session's prefix.
 
 ## Model selection and output limits
 
-Set role models in `.lca/lca.jsonc` with `models: { "worker": "provider/model-id" }`.
+Set role models in `.otter/otter.jsonc` with `models: { "worker": "provider/model-id" }`.
 The provider is the first path segment; the remaining model ID may itself contain slashes.
-An unset role inherits OpenCode's configured default, which may be a cloud provider; lca does
+An unset role inherits OpenCode's configured default, which may be a cloud provider; otter does
 not silently switch providers. Worker/reviewer temperature is set to `0.2` only when the
 effective model is explicitly known to use a local provider. Cloud temperature and reasoning
 options are not assumed to be supported.
@@ -72,9 +72,9 @@ The framework's per-role output ceiling is further limited by a lower OpenCode r
 the selected model's declared positive finite output limit. Invalid explicit limits are rejected.
 This is a request bound, not evidence that a remote provider enforces it or stops billing.
 
-## Common LCA terminal
+## Common Otter terminal
 
-Bare `lca` and `lca chat` open LCA's composer with no engine or model selected, not the
+Bare `otter` and `otter chat` open Otter's composer with no engine or model selected, not the
 OpenCode TUI. No model discovery, runtime setup, or model call happens at launch. Enter
 `/model` in the composer to select **local** (the installed Ollama CLI), **Codex**, or
 **Claude Code**. Chat and workflow input is refused with a `/model` hint until selection.
@@ -84,14 +84,14 @@ explicitly selected facility, not a prerequisite for ordinary CLI use.
 Startup selection can be supplied explicitly with both `--engine` and `--model`:
 
 ```sh
-lca chat --engine local --model llama3.2:3b
-lca chat --engine codex --model gpt-5.6-sol
-lca chat --engine claude --model sonnet
+otter chat --engine local --model llama3.2:3b
+otter chat --engine codex --model gpt-5.6-sol
+otter chat --engine claude --model sonnet
 ```
 
 To skip `/model` on every launch, set a default. With neither `--engine` nor `--model`,
-`lca` starts with `chat.default_model` from `~/.config/lca/lca.jsonc` (a project's
-`.lca/lca.jsonc` wins per key), exactly as if both flags were given: no discovery, the
+`otter` starts with `chat.default_model` from `~/.config/otter/otter.jsonc` (a project's
+`.otter/otter.jsonc` wins per key), exactly as if both flags were given: no discovery, the
 same preflight, and no fallback to another model if it is refused:
 
 ```jsonc
@@ -131,7 +131,7 @@ unavailable combo is reported and not applied. A route equal to the main selecti
 
 In chat: `/model combo` (or `/model combo show`) shows the effective routes, the source of each, and
 whether the current session uses them. `/model combo <role> <local|codex|claude> <native-id>` saves a
-route to `~/.config/lca/lca.jsonc` and does not change the current session. `/model combo clear <role>`
+route to `~/.config/otter/otter.jsonc` and does not change the current session. `/model combo clear <role>`
 and `/model combo clear` remove routes. `/model combo apply` starts a new session with the carried
 conversation under the saved combo; it is refused while a workflow is active or ownership is unsettled.
 Status shows `engine / model +N roles`.
@@ -191,11 +191,11 @@ The full-screen terminal returns to conversation after execution. Readline still
 exits after execution; rejection exits either frontend. Model switching never
 turns recovery into a different-model replay.
 
-Bare `lca` opens a model-unselected home with `/model`, `/help`, and `/quit` actions.
+Bare `otter` opens a model-unselected home with `/model`, `/help`, and `/quit` actions.
 The TUI follows the GJC arrangement: an empty session opens a bordered welcome box
 (identity and selected model on the left, getting-started commands and flow keys on
 the right); the transcript flows top-down. User, assistant and canonical-plan messages
-sit under a `you` / `lca` / `plan` label with an indented body (user text on a
+sit under a `you` / `otter` / `plan` label with an indented body (user text on a
 full-width bar when color is on); notices (`·`) and errors (`✗`) are compact glyph rows,
 and tool calls show an outcome icon (`✔` succeeded, `✘` failed/denied, `⟳` running)
 before the unchanged truthful summary, so provenance never depends on color. Assistant
@@ -216,7 +216,7 @@ Unselected help offers setup, theme/ASCII accessibility controls, and `/quit`;
 transcript search and task details become available after selecting a model.
 `/quit` is the single exit command. The TUI is enabled when all
 standard streams are TTYs, raw input is supported, `TERM` is set and not `dumb`,
-and the screen is at least 60x20 (split panes included). `LCA_TUI=0` selects readline. Unsupported
+and the screen is at least 60x20 (split panes included). `OTTER_TUI=0` selects readline. Unsupported
 terminals receive a plain fallback notice; missing stdin/stderr TTYs still
 refuse interactive operation. Noninteractive JSON/status commands are unchanged.
 `NO_COLOR` disables semantic styling, not the TUI. `/theme neutral`, `/theme light`
@@ -243,7 +243,7 @@ paging and selected/visible-range indicators; it never refreshes or rebinds cand
 while pending. Enter passes the captured stable ID through the same `/resume` checks,
 and navigation, resize, cancellation and opening history dispatch no work. `/resume
 <sid>` remains the direct checked form. `/new` opens a fresh session. Session switching is distinct from `/continue`,
-which offers Keep/Resume for the current session; noninteractive `lca resume
+which offers Keep/Resume for the current session; noninteractive `otter resume
 --session ...` remains work-resume. Switching refuses live turns, queues,
 reviewers, claims and unsettled execution intents. A settled nonterminal owner
 is held before its attachment is released; another session cannot take its work.
@@ -272,7 +272,7 @@ before that reader runs.
 review, stage, broker wait, claim or unsettled execution remains, and only then shows `paused (from <phase>/<stage>)`
 or `cancelled`. A cancel never exits the process while termination is unconfirmed. `/continue` on a paused workflow
 shows the residual and done tasks and asks Keep or Resume; Resume rechecks every precondition, commits one `resume` and
-runs only the residual tasks. `/continue` and `lca resume` refuse while a cancel is pending. Ctrl+Z requests a pause and
+runs only the residual tasks. `/continue` and `otter resume` refuse while a cancel is pending. Ctrl+Z requests a pause and
 suspends only after the pause is settled with no blockers; otherwise it refuses.
 
 Progress output separates model waiting, task lifecycle, tool activity, verification and
@@ -318,7 +318,7 @@ owns the terminal. A cancellation request is not proof that a process has exited
 the existing execution settlement and recovery rules still apply.
 
 Model names are native identifiers and examples, not a promise of account availability.
-Models must follow LCA's JSON tool protocol and produce valid plans; malformed replies
+Models must follow Otter's JSON tool protocol and produce valid plans; malformed replies
 are refused, never executed through a fallback. Selecting an installed local model does
 not establish that it can complete the planning/execution workflow.
 The worktree defaults to the current Git worktree; `--worktree PATH` selects another.
@@ -331,10 +331,10 @@ but does not forward API-key/token environment variables. These names do not est
 execution authority. Vendor account quotas still apply.
 
 All three engines use the same conversation → canonical plan → local human decision →
-serial execution controller. Main/reviewer file tools are read-only. LCA owns the JSON
+serial execution controller. Main/reviewer file tools are read-only. Otter owns the JSON
 file-tool loop; native inference runs in a separate empty scratch directory rather than
 the source worktree. Codex admission is currently Darwin-only and pinned to CLI 0.159.3
-and an exact bundled model slug. An LCA-owned, hash-bound catalogue removes native patch,
+and an exact bundled model slug. An Otter-owned, hash-bound catalogue removes native patch,
 shell and code-mode tools; a named permission profile restricts residual filesystem
 reads to the empty scratch workdir. The legacy `--sandbox` override is not used.
 Version and catalogue checks precede inference; unknown models or drift refuse without
@@ -348,8 +348,8 @@ directories can expose filenames. It is not a defence against a hostile local pr
 
 The terminal explicitly uses `estimated-input-reactive-output-v1`, separate from the
 unchanged `legacy-unowned` containment profile. Input cutoffs are **estimated** at 8192
-for main and 5120 for workers, including LCA's serialized instructions/tool schemas
-and the separate LCA-authored Codex native instruction template.
+for main and 5120 for workers, including Otter's serialized instructions/tool schemas
+and the separate Otter-authored Codex native instruction template.
 Vendor-added context is unobserved. Output capture/cancellation is reactive, not a
 native generation-token or billing ceiling. Neither assertion satisfies the strict
 exact-token profile. Process-group quiescence is not escaped-descendant containment.
@@ -378,7 +378,7 @@ or `autoresearch` is refused and hidden from the palette. A refused or unsafe GJ
 root alone and never hides other skills.
 
 Committed project skills are used directly. Other skills ask "Allow this content in this session" once per session
-unless the operator trusts them in the **user** config (`~/.config/lca/lca.jsonc`):
+unless the operator trusts them in the **user** config (`~/.config/otter/otter.jsonc`):
 
 ```jsonc
 {
@@ -388,13 +388,13 @@ unless the operator trusts them in the **user** config (`~/.config/lca/lca.jsonc
 ```
 
 Trusted skills skip only that prompt, even when their content changes; tool permissions, path restrictions and
-execution approvals are unchanged. `skill_trust` in a project's `.lca/lca.jsonc` is ignored, so a cloned repository
+execution approvals are unchanged. `skill_trust` in a project's `.otter/otter.jsonc` is ignored, so a cloned repository
 cannot approve skills for itself. An invalid list trusts nothing and is reported once per session; `/skills` marks
 trusted entries and `/skills grants` shows `trusted by config`.
 
-### LCA workflows: truth labels and the four kinds
+### Otter workflows: truth labels and the four kinds
 
-LCA owns four workflow kinds on one authority (`workflow/workflow.json`) and never runs GJC. They are started only by
+Otter owns four workflow kinds on one authority (`workflow/workflow.json`) and never runs GJC. They are started only by
 a submitted `/skill:<name>` command that matches a **builtin protected name**; a project or home skill with the same
 name cannot supply instructions or redirect the kind (it is shown as refused), and model output or text that merely
 mentions `/skill:ralplan` starts nothing. **Invoking a name is not consent to execute anything.**
@@ -407,7 +407,7 @@ mentions `/skill:ralplan` starts nothing. **Invoking a name is not consent to ex
 | `ultragoal` | available (P6b) | A direct start decomposes the objective and reviews one unit at a time. No implementation command runs until the current pending unit is approved with its exact `APPROVE-UNIT <workflow id> <subject sha>` receipt. |
 | `autoresearch` | available (P6b) | A direct start runs the research mission. No experiment command runs until the current pending experiment is approved with its exact `RUN <workflow id> <subject sha>` receipt. A verified verdict can be productified into a fresh deep-interview; no execution consent is inherited. |
 
-Usage in the terminal (`lca` / `lca chat`, TUI or readline):
+Usage in the terminal (`otter` / `otter chat`, TUI or readline):
 
 ```text
 /skill:deep-interview <request>   start an interview (the TUI status line shows `deep-interview · <stage> · <phase>`)
@@ -432,7 +432,7 @@ ralplan keeps the interview's spec.
 
 **Known edges (stated, not hidden).** When the connection to ralplan is refused, the interview still completes with its
 verified `spec.md`, but the successor has no `lineage`: starting a ralplan by hand later is a fresh workflow seeded by
-nothing. A crash before a commit's index publish can leave readable files under `.lca/workflows/<sid>/<wid>/` (a spec,
+nothing. A crash before a commit's index publish can leave readable files under `.otter/workflows/<sid>/<wid>/` (a spec,
 a round file, a plan iteration) that no committed revision references; they are orphans, never authority, and a status
 read or the next commit ignores them. Interview completion re-verifies every panel, closure, topology, restatement and
 early-exit record from disk at the commit, at the handoff, and on every display; a deleted or edited record refuses the
@@ -539,24 +539,24 @@ the pinned runtime and a separate decision. No GJC dashboard parity is claimed.
 Read the active workflow and original session without constructing an engine runtime:
 
 ```sh
-lca status --worktree /path/to/repo --json
+otter status --worktree /path/to/repo --json
 ```
 
 Use the workflow ID and `sessionID` from that status. For approval or rejection, use the
 `planRef.jsonSha` from the active workflow record (the canonical plan hash, not the rendered
 Markdown hash); the original approval prompt also prints this value. If it was not retained,
-the record is `workflow/workflow.json` under LCA's external control-plane state root. Specify the
-original engine and exact model explicitly; LCA refuses missing or
+the record is `workflow/workflow.json` under Otter's external control-plane state root. Specify the
+original engine and exact model explicitly; Otter refuses missing or
 mismatched engine/model/session evidence and never falls back to another selection:
 
 ```sh
-lca pause --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID
-lca cancel --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID
-lca approve --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID \
+otter pause --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID
+otter cancel --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID
+otter approve --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID \
   --workflow WORKFLOW_ID --sha PLAN_SHA
-lca reject --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID \
+otter reject --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID \
   --workflow WORKFLOW_ID --sha PLAN_SHA
-lca resume --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID
+otter resume --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID
 ```
 
 Approval and rejection still prompt the local operator for the exact workflow ID and plan SHA;
@@ -578,14 +578,14 @@ and help remain available. These commands do not yet provide a working standalon
 Claude Code/Codex execution path.
 
 The retained runner targets the real, already-running local OpenCode service with this project's
-LCA plugin; it never starts a daemon or falls back to another engine or model. Its plan contract
+Otter plugin; it never starts a daemon or falls back to another engine or model. Its plan contract
 requires canonical JSON inside the worktree (3–10 steps). The retained command syntax is:
 
 ```sh
-lca status --worktree /path/to/repo
+otter status --worktree /path/to/repo
 # Execution syntax only: currently refused at admission.
-lca run --plan plan.json --worktree /path/to/repo --server http://127.0.0.1:4096
-lca status --worktree /path/to/repo --json
+otter run --plan plan.json --worktree /path/to/repo --server http://127.0.0.1:4096
+otter status --worktree /path/to/repo --json
 
 # Equivalent source-tree syntax; run/resume are also currently refused:
 bun src/hosts/cli.ts run --plan plan.json --worktree /path/to/repo --server http://127.0.0.1:4096
@@ -593,12 +593,12 @@ bun src/hosts/cli.ts status --worktree /path/to/repo --json
 bun src/hosts/cli.ts resume --session SESSION_ID --worktree /path/to/repo --server http://127.0.0.1:4096
 ```
 
-`lca --help` and `lca -h` print usage and exit 0 before accessing a worktree, configuration, state
-or server. Bare `lca` launches interactive chat as described above. The supplied worktree must be an accessible directory. Mutating
-commands require an already-running, trusted local OpenCode service and this project's LCA plugin;
+`otter --help` and `otter -h` print usage and exit 0 before accessing a worktree, configuration, state
+or server. Bare `otter` launches interactive chat as described above. The supplied worktree must be an accessible directory. Mutating
+commands require an already-running, trusted local OpenCode service and this project's Otter plugin;
 `run --plan`, `approve` and `reject` also require an interactive local terminal for explicit human
 decisions. Standalone commands do not start a server or provide interactive chat; the separate
-chat command uses the common LCA terminal above. Neither path
+chat command uses the common Otter terminal above. Neither path
 auto-approves plans or establishes native-host qualification.
 
 Exit codes: **0** means success or help; **1** is a fixed host-admission diagnostic or a
@@ -661,7 +661,7 @@ profile or cloud provider egress is enabled by this Darwin work.
 
 The explicit `createLinuxVerifierExecutor({ qualification: true })` path requires an
 operator-installed root gate, dedicated verifier UID, systemd and unified cgroup v2.
-The installer leaves `/etc/lca-verifier/profile.json` at `qualified: false`; production
+The installer leaves `/etc/otter-verifier/profile.json` at `qualified: false`; production
 preflight refuses it, and OpenCode runtime defaults remain legacy. Qualification scripts
 must run in an isolated lab, not a workstation containing credentials or unrelated jobs.
 Private Git inputs are exported exactly, without archive attribute transformations, with
@@ -683,17 +683,17 @@ These availability limitations remain part of the unqualified, lab-only profile.
 Pure crypto tests and manager probes are not native qualification; real-process and
 real-queue qualification are separate from actual-model execution and whole-agent safety.
 
-For actual-model qualification, `scripts/lca-live-core-queue.ts` has an explicit
+For actual-model qualification, `scripts/otter-live-core-queue.ts` has an explicit
 `--verifier linux-qualification` route. Its default remains `legacy`. The driver
 keeps the real OpenCode worker/reviewer host and recovery callbacks, replacing only
 the verifier in a lab-local runtime copy. Run the server and driver as the installed
 profile's non-sudo controller UID, with matching isolated `HOME`, XDG directories
-and `LCA_STATE_HOME`; keep framework sources and installed authority root-owned.
+and `OTTER_STATE_HOME`; keep framework sources and installed authority root-owned.
 The fixture requires isolated task worktrees, enabled policy hooks, strict review,
 three protected plan steps and explicitly allowlisted verification commands.
 
 ```sh
-bun scripts/lca-live-core-queue.ts \
+bun scripts/otter-live-core-queue.ts \
   --worktree /absolute/lab/work --server http://127.0.0.1:58355 \
   --scenario success --verifier linux-qualification \
   --receipt /absolute/lab/success.json
@@ -740,7 +740,7 @@ Operational eligibility still requires its own passing regressions, native fault
 tests, actual production-path canary and strict model soak. No production deployment
 or worker/reviewer OS containment is implied.
 
-Select the verifier explicitly in the ordinary user/project LCA configuration:
+Select the verifier explicitly in the ordinary user/project Otter configuration:
 
 ```json
 { "delegate": { "verifier": "linux-single-use" } }
@@ -792,15 +792,15 @@ independent fixtures for each of the eight scenario families, with zero unexpect
 failures. Retain failures and stop eligibility on an unexplained model abort.
 Quarantine/reboot handling is stop-and-preserve, not legacy fallback or rollback.
 
-The host-side `scripts/lca-soak-supervisor.ts` owns evidence before provisioning:
+The host-side `scripts/otter-soak-supervisor.ts` owns evidence before provisioning:
 exclusive writer lock, append-only events, a separate tail anchor and immutable
 per-invocation receipt snapshots. Workloads receive no writable audit path.
-`scripts/lca-soak-manifest.ts --check <evidence-root>` checks lineage completeness
+`scripts/otter-soak-manifest.ts --check <evidence-root>` checks lineage completeness
 and retained outcomes. This detects incomplete runs and accidental truncation,
 not deliberate edits by the host owner; neither manifest nor anchor is native
 retirement evidence.
 
-Manifest events use `lca.soak-manifest.v2`. Each `invocation-end` records the driver's
+Manifest events use `otter.soak-manifest.v2`. Each `invocation-end` records the driver's
 own boolean `orderedTermination`; receipt-channel timeout or overflow errors cannot
 establish that the driver was deliberately stopped. Restart and the checker use this
 recorded flag, not merged diagnostic error names. Legacy v1 or incomplete events are
@@ -808,7 +808,7 @@ refused without migration. Preserve those historical directories unchanged; neve
 rewrite or rebaseline them to satisfy the new schema.
 
 Each evidence directory also retains a private, immutable `soak-binding.json`:
-`{schema:"lca.soak-binding.v1",vmC:"<SSH target>",fixtures:<normalized lca.soak-fixtures.v1>}`.
+`{schema:"otter.soak-binding.v1",vmC:"<SSH target>",fixtures:<normalized otter.soak-fixtures.v1>}`.
 The normalized fixture object includes every provisioning and invocation argv,
 working directory, timeout, lineage/fixture identity, receipt path and resume
 policy. Its SHA-256 is recorded in the first `supervisor-start` event, then covered
@@ -850,8 +850,8 @@ OpenCode hook-control map does not satisfy that gate. Passing status checks alon
 still not establish the capability evidence below.
 
 Strict CLI admission requires engine/version/model/profile-scoped evidence for every required
-role control, including read-only main/reviewer execution and the LCA-owned serial worker
-lease. It also requires proof of actual complete LCA-controlled input limits: **8192
+role control, including read-only main/reviewer execution and the Otter-owned serial worker
+lease. It also requires proof of actual complete Otter-controlled input limits: **8192
 tokens for main and 5120 for worker**, including system text, tool schemas, wrappers and
 payloads. Generic estimates, UTF-8 byte counts and vendor usage do not establish these
 limits; opaque vendor additions remain unobservable.
@@ -864,17 +864,17 @@ It is a discovery candidate, not an admitted isolation profile. Anthropic's docu
 returns an estimate and is not a CLI-only tokenizer proof.
 Neither documentation nor the offline process/reference-stream tests establish live
 adapter readiness or escaped-descendant retirement. Missing controls or token proof
-remain blockers; existing login must not be accessed or forwarded by LCA to bypass them.
+remain blockers; existing login must not be accessed or forwarded by Otter to bypass them.
 
 ## Plan workflow (harness M1) — `/plan` → `/approve` → workers
 
 ```text
 /plan add an LRU cache module     (or: ralplan … / plan mode … / hyperplan … / 계획부터 … / 계획 모드 …)
   -> planning: main may only read (read/glob/grep/list + read-only bash argv policy); every other tool is refused
-  -> main calls lca_flow op:"plan" once (goal, 3-10 steps {title, files, detail, verify}, 1-5 risks)
-  -> code gates (verify_allow, paths inside the repo, no .git/.lca/knowledge/raw, gaming check) -> errors back to main
+  -> main calls otter_flow op:"plan" once (goal, 3-10 steps {title, files, detail, verify}, 1-5 risks)
+  -> code gates (verify_allow, paths inside the repo, no .git/.otter/knowledge/raw, gaming check) -> errors back to main
   -> advisory reviewer child inside the tool call (VERDICT OKAY|ITERATE; max 2 iterations; never a gate)
-  -> pending_approval: .lca/plans/<id>.md (code-rendered; editing it blocks /approve)
+  -> pending_approval: .otter/plans/<id>.md (code-rendered; editing it blocks /approve)
 /approve   -> steps become ledger tasks tagged with the plan sha (other open tasks are cancelled as superseded)
            -> main runs delegate resume:true; workers implement + verify + review; main itself cannot write
            -> settle -> done (or stuck(tasks_failed) / stuck(user_stop))
@@ -884,21 +884,21 @@ remain blockers; existing login must not be accessed or forwarded by LCA to bypa
 
 In the OpenCode chat workflow, approval comes from your typed `/approve` command (never from model text). Workflow state lives outside
 the repo in `<stateRoot>/workflow/` (`workflow.json`, `archive/`, `events.jsonl`, `plans/<id>.json`); a new
-`opencode` process restores the same session held, with epoch-validated reattachment and explicit owner Resume required before work. `flow.enabled: false` in `.lca/lca.jsonc`
+`opencode` process restores the same session held, with epoch-validated reattachment and explicit owner Resume required before work. `flow.enabled: false` in `.otter/otter.jsonc`
 restores the legacy suffix-only plan mode. Results and numbers: `docs/lca-harness-m1-2026-10-01.md`.
 
-E2E: `scripts/lca-e2e.sh --flow plan --fixture plan3 [--entry keyword] [--seed-open-task]` (F01-F07) and
-`--repeat 10 --stop-after pending_approval` (tool-call reliability, AC1.7). Doctor: D12a (lca_flow schema <= 300
+E2E: `scripts/otter-e2e.sh --flow plan --fixture plan3 [--entry keyword] [--seed-open-task]` (F01-F07) and
+`--repeat 10 --stop-after pending_approval` (tool-call reliability, AC1.7). Doctor: D12a (otter_flow schema <= 300
 tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c (review template <= 350).
 
-## lca harness M0 (pin, flow core, live `/status`) — ralplan M0
+## otter harness M0 (pin, flow core, live `/status`) — ralplan M0
 
 - **Pin:** `@opencode-ai/plugin`/`@opencode-ai/sdk` locked to `1.18.32` in both `framework/` and `.opencode/`;
-  `scripts/lca-doctor.sh` **D12e** cross-checks `opencode --version`, both `package.json` declarations and both
+  `scripts/otter-doctor.sh` **D12e** cross-checks `opencode --version`, both `package.json` declarations and both
   installed `node_modules` copies (WARN on any mismatch or missing source, D01 keeps its existing below-MIN WARN).
 - **Flow core** (`framework/src/flow/{machine,state,owner,status}.ts`, `framework/src/flow/runtime.ts`): the plan
   workflow state machine, event log and ownership/authority rules from ralplan §5.2/§5.3 are implemented and unit
-  tested; M0 had no user-facing entry (`/plan`, `/approve`, `lca_flow` and the reviewer shipped in M1, see above).
+  tested; M0 had no user-facing entry (`/plan`, `/approve`, `otter_flow` and the reviewer shipped in M1, see above).
   Workflow state lives at `<stateRoot(worktree)>/workflow/` (`workflow.json` the single active workflow,
   `archive/<id>.json` terminal ones, `events.jsonl` an append-only global-seq event log) — outside the worktree,
   next to the ledger, so a worker cannot edit it. Tests create workflows directly via `flow/state.ts`/`flow/runtime.ts`.
@@ -907,13 +907,13 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   text part in place (same proven path as the mode suffix, ARCH-08 — no `output.parts` replacement) to
   `renderStatus()` (≤ 25 lines: workflow id/phase/owner incl. "owner dead"/plan path/review/task counts, legacy
   mode, ledger counts, queue running, last 5 events) followed by `Reply only: ok`, starting with the marker
-  `[lca status]` so e2e can prove the model never produced it. It never rewrites an owner, starts a
+  `[otter status]` so e2e can prove the model never produced it. It never rewrites an owner, starts a
   heartbeat or repairs workflow state. A dead owner remains held until proven same-session
   reattachment and explicit Resume; another session may only observe it.
 - **Config wiring (ARCH-13):** the `config` hook registers `status` (template `"Reply only: ok"`) only when
   `config.flow.enabled` and hook id `command.status` are both on, and records exactly the command names it wrote
   (a user-defined `status`/`stop` command of the same name wins and is left alone — `hooks/command.ts` never acts
-  on a name it did not itself inject). `lca_flow` is **not** registered in M0 (ARCH-06/C2-03): M0 adds 0 main-prefix
+  on a name it did not itself inject). `otter_flow` is **not** registered in M0 (ARCH-06/C2-03): M0 adds 0 main-prefix
   tokens. `chat.message` is registered when `mode.detect` **or** the flow feature is on; `command.execute.before` is
   registered when `command.stop`, `command.status`, or `mode.detect` is on. `repairOnLoad` (authority-free: T8 for
   an orphaned `reviewing`, finishing an interrupted approve, settle) runs once at plugin init inside a try/catch
@@ -921,9 +921,9 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
 - New hook ids: `flow`, `command.status`, `guard.plan_boundary` (planning-phase tool allowlist + bash argv policy,
   M1-facing but present as of M0 step 2). New `config.flow` block: `enabled`, `max_code_invalid` (3),
   `max_review_iterations` (2), `nudge_max` (1), `review_max_tool_calls` (6).
-- Live smoke: `scripts/lca-e2e.sh --smoke-command status` runs `opencode run --format json --agent main --command
+- Live smoke: `scripts/otter-e2e.sh --smoke-command status` runs `opencode run --format json --agent main --command
   status` in the same isolated XDG env as `--check`, with a 120 s cap; PASS (exit 0) when the JSON transcript's
-  user-role text contains `[lca status]`, FAIL (exit 2) otherwise. Doctor **D12b** checks the milestone's command
+  user-role text contains `[otter status]`, FAIL (exit 2) otherwise. Doctor **D12b** checks the milestone's command
   set is present in the effective config (M0: `stop`, `status`; WARN if missing).
 
 ## Stage 3 scope (data layer: db_query, schema_lookup, EvoOntology) — 2026-09-23, first slice
@@ -932,11 +932,11 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   `db_query(sql, max_rows?)` runs **one** `SELECT`/`WITH` statement (guard in `src/data/guard.ts`; forbidden
   keywords/functions, `FOR UPDATE`, multi-statements are refused before anything is spawned) and returns a tab table
   capped by rows / cell chars / estimated tokens plus a hint line; `schema_lookup(table?)` serves one table (or the
-  table list) from a static JSON file (`scripts/lca-schema-extract.py` builds it from PostgreSQL DDL).
+  table list) from a static JSON file (`scripts/otter-schema-extract.py` builds it from PostgreSQL DDL).
 - sqlite backend: `src/data/sqlite_query.py` subprocess (`?mode=ro`, SELECT/READ-only authorizer, progress-handler
   timeout, `dist_m()` haversine) because `bun:sqlite` cannot register functions. postgres backend: `psql --csv` in
   `BEGIN READ ONLY` + `SET LOCAL statement_timeout`; the DSN comes **only** from the env var named by `data.pg_dsn_env`
-  (default `LCA_PG_DSN`), loopback hosts only unless `data.pg_allow_remote`, never logged or stored.
+  (default `OTTER_PG_DSN`), loopback hosts only unless `data.pg_allow_remote`, never logged or stored.
 - EvoOntology (MIT, stdlib) is vendored under `vendor/evoontology`; when `data.evo.workspace` has an `active.json`
   the `config` hook injects `config.mcp["evo-semantic"]` (stdio). Only `browse_semantics` / `resolve_semantics` are
   visible, and only to `data-analyst` (`permission["evo-semantic_*"]: deny` then two allows — order matters; the other
@@ -953,7 +953,7 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   advisory rules as code tasks; no snapshot, no files. Main's prompt gets rule 9 ("database question → delegate a
   kind data task") only when a backend is configured, and `data mode:` routes through delegate. The verifier never
   executes anything (the design's `data_check` tool became a queue step, for the same reason the reviewer has no bash).
-- Acceptance (`scripts/lca-e2e-data.sh`, fixture `scripts/fixtures/data-vv`: a synthetic sqlite (places, vehicles,
+- Acceptance (`scripts/otter-e2e-data.sh`, fixture `scripts/fixtures/data-vv`: a synthetic sqlite (places, vehicles,
   visits, risk, outbreaks) + code-generated `ontology_v0` + 10 representative questions with expected results): D01 the SQL the
   model reports, re-executed by the harness, matches the expected result (tier-1 >= 6/7), D02 uncached input + output
   <= 10K tokens per question, D03 <= 6 tool calls, D04 no repeated calls, D05 no write/bash, D06 wiring, D07 resolve
@@ -964,8 +964,8 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
 
 ## Stage 4 scope (ontology evolution batch) — 2026-09-23, first slice
 
-- `scripts/lca-evo-evolve.py` (stdlib, imports the vendored EvoOntology API directly, no MCP): one EvoOntology
-  evolution run per invocation. Parent evaluation = `scripts/lca-e2e-data.sh` on the active version (code judge:
+- `scripts/otter-evo-evolve.py` (stdlib, imports the vendored EvoOntology API directly, no MCP): one EvoOntology
+  evolution run per invocation. Parent evaluation = `scripts/otter-e2e-data.sh` on the active version (code judge:
   the harness re-executes the model's SQL against `queries.jsonl`), trajectories appended to
   `<workspace>/trajectories/`. Per round the `ontology-evolver` agent (Gemma, no tools) gets the terms/constraints
   and the failed cases (question, unresolved mentions, SQL written, why wrong — never the expected answer) and
@@ -986,7 +986,7 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   HEAD plus the main worktree's uncommitted tracked changes and untracked files (so it sees earlier tasks' results and
   the user's WIP), the child sessions are created with `query.directory` (verified on 1.18.32: `POST /session?directory=`
   and file reads resolve inside that directory), verify runs there, and the accepted diff is applied to main in code.
-  Failed and cancelled tasks are discarded with their worktree; main never sees them. `scripts/lca-e2e.sh --worktree`
+  Failed and cancelled tasks are discarded with their worktree; main never sees them. `scripts/otter-e2e.sh --worktree`
   runs the coding suite this way.
 - **Judge hardening** (after the first llm_judge run): the judge prompt carries the ontology's constraints
   (`severity != info`) as "domain conventions", and every case is judged twice with A/B swapped — a winner counts
@@ -1000,11 +1000,11 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   core rule). Two of the three candidate "wins" contradicted the ground truth (the 26B judge prefers simpler SQL when
   it does not know the domain conventions), so `llm_judge` needs the ontology's constraints in the judge prompt and a
   swapped second pass before it is trusted on production questions; on the fixture `ground_truth` is authoritative.
-- `scripts/lca-evo-nightly.sh` runs the driver only when `EvolutionTrigger` says an evolution is due (30 new
+- `scripts/otter-evo-nightly.sh` runs the driver only when `EvolutionTrigger` says an evolution is due (30 new
   trajectories or 7 days; `--force` skips), with a lock, an Ollama health check and a dated log under
-  `~/.cache/lca/evo/`; `scripts/launchd/com.lca.evo-nightly.plist` is a 03:30 template (not installed).
+  `~/.cache/otter/evo/`; `scripts/launchd/com.otter.evo-nightly.plist` is a 03:30 template (not installed).
 - Doctor D11e runs the driver's `--self-test` (patch validation, judge decoding; no model).
-- `OLLAMA_NUM_PARALLEL=2` is **not needed** for cache isolation: `scripts/lca-np-probe.py` (two ≈7K-token prefixes
+- `OLLAMA_NUM_PARALLEL=2` is **not needed** for cache isolation: `scripts/otter-np-probe.py` (two ≈7K-token prefixes
   alternated) shows both prefixes restored in <0.15 s on the one-slot server too — llama-server saves idle slots to a
   host-RAM prompt cache (Ollama 0.34.2). Two slots halve the per-slot context for nothing; keep 1.
 
@@ -1027,7 +1027,7 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
 - Queue (`src/orchestration/queue.ts`), per task: git tree snapshot (temp index + temp object dir, the user's `.git`
   is only read; in-tree clean/smudge filter drivers and hooks are neutralised for every git call) -> fresh `worker`
   child session (`session.create({parentID})` + blocking `session.prompt`, with a session-level tool deny for
-  task/delegate/todo) -> diff of exactly this task's cumulative changes (`.lca/state`, `.lca/handoffs`, `__pycache__`,
+  task/delegate/todo) -> diff of exactly this task's cumulative changes (`.otter/state`, `.otter/handoffs`, `__pycache__`,
   `.env`, … excluded via `delegate.diff_exclude`) -> **protected-file check**: the test files named in `verify`, runner
   autoload files (`conftest.py`, `pytest.ini`, `pyproject.toml`, `Makefile`, `package.json`, `bunfig.toml`, … unless
   the task text names them) and, when `verify` names no file, any test-looking path are restored from the snapshot
@@ -1044,13 +1044,13 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   (reported as "no verdict"). A child aborted by someone else (repetition guard) is a failed attempt, not a queue abort;
   a /stop during the review of an already verified change keeps it as `done` (review aborted). Queue-wide cap
   `delegate.queue_ttl_ms` (checked between tasks).
-- Ledger (control plane): `$XDG_STATE_HOME/lca/<sha1(worktree)[:12]>/sessions/<main>/ledger.json` (default
-  `~/.local/state/lca/…`, override `LCA_STATE_HOME`) — **outside the worktree**, so a worker with bash cannot edit it
+- Ledger (control plane): `$XDG_STATE_HOME/otter/<sha1(worktree)[:12]>/sessions/<main>/ledger.json` (default
+  `~/.local/state/otter/…`, override `OTTER_STATE_HOME`) — **outside the worktree**, so a worker with bash cannot edit it
   and no repository commits it; a corrupt file is moved aside, never overwritten. Handoffs (data plane, human-readable):
-  `<worktree>/.lca/handoffs/<main>/task-<n>.md` (self-ignored via a generated `.gitignore`); the next worker's prompt
+  `<worktree>/.otter/handoffs/<main>/task-<n>.md` (self-ignored via a generated `.gitignore`); the next worker's prompt
   gets a `<= delegate.handoff_context_chars` summary of earlier tasks (status, files, failure reason) and nothing else.
 - Interrupted runs (crash, restart, Esc): open ledger tasks are offered back to main **once** — attached to the
-  user's next message (`<lca-resume>` block) or injected on idle — as "call `delegate` with `resume: true`"; a delegate
+  user's next message (`<otter-resume>` block) or injected on idle — as "call `delegate` with `resume: true`"; a delegate
   call that re-sends the same titles is treated as a resume, other new lists cancel the open tasks as superseded. The
   queue only ever runs inside a tool call, so main is busy while workers run. `ulw` active -> stage-1 todo continuation
   (write-before-await + optimistic re-check so a user's cancel is never overwritten). `/stop` (`command.stop`): abort
@@ -1064,7 +1064,7 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   `permission.<tool>: "deny"`, `steps` instead of `maxSteps`): the plugin `config` hook runs after schema decoding and
   agent `tools`/`maxSteps` keys set there are silently ignored (stage-1 bug found by the review: task/todowrite/delegate
   were visible to every agent). Doctor D09b checks the effective tools with `opencode debug agent`.
-- Acceptance (`scripts/lca-e2e.sh --fixture ulw3` / `--fixture ulw-fail`): E01-E04 as stage 1, E05 ledger statuses
+- Acceptance (`scripts/otter-e2e.sh --fixture ulw3` / `--fixture ulw-fail`): E01-E04 as stage 1, E05 ledger statuses
   match the fixture, E06 every worker/reviewer session of every attempt cross-checked, E07 main cache misses == 1 and
   worker misses <= 1 (reviewer sessions always re-prefill on the single Ollama slot: reported), E08 worker/reviewer
   prefix within their own budgets, E09 verdicts, E10 no reasoning parts in children, E11 no length stops, E12 per-task
@@ -1078,41 +1078,41 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   Whole prefix incl. tools: main <= 8K, worker <= 5K, reviewer <= 3K (`DEFAULT_CONFIG.budget`).
 - Guards (`tool.execute.before/after`): identical (tool, args) call blocked after `repeat_limit`,
   read/bash output trimming, edit/JSON error-recovery hints, n-gram repetition abort.
-- Modes (`ulw`, `plan`) as <= 300-char suffixes on the user message, state under `$XDG_STATE_HOME/lca/<repo-hash>/`.
+- Modes (`ulw`, `plan`) as <= 300-char suffixes on the user message, state under `$XDG_STATE_HOME/otter/<repo-hash>/`.
 - Acceptance: prefix <= 8K tokens, zero repeated identical calls, fib task done in < 5 min.
 
 ## Layout
 
 ```
 framework/src/index.ts        plugin entry (assembly of hook factories)
-framework/src/config.ts       lca config: ~/.config/lca/lca.jsonc -> <repo>/.lca/lca.jsonc (project wins)
+framework/src/config.ts       otter config: ~/.config/otter/otter.jsonc -> <repo>/.otter/otter.jsonc (project wins)
 framework/src/hooks/*.ts      config, chat.params, chat.message, tool-before, tool-after, event, compacting
 framework/src/flow/*.ts       plan workflow core (M0): machine, state, owner, status, runtime, bash-policy
 framework/src/agents/         prompts;  src/guards/  src/modes/  src/state/  src/tokens.ts
 framework/src/state/ledger.ts task ledger + handoffs;  src/state/store.ts  state root (outside the worktree)
 framework/src/orchestration/{queue,snapshot,shell}.ts  serial worker queue, temp-object-dir snapshots, process-group shell
 framework/src/tools/delegate.ts  the `delegate` tool;  src/hooks/command.ts  `/stop`, `/status`;  src/loop/idle.ts  resume offer + todo loop
-.opencode/plugins/lca.ts      project loader: re-exports framework/src/index.ts (OpenCode auto-loads it)
-scripts/lca-*.{py,sh}         measurement / verification tooling (below)
+.opencode/plugins/otter.ts      project loader: re-exports framework/src/index.ts (OpenCode auto-loads it)
+scripts/otter-*.{py,sh}         measurement / verification tooling (below)
 ```
 
 ## Commands
 
 ```sh
 cd framework && bun install && bun test && bun run typecheck   # unit tests + types
-bash scripts/lca-doctor.sh [--json]           # static checks D01-D10 (no GPU); exit 0 ok / 1 warn / 2 fail
-python3 scripts/lca-baseline.py --top 10      # per-session prefix / cache-miss / compaction / repeat table
-python3 scripts/lca-baseline.py --session <id>  # + per-call timeline   (--since YYYY-MM-DD, --json, --db PATH)
-bash scripts/lca-e2e.sh --dry-run             # print the isolated stage-1 run plan
-bash scripts/lca-e2e.sh --check               # verify isolation, no model call
-bash scripts/lca-e2e.sh                       # real run: fib fixture, ~10 min budget, GPU
-bash scripts/lca-e2e.sh --fixture ulw3        # stage-2 run: ulw -> delegate 3 tasks (E01-E14), ~2-4 min
-bash scripts/lca-e2e.sh --fixture ulw-fail    # stage-2 negative run: [done, failed, done], queue continues
-bash scripts/lca-e2e.sh --smoke-command status  # M0 live smoke: /status delivered, transcript has [lca status]
+bash scripts/otter-doctor.sh [--json]           # static checks D01-D10 (no GPU); exit 0 ok / 1 warn / 2 fail
+python3 scripts/otter-baseline.py --top 10      # per-session prefix / cache-miss / compaction / repeat table
+python3 scripts/otter-baseline.py --session <id>  # + per-call timeline   (--since YYYY-MM-DD, --json, --db PATH)
+bash scripts/otter-e2e.sh --dry-run             # print the isolated stage-1 run plan
+bash scripts/otter-e2e.sh --check               # verify isolation, no model call
+bash scripts/otter-e2e.sh                       # real run: fib fixture, ~10 min budget, GPU
+bash scripts/otter-e2e.sh --fixture ulw3        # stage-2 run: ulw -> delegate 3 tasks (E01-E14), ~2-4 min
+bash scripts/otter-e2e.sh --fixture ulw-fail    # stage-2 negative run: [done, failed, done], queue continues
+bash scripts/otter-e2e.sh --smoke-command status  # M0 live smoke: /status delivered, transcript has [otter status]
 ```
 
-`lca-baseline.py` reads OpenCode's SQLite DB read-only (`~/.local/share/opencode/opencode.db`).
-`lca-e2e.sh` runs under `XDG_CONFIG_HOME`/`XDG_DATA_HOME` pointing at a scratch dir (`~/.cache/lca/e2e`), with
+`otter-baseline.py` reads OpenCode's SQLite DB read-only (`~/.local/share/opencode/opencode.db`).
+`otter-e2e.sh` runs under `XDG_CONFIG_HOME`/`XDG_DATA_HOME` pointing at a scratch dir (`~/.cache/otter/e2e`), with
 `OPENCODE_CONFIG_DIR` unset, so neither the user's global config nor the user's session DB is used.
 
 ## Config file locations
@@ -1120,12 +1120,12 @@ bash scripts/lca-e2e.sh --smoke-command status  # M0 live smoke: /status deliver
 | What | Path |
 |---|---|
 | OpenCode global config (user's, loads OMO today) | `~/.config/opencode/opencode.jsonc` |
-| OpenCode project config / plugin loader | `<repo>/.opencode/opencode.json(c)`, `<repo>/.opencode/plugins/lca.ts` |
+| OpenCode project config / plugin loader | `<repo>/.opencode/opencode.json(c)`, `<repo>/.opencode/plugins/otter.ts` |
 | Extra global dir (only if `OPENCODE_CONFIG_DIR` is set, e.g. by orca) | `$OPENCODE_CONFIG_DIR/opencode.json` |
-| lca user / project config | `~/.config/lca/lca.jsonc`, `<repo>/.lca/lca.jsonc` (list only overrides) |
-| lca workflow/session state (ledger, mode, abort marker, session map) | `$XDG_STATE_HOME/lca/<repo-hash>/sessions/<id>/` (default `~/.local/state/lca/…`; `LCA_STATE_HOME` overrides) |
-| lca execution claims and run records | `<OS-account-home>/.local/state/lca/<canonical-worktree-hash>/execution-runs/`; independent of `HOME`, `XDG_STATE_HOME`, and `LCA_STATE_HOME` |
-| lca handoffs (data plane) | `<repo>/.lca/handoffs/<session>/task-<n>.md` |
+| otter user / project config | `~/.config/otter/otter.jsonc`, `<repo>/.otter/otter.jsonc` (list only overrides) |
+| otter workflow/session state (ledger, mode, abort marker, session map) | `$XDG_STATE_HOME/otter/<repo-hash>/sessions/<id>/` (default `~/.local/state/otter/…`; `OTTER_STATE_HOME` overrides) |
+| otter execution claims and run records | `<OS-account-home>/.local/state/otter/<canonical-worktree-hash>/execution-runs/`; independent of `HOME`, `XDG_STATE_HOME`, and `OTTER_STATE_HOME` |
+| otter handoffs (data plane) | `<repo>/.otter/handoffs/<session>/task-<n>.md` |
 | OpenCode session DB (read-only for us) | `~/.local/share/opencode/opencode.db` |
 
 Execution authority requires an existing worktree owned by the operating-system user and
@@ -1140,22 +1140,22 @@ that a terminated controller's descendants have stopped.
 
 ## OMO coexistence warning
 
-`oh-my-openagent` and lca both overwrite `config.agent` and `default_agent`; the plugin loaded last
+`oh-my-openagent` and otter both overwrite `config.agent` and `default_agent`; the plugin loaded last
 wins and the other's agents/guards silently vanish. Do not run both: remove `"oh-my-openagent@latest"`
 from the `plugin` array in `~/.config/opencode/opencode.jsonc` (and from `$OPENCODE_CONFIG_DIR/opencode.json`
-if set) before using lca. `lca-doctor.sh` reports this as `D05c WARN`. With OMO loaded, worker/reviewer also see OMO's
+if set) before using otter. `otter-doctor.sh` reports this as `D05c WARN`. With OMO loaded, worker/reviewer also see OMO's
 tools (`call_omo_agent`, `session_*`, …) in their prefix — another reason not to run both.
 
 ## Optional OpenJev skill recommendations
 
 `skill_router` is a per-turn recommendation layer, not a replacement for mode detection
 or permission checks. Library defaults are **off**; this repository explicitly opts into
-**suggest** mode in `.lca/lca.jsonc`. Recommendations now appear as optional per-turn
+**suggest** mode in `.otter/otter.jsonc`. Recommendations now appear as optional per-turn
 advice in the main agent's input. They never automatically load a skill, activate a mode,
 or execute a task. `shadow` remains available for observation without affecting the input.
-Routing outcomes are always persisted, independently of `LCA_DEBUG`, as session-scoped
+Routing outcomes are always persisted, independently of `OTTER_DEBUG`, as session-scoped
 JSONL at `stateRoot(worktree)/routing/<sessionID>.jsonl` (normally
-`~/.local/state/lca/<worktree-key>/routing/`). `LCA_DEBUG=1` additionally prints
+`~/.local/state/otter/<worktree-key>/routing/`). `OTTER_DEBUG=1` additionally prints
 `skill.router` outcomes and latency to stderr.
 
 Each `decision` event has `schemaVersion: 1`, an event/decision ID, session/message IDs,
@@ -1180,7 +1180,7 @@ and plugin restarts, and are not injected into model context. Retention is manua
 (no automatic expiry). Turns that bypass the router entirely—commands, child agents,
 active workflows/modes and synthetic input—do not create routing decisions.
 
-`bun scripts/lca-wiki.ts capture` also imports these logs into the Wiki. It creates
+`bun scripts/otter-wiki.ts capture` also imports these logs into the Wiki. It creates
 `knowledge/raw/routing/<sha256>.json`, a `sources/routing-<sha256>.md` source page and
 `wiki/reports/routing.md`, then updates the index and capture log. Routing sources appear
 in `status` and can be compiled by `llm-wiki` just like tool-history and document sources.
@@ -1257,7 +1257,7 @@ are failures. Conflicting or malformed explicit exit fields are unknown. Ordinar
 error by a regex. This records future OpenCode plugin events only, not this GJC session,
 arbitrary terminal commands, or historical activity.
 Recording is best-effort: a storage error logs a generic `tool outcome recording failed`
-message through the debug logger (`LCA_DEBUG=1`) and does not interrupt tool/guard handling.
+message through the debug logger (`OTTER_DEBUG=1`) and does not interrupt tool/guard handling.
 Stored-observation counts are therefore not a guarantee that every executed call was captured.
 
 ### Bounded skill evaluation (P1)
@@ -1270,13 +1270,13 @@ verification passing does not prove the skill caused an improvement.
 One explicitly activated campaign belongs to one canonical project root:
 
 ```bash
-bun scripts/lca-skill-observation.ts activate --root /absolute/project --campaign-id approved-campaign
-bun scripts/lca-skill-observation.ts status --root /absolute/project
-bun scripts/lca-skill-observation.ts stop --root /absolute/project --campaign-id approved-campaign
+bun scripts/otter-skill-observation.ts activate --root /absolute/project --campaign-id approved-campaign
+bun scripts/otter-skill-observation.ts status --root /absolute/project
+bun scripts/otter-skill-observation.ts stop --root /absolute/project --campaign-id approved-campaign
 ```
 
 After explicit campaign activation, copy its `ownerBinding` receipt into that
-project's `.lca/lca.jsonc` and opt in:
+project's `.otter/otter.jsonc` and opt in:
 
 ```json
 {
@@ -1313,7 +1313,7 @@ excludes expired facts regardless. Session-boundary reconciliation processes at
 most 1,024 pending keys; limits also include 50,000 total store rows, 64 MiB database
 pages, 10,000 exported facts and a 25 ms SQLite busy timeout. No secure-erasure
 guarantee is made.
-Fixed health warnings remain visible without `LCA_DEBUG`; missing, disabled,
+Fixed health warnings remain visible without `OTTER_DEBUG`; missing, disabled,
 partial, expired and closed coverage must not be described as zero utilization.
 
 Fingerprints have separate meanings: terminal-output bytes, supported host-rendered
@@ -1331,10 +1331,10 @@ Reports distinguish completed/error/unresolved/conflicting calls, attempt and ta
 status, verification refusal/timeout/abort, and unknown/excluded/censored counts.
 Rates show numerator/denominator; an empty denominator is `N/A`. Never sum overlapping
 snapshots or interpret missing trigger evidence as confirmed autonomous choice.
-Configuration strata hash bounded LCA routing/observation settings and skill
+Configuration strata hash bounded Otter routing/observation settings and skill
 allowlisting, not the full host configuration, credentials or endpoints.
 
-`bun scripts/lca-wiki.ts capture` manually adds `raw/skill-runs/<sha256>.json`,
+`bun scripts/otter-wiki.ts capture` manually adds `raw/skill-runs/<sha256>.json`,
 its source page and `wiki/reports/skill-evaluation.md`. New skill snapshots are
 bounded to 128 files and 64 MiB total (16 MiB per snapshot). Wiki evidence is retained
 long-term: the raw observation store's 30-day expiry does **not** delete previously
@@ -1345,7 +1345,7 @@ be manufactured to fill a campaign; a closed zero-observation campaign is not
 evidence of effectiveness.
 
 The isolated synthetic capability probe is
-`bash scripts/lca-e2e.sh --skill-probe`. Its data is not operational utilization.
+`bash scripts/otter-e2e.sh --skill-probe`. Its data is not operational utilization.
 It checks real host tool identity, parent linkage and returned metadata.
 OpenCode 1.18.33 with pinned plugin/SDK 1.18.32 also passed the serialized
 `--skill-probe-off`, `--skill-probe-scenario missing-skill`, `advice-only`,
@@ -1358,7 +1358,7 @@ overrides and verifier fixtures exist only in isolated test roots. Use
 `--probe-timeout 900` for that longer case. Unsupported renderer
 shapes remain unknown rather than being promoted to exact loaded-source hashes.
 
-`bun scripts/lca-skill-bench.ts` measures 1,000 synthetic adapter callbacks in fresh
+`bun scripts/otter-skill-bench.ts` measures 1,000 synthetic adapter callbacks in fresh
 scratch projects, separately checking the disabled path, quota counters, terminal
 facts, database pages, RSS/heap and sampled rollback-journal size. The generated
 receipt at `artifacts/skill-evaluation-p1/benchmark.json` records the measurements
@@ -1377,8 +1377,8 @@ The CLI implementation lives at `framework/src/wiki/wiki.ts` (moved from the old
 `framework/src/telemetry/wiki.ts`). From the repository root:
 
 ```bash
-bun scripts/lca-wiki.ts capture|lint|status|unlock [--root DIR]
-bun scripts/lca-wiki.ts register <file> [--title T] [--root DIR]
+bun scripts/otter-wiki.ts capture|lint|status|unlock [--root DIR]
+bun scripts/otter-wiki.ts register <file> [--title T] [--root DIR]
 ```
 
 Exit 0 is success; 1 is a refusal or failure (stderr `Wiki operation failed: <reason>`);
@@ -1421,7 +1421,7 @@ containing `{pid, at}`) is shared by `capture` and `register` to prevent concurr
 writers; `lint` and `status` report and refuse (exit 1) while it exists. The owner
 process removes only the lock it created, in a `finally` block; writers never remove a
 lock they did not create. A lock whose recorded PID has exited is reported as stale by
-`lint`/`status`; `bun scripts/lca-wiki.ts unlock` removes it (refusing live, unreadable or
+`lint`/`status`; `bun scripts/otter-wiki.ts unlock` removes it (refusing live, unreadable or
 changed locks). Git settings remain unchanged.
 
 The `guard.wiki_raw` hook (`tool.execute.before`) refuses edit/write/multiedit and
@@ -1436,8 +1436,8 @@ optimization or deployment**. The production `llm-wiki` skill and closed/off P1
 campaign remain unchanged. No candidate or efficacy result exists.
 
 ```sh
-bun scripts/lca-skillopt.ts snapshot
-bun scripts/lca-skillopt.ts preflight
+bun scripts/otter-skillopt.ts snapshot
+bun scripts/otter-skillopt.ts preflight
 ```
 
 `snapshot` emits bounded hash-only source metadata, including the immutable research
@@ -1455,12 +1455,12 @@ The full experiment, independent qualification, exact-candidate approval and
 verified production application remain unmet. See the
 [pilot runbook and capability boundary](../docs/lca-skillopt-pipeline-2026-10-03.md).
 
-## Delegate config (`.lca/lca.jsonc` → `delegate`)
+## Delegate config (`.otter/otter.jsonc` → `delegate`)
 
 | key | default | meaning |
 |---|---|---|
 | `review` | `true` | run the reviewer child session on each task's diff + verify output |
-| `worktree` | `false` | stage 4: each code task runs in a linked git worktree under the state root (worker session + verify bound to it via the SDK's per-request `directory`); its diff is applied to the main worktree only when accepted (`git apply --check` first — a patch that no longer applies fails the task and stays in `.lca/handoffs/<session>/task-N.patch`). Falls back to in-place without a commit. Measured (ulw3): 3/3 done, verify + review in the worktrees, files merged, 88 s vs 64 s in place — each worker's system prompt embeds its own directory, so worker prefixes are no longer shared (3 worker cache misses instead of 1; E07 reports it). Isolation costs one prefill per task. |
+| `worktree` | `false` | stage 4: each code task runs in a linked git worktree under the state root (worker session + verify bound to it via the SDK's per-request `directory`); its diff is applied to the main worktree only when accepted (`git apply --check` first — a patch that no longer applies fails the task and stays in `.otter/handoffs/<session>/task-N.patch`). Falls back to in-place without a commit. Measured (ulw3): 3/3 done, verify + review in the worktrees, files merged, 88 s vs 64 s in place — each worker's system prompt embeds its own directory, so worker prefixes are no longer shared (3 worker cache misses instead of 1; E07 reports it). Isolation costs one prefill per task. |
 | `review_strict` | `false` | `true`: a REJECT / no verdict on the last attempt fails the task even when verify passed |
 | `max_attempts` | `2` | worker attempts per task (failed verify / REJECT re-runs once with the reason) |
 | `task_ttl_ms` / `review_ttl_ms` | `900000` / `180000` | wall-clock cap per worker / reviewer session; on expiry the child is aborted and the attempt fails |
@@ -1470,7 +1470,7 @@ verified production application remain unmet. See the
 | `handoff_context_chars` | `600` | earlier-task summary prepended to the next worker prompt |
 | `report_max_chars` / `verify_output_chars` | `1200` / `1500` | trimming of the worker report and the verify output tail |
 | `diff_max_chars` | `6000` | maximum complete task diff accepted for scanning and review; a truncated diff fails the attempt before verification or review, even when review is disabled. Narrow the task or explicitly increase this bound. |
-| `diff_exclude` | `__pycache__`, `.pytest_cache`, `node_modules`, `.venv`, `*.pyc`, `.env`, `*.pem`, … | globs never counted as task changes (any depth); `.lca/state` and `.lca/handoffs` are always excluded (`.lca/lca.jsonc` edits do show up). Without this the reviewer rejects "files outside the task" for test-run artifacts (seen in the first e2e) |
+| `diff_exclude` | `__pycache__`, `.pytest_cache`, `node_modules`, `.venv`, `*.pyc`, `.env`, `*.pem`, … | globs never counted as task changes (any depth); `.otter/state` and `.otter/handoffs` are always excluded (`.otter/otter.jsonc` edits do show up). Without this the reviewer rejects "files outside the task" for test-run artifacts (seen in the first e2e) |
 
 Hook ids for `disabled_hooks`: `tool.delegate` (drops the tool; main's prompt and the `ulw` suffix then fall back to the
 stage-1 direct task list), `command.stop`, `command.status` (drops `/status`), `flow` (drops the plan workflow core
@@ -1479,20 +1479,20 @@ hook id everywhere the flow feature is gated), `guard.plan_boundary` (drops the 
 Full list in `src/hooks/types.ts` (`HOOK_IDS`).
 
 Known limits (from the reviews, not addressed): a plugin tool's `ctx.metadata()` is a no-op on OpenCode 1.18.32, so
-the TUI shows only the tool name while the queue runs (the child sessions' titles `lca task N: …` are the progress
+the TUI shows only the tool name while the queue runs (the child sessions' titles `otter task N: …` are the progress
 signal); execution claims now serialize the shared queue and review across processes, but an unresolved execution
 retains its fence; test gaming
 that no pattern catches (a clever worker) is only stopped by the reviewer, which on a 26B with thinking off is weak —
 verify commands and protected files are the real gate, so write task-local tests.
 
-## Data config (`.lca/lca.jsonc` → `data`)
+## Data config (`.otter/otter.jsonc` → `data`)
 
 | key | default | meaning |
 |---|---|---|
 | `backend` | `"none"` | `"sqlite"` / `"postgres"` enables db_query, schema_lookup and the data agents |
 | `sqlite_path` | `data/app.sqlite` | sqlite file (relative to the worktree), opened read-only |
 | `schema_file` | `data/schema.json` | static schema served by schema_lookup |
-| `pg_dsn_env` / `pg_allow_remote` / `psql_path` | `LCA_PG_DSN` / `false` / `psql` | env var holding the DSN; non-loopback hosts refused unless allowed; psql binary |
+| `pg_dsn_env` / `pg_allow_remote` / `psql_path` | `OTTER_PG_DSN` / `false` / `psql` | env var holding the DSN; non-loopback hosts refused unless allowed; psql binary |
 | `max_rows` / `max_cell_chars` / `max_output_tokens` | `50` / `80` / `1500` | result caps (hint line says what was cut) |
 | `statement_timeout_ms` | `15000` | per query (sqlite progress handler / `SET LOCAL statement_timeout`) |
 | `max_queries_per_session` | `6` | executed db_query calls per session (refused calls do not count) |
@@ -1503,7 +1503,7 @@ Hook ids: `tool.data` (drops db_query/schema_lookup and the data agents), `mcp.e
 
 ## Stage 5 scope (model comparison) — 2026-09-23, first slice
 
-- `scripts/lca-e2e-data.sh --model ollama/<id>` and `LCA_E2E_MODEL=ollama/<id> scripts/lca-e2e.sh` run the same
+- `scripts/otter-e2e-data.sh --model ollama/<id>` and `OTTER_E2E_MODEL=ollama/<id> scripts/otter-e2e.sh` run the same
   isolated suites on another model of the user's `provider.ollama.models`. `qwen3.6:35b-a3b` is not pulled (a
   20 GB download is the user's call), so the first comparison is gemma4:26b-a4b (MoE, default) vs gemma4:31b-mlx:
   same accuracy on both suites (data 10/10, ulw3 3/3), 31B 2.5–5.6× slower, prefix contract unchanged; E07's
@@ -1517,8 +1517,8 @@ Hook ids: `tool.data` (drops db_query/schema_lookup and the data agents), `mcp.e
 
 - `skills.allow` (default `["ulw","plan"]`): OpenCode auto-discovers skills from `~/.claude/skills`, `~/.agents/skills`,
   `.opencode/skills` and lists every description in the skill tool schema (13 skills = ~2K prefix tokens here).
-  lca sets `permission.skill` so main sees only the allowlist; worker/reviewer have the skill tool off.
-  This project overrides the list in `.lca/lca.jsonc` to `["ulw","plan","llm-wiki"]` (arrays replace
+  otter sets `permission.skill` so main sees only the allowlist; worker/reviewer have the skill tool off.
+  This project overrides the list in `.otter/otter.jsonc` to `["ulw","plan","llm-wiki"]` (arrays replace
   defaults; `DEFAULT_CONFIG.skills` in `config.ts` is unchanged) to enable the `llm-wiki` skill at
   `.agents/skills/llm-wiki/SKILL.md`.
 - `guards.read_max_tokens` (default 2500) and `guards.relativize_paths` (default true): tool outputs are cut by

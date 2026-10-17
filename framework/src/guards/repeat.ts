@@ -32,7 +32,7 @@ export function signatureOf(tool: string, args: unknown): string {
 
 export function repeatBlockMessage(tool: string, count: number, lastError?: string): string {
   const why = lastError ? ` The previous attempts failed with: ${lastError}` : ""
-  return `lca: blocked repeated call to ${tool} with identical arguments (${count}x).${why} Change the approach: read the error, use a different tool or different arguments.`
+  return `otter: blocked repeated call to ${tool} with identical arguments (${count}x).${why} Change the approach: read the error, use a different tool or different arguments.`
 }
 
 export function errorExcerpt(text: string | undefined, max = ERROR_EXCERPT_CHARS): string | undefined {
@@ -88,7 +88,7 @@ export class RepeatGuard {
     const entry = ring.get(sig)
     if (!entry) return
     // Our own block message must not overwrite the underlying tool error the model needs to read.
-    if (error && !error.startsWith("lca: blocked repeated call")) entry.lastError = errorExcerpt(error)
+    if (error && !error.startsWith("otter: blocked repeated call")) entry.lastError = errorExcerpt(error)
   }
 
   /** Current count for a signature (for tests / diagnostics). */

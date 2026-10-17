@@ -17,17 +17,17 @@ let oldStateHome: string | undefined
 let oldXdgStateHome: string | undefined
 
 beforeEach(() => {
-  oldStateHome = process.env.LCA_STATE_HOME
+  oldStateHome = process.env.OTTER_STATE_HOME
   oldXdgStateHome = process.env.XDG_STATE_HOME
-  root = mkdtempSync(resolve(tmpdir(), "lca-skill-campaign-root-"))
-  stateHome = mkdtempSync(resolve(tmpdir(), "lca-skill-campaign-state-"))
-  process.env.LCA_STATE_HOME = stateHome
+  root = mkdtempSync(resolve(tmpdir(), "otter-skill-campaign-root-"))
+  stateHome = mkdtempSync(resolve(tmpdir(), "otter-skill-campaign-state-"))
+  process.env.OTTER_STATE_HOME = stateHome
   delete process.env.XDG_STATE_HOME
 })
 
 afterEach(() => {
-  if (oldStateHome === undefined) delete process.env.LCA_STATE_HOME
-  else process.env.LCA_STATE_HOME = oldStateHome
+  if (oldStateHome === undefined) delete process.env.OTTER_STATE_HOME
+  else process.env.OTTER_STATE_HOME = oldStateHome
   if (oldXdgStateHome === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = oldXdgStateHome
   rmSync(root, { recursive: true, force: true })
@@ -94,9 +94,9 @@ describe("campaign quota and closure", () => {
     const deadline = getSkillCampaignStatus(root, startedAt + 10).drainDeadline
     expect(deadline).toBe(startedAt + 10 + 5 * 60 * 1000)
     expect(getSkillCampaignStatus(root, startedAt + 60_000).drainDeadline).toBe(deadline)
-    const cli = resolve(import.meta.dir, "../../scripts/lca-skill-observation.ts")
+    const cli = resolve(import.meta.dir, "../../scripts/otter-skill-observation.ts")
     const restarted = Bun.spawn([process.execPath, cli, "status", "--root", root, "--campaign-id", "deadline-canary"], {
-      env: { ...process.env, LCA_STATE_HOME: stateHome }, stdout: "pipe", stderr: "pipe",
+      env: { ...process.env, OTTER_STATE_HOME: stateHome }, stdout: "pipe", stderr: "pipe",
     })
     const [restartedOutput, restartedExit] = await Promise.all([
       new Response(restarted.stdout).text(), restarted.exited,
@@ -147,22 +147,22 @@ describe("campaign quota and closure", () => {
         const sampledAt = realNow();
         if (first) {
           first = false;
-          writeFileSync(process.env.LCA_TEST_SAMPLED, String(sampledAt));
+          writeFileSync(process.env.OTTER_TEST_SAMPLED, String(sampledAt));
           const wait = new Int32Array(new SharedArrayBuffer(4));
           const deadline = realNow() + 5000;
-          while (!existsSync(process.env.LCA_TEST_RELEASE) && realNow() < deadline) Atomics.wait(wait, 0, 0, 1);
+          while (!existsSync(process.env.OTTER_TEST_RELEASE) && realNow() < deadline) Atomics.wait(wait, 0, 0, 1);
         }
         return sampledAt;
       };
-      const admission = admitSkillCall(process.env.LCA_TEST_ROOT, "clock-order-canary", {
+      const admission = admitSkillCall(process.env.OTTER_TEST_ROOT, "clock-order-canary", {
         sessionID: "older_writer", callID: "older_call", stage: "before",
       });
-      console.log(JSON.stringify({ admission, status: getSkillCampaignStatus(process.env.LCA_TEST_ROOT) }));
+      console.log(JSON.stringify({ admission, status: getSkillCampaignStatus(process.env.OTTER_TEST_ROOT) }));
     `
     const child = Bun.spawn([process.execPath, "-e", program], {
       env: {
-        ...process.env, LCA_STATE_HOME: stateHome, LCA_TEST_ROOT: root,
-        LCA_TEST_SAMPLED: sampledPath, LCA_TEST_RELEASE: releasePath,
+        ...process.env, OTTER_STATE_HOME: stateHome, OTTER_TEST_ROOT: root,
+        OTTER_TEST_SAMPLED: sampledPath, OTTER_TEST_RELEASE: releasePath,
       },
       stdout: "pipe", stderr: "pipe",
     })
@@ -245,20 +245,20 @@ describe("campaign quota and closure", () => {
     expect(activateSkillCampaign(root, campaignID)).toMatchObject({ callCount: 1, ownerBinding: firstBinding })
     expect(() => activateSkillCampaign(root, "different-campaign")).toThrow("campaign_exists")
 
-    const movedState = mkdtempSync(resolve(tmpdir(), "lca-skill-campaign-moved-state-"))
-    const selectedState = process.env.LCA_STATE_HOME
+    const movedState = mkdtempSync(resolve(tmpdir(), "otter-skill-campaign-moved-state-"))
+    const selectedState = process.env.OTTER_STATE_HOME
     try {
-      process.env.LCA_STATE_HOME = movedState
+      process.env.OTTER_STATE_HOME = movedState
       expect(skillObservationBindingHash(root)).not.toBe(firstBinding)
       expect(() => activateSkillCampaign(root, campaignID)).toThrow("binding_mismatch")
       expect(existsSync(skillObservationDatabasePath(root))).toBe(false)
     } finally {
-      if (selectedState === undefined) delete process.env.LCA_STATE_HOME
-      else process.env.LCA_STATE_HOME = selectedState
+      if (selectedState === undefined) delete process.env.OTTER_STATE_HOME
+      else process.env.OTTER_STATE_HOME = selectedState
       rmSync(movedState, { recursive: true, force: true })
     }
 
-    const copiedRoot = mkdtempSync(resolve(tmpdir(), "lca-skill-campaign-copied-root-"))
+    const copiedRoot = mkdtempSync(resolve(tmpdir(), "otter-skill-campaign-copied-root-"))
     try {
       const copiedDatabase = skillObservationDatabasePath(copiedRoot)
       mkdirSync(dirname(copiedDatabase), { recursive: true, mode: 0o700 })
@@ -269,7 +269,7 @@ describe("campaign quota and closure", () => {
       rmSync(copiedRoot, { recursive: true, force: true })
     }
 
-    const missingRoot = mkdtempSync(resolve(tmpdir(), "lca-skill-campaign-missing-db-"))
+    const missingRoot = mkdtempSync(resolve(tmpdir(), "otter-skill-campaign-missing-db-"))
     try {
       writeProjectCampaignConfig(campaignID, skillObservationBindingHash(missingRoot), missingRoot)
       expect(() => activateSkillCampaign(missingRoot, campaignID)).toThrow("database_missing")
@@ -280,9 +280,9 @@ describe("campaign quota and closure", () => {
   })
 
   test("activation refuses an unsafe project config without following it or exposing its contents", () => {
-    const directory = join(root, ".lca")
+    const directory = join(root, ".otter")
     mkdirSync(directory)
-    const configPath = join(directory, "lca.jsonc")
+    const configPath = join(directory, "otter.jsonc")
     writeFileSync(configPath, "x".repeat(SKILL_OBSERVATION_LIMITS.maxConfigBytes + 1))
     expect(() => activateSkillCampaign(root, "oversize-config")).toThrow("binding_mismatch")
     rmSync(configPath)
@@ -439,7 +439,7 @@ describe("campaign quota and closure", () => {
     admitSkillCall(root, "resource-health-canary", { sessionID: "bad//after-full", callID: "call_x", stage: "before" })
     expect(getSkillCampaignStatus(root).rejections.invalid_identifier).toBe(0)
 
-    const corruptRoot = mkdtempSync(resolve(tmpdir(), "lca-skill-campaign-corrupt-"))
+    const corruptRoot = mkdtempSync(resolve(tmpdir(), "otter-skill-campaign-corrupt-"))
     try {
       activateSkillCampaign(corruptRoot, "corrupt-canary")
       const corruptPath = skillObservationDatabasePath(corruptRoot)
@@ -460,14 +460,14 @@ describe("campaign quota and closure", () => {
     const moduleURL = new URL("../src/telemetry/skills.ts", import.meta.url).href
     const program = `
       import { admitSkillCall } from ${JSON.stringify(moduleURL)};
-      const result = admitSkillCall(process.env.LCA_TEST_ROOT, "child-commit-canary", {
-        sessionID: "child_session", callID: process.env.LCA_TEST_CALL, stage: "before",
+      const result = admitSkillCall(process.env.OTTER_TEST_ROOT, "child-commit-canary", {
+        sessionID: "child_session", callID: process.env.OTTER_TEST_CALL, stage: "before",
       });
       console.log(JSON.stringify(result));
     `
     const runChild = async (callID: string) => {
       const child = Bun.spawn([process.execPath, "-e", program], {
-        env: { ...process.env, LCA_STATE_HOME: stateHome, LCA_TEST_ROOT: root, LCA_TEST_CALL: callID },
+        env: { ...process.env, OTTER_STATE_HOME: stateHome, OTTER_TEST_ROOT: root, OTTER_TEST_CALL: callID },
         stdout: "pipe", stderr: "pipe",
       })
       const [stdout, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited])
@@ -573,10 +573,10 @@ describe("campaign quota and closure", () => {
   })
 
   test("the CLI requires explicit activate root/id and emits only safe campaign records", async () => {
-    const script = resolve(import.meta.dir, "../../scripts/lca-skill-observation.ts")
+    const script = resolve(import.meta.dir, "../../scripts/otter-skill-observation.ts")
     const run = async (...args: string[]) => {
       const processHandle = Bun.spawn([process.execPath, script, ...args], {
-        env: { ...process.env, LCA_STATE_HOME: stateHome },
+        env: { ...process.env, OTTER_STATE_HOME: stateHome },
         stdout: "pipe",
         stderr: "pipe",
       })
@@ -619,21 +619,21 @@ describe("concurrent quota admission", () => {
     const moduleURL = new URL("../src/telemetry/skills.ts", import.meta.url).href
     const program = `
       import { admitSkillCall, recordSkillCall } from ${JSON.stringify(moduleURL)};
-      const sessionID = process.env.LCA_TEST_SESSION;
-      const callID = process.env.LCA_TEST_CALL;
-      const admission = admitSkillCall(process.env.LCA_TEST_ROOT, "concurrent-canary", { sessionID, callID, stage: "terminal" });
+      const sessionID = process.env.OTTER_TEST_SESSION;
+      const callID = process.env.OTTER_TEST_CALL;
+      const admission = admitSkillCall(process.env.OTTER_TEST_ROOT, "concurrent-canary", { sessionID, callID, stage: "terminal" });
       const record = admission.admitted
-        ? recordSkillCall(process.env.LCA_TEST_ROOT, admission.token, { state: "error", returnedContent: "not_returned" })
+        ? recordSkillCall(process.env.OTTER_TEST_ROOT, admission.token, { state: "error", returnedContent: "not_returned" })
         : null;
       console.log(JSON.stringify({ admitted: admission.admitted, code: admission.code, record }));
     `
     const children = Array.from({ length: 12 }, (_, index) => Bun.spawn([process.execPath, "-e", program], {
       env: {
         ...process.env,
-        LCA_STATE_HOME: stateHome,
-        LCA_TEST_ROOT: root,
-        LCA_TEST_SESSION: `racing_session_${index}`,
-        LCA_TEST_CALL: `racing_call_${index}`,
+        OTTER_STATE_HOME: stateHome,
+        OTTER_TEST_ROOT: root,
+        OTTER_TEST_SESSION: `racing_session_${index}`,
+        OTTER_TEST_CALL: `racing_call_${index}`,
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -705,9 +705,9 @@ function insertTurnRows(
 }
 
 function writeProjectCampaignConfig(campaignID: string, ownerBinding: string, projectRoot = root): void {
-  const directory = join(projectRoot, ".lca")
+  const directory = join(projectRoot, ".otter")
   mkdirSync(directory, { recursive: true })
-  writeFileSync(join(directory, "lca.jsonc"), JSON.stringify({
+  writeFileSync(join(directory, "otter.jsonc"), JSON.stringify({
     skill_observation: { enabled: true, campaign_id: campaignID, owner_binding: ownerBinding },
   }))
 }

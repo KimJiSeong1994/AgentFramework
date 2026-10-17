@@ -15,8 +15,8 @@ export function launchInteractive(args: InteractiveArgs, overrides: Partial<Inte
     columns: process.stdout.columns || 0,
     rows: process.stdout.rows || 0,
     rawSupported: typeof process.stdin.setRawMode === "function",
-    optOut: process.env.LCA_TUI,
+    optOut: process.env.OTTER_TUI,
   })
-  if (!capability.enabled) process.stderr.write(`LCA: using readline (${capability.reason}).\n`)
+  if (!capability.enabled) process.stderr.write(`Otter: using readline (${capability.reason}).\n`)
   return runInteractiveSession(args, { ...overrides, terminal: capability.enabled ? new TuiApp() : createReadlineTerminal() })
 }

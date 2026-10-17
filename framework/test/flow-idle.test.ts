@@ -101,12 +101,12 @@ for (const [label, engine] of [
     // An unprovable workflow engine voids the session's admission, so no fresh native turn is accepted and no call can
     // be minted: the only remaining authority is the turn bound before the change, which is stale.
     const turn = await native.deliverUserTurn()
-    expect(turn.parts.some(part => part.type === "text" && part.text.includes("LCA session held"))).toBe(true)
+    expect(turn.parts.some(part => part.type === "text" && part.text.includes("Otter session held"))).toBe(true)
     expect(() => primeNativeToolCall(native, "delegate", { resume: true })).toThrow(/accept a native user turn/)
     const call = { input: { tool: "delegate", sessionID: S, callID: "flow_idle_unminted_call" }, output: { args: { resume: true } } }
-    await expect(createToolBeforeHook(deps)(call.input, call.output)).rejects.toThrow("lca: OpenCode tool call refused (stale-turn)")
+    await expect(createToolBeforeHook(deps)(call.input, call.output)).rejects.toThrow("otter: OpenCode tool call refused (stale-turn)")
     await expect(createToolAfterHook(deps)({ ...call.input, args: call.output.args }, { title: "delegate", output: "ok", metadata: {} })).rejects.toThrow(
-      /^lca: OpenCode tool call refused \(/,
+      /^otter: OpenCode tool call refused \(/,
     )
     await createEventHook(deps)(deletedEvent())
     expect(workflowBefore.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
@@ -217,7 +217,7 @@ describe("AC0.12 — precedence", () => {
     expect(part.text).toContain("/cancel first")
   })
 
-  test("legacy plan keyword under an active workflow also gets only the notice (no <lca-mode>)", async () => {
+  test("legacy plan keyword under an active workflow also gets only the notice (no <otter-mode>)", async () => {
     const wf = putWorkflow({ phase: "planning" })
     const deps = makeDeps(client, wt.worktree)
     const part = await deliverNativeUserText(deps, "plan mode for the refactor")
@@ -230,7 +230,7 @@ describe("AC0.12 — precedence", () => {
     writeModeState(wt.worktree, S, ulw())
     const wf = putWorkflow({ phase: "planning" })
     const deps = makeDeps(client, wt.worktree)
-    const part = await deliverNativeUserText(deps, "stop lca")
+    const part = await deliverNativeUserText(deps, "stop otter")
     expect(readModeState(wt.worktree, S).active).toBe(false)
     expect(part.text).toContain(`use /cancel to end plan workflow ${wf.id}`)
     expect(hasModeSuffix(part.text)).toBe(false)
@@ -346,7 +346,7 @@ describe("settle via idle", () => {
     const completedLedger = readLedger(wt.worktree, S)
     expect(completedWorkflow.phase).toBe("done")
     await expect(hook(call.input, { title: "delegate", output: "ok", metadata: {} })).rejects.toThrow(
-      "lca: OpenCode tool call refused (completed-call)",
+      "otter: OpenCode tool call refused (completed-call)",
     )
     expect(readWorkflow(wt.worktree)).toEqual(completedWorkflow)
     expect(readEvents(wt.worktree, wf.id)).toEqual(completedEvents)

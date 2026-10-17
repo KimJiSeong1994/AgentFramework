@@ -12,22 +12,22 @@ import {
   materializeArgv,
   supervisorBindingSha256,
   validateFixtureManifest,
-} from "../../scripts/lca-soak-supervisor.ts"
-import type { Family } from "../../scripts/lca-soak-supervisor.ts"
-import { checkManifest } from "../../scripts/lca-soak-manifest.ts"
+} from "../../scripts/otter-soak-supervisor.ts"
+import type { Family } from "../../scripts/otter-soak-supervisor.ts"
+import { checkManifest } from "../../scripts/otter-soak-manifest.ts"
 
 const families = Object.keys(FAMILY_TABLE) as Family[]
 const sessionID = "session_01"
 
 function fixtureInput(): Record<string, unknown> {
   return {
-    schema: "lca.soak-fixtures.v1",
+    schema: "otter.soak-fixtures.v1",
     version: 1,
     provisioning: [{ vm: "vm-c", cwd: "/tmp", argv: ["provision", "--vm", "vm-c"] }],
     lineages: families.flatMap(family => [1, 2, 3].map(repetition => {
       const lineage = `${family}-r${repetition}`
       const policy = FAMILY_TABLE[family]
-      const receiptPath = `/tmp/lca-soak/${lineage}.receipt.json`
+      const receiptPath = `/tmp/otter-soak/${lineage}.receipt.json`
       return {
         lineage,
         family,
@@ -40,8 +40,8 @@ function fixtureInput(): Record<string, unknown> {
           return {
             scenario,
             cwd: "/tmp",
-            argv: ["python3", "scripts/lca-soak-pty-ssh.py", "--scenario", scenario, "--receipt", receiptPath,
-              "--verifier", "linux-production", ...(index > 1 ? ["--session", "@lca-soak-parent-session"] : [])],
+            argv: ["python3", "scripts/otter-soak-pty-ssh.py", "--scenario", scenario, "--receipt", receiptPath,
+              "--verifier", "linux-production", ...(index > 1 ? ["--session", "@otter-soak-parent-session"] : [])],
             receiptPath,
             expectedInjection: index === 1 ? policy.expectedInjection : null,
             ...(index > 1 ? { resumeSession: { fromInvocationIndex: 1 } } : {}),
@@ -56,7 +56,7 @@ const TEST_BINDING = createSupervisorBinding("stub-host", validateFixtureManifes
 const TEST_BINDING_SHA256 = supervisorBindingSha256(TEST_BINDING)
 
 function evidenceFixture() {
-  const root = mkdtempSync(join(tmpdir(), "lca-soak-manifest-"))
+  const root = mkdtempSync(join(tmpdir(), "otter-soak-manifest-"))
   const evidenceDir = join(root, "linux-eligibility-test")
   mkdirSync(evidenceDir, { mode: 0o700 })
   initializeManifest(evidenceDir, TEST_BINDING)
@@ -71,7 +71,7 @@ function baseReceipt(run: Record<string, unknown>) {
   return {
     schemaVersion: 2,
     scenario: run.scenario,
-    receiptPath: "/tmp/lca-soak/fake-receipt.json",
+    receiptPath: "/tmp/otter-soak/fake-receipt.json",
     baseIdentity: { verifier: "linux-production" },
     nativeSessionIDs: { parentSessionID: sessionID },
     modelAborts: [],

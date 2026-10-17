@@ -26,13 +26,13 @@ export function createDbQueryTool(deps: HookDeps): ToolDefinition {
       max_rows: z.number().int().min(1).max(200).optional().describe("row cap (default 50)"),
     },
     async execute(args, ctx) {
-      if (ctx.agent && !DATA_AGENTS.has(ctx.agent)) throw new Error(`lca: db_query is only available to the data agents (current agent: ${ctx.agent}).`)
+      if (ctx.agent && !DATA_AGENTS.has(ctx.agent)) throw new Error(`otter: db_query is only available to the data agents (current agent: ${ctx.agent}).`)
       const d = deps.config.data
       const problem = sqlProblem(args.sql)
-      if (problem) throw new Error(`lca: query refused — ${problem}. Write a single SELECT/WITH statement.`)
+      if (problem) throw new Error(`otter: query refused — ${problem}. Write a single SELECT/WITH statement.`)
       // only queries that reach the database count towards the cap (refusals cost nothing)
       const n = (callsPerSession.get(ctx.sessionID) ?? 0) + 1
-      if (n > d.max_queries_per_session) throw new Error(`lca: db_query limit (${d.max_queries_per_session} per session) reached. Answer with what you have.`)
+      if (n > d.max_queries_per_session) throw new Error(`otter: db_query limit (${d.max_queries_per_session} per session) reached. Answer with what you have.`)
       callsPerSession.set(ctx.sessionID, n)
       const maxRows = Math.min(args.max_rows ?? d.max_rows, d.max_rows * 4)
       const backend = getBackend(deps)
@@ -44,7 +44,7 @@ export function createDbQueryTool(deps: HookDeps): ToolDefinition {
       } catch (e) {
         const msg = (e as Error).message
         deps.log("db_query error", { sessionID: ctx.sessionID, error: msg.slice(0, 200) })
-        throw new Error(`lca: query failed — ${msg.slice(0, 400)}. Fix the SQL (check schema_lookup for exact column names); do not repeat the same query.`)
+        throw new Error(`otter: query failed — ${msg.slice(0, 400)}. Fix the SQL (check schema_lookup for exact column names); do not repeat the same query.`)
       }
       const elapsedMs = Date.now() - t0
       const text = formatRows(res, { maxRows, maxCell: d.max_cell_chars, maxTokens: d.max_output_tokens, elapsedMs })

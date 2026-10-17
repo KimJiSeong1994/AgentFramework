@@ -79,7 +79,7 @@ describe("common planning conversation", () => {
     const runtime = createCliRuntime({ worktree: wt.worktree, engine: "local", model: "fixture-model" })
     const main = runtime.policy.resolve("main")
     expect(main.tools.allowed).toEqual(["read", "list", "glob", "grep"])
-    expect(main.tools.denied).toEqual(expect.arrayContaining(["write", "bash", "delegate", "lca_flow"]))
+    expect(main.tools.denied).toEqual(expect.arrayContaining(["write", "bash", "delegate", "otter_flow"]))
     expect(main.system[0]).toContain("Never modify files, run commands, execute or approve plans, or delegate work")
     expect(main.nativeContext).toBeUndefined()
   })
@@ -104,7 +104,7 @@ describe("common planning conversation", () => {
     expect(request.text).toContain("inspect files using the provided read-only tools")
     expect(request.text).toContain("Never modify files or run commands")
     expect(request.text).toContain("Do not claim work was executed")
-    expect(request.text).not.toMatch(/do it yourself|call the delegate tool|submit plans only with lca_flow/i)
+    expect(request.text).not.toMatch(/do it yourself|call the delegate tool|submit plans only with otter_flow/i)
   })
 
   test("runtime policy binds native context outside the conversation prompt", async () => {
@@ -302,7 +302,7 @@ describe("common planning conversation", () => {
     expect(f.requests).toHaveLength(1)
     expect(f.requests[0]!.role).toBe("main")
     expect(f.requests[0]!.policy.tools.allowed).toEqual(["read", "list", "glob", "grep"])
-    expect(f.requests[0]!.policy.tools.denied).toEqual(expect.arrayContaining(["write", "bash", "delegate", "lca_flow"]))
+    expect(f.requests[0]!.policy.tools.denied).toEqual(expect.arrayContaining(["write", "bash", "delegate", "otter_flow"]))
     expect(readFileSync(workflowPath(wt.worktree))).toEqual(workflowBefore)
   })
 

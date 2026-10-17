@@ -96,7 +96,7 @@ function toolEvent(
   input: unknown = { pattern: "needle", path: "src" },
   callID = "call-1",
 ): Extract<ExecutionEvent, { type: "tool-before" }> {
-  return { type: "tool-before", sessionID: request.executionID, callID, toolID: `lca:${name}`, name, input }
+  return { type: "tool-before", sessionID: request.executionID, callID, toolID: `otter:${name}`, name, input }
 }
 
 function revalidation(patch: Partial<SkillCallRevalidation> = {}): SkillCallRevalidation {

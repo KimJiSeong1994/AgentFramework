@@ -38,7 +38,7 @@ export async function readSDKResumeIdentity(context: SDKResumeContext): Promise<
   return { sessionID: context.sessionID, directory, createdAt: created, updatedAt: updated }
 }
 
-/** Vendor idleness and canonical terminal tool parts supplement, never replace, LCA execution-store proof. */
+/** Vendor idleness and canonical terminal tool parts supplement, never replace, Otter execution-store proof. */
 export async function assertSDKSessionQuiescent(context: SDKResumeContext, initial: SDKResumeIdentity): Promise<void> {
   const idle = async () => {
     context.revalidate()

@@ -14,8 +14,8 @@ import time
 from typing import Any
 
 
-PROTOCOL = "lca.linux-verifier.v1"
-CONTROL_SOCKET = "/run/lca-verifier/control.sock"
+PROTOCOL = "otter.linux-verifier.v1"
+CONTROL_SOCKET = "/run/otter-verifier/control.sock"
 MAX_MESSAGE_BYTES = 48 * 1024 * 1024
 MAX_FRAME_BYTES = 1_048_576
 

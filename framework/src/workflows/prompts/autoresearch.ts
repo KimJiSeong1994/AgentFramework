@@ -1,4 +1,4 @@
-// Autoresearch stage prompts (P6b S3): intake, hypothesis, evidence, experiment proposal, evaluation. LCA-authored text;
+// Autoresearch stage prompts (P6b S3): intake, hypothesis, evidence, experiment proposal, evaluation. Otter-authored text;
 // the only upstream influence is the mission/run/verdict shape recorded in ../ATTRIBUTION. The prompts hold no executable
 // instructions, tool grants or skill bodies: tools come from the runtime policy snapshot (read-only for every role here),
 // and the model returns typed stage events that code validates and records. A model never runs a command, scores a run

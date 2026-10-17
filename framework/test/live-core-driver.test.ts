@@ -16,8 +16,8 @@ import {
   selectVerifierRuntime,
   verificationProfileForMode,
   type Receipt,
-} from "../../scripts/lca-live-core-queue.ts"
-import { DEFAULT_CONFIG, type LcaConfig } from "../src/config.ts"
+} from "../../scripts/otter-live-core-queue.ts"
+import { DEFAULT_CONFIG, type OtterConfig } from "../src/config.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import type { VerificationReference, VerificationReconciliation } from "../src/orchestration/verifier.ts"
 
@@ -41,15 +41,15 @@ test("new live native scenarios cannot fall back to the legacy verifier", () => 
   expect(() => assertScenarioVerifierMode("retry", "legacy")).not.toThrow()
 })
 
-function withVerifierRuntime(selector: LcaConfig["delegate"]["verifier"], check: (config: LcaConfig, runtime: ReturnType<typeof getOpenCodeRuntime>) => void): void {
-  const stateHome = mkdtempSync(join(tmpdir(), "lca-live-driver-runtime-state-"))
-  const worktree = mkdtempSync(join(tmpdir(), "lca-live-driver-runtime-worktree-"))
+function withVerifierRuntime(selector: OtterConfig["delegate"]["verifier"], check: (config: OtterConfig, runtime: ReturnType<typeof getOpenCodeRuntime>) => void): void {
+  const stateHome = mkdtempSync(join(tmpdir(), "otter-live-driver-runtime-state-"))
+  const worktree = mkdtempSync(join(tmpdir(), "otter-live-driver-runtime-worktree-"))
   const previousStateHome = process.env.XDG_STATE_HOME
-  const previousLcaStateHome = process.env.LCA_STATE_HOME
+  const previousOtterStateHome = process.env.OTTER_STATE_HOME
   process.env.XDG_STATE_HOME = stateHome
-  delete process.env.LCA_STATE_HOME
+  delete process.env.OTTER_STATE_HOME
   try {
-    const config: LcaConfig = {
+    const config: OtterConfig = {
       ...DEFAULT_CONFIG,
       delegate: { ...DEFAULT_CONFIG.delegate, verifier: selector },
     }
@@ -58,8 +58,8 @@ function withVerifierRuntime(selector: LcaConfig["delegate"]["verifier"], check:
   } finally {
     if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = previousStateHome
-    if (previousLcaStateHome === undefined) delete process.env.LCA_STATE_HOME
-    else process.env.LCA_STATE_HOME = previousLcaStateHome
+    if (previousOtterStateHome === undefined) delete process.env.OTTER_STATE_HOME
+    else process.env.OTTER_STATE_HOME = previousOtterStateHome
     rmSync(stateHome, { recursive: true, force: true })
     rmSync(worktree, { recursive: true, force: true })
   }
@@ -116,7 +116,7 @@ test("live qualification waits cover configured queue and task lifecycles beyond
 })
 
 test("main worktree evidence changes when tracked bytes change under the same modified status", () => {
-  const worktree = mkdtempSync(join(tmpdir(), "lca-live-core-git-evidence-"))
+  const worktree = mkdtempSync(join(tmpdir(), "otter-live-core-git-evidence-"))
   try {
     execFileSync("git", ["init", "--quiet"], { cwd: worktree })
     execFileSync("git", ["config", "user.name", "Live core evidence test"], { cwd: worktree })
@@ -139,7 +139,7 @@ test("main worktree evidence changes when tracked bytes change under the same mo
 })
 
 test("main worktree evidence hashes raw untracked names, bytes, and modes", () => {
-  const worktree = mkdtempSync(join(tmpdir(), "lca-live-core-untracked-evidence-"))
+  const worktree = mkdtempSync(join(tmpdir(), "otter-live-core-untracked-evidence-"))
   try {
     execFileSync("git", ["init", "--quiet"], { cwd: worktree })
     execFileSync("git", ["config", "user.name", "Live core evidence test"], { cwd: worktree })
@@ -184,7 +184,7 @@ test("main worktree evidence hashes raw untracked names, bytes, and modes", () =
 })
 
 test("main worktree evidence refuses untracked symlinks instead of following them", () => {
-  const worktree = mkdtempSync(join(tmpdir(), "lca-live-core-untracked-symlink-"))
+  const worktree = mkdtempSync(join(tmpdir(), "otter-live-core-untracked-symlink-"))
   try {
     execFileSync("git", ["init", "--quiet"], { cwd: worktree })
     execFileSync("git", ["config", "user.name", "Live core evidence test"], { cwd: worktree })
@@ -200,7 +200,7 @@ test("main worktree evidence refuses untracked symlinks instead of following the
 })
 
 test("model abort capture is exact, bounded, retains failed-attempt lineage, and protects the main worktree", () => {
-  const worktree = mkdtempSync(join(tmpdir(), "lca-live-model-abort-"))
+  const worktree = mkdtempSync(join(tmpdir(), "otter-live-model-abort-"))
   const receipt = cancellationReceipt()
   const earlierFailure = { at: new Date(0).toISOString(), phase: "attempt 1", name: "Error", message: "verification failed" }
   receipt.failures.push(earlierFailure)
@@ -260,7 +260,7 @@ function cancellationReceipt(): Receipt {
       worktree: "/tmp/worktree",
       gitRoot: "/tmp/worktree",
       serverOrigin: "http://127.0.0.1:1234",
-      script: "lca-live-core-queue.ts",
+      script: "otter-live-core-queue.ts",
       processID: 123,
       platform: "linux",
       architecture: "x64",
@@ -283,7 +283,7 @@ const verifierReference: VerificationReference = {
   inputDigest: "c".repeat(64),
   deadlineAt: Date.now() + 60_000,
   maxOutputChars: 1024,
-  unit: "lca-verifier.service",
+  unit: "otter-verifier.service",
   bootID: "11111111-1111-4111-8111-111111111111",
 }
 

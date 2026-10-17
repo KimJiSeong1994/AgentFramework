@@ -1,4 +1,4 @@
-// Interviewer prompts: topology proposal and the single question of a round. LCA-authored; see ../ATTRIBUTION.
+// Interviewer prompts: topology proposal and the single question of a round. Otter-authored; see ../ATTRIBUTION.
 import { definePrompt } from "./prompt.ts"
 import { DI_CONTEXT_MARKER, DI_READ_ONLY_RULES } from "./deep-interview.rules.ts"
 

@@ -1,5 +1,5 @@
 // Read-only context summarizers used for the single budget-overflow retry (S7.3), one per kind so the summary turn runs
-// under a role the kind may schedule. LCA-authored; see ../ATTRIBUTION.
+// under a role the kind may schedule. Otter-authored; see ../ATTRIBUTION.
 import { definePrompt } from "./prompt.ts"
 
 export const SUMMARIZE_PROMPT = definePrompt({

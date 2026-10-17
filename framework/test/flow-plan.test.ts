@@ -9,7 +9,7 @@ import { canonicalPlanJson, canonicalPlanSha, coercePlan, planToTasks, validateP
 const verifyAllow = DEFAULT_CONFIG.delegate.verify_allow
 
 function tempWorktree(): { dir: string; cleanup: () => void } {
-  const dir = mkdtempSync(join(tmpdir(), "lca-plan-test-"))
+  const dir = mkdtempSync(join(tmpdir(), "otter-plan-test-"))
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
@@ -77,11 +77,11 @@ describe("validatePlan gates", () => {
     }
   })
 
-  test("a file under .lca/ is refused", () => {
+  test("a file under .otter/ is refused", () => {
     const { dir, cleanup } = tempWorktree()
     try {
-      const errs = validatePlan(plan({ steps: [step({ files: [".lca/plans/x.md"] }), step({ title: "s2" }), step({ title: "s3" })] }), dir, verifyAllow)
-      expect(errs.some((e) => /under \.lca\/ is not allowed/.test(e))).toBe(true)
+      const errs = validatePlan(plan({ steps: [step({ files: [".otter/plans/x.md"] }), step({ title: "s2" }), step({ title: "s3" })] }), dir, verifyAllow)
+      expect(errs.some((e) => /under \.otter\/ is not allowed/.test(e))).toBe(true)
     } finally {
       cleanup()
     }

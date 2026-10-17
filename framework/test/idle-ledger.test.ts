@@ -109,11 +109,11 @@ describe("idle loop with a ledger", () => {
     const text = resumeMessage(1, ["ulw everything"])
     // A synthetic-only user message has no real user text: the product refuses to bind a system channel for it.
     await expect(native.deliverUserTurn({ parts: [{ type: "text", text, synthetic: true }] }))
-      .rejects.toThrow("lca: OpenCode system channel refused (invalid-turn)")
+      .rejects.toThrow("otter: OpenCode system channel refused (invalid-turn)")
     expect(native.messages).toHaveLength(0)
     expect(readFileSync(modeStatePath(wt.worktree, S))).toEqual(modeBefore)
     expect(readModeState(wt.worktree, S).mode).toBe("ulw")
-    expect(text).not.toContain("<lca-mode")
+    expect(text).not.toContain("<otter-mode")
   })
 
   test("settled ledger -> falls through to the stage-1 todo path (through the event hook)", async () => {
@@ -173,7 +173,7 @@ describe("idle loop with a ledger", () => {
     const p = idle(S)
     await new Promise((r) => setTimeout(r, 5))
     // user says stop while the loop waits for todos
-    await native.deliverUserTurn({ text: "stop lca" })
+    await native.deliverUserTurn({ text: "stop otter" })
     const out = await p
     expect(out).toEqual({ action: "ignored", why: "state_changed" })
     expect(readModeState(wt.worktree, S).active).toBe(false)

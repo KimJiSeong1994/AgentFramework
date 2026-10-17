@@ -1,31 +1,31 @@
 #!/usr/bin/env bash
-# LCA installer: one command installs or updates `lca`.
+# Otter installer: one command installs or updates `otter`.
 #
 #   gh api repos/KimJiSeong1994/AgentFramework/contents/install.sh -H "Accept: application/vnd.github.raw" | bash
 #
-# It clones (or updates) this repository into $LCA_HOME, installs the runtime dependencies with bun, and writes a
-# `lca` launcher into $LCA_BIN_DIR. Re-running it updates in place. `install.sh --uninstall` removes what it created
-# and keeps your config (~/.config/lca) and session state (~/.local/state/lca).
+# It clones (or updates) this repository into $OTTER_HOME, installs the runtime dependencies with bun, and writes a
+# `otter` launcher into $OTTER_BIN_DIR. Re-running it updates in place. `install.sh --uninstall` removes what it created
+# and keeps your config (~/.config/otter) and session state (~/.local/state/otter).
 #
 # Environment:
-#   LCA_REPO            git URL to install from (default: https://github.com/KimJiSeong1994/AgentFramework.git)
-#   LCA_REF             branch, tag or commit (default: master)
-#   LCA_HOME            install root (default: ~/.local/share/lca); the checkout is $LCA_HOME/AgentFramework
-#   LCA_BIN_DIR         launcher directory (default: ~/.local/bin)
-#   LCA_NO_MODIFY_PATH  set to 1 to never edit a shell rc file
-#   LCA_NO_BUN_INSTALL  set to 1 to fail instead of installing bun when it is missing
-#   LCA_FORCE           set to 1 to replace an existing `lca` launcher this installer did not create
+#   OTTER_REPO            git URL to install from (default: https://github.com/KimJiSeong1994/AgentFramework.git)
+#   OTTER_REF             branch, tag or commit (default: master)
+#   OTTER_HOME            install root (default: ~/.local/share/otter); the checkout is $OTTER_HOME/AgentFramework
+#   OTTER_BIN_DIR         launcher directory (default: ~/.local/bin)
+#   OTTER_NO_MODIFY_PATH  set to 1 to never edit a shell rc file
+#   OTTER_NO_BUN_INSTALL  set to 1 to fail instead of installing bun when it is missing
+#   OTTER_FORCE           set to 1 to replace an existing `otter` launcher this installer did not create
 set -euo pipefail
 
-REPO="${LCA_REPO:-https://github.com/KimJiSeong1994/AgentFramework.git}"
-REF="${LCA_REF:-master}"
-LCA_HOME="${LCA_HOME:-$HOME/.local/share/lca}"
-BIN_DIR="${LCA_BIN_DIR:-$HOME/.local/bin}"
-DIR="$LCA_HOME/AgentFramework"
-SHIM="$BIN_DIR/lca"
-MARKER="# managed by the lca installer (install.sh)"
-BLOCK_BEGIN="# >>> lca installer >>>"
-BLOCK_END="# <<< lca installer <<<"
+REPO="${OTTER_REPO:-https://github.com/KimJiSeong1994/AgentFramework.git}"
+REF="${OTTER_REF:-master}"
+OTTER_HOME="${OTTER_HOME:-$HOME/.local/share/otter}"
+BIN_DIR="${OTTER_BIN_DIR:-$HOME/.local/bin}"
+DIR="$OTTER_HOME/AgentFramework"
+SHIM="$BIN_DIR/otter"
+MARKER="# managed by the otter installer (install.sh)"
+BLOCK_BEGIN="# >>> otter installer >>>"
+BLOCK_END="# <<< otter installer <<<"
 BUN_MIN_MAJOR=1
 BUN_MIN_MINOR=2
 
@@ -72,7 +72,7 @@ ensure_bun() {
   for candidate in "$(command -v bun 2>/dev/null || true)" "${BUN_INSTALL:-$HOME/.bun}/bin/bun"; do
     if [ -n "$candidate" ] && [ -x "$candidate" ] && bun_ok "$candidate"; then BUN="$candidate"; return; fi
   done
-  [ "${LCA_NO_BUN_INSTALL:-}" = "1" ] && die "bun >= $BUN_MIN_MAJOR.$BUN_MIN_MINOR is required: https://bun.sh"
+  [ "${OTTER_NO_BUN_INSTALL:-}" = "1" ] && die "bun >= $BUN_MIN_MAJOR.$BUN_MIN_MINOR is required: https://bun.sh"
   command -v curl >/dev/null 2>&1 || die "curl is required to install bun"
   say "installing bun (https://bun.sh)"
   curl -fsSL https://bun.sh/install | bash >/dev/null
@@ -81,19 +81,19 @@ ensure_bun() {
   BUN="$candidate"
 }
 
-managed_checkout() { [ -f "$DIR/.git/lca-installer" ]; }
+managed_checkout() { [ -f "$DIR/.git/otter-installer" ]; }
 
 fetch_source() {
   local created=0
   if [ -e "$DIR" ] && ! managed_checkout; then
-    die "$DIR exists and was not created by this installer; move it or set LCA_HOME"
+    die "$DIR exists and was not created by this installer; move it or set OTTER_HOME"
   fi
   if [ ! -e "$DIR" ]; then
     mkdir -p "$DIR"
     created=1
     git -C "$DIR" init -q
     git -C "$DIR" remote add origin "$REPO"
-    printf 'repo=%s\n' "$REPO" > "$DIR/.git/lca-installer"
+    printf 'repo=%s\n' "$REPO" > "$DIR/.git/otter-installer"
   else
     [ -z "$(git -C "$DIR" status --porcelain)" ] || die "$DIR has local changes; commit or discard them before updating"
     git -C "$DIR" remote set-url origin "$REPO"
@@ -101,7 +101,7 @@ fetch_source() {
   say "fetching $REF from $REPO"
   if ! git_auth -C "$DIR" fetch -q --depth 1 origin "$REF"; then
     [ "$created" = 1 ] && rm -rf "$DIR"
-    die "could not fetch $REPO ($REF). For a private repository sign in first (gh auth login), or use an SSH URL: LCA_REPO=git@github.com:KimJiSeong1994/AgentFramework.git"
+    die "could not fetch $REPO ($REF). For a private repository sign in first (gh auth login), or use an SSH URL: OTTER_REPO=git@github.com:KimJiSeong1994/AgentFramework.git"
   fi
   git -C "$DIR" checkout -q --force --detach FETCH_HEAD
   say "source at $(git -C "$DIR" rev-parse --short HEAD)"
@@ -116,15 +116,15 @@ install_deps() {
 shim_owned() { [ -f "$SHIM" ] && grep -qF "$MARKER" "$SHIM"; }
 
 install_shim() {
-  if [ -e "$SHIM" ] && ! shim_owned && [ "${LCA_FORCE:-}" != "1" ]; then
-    die "$SHIM already exists and was not created by this installer; remove it or re-run with LCA_FORCE=1"
+  if [ -e "$SHIM" ] && ! shim_owned && [ "${OTTER_FORCE:-}" != "1" ]; then
+    die "$SHIM already exists and was not created by this installer; remove it or re-run with OTTER_FORCE=1"
   fi
   mkdir -p "$BIN_DIR"
   local tmp="$SHIM.tmp.$$"
   {
     printf '#!/bin/sh\n%s\n' "$MARKER"
     printf 'bun=%s\n' "$(shq "$BUN")"
-    printf '[ -x "$bun" ] || bun="$(command -v bun)" || { echo "lca: bun not found; re-run the lca installer" >&2; exit 127; }\n'
+    printf '[ -x "$bun" ] || bun="$(command -v bun)" || { echo "otter: bun not found; re-run the otter installer" >&2; exit 127; }\n'
     printf 'exec "$bun" %s "$@"\n' "$(shq "$DIR/framework/src/hosts/cli.ts")"
   } > "$tmp"
   chmod 755 "$tmp"
@@ -135,7 +135,7 @@ rc_file() {
   case "$(basename "${SHELL:-sh}")" in
     zsh) printf '%s\n' "${ZDOTDIR:-$HOME}/.zshrc" ;;
     bash) [ "$(uname -s)" = Darwin ] && printf '%s\n' "$HOME/.bash_profile" || printf '%s\n' "$HOME/.bashrc" ;;
-    fish) printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/lca.fish" ;;
+    fish) printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/otter.fish" ;;
     *) printf '%s\n' "$HOME/.profile" ;;
   esac
 }
@@ -144,8 +144,8 @@ ensure_path() {
   case ":$PATH:" in *":$BIN_DIR:"*) return ;; esac
   local rc
   rc="$(rc_file)"
-  if [ "${LCA_NO_MODIFY_PATH:-}" = "1" ]; then
-    warn "$BIN_DIR is not on PATH; add it to use \`lca\`"
+  if [ "${OTTER_NO_MODIFY_PATH:-}" = "1" ]; then
+    warn "$BIN_DIR is not on PATH; add it to use \`otter\`"
     return
   fi
   if [ ! -f "$rc" ] || ! grep -qF "$BLOCK_BEGIN" "$rc"; then
@@ -157,7 +157,7 @@ ensure_path() {
     fi
     say "added $BIN_DIR to PATH in $rc"
   fi
-  warn "open a new terminal (or run: export PATH=\"$BIN_DIR:\$PATH\") to use \`lca\`"
+  warn "open a new terminal (or run: export PATH=\"$BIN_DIR:\$PATH\") to use \`otter\`"
 }
 
 report_engines() {
@@ -172,18 +172,18 @@ uninstall() {
   elif [ -e "$SHIM" ]; then warn "kept $SHIM (not created by this installer)"; fi
   if managed_checkout; then rm -rf "$DIR"; say "removed $DIR"
   elif [ -e "$DIR" ]; then warn "kept $DIR (not created by this installer)"; fi
-  rmdir "$LCA_HOME" 2>/dev/null || true
+  rmdir "$OTTER_HOME" 2>/dev/null || true
   local rc
   rc="$(rc_file)"
   if [ -f "$rc" ] && grep -qF "$BLOCK_BEGIN" "$rc"; then
     if [ "${rc##*.}" = fish ]; then rm -f "$rc"
     else
-      awk -v begin="$BLOCK_BEGIN" -v end="$BLOCK_END" '$0 == begin {skip = 1; next} $0 == end {skip = 0; next} !skip' "$rc" > "$rc.lca.tmp"
-      mv -f "$rc.lca.tmp" "$rc"
+      awk -v begin="$BLOCK_BEGIN" -v end="$BLOCK_END" '$0 == begin {skip = 1; next} $0 == end {skip = 0; next} !skip' "$rc" > "$rc.otter.tmp"
+      mv -f "$rc.otter.tmp" "$rc"
     fi
     say "removed the PATH entry from $rc"
   fi
-  say "config (~/.config/lca) and session state (~/.local/state/lca) were kept"
+  say "config (~/.config/otter) and session state (~/.local/state/otter) were kept"
 }
 
 main() {
@@ -203,7 +203,7 @@ main() {
   say "installed: $SHIM"
   ensure_path
   report_engines
-  say "start with: lca"
+  say "start with: otter"
 }
 
 main "$@"

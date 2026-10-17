@@ -31,6 +31,6 @@ describe("recoveryHint", () => {
     const h = recoveryHint("write", {}, "File already exists")!
     expect(h.length).toBeLessThanOrEqual(HINT_MAX_CHARS)
     expect(appendHint("out", h)).toBe(`out${HINT_PREFIX}${h}`)
-    expect(HINT_PREFIX).toBe("\n\n[lca hint] ")
+    expect(HINT_PREFIX).toBe("\n\n[otter hint] ")
   })
 })

@@ -1,4 +1,4 @@
-"""Drive the production LCA TUI and interactive coordinator through real PTYs."""
+"""Drive the production Otter TUI and interactive coordinator through real PTYs."""
 from __future__ import annotations
 
 import argparse
@@ -36,13 +36,13 @@ SKILL_HOME_SCENARIOS = ("skills", "readline-skills", "skill-grants", "skill-rest
 STARTUP_ENV_KEYS = (
     "BUN_OPTIONS", "BUN_CONFIG", "BUN_INSTALL", "NODE_OPTIONS", "NODE_PATH",
     "PYTHONPATH", "PYTHONHOME", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES",
-    "LCA_STATE_HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME",
+    "OTTER_STATE_HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME",
 )
 
 
 def load_preflight():
     """Import, but do not modify, the frozen P0 prerequisite probe."""
-    spec = importlib.util.spec_from_file_location("lca_pty_preflight", HERE / "preflight.py")
+    spec = importlib.util.spec_from_file_location("otter_pty_preflight", HERE / "preflight.py")
     if spec is None or spec.loader is None:
         raise RuntimeError("could not import existing PTY preflight")
     module = importlib.util.module_from_spec(spec)
@@ -236,7 +236,7 @@ class TerminalScreen:
         return "\n".join(self.current_lines())
 
     def rule_index(self):
-        """Row of the model rule above the bordered composer (`  ⬢ model ─── LCA`)."""
+        """Row of the model rule above the bordered composer (`  ⬢ model ─── Otter`)."""
         lines = self.current_lines()
         for index in range(len(lines) - 1, -1, -1):
             value = lines[index]
@@ -331,25 +331,25 @@ class PtySession:
         self.executable = os.path.realpath(bun)
         fixture_scenario = "signal" if self.scenario in ("sigint", "sigterm", "sighup") else self.scenario
         env = os.environ.copy()
-        # Tests in the parent Bun process mutate PATH and XDG/LCA homes while
+        # Tests in the parent Bun process mutate PATH and XDG/Otter homes while
         # running concurrently. Keep this child on private, scenario-local
-        # state/config and do not inherit the test-only LCA override.
-        env.pop("LCA_STATE_HOME", None)
+        # state/config and do not inherit the test-only Otter override.
+        env.pop("OTTER_STATE_HOME", None)
         env["XDG_STATE_HOME"] = str(self.temp_root / f"{self.scenario}.state-home")
         env["XDG_CONFIG_HOME"] = str(self.temp_root / f"{self.scenario}.config-home")
         if self.scenario in SKILL_HOME_SCENARIOS:
             isolated_home = (self.temp_root / f"{self.scenario}.home").resolve()
             isolated_home.mkdir(parents=True, exist_ok=True)
             env["HOME"] = str(isolated_home)
-            env["LCA_TUI_PTY_HOME"] = str(isolated_home)
+            env["OTTER_TUI_PTY_HOME"] = str(isolated_home)
         env.update({
             "TERM": "xterm-256color",
             "NO_COLOR": "1",
-            "LCA_TUI_PTY_SCENARIO": fixture_scenario,
-            "LCA_TUI_PTY_RESULT": str(self.result_path),
-            "LCA_TUI_PTY_EVENTS": str(self.events_path),
-            "LCA_TUI_PTY_GATE": str(self.gate_path),
-            "LCA_TUI_PTY_TERMIOS_RELEASE": str(self.termios_release_path),
+            "OTTER_TUI_PTY_SCENARIO": fixture_scenario,
+            "OTTER_TUI_PTY_RESULT": str(self.result_path),
+            "OTTER_TUI_PTY_EVENTS": str(self.events_path),
+            "OTTER_TUI_PTY_GATE": str(self.gate_path),
+            "OTTER_TUI_PTY_TERMIOS_RELEASE": str(self.termios_release_path),
             **self.extra_env,
         })
         self.child_environment = {
@@ -361,7 +361,7 @@ class PtySession:
             "isolatedXdgStateHome": True,
             "isolatedXdgConfigHome": True,
             "isolatedHomeForSkills": self.scenario in SKILL_HOME_SCENARIOS,
-            "lcaStateHomeInherited": "LCA_STATE_HOME" in os.environ,
+            "otterStateHomeInherited": "OTTER_STATE_HOME" in os.environ,
             "pathEntryCount": len(env.get("PATH", "").split(os.pathsep)),
             "bunPathEntryIndex": next((
                 index for index, entry in enumerate(env.get("PATH", "").split(os.pathsep))
@@ -1251,7 +1251,7 @@ def run_sdk_observer(temp_root: Path):
 
         session.send_text("/new\r")
         session.wait_events(
-            lambda event: event.get("type") == "conversation.created" and event.get("sessionID") == "lca-pty-session-2",
+            lambda event: event.get("type") == "conversation.created" and event.get("sessionID") == "otter-pty-session-2",
             "new unique CLI conversation after SDK observation",
         )
         session._wait(
@@ -1270,7 +1270,7 @@ def run_sdk_observer(temp_root: Path):
             lambda event: event.get("type") == "turn.started" and event.get("text") == "ordinary input after SDK observer",
             "ordinary conversation turn in the fresh CLI session",
         )
-        if turn.get("sessionID") != "lca-pty-session-2":
+        if turn.get("sessionID") != "otter-pty-session-2":
             raise AssertionError(f"new CLI turn used the wrong session identity: {turn}")
         session.wait_screen("Fixture turn 1 completed.")
         session.mode_proof["newCliTurnWorks"] = True
@@ -1302,7 +1302,7 @@ def run_sdk_observer(temp_root: Path):
         if fixture.get("modelCatalogCallCount") != 0 or fixture.get("controllerStatusCallCount") != 0 or fixture.get("controllerCancelCallCount") != 0:
             raise AssertionError(f"read-only observer performed model, status or cancel calls: {fixture}")
         selections = fixture.get("runtimeSelections")
-        if not isinstance(selections, list) or [item.get("sessionID") for item in selections] != ["lca-pty-session", "lca-pty-session-2"] or any(item.get("engine") != "codex" for item in selections):
+        if not isinstance(selections, list) or [item.get("sessionID") for item in selections] != ["otter-pty-session", "otter-pty-session-2"] or any(item.get("engine") != "codex" for item in selections):
             raise AssertionError(f"SDK session was remapped to a native CLI runtime: {selections}")
         session.mode_proof["sdkMetadataAndWriterUntouched"] = True
         return {"exitCode": code, "fixture": fixture, "capture": session.capture()}
@@ -1468,7 +1468,7 @@ def run_skills(temp_root: Path):
 
         session.send_text("/new\r")
         session.wait_events(
-            lambda event: event.get("type") == "conversation.created" and event.get("sessionID") == "lca-pty-session-2",
+            lambda event: event.get("type") == "conversation.created" and event.get("sessionID") == "otter-pty-session-2",
             "new foreground session after a source grant",
         )
         session._wait(
@@ -1511,10 +1511,10 @@ def run_skills(temp_root: Path):
             raise AssertionError(f"skill consent flow dispatched an unexpected turn or run: {fixture.get('turnInputs')} / {fixture.get('runCount')}")
         choices = fixture.get("sourceChoices")
         expected_choices = [
-            {"sessionID": "lca-pty-session", "answer": 1},
-            {"sessionID": "lca-pty-session", "answer": 0},
-            {"sessionID": "lca-pty-session-2", "answer": 0},
-            {"sessionID": "lca-pty-session-2", "answer": None},
+            {"sessionID": "otter-pty-session", "answer": 1},
+            {"sessionID": "otter-pty-session", "answer": 0},
+            {"sessionID": "otter-pty-session-2", "answer": 0},
+            {"sessionID": "otter-pty-session-2", "answer": None},
         ]
         if not isinstance(choices, list) or [
             {"sessionID": item.get("sessionID"), "answer": item.get("answer")} for item in choices
@@ -1524,7 +1524,7 @@ def run_skills(temp_root: Path):
         if not isinstance(handoffs, list) or len(handoffs) != 3 or any(
             item.get("name") != "pty-inspect" or item.get("exactSource") is not True for item in handoffs
         ) or [item.get("sessionID") for item in handoffs] != [
-            "lca-pty-session", "lca-pty-session", "lca-pty-session-2",
+            "otter-pty-session", "otter-pty-session", "otter-pty-session-2",
         ]:
             raise AssertionError(f"source handoff did not preserve exact custom skill bytes and session ownership: {handoffs}")
         if fixture.get("runtimeCreateCount") != 2 or fixture.get("runtimeAdmissionCount") != 2 or \
@@ -1541,7 +1541,7 @@ def run_skills(temp_root: Path):
 
 def run_readline_pickers(preflight: dict[str, Any]):
     cases = {}
-    with tempfile.TemporaryDirectory(prefix="lca-readline-pickers-") as directory:
+    with tempfile.TemporaryDirectory(prefix="otter-readline-pickers-") as directory:
         root = Path(directory).resolve()
         for level in ("engine", "model"):
             for action in ("escape", "cancel", "eof"):
@@ -1656,12 +1656,12 @@ def run_readline_skills(temp_root: Path):
         if fixture.get("turnInputs") != ["/skill:pty-inspect accept via readline"] or fixture.get("turnCount") != 1:
             raise AssertionError(f"readline consent flow dispatched unexpected turns: {fixture.get('turnInputs')}")
         if fixture.get("sourceChoices") != [
-            {"sessionID": "lca-pty-session", "values": ["Allow this content in this session", "Deny"], "answer": 1},
-            {"sessionID": "lca-pty-session", "values": ["Allow this content in this session", "Deny"], "answer": 0},
+            {"sessionID": "otter-pty-session", "values": ["Allow this content in this session", "Deny"], "answer": 1},
+            {"sessionID": "otter-pty-session", "values": ["Allow this content in this session", "Deny"], "answer": 0},
         ]:
             raise AssertionError(f"readline chooser did not preserve denial and acceptance: {fixture.get('sourceChoices')}")
         if fixture.get("skillHandoffs") != [
-            {"sessionID": "lca-pty-session", "turn": 1, "name": "pty-inspect", "exactSource": True},
+            {"sessionID": "otter-pty-session", "turn": 1, "name": "pty-inspect", "exactSource": True},
         ]:
             raise AssertionError(f"readline chooser did not hand off the exact project skill: {fixture.get('skillHandoffs')}")
         if fixture.get("runtimeCreateCount") != 1 or fixture.get("runtimeAdmissionCount") != 1 or \
@@ -1805,7 +1805,7 @@ def run_skill_tool_scope(temp_root: Path):
         if fixture.get("error") is not None or fixture.get("runCount") != 0:
             raise AssertionError(f"denied repeated grep did not fail the owned model turn without execution: {fixture.get('error')} / {fixture.get('runCount')}")
         if fixture.get("sourceChoices") != [{
-            "sessionID": "lca-pty-session", "values": ["Allow this content in this session", "Deny"], "answer": 0,
+            "sessionID": "otter-pty-session", "values": ["Allow this content in this session", "Deny"], "answer": 0,
         }]:
             raise AssertionError(f"project source was not admitted exactly once through the foreground owner: {fixture.get('sourceChoices')}")
         choices = fixture.get("toolPermissionChoices")
@@ -1822,12 +1822,12 @@ def run_skill_tool_scope(temp_root: Path):
             raise AssertionError("the fixed main-role policy ID changed across permission decisions")
         evidence = fixture.get("planExecutionEvidence")
         if not isinstance(evidence, list) or evidence != [{
-            "ownerSession": "lca-pty-session", "role": "main", "policyID": fixture.get("policyIDBefore"),
+            "ownerSession": "otter-pty-session", "role": "main", "policyID": fixture.get("policyIDBefore"),
             "kind": "host", "hostDispatched": True, "outcome": "failed", "reconciled": True,
         }]:
             raise AssertionError(f"real planning conversation did not retain a reconciled main-role host intent: {evidence}")
         if [event for event in fixture.get("events", []) if event.get("type") == "conversation.planCreated"] != [{
-            "type": "conversation.planCreated", "sessionID": "lca-pty-session", "implementation": "createPlanConversation",
+            "type": "conversation.planCreated", "sessionID": "otter-pty-session", "implementation": "createPlanConversation",
         }]:
             raise AssertionError("native scope scenario did not use the real PlanConversation factory under the attached session")
         if fixture.get("runtimeCreateCount") != 1 or fixture.get("runtimeAdmissionCount") != 1 or \
@@ -1876,7 +1876,7 @@ def run_skill_tool_cancel(temp_root: Path):
             raise AssertionError("main policy identity changed during cancelled permission wait")
         evidence = fixture.get("planExecutionEvidence")
         if not isinstance(evidence, list) or evidence != [{
-            "ownerSession": "lca-pty-session", "role": "main", "policyID": fixture.get("policyIDBefore"),
+            "ownerSession": "otter-pty-session", "role": "main", "policyID": fixture.get("policyIDBefore"),
             "kind": "host", "hostDispatched": True, "outcome": "cancelled", "reconciled": True,
         }]:
             raise AssertionError(f"cancelled plan turn did not reconcile its real main-role execution intent: {evidence}")
@@ -1922,7 +1922,7 @@ def run_skill_main_write(temp_root: Path):
             raise AssertionError("main policy identity changed on write refusal")
         evidence = fixture.get("planExecutionEvidence")
         if not isinstance(evidence, list) or evidence != [{
-            "ownerSession": "lca-pty-session", "role": "main", "policyID": fixture.get("policyIDBefore"),
+            "ownerSession": "otter-pty-session", "role": "main", "policyID": fixture.get("policyIDBefore"),
             "kind": "host", "hostDispatched": True, "outcome": "failed", "reconciled": True,
         }]:
             raise AssertionError(f"main-role write refusal did not reconcile its real host execution intent: {evidence}")
@@ -2132,7 +2132,7 @@ def run_skill_grants(temp_root: Path):
             lambda event: event.get("type") == "runtime.preflight.accepted" and event.get("engine") == "local" and event.get("compatible") is True,
             "real CLI host preflight and coordinator admission for grant listing",
         )
-        sid = "lca-pty-session"
+        sid = "otter-pty-session"
         choice = accept_source_grant(session, "pty-inspect", "list and revoke", 1)
         session.wait_screen("Fixture turn 1 completed.")
         row = list_grant_row(session, sid, "pty-inspect", choice)
@@ -2185,11 +2185,11 @@ def run_skill_restore(temp_root: Path, mode: str):
     root.mkdir()
     worktree = root / "worktree"
     worktree.mkdir()
-    sid_a = "lca-pty-skill-a"
+    sid_a = "otter-pty-skill-a"
 
     def launch(label: str, prefix: str):
         return PtySession("skill-restore", root, columns=160, label=label, extra_env={
-            "LCA_TUI_PTY_WORKTREE": str(worktree), "LCA_TUI_PTY_SESSION_PREFIX": prefix,
+            "OTTER_TUI_PTY_WORKTREE": str(worktree), "OTTER_TUI_PTY_SESSION_PREFIX": prefix,
         }).start()
 
     first = launch("a", "pty-skill-a")
@@ -2462,7 +2462,7 @@ def run_pause_resume(temp_root: Path):
         titles = evidence.get("workerRuns", [])
         if code != 0 or fixture.get("exitCode") != 0:
             raise AssertionError(f"pause-resume exit mismatch: {code} / {fixture.get('exitCode')} / {fixture.get('error')}")
-        if len(titles) != paused_runs + 3 or sorted(title for title in titles[paused_runs:]) != sorted(f"lca task {n}: module {n}" for n in (1, 2, 3)):
+        if len(titles) != paused_runs + 3 or sorted(title for title in titles[paused_runs:]) != sorted(f"otter task {n}: module {n}" for n in (1, 2, 3)):
             raise AssertionError(f"resume did not run exactly the residual tasks: {titles}")
         if evidence.get("taskStatuses") != ["done", "done", "done"] or evidence.get("phase") != "done":
             raise AssertionError(f"residual run did not complete the workflow: {evidence}")
@@ -2548,7 +2548,7 @@ def run_paused_cancel(temp_root: Path):
 
 
 def run_all(preflight: dict[str, Any]):
-    with tempfile.TemporaryDirectory(prefix="lca-tui-pty-") as directory:
+    with tempfile.TemporaryDirectory(prefix="otter-tui-pty-") as directory:
         root = Path(directory).resolve()
         def ux(acceptance_id: str, evidence: dict[str, Any], obligations: list[str]):
             return {**evidence, "acceptanceID": acceptance_id, "classification": "deterministic fixture transport", "obligations": obligations}
@@ -2645,7 +2645,7 @@ def main():
     parser.add_argument("--readline-pickers-only", action="store_true", help="probe fallback selection cancellation and EOF without inference")
     parser.add_argument("--out", type=Path, help="optional path for structured PTY evidence and screen captures")
     args = parser.parse_args()
-    required = os.environ.get("LCA_TUI_PTY_REQUIRED") == "1"
+    required = os.environ.get("OTTER_TUI_PTY_REQUIRED") == "1"
 
     try:
         preflight = preflight_evidence()

@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realp
 import { join } from "node:path"
 import { randomUUID } from "node:crypto"
 import { expect, test } from "bun:test"
-import { DEFAULT_CONFIG, type LcaConfig } from "../src/config.ts"
+import { DEFAULT_CONFIG, type OtterConfig } from "../src/config.ts"
 import { createExecutionRunStore, settled } from "../src/hosts/run-state.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
 import type { ExecutionRequest, ExecutionRuntime } from "../src/hosts/types.ts"
@@ -29,7 +29,7 @@ type FixtureProcess = {
 type LoggedRequest = { role: string; cwd: string; taskID: string }
 
 function runtimeFor(worktree: string, requestLogPath: string, instance: string): ExecutionRuntime {
-  const config: LcaConfig = {
+  const config: OtterConfig = {
     ...DEFAULT_CONFIG,
     delegate: {
       ...DEFAULT_CONFIG.delegate,

@@ -128,7 +128,7 @@ describe("/stop", () => {
       const { parts } = await child.native.deliverUserTurn({ text: "Task 1 of 3: ulw everything, 끝까지" })
       const part = parts.find(candidate => candidate.type === "text")
       if (!part || part.type !== "text") throw new Error("native child turn did not contain a text part")
-      expect(part.text).not.toContain("<lca-mode")
+      expect(part.text).not.toContain("<otter-mode")
       expect(readModeState(wt.worktree, "child_1").mode).toBe("none")
     } finally {
       child.cleanup()

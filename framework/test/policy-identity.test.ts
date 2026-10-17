@@ -8,7 +8,7 @@ import baseline from "./fixtures/legacy-policy-ids.json"
 // P0 freezes these identities before UI/discovery changes. Separate processes
 // prevent module caches from hiding environment-dependent policy drift.
 test("legacy role identities survive UI toggles and unrelated home skill roots", () => {
-  const home = mkdtempSync(join(tmpdir(), "lca-policy-home-"))
+  const home = mkdtempSync(join(tmpdir(), "otter-policy-home-"))
   try {
     mkdirSync(join(home, ".agents", "skills"), { recursive: true })
     mkdirSync(join(home, ".claude", "skills"), { recursive: true })
@@ -23,7 +23,7 @@ test("legacy role identities survive UI toggles and unrelated home skill roots",
     `
     for (const enabled of ["0", "1"]) {
       const result = Bun.spawnSync([process.execPath, "-e", source], {
-        env: { ...process.env, HOME: home, LCA_TUI: enabled, NO_COLOR: "1" },
+        env: { ...process.env, HOME: home, OTTER_TUI: enabled, NO_COLOR: "1" },
         stdout: "pipe", stderr: "pipe",
       })
       expect(result.exitCode).toBe(0)
@@ -47,7 +47,7 @@ test("a persisted chat default model or skill trust list never changes role iden
 })
 
 test("CLI selection preserves frozen model keys and old serialized policy inputs", () => {
-  const home = mkdtempSync(join(tmpdir(), "lca-policy-cli-home-"))
+  const home = mkdtempSync(join(tmpdir(), "otter-policy-cli-home-"))
   const worktree = join(home, "worktree")
   mkdirSync(worktree)
   try {
@@ -65,7 +65,7 @@ test("CLI selection preserves frozen model keys and old serialized policy inputs
     }
     for (const enabled of ["0", "1"]) {
       const result = Bun.spawnSync([process.execPath, "-e", source], {
-        env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, "config"), LCA_TUI: enabled },
+        env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, "config"), OTTER_TUI: enabled },
         stdout: "pipe", stderr: "pipe",
       })
       expect(result.exitCode).toBe(0)
@@ -75,7 +75,7 @@ test("CLI selection preserves frozen model keys and old serialized policy inputs
       for (const [name, snapshot] of Object.entries(captured.snapshots)) {
         const { id: _id, role, ...rest } = snapshot
         const resolved = { role, model: selected, ...rest }
-        const id = `lca:${name}:${createHash("sha256").update(JSON.stringify({ resolved, config: expectedConfig })).digest("hex")}`
+        const id = `otter:${name}:${createHash("sha256").update(JSON.stringify({ resolved, config: expectedConfig })).digest("hex")}`
         expect(actual.snapshots[name]).toEqual({ id, ...resolved })
       }
       for (const name of ["interviewer", "planner", "architect", "critic", "researcher", "contrarian", "simplifier"]) {

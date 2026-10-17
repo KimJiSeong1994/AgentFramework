@@ -1,4 +1,4 @@
-// Scorer prompt: dimension clarity scores only; ambiguity is computed by the runtime. LCA-authored; see ../ATTRIBUTION.
+// Scorer prompt: dimension clarity scores only; ambiguity is computed by the runtime. Otter-authored; see ../ATTRIBUTION.
 import { definePrompt } from "./prompt.ts"
 import { DI_CONTEXT_MARKER, DI_READ_ONLY_RULES } from "./deep-interview.rules.ts"
 

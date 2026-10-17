@@ -1,7 +1,7 @@
 // Recovery hints: short, actionable text appended to failing tool outputs so a small model changes approach
 // instead of re-issuing the same call (ported idea from OMO's edit/json recovery).
 
-export const HINT_PREFIX = "\n\n[lca hint] "
+export const HINT_PREFIX = "\n\n[otter hint] "
 export const HINT_MAX_CHARS = 200
 
 type Rule = { tool: string | null; pattern: RegExp; hint: string }

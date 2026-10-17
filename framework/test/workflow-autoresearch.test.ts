@@ -478,8 +478,8 @@ describe("pause, resume and cancel (7, 8)", () => {
   }, 60_000)
 })
 
-describe("diff stays within .lca/workflows (9)", () => {
-  test("every file the engine adds is under .lca/workflows/", async () => {
+describe("diff stays within .otter/workflows (9)", () => {
+  test("every file the engine adds is under .otter/workflows/", async () => {
     const [a, b] = metricScripts()
     const h = harness({ script: { researcher: [mission, hypothesis, evidence("README.md"), experiment([a!, b!])], critic: [OKAY] } })
     const status = () => execFileSync("git", ["-C", wt.worktree, "status", "--porcelain", "-uall"], { encoding: "utf8" }).split("\n").filter(Boolean).map(line => line.slice(3))
@@ -488,7 +488,7 @@ describe("diff stays within .lca/workflows (9)", () => {
     await drive(h)
     const added = status().filter(path => !before.has(path))
     expect(added.length).toBeGreaterThan(0)
-    expect(added.every(path => path.startsWith(".lca/workflows/"))).toBe(true)
+    expect(added.every(path => path.startsWith(".otter/workflows/"))).toBe(true)
     expect(existsSync(join(wt.worktree, "stray.txt"))).toBe(false)
   })
 })

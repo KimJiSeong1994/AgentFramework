@@ -45,13 +45,13 @@ export type UnsafeOpenCodeSystemReason =
   | "transform-unavailable"
   | "capacity-exhausted"
 
-/** Typed fail-closed refusal for an OpenCode request that has no exact LCA-owned system channel. */
+/** Typed fail-closed refusal for an OpenCode request that has no exact Otter-owned system channel. */
 export class UnsafeOpenCodeSystemChannel extends Error {
-  readonly code = "LCA_UNSAFE_OPENCODE_SYSTEM_CHANNEL"
+  readonly code = "OTTER_UNSAFE_OPENCODE_SYSTEM_CHANNEL"
   readonly reason: UnsafeOpenCodeSystemReason
 
   constructor(reason: UnsafeOpenCodeSystemReason) {
-    super(`lca: OpenCode system channel refused (${reason})`)
+    super(`otter: OpenCode system channel refused (${reason})`)
     this.name = "UnsafeOpenCodeSystemChannel"
     this.reason = reason
   }

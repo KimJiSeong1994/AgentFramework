@@ -21,8 +21,8 @@ const TAIL_END = "\\s|$|[!.,?~]"
 const KEYWORDS: Record<Kind, Array<{ label: string; source: string }>> = {
   cancel: [
     { label: "/stop", source: "(?<![A-Za-z0-9_/])/stop(?![A-Za-z0-9_])" },
-    { label: "stop lca", source: L("stop\\s+lca") },
-    { label: "cancel lca", source: L("cancel\\s+lca") },
+    { label: "stop otter", source: L("stop\\s+otter") },
+    { label: "cancel otter", source: L("cancel\\s+otter") },
     { label: "중단", source: K("중단", `${TAIL_END}|해|하|시|되|돼|을|이`) },
     { label: "그만", source: K("그만", `${TAIL_END}|해|하|둬|두`) },
   ],

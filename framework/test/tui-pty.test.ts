@@ -9,7 +9,7 @@ const harness = fileURLToPath(new URL("./pty/tui.py", import.meta.url))
 // environment before tests start so PTY child resolution is not timing-based.
 const harnessEnvironment: NodeJS.ProcessEnv = { ...process.env }
 const python = harnessEnvironment.PYTHON ?? "python3"
-const required = harnessEnvironment.LCA_TUI_PTY_REQUIRED === "1"
+const required = harnessEnvironment.OTTER_TUI_PTY_REQUIRED === "1"
 const preflight = spawnSync(python, [harness, "--check"], {
   cwd: framework,
   encoding: "utf8",
@@ -68,7 +68,7 @@ test.skipIf(optionalPrerequisiteSkip)("readline engine and manual-model pickers 
 
 test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python PTY with truthful workflow evidence", () => {
   const args = [harness]
-  const evidencePath = harnessEnvironment.LCA_TUI_PTY_OUT
+  const evidencePath = harnessEnvironment.OTTER_TUI_PTY_OUT
   if (evidencePath) args.push("--out", evidencePath)
   const result = spawnSync(python, args, {
     cwd: framework,
@@ -337,8 +337,8 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
       attachLockExists: false,
     },
     runtimeSelections: [
-      { engine: "codex", model: "pty-fixture-model", sessionID: "lca-pty-session" },
-      { engine: "codex", model: "pty-fixture-model", sessionID: "lca-pty-session-2" },
+      { engine: "codex", model: "pty-fixture-model", sessionID: "otter-pty-session" },
+      { engine: "codex", model: "pty-fixture-model", sessionID: "otter-pty-session-2" },
     ],
   })
   const sdkFixture = sdkObserver.fixture as {
@@ -378,19 +378,19 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
     modelCatalogCallCount: 0,
     modelTransportStub: { command: "ollama", invocations: 0 },
     runtimeSelections: [
-      { engine: "local", model: "pty-fixture-model", sessionID: "lca-pty-session" },
-      { engine: "local", model: "pty-fixture-model", sessionID: "lca-pty-session-2" },
+      { engine: "local", model: "pty-fixture-model", sessionID: "otter-pty-session" },
+      { engine: "local", model: "pty-fixture-model", sessionID: "otter-pty-session-2" },
     ],
     sourceChoices: [
-      { sessionID: "lca-pty-session", values: ["Allow this content in this session", "Deny"], answer: 1 },
-      { sessionID: "lca-pty-session", values: ["Allow this content in this session", "Deny"], answer: 0 },
-      { sessionID: "lca-pty-session-2", values: ["Allow this content in this session", "Deny"], answer: 0 },
-      { sessionID: "lca-pty-session-2", values: ["Allow this content in this session", "Deny"], answer: null },
+      { sessionID: "otter-pty-session", values: ["Allow this content in this session", "Deny"], answer: 1 },
+      { sessionID: "otter-pty-session", values: ["Allow this content in this session", "Deny"], answer: 0 },
+      { sessionID: "otter-pty-session-2", values: ["Allow this content in this session", "Deny"], answer: 0 },
+      { sessionID: "otter-pty-session-2", values: ["Allow this content in this session", "Deny"], answer: null },
     ],
     skillHandoffs: [
-      { sessionID: "lca-pty-session", turn: 1, name: "pty-inspect", exactSource: true },
-      { sessionID: "lca-pty-session", turn: 2, name: "pty-inspect", exactSource: true },
-      { sessionID: "lca-pty-session-2", turn: 3, name: "pty-inspect", exactSource: true },
+      { sessionID: "otter-pty-session", turn: 1, name: "pty-inspect", exactSource: true },
+      { sessionID: "otter-pty-session", turn: 2, name: "pty-inspect", exactSource: true },
+      { sessionID: "otter-pty-session-2", turn: 3, name: "pty-inspect", exactSource: true },
     ],
   })
   expect(skills.fixture.events.filter(event => event.type === "runtime.realCliCreated")).toHaveLength(2)
@@ -425,11 +425,11 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
     skillHomeIsolated: true,
     modelTransportStub: { command: "ollama", invocations: 0 },
     sourceChoices: [
-      { sessionID: "lca-pty-session", values: ["Allow this content in this session", "Deny"], answer: 1 },
-      { sessionID: "lca-pty-session", values: ["Allow this content in this session", "Deny"], answer: 0 },
+      { sessionID: "otter-pty-session", values: ["Allow this content in this session", "Deny"], answer: 1 },
+      { sessionID: "otter-pty-session", values: ["Allow this content in this session", "Deny"], answer: 0 },
     ],
     skillHandoffs: [
-      { sessionID: "lca-pty-session", turn: 1, name: "pty-inspect", exactSource: true },
+      { sessionID: "otter-pty-session", turn: 1, name: "pty-inspect", exactSource: true },
     ],
   })
   expect(readlineSkills.fixture.events.filter(event => event.type === "runtime.realCliCreated")).toHaveLength(1)
@@ -446,7 +446,7 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
   const skillGrants = report.scenarios.skillGrants
   expect(skillGrants.exitCode).toBe(0)
   expect(skillGrants.grantRow).toEqual({
-    sid: "lca-pty-session", name: "pty-inspect", source: "project", classification: "custom",
+    sid: "otter-pty-session", name: "pty-inspect", source: "project", classification: "custom",
     hash: skillGrants.consentHash, scope: "read",
   })
   expect(skillGrants.consentHash).toMatch(/^[0-9a-f]{64}$/u)
@@ -463,9 +463,9 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
     revokedSkillRequiredFreshSourceChoice: true,
   })
   for (const restored of [report.scenarios.skillRestoreExit, report.scenarios.skillRestoreKill]) {
-    expect(restored.originalSessionID).toBe("lca-pty-skill-a")
+    expect(restored.originalSessionID).toBe("otter-pty-skill-a")
     expect(restored.originalExitCode).toBe(restored.mode === "kill" ? -9 : 0)
-    expect(restored.originalGrantRow).toMatchObject({ sid: "lca-pty-skill-a", name: "pty-inspect", source: "project", classification: "custom", scope: "read" })
+    expect(restored.originalGrantRow).toMatchObject({ sid: "otter-pty-skill-a", name: "pty-inspect", source: "project", classification: "custom", scope: "read" })
     expect(restored.originalGrantRow.hash).toBe(restored.originalConsentHash)
     expect(restored.restoredExitCode).toBe(0)
     expect(restored.restoredPromptCount).toBe(1)
@@ -507,24 +507,24 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
       { type: "tool", name: "grep", input: { pattern: "PTY_SCOPE_NEEDLE", path: "scope-target.txt" } },
     ],
     sourceChoices: [
-      { sessionID: "lca-pty-session", values: ["Allow this content in this session", "Deny"], answer: 0 },
+      { sessionID: "otter-pty-session", values: ["Allow this content in this session", "Deny"], answer: 0 },
     ],
   })
   expect(String(skillToolScope.fixture.skillModelServer && (skillToolScope.fixture.skillModelServer as Record<string, unknown>).endpoint)).toMatch(/^http:\/\/127\.0\.0\.1:/u)
   expect(skillToolScope.fixture.policyIDBefore).toBe(skillToolScope.fixture.policyIDAfter)
   expect(skillToolScope.fixture.planExecutionEvidence).toMatchObject([{
-    ownerSession: "lca-pty-session", role: "main", policyID: skillToolScope.fixture.policyIDBefore,
+    ownerSession: "otter-pty-session", role: "main", policyID: skillToolScope.fixture.policyIDBefore,
     kind: "host", hostDispatched: true, outcome: "failed", reconciled: true,
   }])
   expect(skillToolScope.fixture.events.filter(event => event.type === "conversation.planCreated")).toEqual([{
-    type: "conversation.planCreated", sessionID: "lca-pty-session", implementation: "createPlanConversation",
+    type: "conversation.planCreated", sessionID: "otter-pty-session", implementation: "createPlanConversation",
   }])
   expect(skillToolScope.fixture.toolPermissionChoices.map(choice => ({
     sessionID: choice.sessionID, values: choice.values, answer: choice.answer,
     scopedToRead: String(choice.title).includes("declared tools: read"), requestedGrep: String(choice.title).includes("Tool: grep"),
   }))).toEqual([
-    { sessionID: "lca-pty-session", values: ["Allow once", "Deny"], answer: 0, scopedToRead: true, requestedGrep: true },
-    { sessionID: "lca-pty-session", values: ["Allow once", "Deny"], answer: 1, scopedToRead: true, requestedGrep: true },
+    { sessionID: "otter-pty-session", values: ["Allow once", "Deny"], answer: 0, scopedToRead: true, requestedGrep: true },
+    { sessionID: "otter-pty-session", values: ["Allow once", "Deny"], answer: 1, scopedToRead: true, requestedGrep: true },
   ])
   expect(skillToolScope.fixture.nativeToolActivities.filter(event => event.kind === "tool-started" || event.kind === "tool-finished").map(event => ({
     kind: event.kind, role: event.role, tool: event.tool, outcome: event.outcome, ok: event.ok,
@@ -556,7 +556,7 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
     runCount: 0,
     skillHomeIsolated: true,
     skillModelServer: { requests: 1, responses: 1, simulated: true },
-    toolPermissionChoices: [{ sessionID: "lca-pty-session", values: ["Allow once", "Deny"], answer: null }],
+    toolPermissionChoices: [{ sessionID: "otter-pty-session", values: ["Allow once", "Deny"], answer: null }],
   })
   expect(skillToolCancel.fixture.nativeToolActivities.filter(event => event.kind === "tool-started" || event.kind === "tool-finished").map(event => ({
     kind: event.kind, role: event.role, tool: event.tool, outcome: event.outcome, ok: event.ok,
@@ -566,7 +566,7 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
   ])
   expect(skillToolCancel.fixture.policyIDBefore).toBe(skillToolCancel.fixture.policyIDAfter)
   expect(skillToolCancel.fixture.planExecutionEvidence).toMatchObject([{
-    ownerSession: "lca-pty-session", role: "main", policyID: skillToolCancel.fixture.policyIDBefore,
+    ownerSession: "otter-pty-session", role: "main", policyID: skillToolCancel.fixture.policyIDBefore,
     kind: "host", hostDispatched: true, outcome: "cancelled", reconciled: true,
   }])
   expect(skillToolCancel.capture).toMatchObject({ ...restoredTerminalProof, onlyResetSgr: true })
@@ -627,13 +627,13 @@ test.skipIf(optionalPrerequisiteSkip)("production TUI runs through a real Python
     skillHomeIsolated: true,
     skillModelServer: { requests: 1, responses: 1, simulated: true },
     skillModelRequests: [{ model: "pty-fixture-model", hasSkillInstructions: true }],
-    sourceChoices: [{ sessionID: "lca-pty-session", values: ["Allow this content in this session", "Deny"], answer: 0 }],
+    sourceChoices: [{ sessionID: "otter-pty-session", values: ["Allow this content in this session", "Deny"], answer: 0 }],
     toolPermissionChoices: [],
     writeFileContent: "FIXTURE_FILE_MUST_STAY_UNCHANGED\n",
   })
   expect(skillMainWrite.fixture.policyIDBefore).toBe(skillMainWrite.fixture.policyIDAfter)
   expect(skillMainWrite.fixture.planExecutionEvidence).toMatchObject([{
-    ownerSession: "lca-pty-session", role: "main", policyID: skillMainWrite.fixture.policyIDBefore,
+    ownerSession: "otter-pty-session", role: "main", policyID: skillMainWrite.fixture.policyIDBefore,
     kind: "host", hostDispatched: true, outcome: "failed", reconciled: true,
   }])
   expect(skillMainWrite.fixture.nativeToolActivities.filter(event => event.kind === "tool-started" || event.kind === "tool-finished").map(event => ({

@@ -2,7 +2,7 @@ import { StringDecoder } from "node:string_decoder"
 import type { ReadStream, WriteStream } from "node:tty"
 import { KeyDecoder, type InputEvent } from "./keys.ts"
 
-// LCA terminal lifecycle; input semantics are attributed in ./ATTRIBUTION.
+// Otter terminal lifecycle; input semantics are attributed in ./ATTRIBUTION.
 const ENTER = "\x1b[?1049h\x1b[?2004h\x1b[>4;2m\x1b[>1u\x1b[?25h"
 const LEAVE = "\x1b[<u\x1b[>4;0m\x1b[?2004l\x1b[?25h\x1b[0m\x1b[?1049l"
 

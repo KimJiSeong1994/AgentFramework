@@ -115,8 +115,8 @@ export function runOperatorShell(command: string, options: {
 }): Promise<ShellResult> {
   const started = Date.now()
   const buffer = new ShellOutputBuffer()
-  const env: NodeJS.ProcessEnv = { ...process.env, TERM: "dumb", NO_COLOR: "1", LCA_OPERATOR_SHELL: "1" }
-  delete env.LCA_TUI
+  const env: NodeJS.ProcessEnv = { ...process.env, TERM: "dumb", NO_COLOR: "1", OTTER_OPERATOR_SHELL: "1" }
+  delete env.OTTER_TUI
   return new Promise(resolve => {
     let settled = false
     let reason: "cancelled" | "timeout" | undefined

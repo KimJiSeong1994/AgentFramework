@@ -34,7 +34,7 @@ A01–A13은 [불변 조사 노트](../../raw/documents/42a99b2d70786650607a5758
 
 - **에이전트 설계:** 하네스 → 컨텍스트·캐시 → 스킬·확장 → 검토 산출물. 모델이 선택할 행동, 필요한 정보, 결과를 확인하는 인터페이스를 순서대로 본다.
 - **에이전트 운영:** 평가·최적화 → 운영·비용 → 도구 결과 근거. 지표의 의미와 실행 환경을 먼저 정하고 비용·성능을 비교한다.
-- **이 저장소와 비교:** [lca 프레임워크](lca-framework.md), [로컬 우선 계약](../concepts/local-first-contract.md), [OpenJev 라우터](openjev-router.md), [도구 결과 근거](../concepts/tool-outcome-evidence.md). 기존 페이지의 설계 시점과 관측 범위를 유지하며 새 글을 현재 구현 증거로 치환하지 않는다.
+- **이 저장소와 비교:** [otter 프레임워크](lca-framework.md), [로컬 우선 계약](../concepts/local-first-contract.md), [OpenJev 라우터](openjev-router.md), [도구 결과 근거](../concepts/tool-outcome-evidence.md). 기존 페이지의 설계 시점과 관측 범위를 유지하며 새 글을 현재 구현 증거로 치환하지 않는다.
 
 ## 종합 판단과 충돌
 

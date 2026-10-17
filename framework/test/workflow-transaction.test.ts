@@ -434,7 +434,7 @@ describe("single slot", () => {
       const ready = join(wt.stateHome, `ready-${index}`)
       const child = Bun.spawn([process.execPath, "-e", script], {
         cwd: process.cwd(), stdout: "pipe", stderr: "pipe",
-        env: { ...process.env, WT: wt.worktree, SID: sid, GO: go, READY: ready, LCA_STATE_HOME: wt.stateHome },
+        env: { ...process.env, WT: wt.worktree, SID: sid, GO: go, READY: ready, OTTER_STATE_HOME: wt.stateHome },
       })
       return { child, ready }
     })
@@ -760,14 +760,14 @@ describe("receipts (P6a S1)", () => {
 describe("required artifacts are verified inside commitRevision (P6a S1)", () => {
   test("deep-interview done needs spec.md recorded, hashed and verified; every failure leaves state untouched", () => {
     const live = commitPlanning(planning("deep-interview", "wf_a"))
-    const spec = writeArtifact(".lca/workflows/ses_tx/wf_a/spec.md", "# spec\n")
+    const spec = writeArtifact(".otter/workflows/ses_tx/wf_a/spec.md", "# spec\n")
     const done = (artifacts: unknown[]) => ({ ...live, stage: "terminal", phase: "done", artifacts })
     const snapshot = () => ({ index: bytes(workflowPath(wt.worktree)), events: bytes(eventsPath(wt.worktree)) })
     const before = snapshot()
     expect(() => commitPlanning(done([]))).toThrow("required artifact spec.md is not recorded")
     expect(() => commitPlanning(done([{ key: "spec.md", path: spec.path }]))).toThrow("no recorded hash")
     expect(() => commitPlanning(done([{ ...spec, sha256: "f".repeat(64) }]))).toThrow("hash mismatch")
-    expect(() => commitPlanning(done([{ ...spec, path: ".lca/workflows/ses_tx/wf_a/missing.md" }]))).toThrow("missing")
+    expect(() => commitPlanning(done([{ ...spec, path: ".otter/workflows/ses_tx/wf_a/missing.md" }]))).toThrow("missing")
     expect(() => commitPlanning(done([{ ...spec, path: "/etc/hosts" }]))).toThrow("relative")
     expect(snapshot().index!.equals(before.index!)).toBe(true)
     expect(snapshot().events!.equals(before.events!)).toBe(true)
@@ -782,9 +782,9 @@ describe("required artifacts are verified inside commitRevision (P6a S1)", () =>
 
   test("ralplan pending_execution and done need pending-approval.md + consensus.json; PLANNING-STUCK needs best-plan.md; cancel needs nothing", () => {
     const live = commitPlanning(planning("ralplan", "wf_b"))
-    const pa = writeArtifact(".lca/workflows/ses_tx/wf_b/pending-approval.md", "plan")
-    const cj = writeArtifact(".lca/workflows/ses_tx/wf_b/consensus.json", "{}")
-    const best = writeArtifact(".lca/workflows/ses_tx/wf_b/best-plan.md", "best")
+    const pa = writeArtifact(".otter/workflows/ses_tx/wf_b/pending-approval.md", "plan")
+    const cj = writeArtifact(".otter/workflows/ses_tx/wf_b/consensus.json", "{}")
+    const best = writeArtifact(".otter/workflows/ses_tx/wf_b/best-plan.md", "best")
     const pending = (artifacts: unknown[]) => ({ ...live, stage: "pending_execution", phase: "pending_approval", artifacts })
     expect(() => commitPlanning(pending([pa]))).toThrow("consensus.json is not recorded")
     expect(() => commitPlanning(pending([cj]))).toThrow("pending-approval.md is not recorded")
@@ -811,7 +811,7 @@ describe("commitHandoff (P6a S1)", () => {
 
   function setup() {
     const live = commitPlanning(planning("deep-interview", "wf_di"))
-    const spec = writeArtifact(".lca/workflows/ses_tx/wf_di/spec.md", SPEC_TEXT)
+    const spec = writeArtifact(".otter/workflows/ses_tx/wf_di/spec.md", SPEC_TEXT)
     const predecessor = { ...live, stage: "terminal", phase: "done", artifacts: [spec] } as never as WorkflowEnvelopeLike
     const successor = planning("ralplan", "wf_rp") as WorkflowEnvelopeLike
     return { live, spec, predecessor, successor }
@@ -936,7 +936,7 @@ describe("commitHandoff (P6a S1)", () => {
 
 describe("status artifact read budget (P6a S1)", () => {
   test("refs are sliced before any read, bytes are budgeted, and over-budget refs are unverified (budget) never verified", () => {
-    const refs = Array.from({ length: 20 }, (_, i) => writeArtifact(`.lca/out/f${i}.txt`, `content-${i}`))
+    const refs = Array.from({ length: 20 }, (_, i) => writeArtifact(`.otter/out/f${i}.txt`, `content-${i}`))
     const all = describeArtifactsBudgeted(wt.worktree, { artifacts: refs })
     expect(all.items).toHaveLength(16)
     expect(all.omitted).toBe(4)
@@ -946,7 +946,7 @@ describe("status artifact read budget (P6a S1)", () => {
     const over = tight.items.find(item => item.state === "unverified")!
     expect(over.reason).toBe("unverified (budget)")
     expect(tight.bytes).toBeLessThanOrEqual(25)
-    const big = writeArtifact(".lca/out/big.bin", "x".repeat(100))
+    const big = writeArtifact(".otter/out/big.bin", "x".repeat(100))
     const budgeted = describeArtifactsBudgeted(wt.worktree, { artifacts: [big] }, { bytes: 50 })
     expect(budgeted.items[0]).toMatchObject({ state: "unverified" })
   })
@@ -955,7 +955,7 @@ describe("status artifact read budget (P6a S1)", () => {
     const d = deps()
     admit(d, S)
     const live = commitPlanning(planning("ralplan", "wf_view"))
-    const art = writeArtifact(".lca/workflows/ses_tx/wf_view/note.md", "n")
+    const art = writeArtifact(".otter/workflows/ses_tx/wf_view/note.md", "n")
     commitPlanning({ ...live, artifacts: [art] })
     const status = statusJson(d, S)
     expect(status.workflow).toMatchObject({ id: "wf_view", kind: "ralplan", stage: "planner", phase: "planning", stopIntent: null })

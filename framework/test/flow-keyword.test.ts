@@ -1,7 +1,7 @@
 // D3: legacy plan keywords ("plan mode", "ralplan", "hyperplan", "계획부터", "계획 모드") map to §5.3 /plan with
 // entry "keyword", actor user_keyword, when flow is on (chat-message.ts, the plan-keyword branch below
 // handleWorkflowTurn). Informational questions are still suppressed unless `force:`/`!`; flow.enabled=false keeps
-// the legacy <lca-mode name="plan"> path untouched; an active workflow in the same session gets a notice only
+// the legacy <otter-mode name="plan"> path untouched; an active workflow in the same session gets a notice only
 // (handleWorkflowTurn); a foreign session's workflow is never replaced, regardless of owner liveness.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdirSync, readFileSync } from "node:fs"
@@ -92,12 +92,12 @@ describe("legacy plan keyword -> §5.3 keyword workflow (D3)", () => {
     expect(wf.sessionID).toBe(S)
   })
 
-  test("flow.enabled=false: the legacy <lca-mode name=\"plan\"> suffix runs instead, no workflow", async () => {
+  test("flow.enabled=false: the legacy <otter-mode name=\"plan\"> suffix runs instead, no workflow", async () => {
     const deps = makeDeps(client, wt.worktree, { flow: { enabled: false, max_code_invalid: 3, max_review_iterations: 2, nudge_max: 1, review_max_tool_calls: 6 } })
     const resultText = await sendText("ralplan: add a login button", S, deps)
     expect(activeWorkflow(wt.worktree)).toBeNull()
     expect(hasModeSuffix(resultText)).toBe(true)
-    expect(resultText).toContain('<lca-mode name="plan">')
+    expect(resultText).toContain('<otter-mode name="plan">')
     const mode = readModeState(wt.worktree, S)
     expect(mode.active).toBe(true)
     expect(mode.mode).toBe("plan")

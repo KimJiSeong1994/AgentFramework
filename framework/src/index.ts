@@ -1,4 +1,4 @@
-// lca — local-first coding agent framework for OpenCode. Stage 1 core + stage 2 (ledger, delegate, /stop).
+// otter — local-first coding agent framework for OpenCode. Stage 1 core + stage 2 (ledger, delegate, /stop).
 // Assembly: loadConfig -> deps -> hook factories -> Hooks. Each factory may return undefined when disabled.
 import type { Hooks, Plugin, PluginModule } from "@opencode-ai/plugin"
 import { realpathSync } from "node:fs"
@@ -20,7 +20,7 @@ import { APPROVE_COMMAND, APPROVE_TEMPLATE, createCommandHook } from "./hooks/co
 import { createDelegateTool } from "./tools/delegate.ts"
 import { createDbQueryTool } from "./tools/db-query.ts"
 import { createSchemaLookupTool } from "./tools/schema-lookup.ts"
-import { createLcaFlowTool } from "./tools/lca-flow.ts"
+import { createOtterFlowTool } from "./tools/otter-flow.ts"
 import { createSkillTool } from "./tools/skill.ts"
 import { flowOn } from "./flow/status.ts"
 import { repairOnLoad } from "./flow/runtime.ts"
@@ -34,9 +34,9 @@ import { initializeSkillObservation } from "./telemetry/skill-observer.ts"
 import { activeWorkflow, workflowEngineRefusal } from "./flow/state.ts"
 
 function interactiveForWorktree(worktree: string): boolean {
-  const requested = process.env.LCA_INTERACTIVE_WORKTREE
+  const requested = process.env.OTTER_INTERACTIVE_WORKTREE
   if (requested === undefined) return false
-  if (!requested.trim()) throw new Error("lca interactive startup refused: LCA_INTERACTIVE_WORKTREE is empty")
+  if (!requested.trim()) throw new Error("otter interactive startup refused: OTTER_INTERACTIVE_WORKTREE is empty")
 
   let requestedRoot: string
   let actualRoot: string
@@ -44,17 +44,17 @@ function interactiveForWorktree(worktree: string): boolean {
     requestedRoot = realpathSync.native(resolve(requested))
     actualRoot = realpathSync.native(resolve(worktree))
   } catch (e) {
-    throw new Error(`lca interactive startup refused: cannot canonicalize the bound worktree: ${(e as Error).message}`)
+    throw new Error(`otter interactive startup refused: cannot canonicalize the bound worktree: ${(e as Error).message}`)
   }
   if (requestedRoot !== actualRoot) {
     let owner: ReturnType<typeof taskWorktreeOwner>
     try {
       owner = taskWorktreeOwner(actualRoot)
     } catch (e) {
-      throw new Error(`lca interactive startup refused: cannot authenticate managed task worktree (${(e as Error).message})`)
+      throw new Error(`otter interactive startup refused: cannot authenticate managed task worktree (${(e as Error).message})`)
     }
     if (!owner || owner.mainWorktree !== requestedRoot) {
-      throw new Error(`lca interactive startup refused: LCA_INTERACTIVE_WORKTREE does not match this plugin worktree (${actualRoot})`)
+      throw new Error(`otter interactive startup refused: OTTER_INTERACTIVE_WORKTREE does not match this plugin worktree (${actualRoot})`)
     }
   }
   return true
@@ -65,16 +65,16 @@ function requireInteractiveConfig(config: HookDeps["config"]): void {
   const disabled: string[] = required.filter((id) => !enabled(config, id))
   if (!config.flow.enabled) disabled.push("flow.enabled")
   if (disabled.length) {
-    throw new Error(`lca interactive startup refused: required hooks/config disabled: ${disabled.join(", ")}`)
+    throw new Error(`otter interactive startup refused: required hooks/config disabled: ${disabled.join(", ")}`)
   }
 }
 
-export const LcaPlugin: Plugin = async (input) => {
+export const OtterPlugin: Plugin = async (input) => {
   const interactive = interactiveForWorktree(input.worktree)
   const config = loadConfig(input.worktree)
   if (interactive) requireInteractiveConfig(config)
   const log = (msg: string, extra?: Record<string, unknown>) => {
-    if (process.env.LCA_DEBUG) console.error(`[lca] ${msg}`, extra ?? "")
+    if (process.env.OTTER_DEBUG) console.error(`[otter] ${msg}`, extra ?? "")
   }
   const deps: HookDeps = { client: input.client, directory: input.directory, worktree: input.worktree, config, log, interactive: interactive || undefined }
   initializeSkillObservation(deps)
@@ -102,7 +102,7 @@ export const LcaPlugin: Plugin = async (input) => {
       await configHook(current)
       const approval = (current as { command?: Record<string, { template?: string }> }).command?.[APPROVE_COMMAND]
       if (approval?.template !== APPROVE_TEMPLATE) {
-        throw new Error(`lca interactive startup refused: user command "/${APPROVE_COMMAND}" conflicts with the typed approval command`)
+        throw new Error(`otter interactive startup refused: user command "/${APPROVE_COMMAND}" conflicts with the typed approval command`)
       }
     } : configHook
   }
@@ -129,7 +129,7 @@ export const LcaPlugin: Plugin = async (input) => {
     hooks.tool.db_query = createDbQueryTool(deps)
     hooks.tool.schema_lookup = createSchemaLookupTool(deps)
   }
-  if (flowOn(config)) hooks.tool.lca_flow = createLcaFlowTool(deps)
+  if (flowOn(config)) hooks.tool.otter_flow = createOtterFlowTool(deps)
   if (Object.keys(hooks.tool).length === 0) delete hooks.tool
   // Registered for the router too: it marks command turns so their expanded templates are not skill-routed.
   const stopOn = enabled(config, "command.stop")
@@ -139,5 +139,5 @@ export const LcaPlugin: Plugin = async (input) => {
   return hooks
 }
 
-const plugin: PluginModule = { id: "lca", server: LcaPlugin }
+const plugin: PluginModule = { id: "otter", server: OtterPlugin }
 export default plugin

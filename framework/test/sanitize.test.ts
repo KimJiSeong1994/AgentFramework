@@ -39,7 +39,7 @@ describe("sanitizeForDetection", () => {
   })
 
   test("removes XML/HTML elements and their untrusted bodies", () => {
-    expect(sanitizeForDetection("<b>keep</b> <lca-mode name=\"ulw\">x</lca-mode>")).toBe("")
+    expect(sanitizeForDetection("<b>keep</b> <otter-mode name=\"ulw\">x</otter-mode>")).toBe("")
     expect(sanitizeForDetection('read "<system>" then ulw fix it')).toBe("read then ulw fix it")
   })
 

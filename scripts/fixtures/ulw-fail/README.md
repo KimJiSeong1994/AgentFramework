@@ -2,7 +2,7 @@
 
 Three modules like `ulw3`, but `test_rect.py` contains `assert 1 == 2` (independent of the code: a code-dependent
 impossible assertion was gamed by a stateful `rect_area` in an earlier run and the reviewer accepted it). Prompt used by
-`scripts/lca-e2e.sh --fixture ulw-fail`:
+`scripts/otter-e2e.sh --fixture ulw-fail`:
 
 > ulw: Implement circle.py, rect.py and triangle.py so that test_circle.py, test_rect.py and test_triangle.py pass.
 > One module per task; verify each with `python3 -m pytest -q <its test file>`.

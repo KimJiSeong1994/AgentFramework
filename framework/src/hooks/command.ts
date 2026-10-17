@@ -18,35 +18,35 @@ import { captureSDKSessionLifetime } from "../sessions/sdk-transcript.ts"
 import { durableWriteJson } from "../state/durable.ts"
 
 export const STOP_COMMAND = "stop"
-export const STOP_TEMPLATE = "stop lca: cancel the active mode and the task queue. Finish the current step, then stop."
-export const STOP_DESCRIPTION = "lca: stop the task queue / continuation loop"
+export const STOP_TEMPLATE = "stop otter: cancel the active mode and the task queue. Finish the current step, then stop."
+export const STOP_DESCRIPTION = "otter: stop the task queue / continuation loop"
 
 export const STATUS_COMMAND = "status"
 export const STATUS_TEMPLATE = "Reply only: ok"
-export const STATUS_DESCRIPTION = "lca: show the plan workflow, mode, ledger and queue status"
+export const STATUS_DESCRIPTION = "otter: show the plan workflow, mode, ledger and queue status"
 
 export const PLAN_COMMAND = "plan"
-export const PLAN_TEMPLATE = 'Investigate read-only, then call lca_flow op:"plan" once. Ask the user if a step cannot be written.'
-export const PLAN_DESCRIPTION = "lca: start a plan workflow (read-only investigation, then a validated, reviewed plan)"
+export const PLAN_TEMPLATE = 'Investigate read-only, then call otter_flow op:"plan" once. Ask the user if a step cannot be written.'
+export const PLAN_DESCRIPTION = "otter: start a plan workflow (read-only investigation, then a validated, reviewed plan)"
 
 export const APPROVE_COMMAND = "approve"
 export const APPROVE_TEMPLATE = "The plan is approved and saved. Call delegate with resume:true now."
-export const APPROVE_DESCRIPTION = "lca: approve the pending plan and run it"
+export const APPROVE_DESCRIPTION = "otter: approve the pending plan and run it"
 
 export const REJECT_COMMAND = "reject"
 export const REJECT_TEMPLATE_PREFIX = "Revise the plan using: "
-export const REJECT_TEMPLATE_SUFFIX = '. Call lca_flow op:"plan" again.'
+export const REJECT_TEMPLATE_SUFFIX = '. Call otter_flow op:"plan" again.'
 // Registered as the config.command template (placeholder reason); chat.message substitutes the real /reject argument.
 export const REJECT_TEMPLATE = `${REJECT_TEMPLATE_PREFIX}<reason>${REJECT_TEMPLATE_SUFFIX}`
-export const REJECT_DESCRIPTION = "lca: reject the pending (or invalid) plan with a reason"
+export const REJECT_DESCRIPTION = "otter: reject the pending (or invalid) plan with a reason"
 
 export const CANCEL_COMMAND = "cancel"
 export const CANCEL_TEMPLATE = "The workflow was cancelled; stop."
-export const CANCEL_DESCRIPTION = "lca: cancel the active plan workflow"
+export const CANCEL_DESCRIPTION = "otter: cancel the active plan workflow"
 
 export const CONTINUE_COMMAND = "continue"
-export const CONTINUE_TEMPLATE = "LCA explicit Resume command. Use /continue confirm to acknowledge a held session."
-export const CONTINUE_DESCRIPTION = "lca: explicitly resume the current held session (requires confirm)"
+export const CONTINUE_TEMPLATE = "Otter explicit Resume command. Use /continue confirm to acknowledge a held session."
+export const CONTINUE_DESCRIPTION = "otter: explicitly resume the current held session (requires confirm)"
 export const CONTINUE_CONFIRMATION_PROMPT = "To acknowledge explicit owner Resume, run /continue confirm. This command did not change session admission."
 export const CONTINUE_HELD_RECEIPT = "Resume was refused; this command granted no admission and started no work."
 export const CONTINUE_PAUSED_RESUMED_RECEIPT = "Paused workflow resumed for this attachment epoch only. Residual approved tasks are not started; ask main to call delegate with resume:true."
@@ -94,7 +94,7 @@ function canCancelOpenQueue(runtime: ReturnType<typeof getOpenCodeRuntime>, queu
 }
 
 /**
- * Names lca actually wrote into `config.command` this load (a user-defined same-named command wins there and is
+ * Names otter actually wrote into `config.command` this load (a user-defined same-named command wins there and is
  * excluded here, ARCH-13). Recorded by the config hook per `deps`; `createCommandHook` reads it lazily on every
  * call so hook construction order at plugin init does not matter.
  */
@@ -104,8 +104,8 @@ export function recordInjectedCommands(deps: HookDeps, names: Set<string>): void
 }
 
 /**
- * Dispatch keyed on **names lca injected** into the config (recorded by the config hook). A user-defined command
- * with the same name wins in config.ts and is never acted on here (ARCH-13): only an injected name runs lca
+ * Dispatch keyed on **names otter injected** into the config (recorded by the config hook). A user-defined command
+ * with the same name wins in config.ts and is never acted on here (ARCH-13): only an injected name runs otter
  * command logic. Every command turn is still marked so its expanded template is never skill-routed.
  */
 export function createCommandHook(
@@ -126,9 +126,9 @@ export function createCommandHook(
   ])
   return async (input) => {
     // Every explicit command keeps its own authority: its expanded template must not be skill-routed. Only a
-    // name lca actually injected is marked with that literal name; anything else (a foreign command, or a
-    // user-defined command shadowing an lca name) is marked with a synthetic name so the turn still bypasses
-    // the router, but no lca command logic ever acts on it.
+    // name otter actually injected is marked with that literal name; anything else (a foreign command, or a
+    // user-defined command shadowing an otter name) is marked with a synthetic name so the turn still bypasses
+    // the router, but no otter command logic ever acts on it.
     const injectedHere = injectedRegistry.get(deps)?.has(input.command) === true && enabledCommands.has(input.command)
     markCommandTurn(input.sessionID, injectedHere ? input.command : `__foreign:${input.command}`, input.arguments)
     if (!injectedHere) return

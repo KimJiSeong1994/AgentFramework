@@ -1,26 +1,26 @@
 #!/bin/bash
-# lca-e2e-data.sh — ISOLATED stage-3 acceptance run: the `data-analyst` agent answers the example questions of
+# otter-e2e-data.sh — ISOLATED stage-3 acceptance run: the `data-analyst` agent answers the example questions of
 # the fixture question set (queries.jsonl) on the synthetic sqlite through the EvoOntology semantic layer.
 #
-#   scripts/lca-e2e-data.sh --check            # build the isolated env, verify agent/tools/MCP wiring; NO model call
-#   scripts/lca-e2e-data.sh                    # tier-1 questions (7), one `opencode run --agent data-analyst` each
-#   scripts/lca-e2e-data.sh --tier 2           # tier-1 + tier-2 (PostGIS-style + 3-way joins)
-#   scripts/lca-e2e-data.sh --only TEXT-001    # a single question id
-#   scripts/lca-e2e-data.sh --evo-workspace D  # use another EvoOntology workspace (candidate version evaluation)
-#   scripts/lca-e2e-data.sh --model ollama/gemma4:31b-mlx   # another model from the user's provider list (stage 5)
-#   scripts/lca-e2e-data.sh --questions F.jsonl # another question file; records without `expected` get match=-1
+#   scripts/otter-e2e-data.sh --check            # build the isolated env, verify agent/tools/MCP wiring; NO model call
+#   scripts/otter-e2e-data.sh                    # tier-1 questions (7), one `opencode run --agent data-analyst` each
+#   scripts/otter-e2e-data.sh --tier 2           # tier-1 + tier-2 (PostGIS-style + 3-way joins)
+#   scripts/otter-e2e-data.sh --only TEXT-001    # a single question id
+#   scripts/otter-e2e-data.sh --evo-workspace D  # use another EvoOntology workspace (candidate version evaluation)
+#   scripts/otter-e2e-data.sh --model ollama/gemma4:31b-mlx   # another model from the user's provider list (stage 5)
+#   scripts/otter-e2e-data.sh --questions F.jsonl # another question file; records without `expected` get match=-1
 #                                              #   (no ground truth: the SQL + first rows are still captured for a judge)
-#   scripts/lca-e2e-data.sh --via main         # ask `main` ("data mode: <question>"): main must delegate a kind:"data"
+#   scripts/otter-e2e-data.sh --via main         # ask `main` ("data mode: <question>"): main must delegate a kind:"data"
 #                                              #   task; the analyst answers, the framework re-executes + checks, the
 #                                              #   data-verifier judges; the SQL is read from the ledger (D08, D09)
 #
-# Options: --scratch DIR (default ~/.cache/lca/e2e, env LCA_E2E_SCRATCH)  --timeout S per question (300)
+# Options: --scratch DIR (default ~/.cache/otter/e2e, env OTTER_E2E_SCRATCH)  --timeout S per question (300)
 #          --token-budget N (10000)  --tool-budget N (6)  --min-pass N (6 of the tier-1 set)  --keep
 # Exit: 0 all criteria met, 1 warnings only, 2 a criterion failed, 3 setup failed.
 #
-# Isolation: identical to scripts/lca-e2e.sh (XDG_CONFIG_HOME/XDG_DATA_HOME/XDG_STATE_HOME under the scratch dir,
-# OPENCODE_CONFIG_DIR unset, plugin loaded from <work>/.opencode/plugins/lca.ts). The work dir is a copy of
-# scripts/fixtures/data-vv (sqlite file, schema.json, .evoontology workspace) plus a project .lca/lca.jsonc that turns
+# Isolation: identical to scripts/otter-e2e.sh (XDG_CONFIG_HOME/XDG_DATA_HOME/XDG_STATE_HOME under the scratch dir,
+# OPENCODE_CONFIG_DIR unset, plugin loaded from <work>/.opencode/plugins/otter.ts). The work dir is a copy of
+# scripts/fixtures/data-vv (sqlite file, schema.json, .evoontology workspace) plus a project .otter/otter.jsonc that turns
 # the data backend on. The evo-semantic MCP server is the vendored copy under framework/vendor/evoontology.
 #
 # Criteria (per question, then aggregated):
@@ -38,11 +38,11 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRATCH="${LCA_E2E_SCRATCH:-$HOME/.cache/lca/e2e}"
-MODE=run; TIER=1; ONLY=""; VIA=analyst; EVO_WS=""; MODEL="${LCA_E2E_MODEL:-}"; QFILE=""; TIMEOUT=300; TOKEN_BUDGET=10000; TOOL_BUDGET=6; MIN_PASS=6; KEEP=0
+SCRATCH="${OTTER_E2E_SCRATCH:-$HOME/.cache/otter/e2e}"
+MODE=run; TIER=1; ONLY=""; VIA=analyst; EVO_WS=""; MODEL="${OTTER_E2E_MODEL:-}"; QFILE=""; TIMEOUT=300; TOKEN_BUDGET=10000; TOOL_BUDGET=6; MIN_PASS=6; KEEP=0
 USER_JSONC="$HOME/.config/opencode/opencode.jsonc"
 FIXTURE="$ROOT/scripts/fixtures/data-vv"
-BASELINE="$ROOT/scripts/lca-baseline.py"
+BASELINE="$ROOT/scripts/otter-baseline.py"
 HELPER="$ROOT/framework/src/data/sqlite_query.py"
 
 while [ $# -gt 0 ]; do
@@ -66,7 +66,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-E2E="$SCRATCH/lca-e2e"
+E2E="$SCRATCH/otter-e2e"
 CFG_HOME="$E2E/config"; DATA_HOME="$E2E/data"; STATE_HOME="$E2E/state"; LOGS="$E2E/logs"
 SCRATCH_CFG="$CFG_HOME/opencode/opencode.json"
 ISO_DB="$DATA_HOME/opencode/opencode.db"
@@ -103,17 +103,17 @@ json.dump({"$schema": "https://opencode.ai/config.json", "model": model, "small_
 print(f"wrote {dst}: model={model}")
 PY
 [ -f "$FIXTURE/data/vehicle_visit.sqlite" ] || python3 "$FIXTURE/make_fixture.py" >/dev/null || exit 3
-mkdir -p "$WORK/.opencode/plugins" "$WORK/.lca" && cp -R "$FIXTURE/data" "$WORK/" && cp "${QFILE:-$FIXTURE/queries.jsonl}" "$WORK/queries.jsonl" || exit 3
+mkdir -p "$WORK/.opencode/plugins" "$WORK/.otter" && cp -R "$FIXTURE/data" "$WORK/" && cp "${QFILE:-$FIXTURE/queries.jsonl}" "$WORK/queries.jsonl" || exit 3
 cp -R "${EVO_WS:-$FIXTURE/.evoontology}" "$WORK/.evoontology" || exit 3
 [ -n "$EVO_WS" ] && say "evo workspace: $EVO_WS (active: $(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('active_version') or json.load(open(sys.argv[1])).get('version'))" "$WORK/.evoontology/active.json" 2>/dev/null))"
-printf 'export { LcaPlugin } from "%s/framework/src/index.ts"\n' "$ROOT" > "$WORK/.opencode/plugins/lca.ts"
-cat > "$WORK/.lca/lca.jsonc" <<'EOF'
+printf 'export { OtterPlugin } from "%s/framework/src/index.ts"\n' "$ROOT" > "$WORK/.opencode/plugins/otter.ts"
+cat > "$WORK/.otter/otter.jsonc" <<'EOF'
 {
   "data": { "backend": "sqlite", "sqlite_path": "data/vehicle_visit.sqlite", "schema_file": "data/schema.json",
             "evo": { "enabled": true, "workspace": ".evoontology" } }
 }
 EOF
-( cd "$WORK" && git init -q && git add -A && git -c user.name=lca-e2e -c user.email=lca-e2e@localhost commit -q -m "fixture: data-vv" ) || exit 3
+( cd "$WORK" && git init -q && git add -A && git -c user.name=otter-e2e -c user.email=otter-e2e@localhost commit -q -m "fixture: data-vv" ) || exit 3
 say "work dir: $WORK"
 
 # ------------------------------------------------------------------ check (no model)
@@ -154,7 +154,7 @@ print("mcp=" + ("1" if "evo-semantic" in (d.get("mcp") or {}) else "0"))
 PY
 pv() { grep "^$1=" "$LOGS/data-perm-$STAMP.txt" | head -1 | cut -d= -f2-; }
 if grep -q "evo-semantic" "$LOGS/data-mcp-$STAMP.txt" && grep -qi "connected" "$LOGS/data-mcp-$STAMP.txt" && [ "$(pv mcp)" = 1 ]; then res PASS D06b "evo-semantic MCP registered by the config hook and connected (opencode mcp list)"
-else res FAIL D06b "evo-semantic MCP not connected: $(grep -v '^\[lca\]' "$LOGS/data-mcp-$STAMP.txt" | tr '\n' ' ' | head -c 200)"; fi
+else res FAIL D06b "evo-semantic MCP not connected: $(grep -v '^\[otter\]' "$LOGS/data-mcp-$STAMP.txt" | tr '\n' ' ' | head -c 200)"; fi
 [ "$(pv allow)" = "evo-semantic_browse_semantics,evo-semantic_resolve_semantics" ] && [ "$(pv wildcard_first)" = 1 ] && res PASS D06c "analyst permission exposes exactly browse+resolve after the evo-semantic_* deny" || res FAIL D06c "analyst evo permission wrong: allow=[$(pv allow)] wildcard_first=$(pv wildcard_first)"
 if [ "$MODE" = check ]; then
   say ""; [ "$KEEP" = 1 ] || rm -rf "$WORK"; say "check: $N_WARN warn, $N_FAIL fail"; [ "$N_FAIL" -gt 0 ] && exit 2; [ "$N_WARN" -gt 0 ] && exit 1; exit 0
@@ -198,7 +198,7 @@ if row:
         # main's own calls: exactly one delegate, no db tools (D09); the analyst/verifier children carry the rest
         mcalls = [p.get("tool") for p in parts if p.get("type") == "tool"]
         ledger = {}
-        for f in glob.glob(f"{state_home}/lca/*/sessions/{sid}/ledger.json"):
+        for f in glob.glob(f"{state_home}/otter/*/sessions/{sid}/ledger.json"):
             ledger = json.load(open(f))
         tasks = [t for t in ledger.get("tasks", [])]
         dtask = next((t for t in tasks if t.get("kind") == "data"), None)

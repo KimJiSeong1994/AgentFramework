@@ -224,7 +224,7 @@ function assertNativePermissionRequests(): void {
 async function expectUnsafeCall(promise: Promise<unknown>, reason: string): Promise<void> {
   const error = await promise.then(() => { throw new Error("expected unsafe native tool-call refusal") }, value => value)
   expect(error).toBeInstanceOf(UnsafeOpenCodeToolCall)
-  expect(error).toMatchObject({ code: "LCA_UNSAFE_OPENCODE_TOOL_CALL", reason })
+  expect(error).toMatchObject({ code: "OTTER_UNSAFE_OPENCODE_TOOL_CALL", reason })
 }
 
 function childLineReader(stream: ReadableStream<Uint8Array>): ChildLineReader {
@@ -444,7 +444,7 @@ test("native adapter uses main app.agents rules, loads exact tracked bytes, and 
     skillBody,
   ].join("\n")
   expect(loaded).toMatchObject({
-    title: "LCA skill loaded",
+    title: "Otter skill loaded",
     output: expectedSkillBytes,
     metadata: {
       sdkSessionID: SESSION_ID,
@@ -463,7 +463,7 @@ test("native adapter uses main app.agents rules, loads exact tracked bytes, and 
   await afterTool(skillCall, finalizedSkill)
   // OpenCode 1.18.35 aborts each tool's own context signal once it finishes; continuation reads must survive it.
   skillAbort.abort()
-  expect(finalizedSkill).toMatchObject({ title: "LCA skill loaded", output: expectedSkillBytes })
+  expect(finalizedSkill).toMatchObject({ title: "Otter skill loaded", output: expectedSkillBytes })
   expect(finalizedSkill.metadata).toMatchObject({
     invocationID: loaded.metadata?.invocationID,
     name: "common",
@@ -497,7 +497,7 @@ test("native adapter uses main app.agents rules, loads exact tracked bytes, and 
   await beforeTool(referenceCall)
   const referenceOutput: SkillToolOutput = { title: "read", output: "untrusted SDK output", metadata: { vendor: true } }
   await afterTool(referenceCall, referenceOutput)
-  expect(referenceOutput).toMatchObject({ title: "LCA captured source", output: EXPECTED_REFERENCE_OUTPUT })
+  expect(referenceOutput).toMatchObject({ title: "Otter captured source", output: EXPECTED_REFERENCE_OUTPUT })
   expect(referenceOutput.metadata).toMatchObject({
     invocationID: loaded.metadata?.invocationID,
     name: "common",
@@ -522,7 +522,7 @@ test("native adapter uses main app.agents rules, loads exact tracked bytes, and 
     () => new Error("unexpected dispatch after the captured skill changed"), error => error as Error,
   )
   expect(changedBoundary).toBeInstanceOf(OpenCodeSkillRefused)
-  expect(changedBoundary.message).toBe("lca: native skill source or scope is not currently authorized")
+  expect(changedBoundary.message).toBe("otter: native skill source or scope is not currently authorized")
   assertNativePermissionRequests()
 })
 
@@ -695,7 +695,7 @@ test("a remote child loads and finalizes a common skill without a local supervis
     const expectedSkillBytes = [
       "---", "name: common", "description: Inspect this project", "allowed-tools: [read]", "---", skillBody,
     ].join("\n")
-    expect(loaded).toMatchObject({ title: "LCA skill loaded", output: expectedSkillBytes })
+    expect(loaded).toMatchObject({ title: "Otter skill loaded", output: expectedSkillBytes })
     expect(loaded.metadata).toMatchObject({
       invocationID: expect.any(String),
       sdkSessionID: REMOTE_CHILD_ID,

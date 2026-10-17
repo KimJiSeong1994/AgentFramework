@@ -436,10 +436,10 @@ function configuredCampaign(root: string): { campaignID: string; ownerBinding: s
 function alternateStoreExists(root: string, selectedPath: string): boolean {
   const key = worktreeKey(root)
   const bases = new Set<string>([
-    join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "lca"),
-    join(homedir(), ".local", "state", "lca"),
+    join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "otter"),
+    join(homedir(), ".local", "state", "otter"),
   ])
-  if (process.env.LCA_STATE_HOME) bases.add(resolve(process.env.LCA_STATE_HOME))
+  if (process.env.OTTER_STATE_HOME) bases.add(resolve(process.env.OTTER_STATE_HOME))
   for (const base of bases) {
     const candidate = join(base, key, "skill-observations.sqlite")
     if (candidate === selectedPath) continue

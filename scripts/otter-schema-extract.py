@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Build the static schema description used by lca's `schema_lookup` tool from PostgreSQL DDL files.
+"""Build the static schema description used by otter's `schema_lookup` tool from PostgreSQL DDL files.
 
-    python3 scripts/lca-schema-extract.py path/to/ddl/*.sql -o data/schema.json \
+    python3 scripts/otter-schema-extract.py path/to/ddl/*.sql -o data/schema.json \
         --prefix <schema>. --dialect postgres
 
 Extracts CREATE TABLE columns (name, type), PRIMARY KEY / REFERENCES, CHECK (...IN (...)) value lists, enum types,

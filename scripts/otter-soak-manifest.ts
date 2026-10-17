@@ -11,8 +11,8 @@ import {
   supervisorBindingSha256,
   validateGrammar,
   verifyTail,
-} from "./lca-soak-supervisor.ts"
-import type { Family, ManifestLine } from "./lca-soak-supervisor.ts"
+} from "./otter-soak-supervisor.ts"
+import type { Family, ManifestLine } from "./otter-soak-supervisor.ts"
 
 const MAX_RECEIPT_BYTES = 16 * 1024 * 1024
 
@@ -280,7 +280,7 @@ export function checkManifest(evidenceDir: string): ManifestCheck {
 
 function main(argv: string[]): void {
   if (argv.length !== 2 || argv[0] !== "--check" || !argv[1]!.startsWith("/")) {
-    console.error("usage: bun scripts/lca-soak-manifest.ts --check ABS_EVIDENCE_DIR")
+    console.error("usage: bun scripts/otter-soak-manifest.ts --check ABS_EVIDENCE_DIR")
     process.exitCode = 2
     return
   }

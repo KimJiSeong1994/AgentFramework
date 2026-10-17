@@ -77,7 +77,7 @@ function lockProblem(root: string): string {
   const stale = staleLockPid(root)
   return stale === null
     ? "Wiki lock exists; verify the owning process before retrying"
-    : `Stale wiki lock from exited process ${stale}; run \`bun scripts/lca-wiki.ts unlock\``
+    : `Stale wiki lock from exited process ${stale}; run \`bun scripts/otter-wiki.ts unlock\``
 }
 
 /**

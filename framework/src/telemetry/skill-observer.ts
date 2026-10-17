@@ -31,8 +31,8 @@ function warning(deps: CoreDeps, code: string): void {
   if (warnings.has(key)) return
   warnings.add(key)
   if (warnings.size > 64) warnings.delete(warnings.values().next().value!)
-  // Fixed codes only: failures are visible without LCA_DEBUG, never echo inputs or storage paths.
-  try { console.warn(`[lca] skill observation: ${code}`) } catch { /* Observational only. */ }
+  // Fixed codes only: failures are visible without OTTER_DEBUG, never echo inputs or storage paths.
+  try { console.warn(`[otter] skill observation: ${code}`) } catch { /* Observational only. */ }
 }
 
 export function skillObservationBinding(deps: CoreDeps): { root: string; campaignID: string } | null {
@@ -103,7 +103,7 @@ export function observationConfigGeneration(deps: CoreDeps): string | null {
   if (names.length !== allow.length) return null
   const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null
   return createHash("sha256").update(JSON.stringify({
-    basis: "lca-observation-config.v1",
+    basis: "otter-observation-config.v1",
     enabled: deps.config.skill_observation?.enabled === true,
     history: !deps.config.disabled_hooks.includes("tool.history"), routerMode: ["off", "shadow", "suggest"].includes(router.mode) ? router.mode : "invalid",
     probability: number(router.min_probability), margin: number(router.min_margin), timeoutMs: number(router.timeout_ms),
@@ -139,7 +139,7 @@ export function observeSkillPart(deps: CoreDeps, value: unknown): void {
     const args = record(state.input)
     const metadata = record(state.metadata)
     const time = record(state.time)
-    const flags = record(metadata.lca)
+    const flags = record(metadata.otter)
     const fingerprints = state.status === "completed" ? fingerprintSkillObservation({
       requestedName: args.name, returnedName: metadata.name, output: state.output, metadata,
       renderer: SUPPORTED_SKILL_RENDERER, projectRoot: deps.worktree,

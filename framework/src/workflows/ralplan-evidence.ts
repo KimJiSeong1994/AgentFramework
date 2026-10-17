@@ -13,13 +13,13 @@ import { verifyReceiptRef, writeReceipt, type Receipt } from "./receipts.ts"
 
 const KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/
 
-/** `<worktree>/.lca/workflows/<sid>/<wid>/<key>` as a hash-recorded, worktree-relative artifact reference. */
+/** `<worktree>/.otter/workflows/<sid>/<wid>/<key>` as a hash-recorded, worktree-relative artifact reference. */
 export function writeReadable(worktree: string, wf: Pick<RalplanWorkflow, "sessionID" | "id" | "artifacts">, key: string, text: string): Hashed {
   if (!KEY_RE.test(key) || key.includes("..")) throw new TypeError("invalid artifact key")
   if (wf.artifacts.some(ref => ref.key === key)) throw new Error(`artifact ${key} is already committed; refusing overwrite`)
   const bytes = Buffer.from(text, "utf8")
   durableWriteBytes(join(workflowArtifactDirectory(worktree, wf.sessionID, wf.id), key), bytes)
-  return { key, path: join(".lca", "workflows", wf.sessionID, wf.id, key), sha256: sha256(bytes) }
+  return { key, path: join(".otter", "workflows", wf.sessionID, wf.id, key), sha256: sha256(bytes) }
 }
 
 /** Verified read of a recorded artifact; a missing, edited or oversized file throws (never silently reused). */

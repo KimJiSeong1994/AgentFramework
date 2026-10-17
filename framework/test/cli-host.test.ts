@@ -33,7 +33,7 @@ function historyPrompt(base: string, history: readonly HistoryEntry[]): string {
 
 let root: string
 
-beforeEach(() => { root = mkdtempSync(join(tmpdir(), "lca-cli-host-")) })
+beforeEach(() => { root = mkdtempSync(join(tmpdir(), "otter-cli-host-")) })
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
 type HarnessOptions = {
@@ -465,7 +465,7 @@ describe("common CLI execution host", () => {
     expect(await handle.run()).toEqual({ status: "failed", error: "current execution lease changed; execution stopped" })
   })
 
-  test("local and Claude use the same repeatable LCA tool loop and preserve final text", async () => {
+  test("local and Claude use the same repeatable Otter tool loop and preserve final text", async () => {
     const finalText = " {\"plan\":true}\n"
     for (const engine of ["local", "claude"] as const) {
       const subject = harness({ engine, responses: [toolWrite(`result-${engine}.txt`, "done"), JSON.stringify({ type: "final", text: finalText })] })
@@ -492,7 +492,7 @@ describe("common CLI execution host", () => {
     expect(subject.observed.before).toBe(0)
   })
 
-  test("a single deterministic JSON fence is accepted and the LCA byte cap remains reactive", async () => {
+  test("a single deterministic JSON fence is accepted and the Otter byte cap remains reactive", async () => {
     const fenced = harness({ responses: ['```json\n{"type":"final","text":"fenced result"}\n```'] })
     const fencedHandle = await fenced.host.prepare(fenced.request)
     expect(await fencedHandle.run()).toEqual({ status: "completed", text: "fenced result" })

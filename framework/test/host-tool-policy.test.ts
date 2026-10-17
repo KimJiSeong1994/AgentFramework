@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { mainPrompt } from "../src/agents/prompts.ts"
-import { DEFAULT_CONFIG, type LcaConfig } from "../src/config.ts"
+import { DEFAULT_CONFIG, type OtterConfig } from "../src/config.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
 import { EXECUTION_ROLES, EXECUTION_TOOL_NAMES, WORKFLOW_READ_ONLY_ROLES, type ExecutionRequest, type ExecutionRole } from "../src/hosts/types.ts"
 import { EMPTY_MODE, readModeState, writeModeState } from "../src/state/store.ts"
@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-const config = (patch: Partial<LcaConfig> = {}): LcaConfig => ({
+const config = (patch: Partial<OtterConfig> = {}): OtterConfig => ({
   ...DEFAULT_CONFIG,
   ...patch,
   guards: { ...DEFAULT_CONFIG.guards, ...patch.guards },
@@ -50,7 +50,7 @@ describe("host-neutral execution tool policy", () => {
     for (const role of WORKFLOW_READ_ONLY_ROLES) {
       const snapshot = p.resolve(role)
       expect(snapshot.tools.allowed).toEqual(["read", "list", "glob", "grep"])
-      expect(snapshot.tools.denied).toEqual(expect.arrayContaining(["write", "edit", "bash", "delegate", "task", "lca_flow", "skill"]))
+      expect(snapshot.tools.denied).toEqual(expect.arrayContaining(["write", "edit", "bash", "delegate", "task", "otter_flow", "skill"]))
       expect(snapshot.model).toEqual({ providerID: "local", modelID: "selected-model" })
       expect(Object.isFrozen(snapshot)).toBe(true)
       expect(Object.isFrozen(snapshot.tools.allowed)).toBe(true)
@@ -85,12 +85,12 @@ describe("host-neutral execution tool policy", () => {
     expect(Object.isFrozen(main.system)).toBe(true)
     expect(main.tools.allowed).toEqual(["read", "list", "glob", "grep"])
     expect(main.tools.denied).toEqual(expect.arrayContaining([
-      "write", "edit", "patch", "apply_patch", "multiedit", "bash", "delegate", "lca_flow",
+      "write", "edit", "patch", "apply_patch", "multiedit", "bash", "delegate", "otter_flow",
       "webfetch", "skill", "todowrite", "todoread", "db_query", "schema_lookup", "task",
     ]))
     expect(main.system.join("\n")).toContain("Discuss the request, inspect files with read-only tools, and create a concrete plan")
     expect(main.system.join("\n")).toContain("Never modify files, run commands, execute or approve plans, or delegate work")
-    expect(main.system.join("\n")).not.toMatch(/do it yourself|after changing code|run existing tests|call the delegate tool|submit plans only with lca_flow/i)
+    expect(main.system.join("\n")).not.toMatch(/do it yourself|after changing code|run existing tests|call the delegate tool|submit plans only with otter_flow/i)
     expect(main.id).not.toBe(createExecutionPolicy(config()).resolve("main").id)
     const handlers = p.handlers(request(p, "main"))
     expect(handlers.beforeTool({ type: "tool-before", sessionID: "main", callID: "read", toolID: "t", name: "read", input: {} })).toEqual({ allow: true })
@@ -144,7 +144,7 @@ describe("host-neutral execution tool policy", () => {
   })
 
   test("records failures and resets repeats only after successful result", () => {
-    const p = createExecutionPolicy(config({ guards: { repeat_limit: 1 } as LcaConfig["guards"] }))
+    const p = createExecutionPolicy(config({ guards: { repeat_limit: 1 } as OtterConfig["guards"] }))
     const h = p.handlers(request(p))
     const before = (callID: string) => h.beforeTool({ type: "tool-before", sessionID: "vendor", callID, toolID: "t", name: "bash", input: { command: "bad" } })
     expect(before("1")).toEqual({ allow: true })
@@ -155,7 +155,7 @@ describe("host-neutral execution tool policy", () => {
   })
 
   test("binds exact handler instances and honors repetition cancellation configuration", () => {
-    const p = createExecutionPolicy(config({ guards: { abort_on_repetition: false } as LcaConfig["guards"] }))
+    const p = createExecutionPolicy(config({ guards: { abort_on_repetition: false } as OtterConfig["guards"] }))
     const h = p.handlers(request(p))
     const snapshot = p.resolve("worker")
     p.bindSession("vendor", h, snapshot)
@@ -173,7 +173,7 @@ describe("host-neutral execution tool policy", () => {
   })
 
   test("returns trimming and recovery metadata from result shaping", () => {
-    const p = createExecutionPolicy(config({ guards: { read_max_lines: 2 } as LcaConfig["guards"] }))
+    const p = createExecutionPolicy(config({ guards: { read_max_lines: 2 } as OtterConfig["guards"] }))
     const h = p.handlers(request(p))
     const trimmed = h.toolResult({ type: "tool-result", sessionID: "vendor", callID: "read", toolID: "t", name: "read", result: "one\ntwo\nthree\nfour" })
     expect(trimmed).toMatchObject({ trimmed: true, hinted: false })

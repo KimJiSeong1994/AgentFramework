@@ -1,10 +1,10 @@
-import type { LcaConfig } from "./config.ts"
+import type { OtterConfig } from "./config.ts"
 
 export type Logger = (msg: string, extra?: Record<string, unknown>) => void
 
 export type CoreDeps = {
   directory: string
   worktree: string
-  config: LcaConfig
+  config: OtterConfig
   log: Logger
 }

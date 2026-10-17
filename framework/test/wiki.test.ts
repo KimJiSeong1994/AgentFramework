@@ -23,11 +23,11 @@ let state: string
 let oldState: string | undefined
 let docsDir: string
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "lca-wiki-"))
-  state = mkdtempSync(join(tmpdir(), "lca-wiki-state-"))
-  docsDir = mkdtempSync(join(tmpdir(), "lca-wiki-docs-"))
-  oldState = process.env.LCA_STATE_HOME
-  process.env.LCA_STATE_HOME = state
+  root = mkdtempSync(join(tmpdir(), "otter-wiki-"))
+  state = mkdtempSync(join(tmpdir(), "otter-wiki-state-"))
+  docsDir = mkdtempSync(join(tmpdir(), "otter-wiki-docs-"))
+  oldState = process.env.OTTER_STATE_HOME
+  process.env.OTTER_STATE_HOME = state
   mkdirSync(join(root, "knowledge", "wiki"), { recursive: true })
   writeFileSync(join(root, "knowledge", "AGENTS.md"), "# Schema\nRaw sources are immutable; log is append-only.\n")
   writeFileSync(join(root, "knowledge", "wiki", "index.md"), "# Index\n\n[Log](log.md)\n[Report](reports/tool-outcomes.md)\n")
@@ -37,8 +37,8 @@ beforeEach(() => {
   writeFileSync(join(root, "knowledge", "wiki", "reports", "tool-outcomes.md"), "# Report\n\n[Index](../index.md)\n")
 })
 afterEach(() => {
-  if (oldState === undefined) delete process.env.LCA_STATE_HOME
-  else process.env.LCA_STATE_HOME = oldState
+  if (oldState === undefined) delete process.env.OTTER_STATE_HOME
+  else process.env.OTTER_STATE_HOME = oldState
   rmSync(root, { recursive: true, force: true })
   rmSync(state, { recursive: true, force: true })
   rmSync(docsDir, { recursive: true, force: true })
@@ -383,7 +383,7 @@ test("skill capture rejects corrupt hashes, unsafe symlinks, and over-limit file
   expect(existsSync(join(root, "knowledge/.wiki.lock"))).toBe(false)
 
   rmSync(rawPath)
-  const outside = mkdtempSync(join(tmpdir(), "lca-skill-wiki-outside-"))
+  const outside = mkdtempSync(join(tmpdir(), "otter-skill-wiki-outside-"))
   try {
     const unsafe = join(root, "knowledge/raw/skill-runs", `${"a".repeat(64)}.json`)
     symlinkSync(join(outside, "missing.json"), unsafe)
@@ -503,7 +503,7 @@ test("routing capture strips unknown text metadata and visibly rejects malformed
 test("routing reader rejects symlinked directories and files before wiki writes", () => {
   const stateDirectory = stateRoot(root)
   mkdirSync(stateDirectory, { recursive: true })
-  const outside = mkdtempSync(join(tmpdir(), "lca-routing-outside-"))
+  const outside = mkdtempSync(join(tmpdir(), "otter-routing-outside-"))
   try {
     const before = snapshot()
     symlinkSync(outside, join(stateDirectory, "routing"))
@@ -636,7 +636,7 @@ test("unlock refuses live and unreadable locks", () => {
 })
 
 test("concurrent writers are mutually exclusive: every success is fully recorded, refusals write nothing", async () => {
-  const script = join(import.meta.dir, "../../scripts/lca-wiki.ts")
+  const script = join(import.meta.dir, "../../scripts/otter-wiki.ts")
   const names = ["a", "b", "c", "d", "e", "f"]
   const runs = await Promise.all(names.map((n) => {
     const file = doc(`race-${n}.md`, `# Race ${n}\n\nbody ${n}\n`)
@@ -686,7 +686,7 @@ test("register refuses a symlinked log instead of appending through it", () => {
 
 test("CLI status exits 1 while the wiki is locked", () => {
   writeFileSync(join(root, "knowledge/.wiki.lock"), JSON.stringify({ pid: process.pid, at: new Date().toISOString() }))
-  const r = spawnSync("bun", [join(import.meta.dir, "../../scripts/lca-wiki.ts"), "status", "--root", root], { encoding: "utf8" })
+  const r = spawnSync("bun", [join(import.meta.dir, "../../scripts/otter-wiki.ts"), "status", "--root", root], { encoding: "utf8" })
   expect(r.status).toBe(1)
   expect(JSON.parse(r.stdout)).toMatchObject({ locked: true })
 })
@@ -703,7 +703,7 @@ test("existing wiki lock is not removed or overwritten", () => {
 })
 
 test("symlinked raw directories do not receive exported data", () => {
-  const outside = mkdtempSync(join(tmpdir(), "lca-wiki-outside-"))
+  const outside = mkdtempSync(join(tmpdir(), "otter-wiki-outside-"))
   try {
     symlinkSync(outside, join(root, "knowledge/raw"))
     expect(() => captureWiki(root)).toThrow("must not be a symlink")
@@ -881,7 +881,7 @@ test("register refuses when the lock exists", () => {
 })
 
 test("register refuses when the raw documents directory is a symlink", () => {
-  const outside = mkdtempSync(join(tmpdir(), "lca-wiki-outside-"))
+  const outside = mkdtempSync(join(tmpdir(), "otter-wiki-outside-"))
   try {
     mkdirSync(join(root, "knowledge", "raw"), { recursive: true })
     symlinkSync(outside, join(root, "knowledge", "raw", "documents"))
@@ -919,7 +919,7 @@ test("crash recovery: missing source page and index line are restored on re-regi
 })
 
 test("symlinked raw/documents receives nothing and leaves no lock on register", () => {
-  const outside = mkdtempSync(join(tmpdir(), "lca-wiki-outside-"))
+  const outside = mkdtempSync(join(tmpdir(), "otter-wiki-outside-"))
   try {
     symlinkSync(outside, join(root, "knowledge/raw"))
     expect(() => registerWiki(root, doc("a.md", "# A\n\nbody\n"), {})).toThrow("must not be a symlink")
@@ -1029,7 +1029,7 @@ test("lint reports a raw source without a page and a page without a raw source",
 // -- CLI ------------------------------------------------------------------------------------------------------------
 
 function runCli(args: string[]) {
-  return spawnSync("bun", [join(import.meta.dir, "..", "..", "scripts", "lca-wiki.ts"), ...args], { encoding: "utf8" })
+  return spawnSync("bun", [join(import.meta.dir, "..", "..", "scripts", "otter-wiki.ts"), ...args], { encoding: "utf8" })
 }
 
 test("CLI usage errors exit with code 2", () => {
@@ -1044,15 +1044,15 @@ test("CLI usage errors exit with code 2", () => {
 })
 
 test("CLI --root drives status against an isolated worktree", () => {
-  const cliRoot = mkdtempSync(join(tmpdir(), "lca-wiki-cli-"))
-  const cliState = mkdtempSync(join(tmpdir(), "lca-wiki-cli-state-"))
+  const cliRoot = mkdtempSync(join(tmpdir(), "otter-wiki-cli-"))
+  const cliState = mkdtempSync(join(tmpdir(), "otter-wiki-cli-state-"))
   try {
     mkdirSync(join(cliRoot, "knowledge", "wiki"), { recursive: true })
     writeFileSync(join(cliRoot, "knowledge", "AGENTS.md"), "# Schema\n")
     writeFileSync(join(cliRoot, "knowledge", "wiki", "index.md"), "# Index\n")
     writeFileSync(join(cliRoot, "knowledge", "wiki", "log.md"), "# Log\n")
-    const result = spawnSync("bun", [join(import.meta.dir, "..", "..", "scripts", "lca-wiki.ts"), "status", "--root", cliRoot],
-      { encoding: "utf8", env: { ...process.env, LCA_STATE_HOME: cliState } })
+    const result = spawnSync("bun", [join(import.meta.dir, "..", "..", "scripts", "otter-wiki.ts"), "status", "--root", cliRoot],
+      { encoding: "utf8", env: { ...process.env, OTTER_STATE_HOME: cliState } })
     expect(result.status).toBe(0)
     const parsed = JSON.parse(result.stdout)
     expect(parsed).toMatchObject({ sources: 0, compiled: 0, pending: [], problems: [] })

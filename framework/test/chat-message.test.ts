@@ -71,7 +71,7 @@ describe("chat.message hook", () => {
     const part = textPart("ultrawork: make the tests pass")
     await run([part])
     expect(part.text.endsWith(modeSuffix("ulw"))).toBe(true)
-    expect(part.text.split("<lca-mode").length - 1).toBe(1)
+    expect(part.text.split("<otter-mode").length - 1).toBe(1)
     expect(stripModeSuffix(part.text)).toBe("ultrawork: make the tests pass")
     const state = readModeState(worktree, SESSION)
     expect(state.mode).toBe("ulw")
@@ -80,7 +80,7 @@ describe("chat.message hook", () => {
     expect(state.startedAt).toBeGreaterThan(0)
     // A replay cannot dispatch again or double-append the retained part.
     await expect(run([part], "main", part.messageID)).rejects.toThrow("stale-turn")
-    expect(part.text.split("<lca-mode").length - 1).toBe(1)
+    expect(part.text.split("<otter-mode").length - 1).toBe(1)
   })
 
   test("uses the last non-synthetic text part", async () => {

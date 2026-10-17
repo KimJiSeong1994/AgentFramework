@@ -85,7 +85,7 @@ async function expectUnsafeTurn(promise: Promise<unknown>, reason: UnsafeOpenCod
   )
   expect(error).toBeInstanceOf(UnsafeOpenCodeSystemChannel)
   expect(error).toMatchObject({
-    code: "LCA_UNSAFE_OPENCODE_SYSTEM_CHANNEL",
+    code: "OTTER_UNSAFE_OPENCODE_SYSTEM_CHANNEL",
     reason,
   })
 }
@@ -215,7 +215,7 @@ describe("skill router adversarial contract", () => {
     await turn(await createNativeChatHook(), p)
 
     expect(p.text).toContain("optional advice, not a request to load a skill, change mode, or execute work")
-    expect(p.text).not.toContain("<lca-mode")
+    expect(p.text).not.toContain("<otter-mode")
     expect(readModeState(root, "s1")).toEqual(EMPTY_MODE)
     expect(capabilityReads).toEqual([])
   })
@@ -227,13 +227,13 @@ describe("skill router adversarial contract", () => {
     const childText = child.text
     await expectUnsafeTurn(turn(hook, child, "reviewer"), "unknown-role")
     expect(child.text).toBe(childText)
-    expect(child.text).not.toContain("lca-skill-advice")
+    expect(child.text).not.toContain("otter-skill-advice")
     expect(requests).toHaveLength(0)
 
     rules.push({ permission: "skill", pattern: "plan", action: "deny" })
     const denied = part("Investigate using the plan skill.", "denied")
     await turn(hook, denied)
-    expect(denied.text).not.toContain("lca-skill-advice")
+    expect(denied.text).not.toContain("otter-skill-advice")
     expect(requests).toHaveLength(0)
 
     rules.pop()
@@ -339,8 +339,8 @@ describe("skill router adversarial contract", () => {
     expect(requests).toHaveLength(1)
     expect(first.text).toBe(firstText)
     expect(newer.text).toBe(newerText)
-    expect(first.text).not.toContain("lca-skill-advice")
-    expect(newer.text).not.toContain("lca-skill-advice")
+    expect(first.text).not.toContain("otter-skill-advice")
+    expect(newer.text).not.toContain("otter-skill-advice")
     expect(readModeState(root, "s1")).toEqual(EMPTY_MODE)
   })
 

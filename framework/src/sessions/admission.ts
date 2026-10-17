@@ -383,7 +383,7 @@ function rebindHeldWorkflow(runtime: ExecutionRuntime, store: SessionStore, sid:
   }
 }
 
-/** Open an attachment held first. Only a genuinely new LCA session receives its initial process-local token. */
+/** Open an attachment held first. Only a genuinely new Otter session receives its initial process-local token. */
 export function attachAdmission(
   runtime: ExecutionRuntime,
   sid: string,

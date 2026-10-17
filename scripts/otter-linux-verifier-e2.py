@@ -35,19 +35,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-PROTOCOL = "lca.linux-verifier.v1"
-PROFILE_SCHEMA = "lca.linux-verifier.profile.v2"
-RECEIPT_SCHEMA = "lca.linux-verifier.retirement.v1"
-PROFILE_PATH = Path("/etc/lca-verifier/profile.json")
-CLIENT_PATH = Path("/usr/local/libexec/lca-verifier/client.py")
-GATE_PATH = Path("/usr/local/libexec/lca-verifier/gate.py")
-RECORD_DIR = Path("/var/lib/lca-verifier/records")
-UNIT = "lca-verifier.service"
-GATE_UNIT = "lca-verifier-gate.service"
-CGROUP_PATH = Path("/sys/fs/cgroup/lca.slice/lca-verifier.service")
-GATE_CGROUP_PATH = "/system.slice/lca-verifier-gate.service"
+PROTOCOL = "otter.linux-verifier.v1"
+PROFILE_SCHEMA = "otter.linux-verifier.profile.v2"
+RECEIPT_SCHEMA = "otter.linux-verifier.retirement.v1"
+PROFILE_PATH = Path("/etc/otter-verifier/profile.json")
+CLIENT_PATH = Path("/usr/local/libexec/otter-verifier/client.py")
+GATE_PATH = Path("/usr/local/libexec/otter-verifier/gate.py")
+RECORD_DIR = Path("/var/lib/otter-verifier/records")
+UNIT = "otter-verifier.service"
+GATE_UNIT = "otter-verifier-gate.service"
+CGROUP_PATH = Path("/sys/fs/cgroup/otter.slice/otter-verifier.service")
+GATE_CGROUP_PATH = "/system.slice/otter-verifier-gate.service"
 CGROUP_ROOT = Path("/sys/fs/cgroup")
-OUTPUT_DIR = Path("/run/lca-verifier-output")
+OUTPUT_DIR = Path("/run/otter-verifier-output")
 MAX_OUTPUT = 4096
 CASE_TIMEOUT_MS = 60_000
 CLIENT_TIMEOUT_SECONDS = 25
@@ -204,9 +204,9 @@ def run_git(cwd: Path, *args: str, output_limit: int = 2 * 1024 * 1024) -> bytes
 def make_git_fixture(root: Path) -> tuple[str, bytes]:
     repo = root / "git-input"
     repo.mkdir(mode=0o700)
-    (repo / "fixture.txt").write_text("lca-linux-verifier-e2\n", encoding="utf-8")
+    (repo / "fixture.txt").write_text("otter-linux-verifier-e2\n", encoding="utf-8")
     run_git(repo, "init", "--quiet")
-    run_git(repo, "config", "user.name", "LCA verifier qualification")
+    run_git(repo, "config", "user.name", "Otter verifier qualification")
     run_git(repo, "config", "user.email", "verifier-qualification@localhost")
     run_git(repo, "add", "--all")
     tree = run_git(repo, "write-tree").decode("ascii").strip()
@@ -267,15 +267,15 @@ def gate_record(reference: dict[str, Any]) -> dict[str, Any]:
         record = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError):
         fail("native-record-json-invalid")
-    if (not isinstance(record, dict) or record.get("schema") != "lca.linux-verifier.record.v1" or
+    if (not isinstance(record, dict) or record.get("schema") != "otter.linux-verifier.record.v1" or
             record.get("ticket") != ticket or record.get("reference") != reference or
-            record.get("inputPath") != f"/var/lib/lca-verifier/inputs/{ticket}"):
+            record.get("inputPath") != f"/var/lib/otter-verifier/inputs/{ticket}"):
         fail("native-record-binding-invalid")
     return record
 
 
 def lock_gate_authority_state(timeout: float = 10.0) -> int:
-    path = Path("/var/lib/lca-verifier/authority.lock")
+    path = Path("/var/lib/otter-verifier/authority.lock")
     descriptor = -1
     try:
         parent = path.parent.lstat()
@@ -331,7 +331,7 @@ class HeldCgroup:
 
 def _cgroup_components(path: str) -> tuple[str, ...]:
     allowed = {
-        "/lca.slice/lca-verifier.service": ("lca.slice", "lca-verifier.service"),
+        "/otter.slice/otter-verifier.service": ("otter.slice", "otter-verifier.service"),
         GATE_CGROUP_PATH: ("system.slice", GATE_UNIT),
     }
     components = allowed.get(path)
@@ -753,7 +753,7 @@ def verify_signed_result(profile_key: str, reference: dict[str, Any], result: di
             not re.fullmatch(r"[0-9a-f]{32}", binding["systemdInvocationID"]) or
             type(binding.get("mainPID")) is not int or not 1 < binding["mainPID"] <= 9_007_199_254_740_991 or
             type(binding.get("startTimeTicks")) is not int or not 0 < binding["startTimeTicks"] <= 9_007_199_254_740_991 or
-            binding.get("cgroupPath") != f"/lca.slice/{UNIT}" or
+            binding.get("cgroupPath") != f"/otter.slice/{UNIT}" or
             type(binding.get("device")) is not int or not 0 <= binding["device"] <= 9_007_199_254_740_991 or
             type(binding.get("inode")) is not int or not 0 < binding["inode"] <= 9_007_199_254_740_991):
         fail("native-binding-invalid")
@@ -837,7 +837,7 @@ def assert_verifier_idle() -> None:
     if (completed.returncode != 0 or set(properties) != {"ActiveState", "SubState", "InvocationID", "MainPID", "ControlGroup"} or
             (properties["ActiveState"], properties["SubState"]) not in {("inactive", "dead"), ("failed", "failed")} or
             properties["MainPID"] != "0" or
-            properties["ControlGroup"] not in {"", f"/lca.slice/{UNIT}"}):
+            properties["ControlGroup"] not in {"", f"/otter.slice/{UNIT}"}):
         fail("verifier-unit-not-inert")
     try:
         raw = (CGROUP_PATH / "cgroup.events").read_text(encoding="ascii")
@@ -914,7 +914,7 @@ def detached_command(marker: str) -> str:
         "if pid:",
         "    os._exit(0)",
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
-        f"path = '/run/lca-verifier-output/{marker}'",
+        f"path = '/run/otter-verifier-output/{marker}'",
         "with open(path + '.ready', 'x', encoding='ascii') as ready:",
         "    ready.write(str(os.getpid()))",
         "counter = 0",
@@ -929,7 +929,7 @@ def detached_command(marker: str) -> str:
 
 def run_detached_case(profile: dict[str, Any], key: str, tree: str, archive: bytes, scratch: Path) -> dict[str, Any]:
     assert_verifier_idle()
-    token = "lca-e2-" + uuid.uuid4().hex
+    token = "otter-e2-" + uuid.uuid4().hex
     command = detached_command(token)
     case_scratch = scratch / f"case-detached-{uuid.uuid4().hex}"
     case_scratch.mkdir(mode=0o700)
@@ -1069,9 +1069,9 @@ def run_forged_controller_peer(profile: dict[str, Any]) -> dict[str, Any]:
     source = "\n".join((
         "import errno,json,socket,struct,sys",
         "sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); sock.settimeout(3)",
-        "body=json.dumps({'protocol':'lca.linux-verifier.v1','op':'preflight'},separators=(',',':')).encode('ascii')",
+        "body=json.dumps({'protocol':'otter.linux-verifier.v1','op':'preflight'},separators=(',',':')).encode('ascii')",
         "try:",
-        " sock.connect('/run/lca-verifier/control.sock')",
+        " sock.connect('/run/otter-verifier/control.sock')",
         " sock.sendall(struct.pack('!I',len(body))+body)",
         " header=sock.recv(4)",
         " if header: print('FORGED_CONTROLLER_ACCEPTED'); sys.exit(42)",
@@ -1105,8 +1105,8 @@ def run_concurrent_prepare_start(profile: dict[str, Any], key: str, tree: str, a
     python = "\n".join((
         "import json,socket,struct",
         "sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); sock.settimeout(2)",
-        "sock.connect('/run/lca-verifier/runner.sock')",
-        "body=json.dumps({'protocol':'lca.linux-verifier.v1','op':'runner-hello'},separators=(',',':'),sort_keys=True).encode('ascii')",
+        "sock.connect('/run/otter-verifier/runner.sock')",
+        "body=json.dumps({'protocol':'otter.linux-verifier.v1','op':'runner-hello'},separators=(',',':'),sort_keys=True).encode('ascii')",
         "sock.sendall(struct.pack('!I',len(body))+body); sock.close()",
         "print('FORGED_VERIFIER_PEER_CONNECTED')",
         "print('CONCURRENT_BODY_EXECUTED')",
@@ -1161,17 +1161,17 @@ def run_escape_denial(profile: dict[str, Any], key: str, tree: str, archive: byt
     case_scratch.mkdir(mode=0o700)
     source = "\n".join((
         "import errno,os,socket,subprocess,sys",
-        "for path in ('/sys/fs/cgroup/lca.slice/lca-verifier.service/cgroup.procs','/sys/fs/cgroup/lca.slice/cgroup.procs'):",
+        "for path in ('/sys/fs/cgroup/otter.slice/otter-verifier.service/cgroup.procs','/sys/fs/cgroup/otter.slice/cgroup.procs'):",
         " try: fd=os.open(path,os.O_WRONLY|os.O_CLOEXEC); os.close(fd); print('CGROUP_WRITE_OPEN_ALLOWED'); sys.exit(41)",
         " except OSError: pass",
         "for path in ('/run/systemd/private','/run/dbus/system_bus_socket'):",
         " try:",
         "  sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); sock.settimeout(1); sock.connect(path); sock.close(); print('MANAGER_SOCKET_CONNECTED'); sys.exit(42)",
         " except OSError: pass",
-        "try: manager=subprocess.run(['/usr/bin/systemctl','show','--no-pager','lca-verifier-gate.service'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=3,check=False)",
+        "try: manager=subprocess.run(['/usr/bin/systemctl','show','--no-pager','otter-verifier-gate.service'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=3,check=False)",
         "except (OSError,subprocess.TimeoutExpired): print('MANAGER_PROBE_UNAVAILABLE'); sys.exit(43)",
         "if manager.returncode == 0: print('MANAGER_API_REACHABLE'); sys.exit(44)",
-        "runner_pid=int(os.environ['LCA_E2_RUNNER_PID'])",
+        "runner_pid=int(os.environ['OTTER_E2_RUNNER_PID'])",
         "if runner_pid <= 1: print('RUNNER_IDENTITY_INVALID'); sys.exit(45)",
         "try: os.kill(runner_pid,0)",
         "except OSError: print('RUNNER_IDENTITY_NOT_LIVE'); sys.exit(46)",
@@ -1183,7 +1183,7 @@ def run_escape_denial(profile: dict[str, Any], key: str, tree: str, archive: byt
         "if not memory_denied or not fd_denied: print('SAME_UID_RUNNER_CONTROL_ACCESS_ALLOWED'); sys.exit(47)",
         "print('CGROUP_MANAGER_AND_SAME_UID_RUNNER_ACCESS_DENIED')",
     ))
-    command = f"LCA_E2_RUNNER_PID=$PPID /usr/bin/python3 -c {shlex.quote(source)}"
+    command = f"OTTER_E2_RUNNER_PID=$PPID /usr/bin/python3 -c {shlex.quote(source)}"
     reference = prepare_direct(profile, tree, archive, case_scratch, command)
     try:
         started = reference_call(profile, "start", reference)
@@ -1232,7 +1232,7 @@ def run_gate_restart_while_bound(profile: dict[str, Any], key: str, tree: str, a
             if current_record.get("state") != "running" or current_record.get("binding") != binding:
                 fail("bound-restart-authority-changed-before-fault")
             workload_held, workload_identity = _unit_capture(
-                UNIT, "/lca.slice/lca-verifier.service", binding.get("systemdInvocationID"),
+                UNIT, "/otter.slice/otter-verifier.service", binding.get("systemdInvocationID"),
                 (binding.get("device"), binding.get("inode")),
             )
             if (workload_identity["mainPID"] != binding.get("mainPID") or
@@ -1305,7 +1305,7 @@ def run_stale_identity_does_not_stop_replacement(profile: dict[str, Any], key: s
             if current_record.get("state") != "running" or current_record.get("binding") != old_binding:
                 fail("stale-identity-old-record-changed-before-replacement")
             old_held, old_identity = _unit_capture(
-                UNIT, "/lca.slice/lca-verifier.service", old_binding.get("systemdInvocationID"),
+                UNIT, "/otter.slice/otter-verifier.service", old_binding.get("systemdInvocationID"),
                 (old_binding.get("device"), old_binding.get("inode")),
             )
             if (old_identity["mainPID"] != old_binding.get("mainPID") or
@@ -1318,7 +1318,7 @@ def run_stale_identity_does_not_stop_replacement(profile: dict[str, Any], key: s
             _systemctl_start_replacement(UNIT)
             try:
                 replacement_held, replacement_identity = _wait_for_new_unit(
-                    UNIT, "/lca.slice/lca-verifier.service", old_identity, 8.0,
+                    UNIT, "/otter.slice/otter-verifier.service", old_identity, 8.0,
                 )
             except QualificationFailure:
                 lab_quarantined = True
@@ -1384,7 +1384,7 @@ def run_launch_gap_crash(profile: dict[str, Any], tree: str, archive: bytes, scr
     for attempt in range(1, 9):
         case_scratch = scratch / f"case-launch-gap-{attempt}-{uuid.uuid4().hex}"
         case_scratch.mkdir(mode=0o700)
-        marker = OUTPUT_DIR / f"lca-e2-launch-gap-{uuid.uuid4().hex}.executed"
+        marker = OUTPUT_DIR / f"otter-e2-launch-gap-{uuid.uuid4().hex}.executed"
         command = f"/usr/bin/printf 'BODY_RAN\\n' > {shlex.quote(str(marker))}; /usr/bin/sleep 5"
         request = prepare_request(tree, archive, command, case_scratch)
         prepared = native_call(profile, request)
@@ -1544,7 +1544,7 @@ def verify_tamper_refused(profile_key: str, signed: dict[str, Any], scratch: Pat
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--receipt", help="new absolute secret-free JSON receipt path (default: /tmp/lca-linux-verifier-e2-<id>.json)")
+    parser.add_argument("--receipt", help="new absolute secret-free JSON receipt path (default: /tmp/otter-linux-verifier-e2-<id>.json)")
     parser.add_argument("--keep-success-artifacts", action="store_true", help="retain the harness-owned Git fixture after success")
     parser.add_argument("--scenario", choices=("full", "launch-gap"), default="full",
                         help="run all non-quarantining cases, or run launch-gap last in isolation")
@@ -1553,14 +1553,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    default_receipt = Path(tempfile.gettempdir()) / f"lca-linux-verifier-e2-{uuid.uuid4().hex}.json"
+    default_receipt = Path(tempfile.gettempdir()) / f"otter-linux-verifier-e2-{uuid.uuid4().hex}.json"
     try:
         receipt_path = canonical_receipt_path(args.receipt) if args.receipt else canonical_receipt_path(str(default_receipt))
     except QualificationFailure as error:
-        print(f"lca-linux-verifier-e2: {error.code}", file=sys.stderr)
+        print(f"otter-linux-verifier-e2: {error.code}", file=sys.stderr)
         return 2
     report: dict[str, Any] = {
-        "schema": "lca.linux-verifier.e2.v1",
+        "schema": "otter.linux-verifier.e2.v1",
         "startedAt": utc_now(),
         "scope": "actual fixed Linux verifier gate and single-use native receipt; not whole-agent containment or live-model qualification",
         "qualification": "incomplete",
@@ -1585,7 +1585,7 @@ def main(argv: list[str]) -> int:
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
         if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", boot_id):
             fail("invalid-current-boot-id")
-        scratch = Path(tempfile.mkdtemp(prefix="lca-linux-verifier-e2-", dir="/tmp"))
+        scratch = Path(tempfile.mkdtemp(prefix="otter-linux-verifier-e2-", dir="/tmp"))
         os.chmod(scratch, 0o700)
         report["artifacts"]["scratch"] = str(scratch)
         preflight = native_call(profile, {"protocol": PROTOCOL, "op": "preflight"})
@@ -1624,14 +1624,14 @@ def main(argv: list[str]) -> int:
                                     "forgedVerifierPeerRejectedBeforeNextRunnerHandshake": True})
 
             phase = "benign-success"
-            benign_reference, benign = run_direct_case(profile, public_key, tree, archive, scratch, "benign", "/usr/bin/printf 'LCA_E2_NATIVE_OK\\n'", 0,
-                                                        "LCA_E2_NATIVE_OK\n")
+            benign_reference, benign = run_direct_case(profile, public_key, tree, archive, scratch, "benign", "/usr/bin/printf 'OTTER_E2_NATIVE_OK\\n'", 0,
+                                                        "OTTER_E2_NATIVE_OK\n")
             report["cases"].append({"name": "benign-success", "reference": benign_reference,
                                     "result": {key: value for key, value in benign.items() if key != "proof"}, "proof": benign["proof"]})
 
             phase = "nonzero-result"
-            nonzero_reference, nonzero = run_direct_case(profile, public_key, tree, archive, scratch, "nonzero", "/usr/bin/printf 'LCA_E2_NONZERO\\n'; exit 23", 23,
-                                                          "LCA_E2_NONZERO\n")
+            nonzero_reference, nonzero = run_direct_case(profile, public_key, tree, archive, scratch, "nonzero", "/usr/bin/printf 'OTTER_E2_NONZERO\\n'; exit 23", 23,
+                                                          "OTTER_E2_NONZERO\n")
             report["cases"].append({"name": "nonzero-result", "reference": nonzero_reference,
                                     "result": {key: value for key, value in nonzero.items() if key != "proof"}, "proof": nonzero["proof"]})
 
@@ -1675,7 +1675,7 @@ def main(argv: list[str]) -> int:
         try:
             write_receipt(receipt_path, report)
         except Exception:
-            print("lca-linux-verifier-e2: could-not-write-receipt", file=sys.stderr)
+            print("otter-linux-verifier-e2: could-not-write-receipt", file=sys.stderr)
             return 1
     print(json.dumps({"qualification": report["qualification"], "receipt": str(receipt_path)}, sort_keys=True))
     return 0 if report["qualification"] == "pass" else 2 if report["qualification"] == "blocked" else 1

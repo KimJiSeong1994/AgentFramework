@@ -7,7 +7,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { executionRunDirectory, stateRoot, worktreeKey } from "../src/state/store.ts"
 
-const ENV_KEYS = ["HOME", "XDG_STATE_HOME", "LCA_STATE_HOME"] as const
+const ENV_KEYS = ["HOME", "XDG_STATE_HOME", "OTTER_STATE_HOME"] as const
 let envBefore: Record<typeof ENV_KEYS[number], string | undefined>
 let restoreAccountLookup: (() => void) | undefined
 const cleanups: Array<() => void> = []
@@ -24,7 +24,7 @@ afterEach(() => {
 })
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "lca-execution-authority-"))
+  const root = mkdtempSync(join(tmpdir(), "otter-execution-authority-"))
   const worktree = join(root, "worktree")
   mkdirSync(worktree)
   cleanups.push(() => rmSync(root, { recursive: true, force: true }))
@@ -88,7 +88,7 @@ function stubOSIdentity(home: string, uid = currentUID(), options: AccountLookup
 }
 
 function authorityPath(homedir: string, worktree: string): string {
-  return join(homedir, ".local", "state", "lca", worktreeKey(worktree), "execution-runs")
+  return join(homedir, ".local", "state", "otter", worktreeKey(worktree), "execution-runs")
 }
 
 function createAuthority(homedir: string, worktree: string): string {
@@ -98,7 +98,7 @@ function createAuthority(homedir: string, worktree: string): string {
 }
 
 function envSnapshot(): void {
-  envBefore = { HOME: process.env.HOME, XDG_STATE_HOME: process.env.XDG_STATE_HOME, LCA_STATE_HOME: process.env.LCA_STATE_HOME }
+  envBefore = { HOME: process.env.HOME, XDG_STATE_HOME: process.env.XDG_STATE_HOME, OTTER_STATE_HOME: process.env.OTTER_STATE_HOME }
 }
 
 test("execution authority uses OS identity and is independent of HOME and state-root overrides", () => {
@@ -111,11 +111,11 @@ test("execution authority uses OS identity and is independent of HOME and state-
   for (const values of [
     { HOME: join(f.root, "home-one"), XDG_STATE_HOME: join(f.root, "xdg-one") },
     { HOME: join(f.root, "home-two") },
-    { HOME: join(f.root, "home-three"), XDG_STATE_HOME: join(f.root, "xdg-three"), LCA_STATE_HOME: join(f.root, "lca-three") },
+    { HOME: join(f.root, "home-three"), XDG_STATE_HOME: join(f.root, "xdg-three"), OTTER_STATE_HOME: join(f.root, "otter-three") },
   ]) {
     setStateEnv(values)
     expect(executionRunDirectory(f.worktree)).toBe(realpathSync(expected))
-    expect(stateRoot(f.worktree)).not.toBe(join(osHome, ".local", "state", "lca", worktreeKey(f.worktree)))
+    expect(stateRoot(f.worktree)).not.toBe(join(osHome, ".local", "state", "otter", worktreeKey(f.worktree)))
   }
 })
 
@@ -126,7 +126,7 @@ test("account identity is revalidated for every directory resolution", () => {
   const secondHome = join(f.root, "second-os-home")
   mkdirSync(firstHome)
   mkdirSync(secondHome)
-  setStateEnv({ LCA_STATE_HOME: join(f.root, "legacy-state") })
+  setStateEnv({ OTTER_STATE_HOME: join(f.root, "legacy-state") })
 
   stubOSIdentity(firstHome)
   const first = executionRunDirectory(f.worktree)
@@ -302,7 +302,7 @@ test("an existing authority owned by another UID is refused without mutation", (
   const record = join(selected, "state.json")
   writeFileSync(record, "preserved authority")
   stubOSIdentity(osHome)
-  setStateEnv({ LCA_STATE_HOME: join(f.root, "legacy-state") })
+  setStateEnv({ OTTER_STATE_HOME: join(f.root, "legacy-state") })
   const worktreeStat = fs.statSync(realpathSync(f.worktree))
   const homeStat = fs.statSync(realpathSync(osHome))
   const authorityStat = fs.statSync(realpathSync(selected))
@@ -327,7 +327,7 @@ test("missing authority resolves without writes and worktree-contained authority
   stubOSIdentity(missingHome)
   setStateEnv({ XDG_STATE_HOME: join(f.root, "legacy-state") })
   const missing = authorityPath(missingHome, f.worktree)
-  expect(executionRunDirectory(f.worktree)).toBe(join(realpathSync(missingHome), ".local", "state", "lca", worktreeKey(f.worktree), "execution-runs"))
+  expect(executionRunDirectory(f.worktree)).toBe(join(realpathSync(missingHome), ".local", "state", "otter", worktreeKey(f.worktree), "execution-runs"))
   expect(() => lstatSync(missing)).toThrow()
   expect(readdirSync(missingHome)).toEqual([])
   expect(readdirSync(f.root).sort()).toEqual(["missing-home", "worktree"])
@@ -343,13 +343,13 @@ test("missing authority beneath a symlinked ancestor is checked against its cano
   envSnapshot()
   const f = fixture()
   const osHome = join(f.root, "os-home")
-  const authorityParent = join(osHome, ".local", "state", "lca")
+  const authorityParent = join(osHome, ".local", "state", "otter")
   const inside = join(f.worktree, "aliased-authority")
   mkdirSync(authorityParent, { recursive: true })
   mkdirSync(inside)
   symlinkSync(inside, join(authorityParent, worktreeKey(f.worktree)), "dir")
   stubOSIdentity(osHome)
-  setStateEnv({ LCA_STATE_HOME: join(f.root, "legacy-state") })
+  setStateEnv({ OTTER_STATE_HOME: join(f.root, "legacy-state") })
 
   expect(() => executionRunDirectory(f.worktree)).toThrow("resolves inside the worktree")
   expect(readdirSync(inside)).toEqual([])
@@ -362,7 +362,7 @@ test("existing distinct legacy directories and dangling links are refused and pr
     const osHome = join(f.root, "os-home")
     const selected = createAuthority(osHome, f.worktree)
     const legacyBase = join(f.root, "configured-state")
-    setStateEnv({ LCA_STATE_HOME: legacyBase })
+    setStateEnv({ OTTER_STATE_HOME: legacyBase })
     stubOSIdentity(osHome)
     const legacy = join(stateRoot(f.worktree), "execution-runs")
     mkdirSync(join(legacy, ".."), { recursive: true })
@@ -409,7 +409,7 @@ test("legacy inspection errors other than ENOENT are not treated as absence", ()
   createAuthority(osHome, f.worktree)
   const invalidLegacyParent = join(f.root, "legacy-parent-file")
   writeFileSync(invalidLegacyParent, "not a directory")
-  setStateEnv({ LCA_STATE_HOME: invalidLegacyParent })
+  setStateEnv({ OTTER_STATE_HOME: invalidLegacyParent })
   stubOSIdentity(osHome)
 
   expect(() => executionRunDirectory(f.worktree)).toThrow("cannot inspect the configured legacy execution authority")
@@ -422,7 +422,7 @@ test("existing non-directory and dangling authority entries fail closed", () => 
   const candidate = authorityPath(osHome, f.worktree)
   mkdirSync(join(candidate, ".."), { recursive: true })
   stubOSIdentity(osHome)
-  setStateEnv({ LCA_STATE_HOME: join(f.root, "legacy-state") })
+  setStateEnv({ OTTER_STATE_HOME: join(f.root, "legacy-state") })
 
   writeFileSync(candidate, "not a directory")
   expect(() => executionRunDirectory(f.worktree)).toThrow("not a directory")
@@ -445,7 +445,7 @@ test("missing OS homes, non-directory homes, and malformed home metadata fail cl
   const f = fixture()
   const missingHome = join(f.root, "missing-home")
   stubOSIdentity(missingHome)
-  setStateEnv({ LCA_STATE_HOME: join(f.root, "legacy-state") })
+  setStateEnv({ OTTER_STATE_HOME: join(f.root, "legacy-state") })
   expect(() => executionRunDirectory(f.worktree)).toThrow("operating-system home does not exist")
 
   const fileHome = join(f.root, "file-home")
@@ -461,10 +461,10 @@ test("dangling symlink and non-directory ancestors cannot be treated as absent a
   envSnapshot()
   const f = fixture()
   const osHome = join(f.root, "os-home")
-  const keyPath = join(osHome, ".local", "state", "lca", worktreeKey(f.worktree))
+  const keyPath = join(osHome, ".local", "state", "otter", worktreeKey(f.worktree))
   mkdirSync(join(keyPath, ".."), { recursive: true })
   stubOSIdentity(osHome)
-  setStateEnv({ LCA_STATE_HOME: join(f.root, "legacy-state") })
+  setStateEnv({ OTTER_STATE_HOME: join(f.root, "legacy-state") })
 
   const danglingTarget = join(f.root, "missing-authority-parent")
   symlinkSync(danglingTarget, keyPath, "dir")
@@ -482,7 +482,7 @@ test("missing and non-directory worktrees cannot acquire an authority namespace"
   const osHome = join(f.root, "os-home")
   mkdirSync(osHome)
   stubOSIdentity(osHome)
-  setStateEnv({ LCA_STATE_HOME: join(f.root, "legacy-state") })
+  setStateEnv({ OTTER_STATE_HOME: join(f.root, "legacy-state") })
   expect(() => executionRunDirectory(join(f.root, "missing-worktree"))).toThrow("cannot canonicalize")
   const file = join(f.root, "worktree-file")
   writeFileSync(file, "preserved worktree candidate")

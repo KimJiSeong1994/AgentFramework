@@ -14,8 +14,8 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path"
 import { stateBase, stateRoot } from "../state/store.ts"
 import { safeGit as git, safeGitBuffer as gitBuffer, safeGitBufferSync, safeGitSync } from "./git-boundary.ts"
 
-/** Always excluded: the plugin's handoffs (control-plane state lives outside the worktree; ".lca/state" kept for old layouts). */
-export const ALWAYS_EXCLUDED = [".lca/state", ".lca/handoffs"]
+/** Always excluded: the plugin's handoffs (control-plane state lives outside the worktree; ".otter/state" kept for old layouts). */
+export const ALWAYS_EXCLUDED = [".otter/state", ".otter/handoffs"]
 
 /** Turn a name/glob into git pathspecs that exclude it at any depth (top level and nested). */
 export function excludePathspecs(patterns: string[]): string[] {
@@ -60,7 +60,7 @@ export async function createSnapshotStore(worktree: string, durableDirectory?: s
     throw new Error("snapshot store must be outside the worktree")
   }
   if (requestedDirectory) assertNoStateSymlinks(worktree, requestedDirectory)
-  const dir = requestedDirectory ? ensureDirectory(requestedDirectory, root) : realpathSync.native(mkdtempSync(join(tmpdir(), "lca-snap-")))
+  const dir = requestedDirectory ? ensureDirectory(requestedDirectory, root) : realpathSync.native(mkdtempSync(join(tmpdir(), "otter-snap-")))
   const durable = requestedDirectory !== undefined
   if (durable && (isWithin(root, dir) || isWithin(dir, root))) throw new Error("snapshot store must be outside the worktree")
   try {
@@ -219,7 +219,7 @@ export async function createSnapshotStore(worktree: string, durableDirectory?: s
       if (durable) assertNoStateSymlinks(worktree, dir)
       assertPrivateDirectory(dir)
       assertPrivateDirectory(env.GIT_OBJECT_DIRECTORY!)
-      const exportDir = mkdtempSync(join(tmpdir(), "lca-archive-"))
+      const exportDir = mkdtempSync(join(tmpdir(), "otter-archive-"))
       try {
         const initialized = await git(worktree, ["init", "--bare", "--template=", exportDir])
         if (initialized === null) return null
@@ -441,7 +441,7 @@ function assertPrivateDirectory(path: string): void {
 }
 
 function safeControlDirectories(root: string): boolean {
-  for (const path of [".lca", ...ALWAYS_EXCLUDED]) {
+  for (const path of [".otter", ...ALWAYS_EXCLUDED]) {
     const entry = lstatOrNull(join(root, path))
     if (entry && (!entry.isDirectory() || entry.isSymbolicLink())) return false
   }

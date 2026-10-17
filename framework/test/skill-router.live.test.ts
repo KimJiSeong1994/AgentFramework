@@ -12,8 +12,8 @@ import type { HookDeps } from "../src/hooks/types.ts"
 import { routingLogPath } from "../src/telemetry/routing.ts"
 
 // Opt-in: requires the actual OpenCode host and OpenJev, without starting or changing either.
-const host = process.env.LCA_ROUTER_LIVE_HOST
-const endpoint = process.env.LCA_ROUTER_LIVE_ENDPOINT
+const host = process.env.OTTER_ROUTER_LIVE_HOST
+const endpoint = process.env.OTTER_ROUTER_LIVE_ENDPOINT
 
 test.skipIf(!host || !endpoint)("real host catalog -> live OpenJev -> applied optional advice", async () => {
   const root = resolve(import.meta.dir, "../..")
@@ -37,8 +37,8 @@ test.skipIf(!host || !endpoint)("real host catalog -> live OpenJev -> applied op
   const sessionID = `router-live-${crypto.randomUUID()}`
   const part: TextPart = { type: "text", id: "part-live", messageID: "message-live", sessionID, text }
   await createChatMessageHook(deps)({ sessionID, agent: "main" }, { parts: [part], message: { id: part.messageID } as UserMessage })
-  console.log("LIVE_APPLIED_ADVICE", JSON.stringify({ applied: part.text.includes("<lca-skill-advice>"), log: logs.at(-1) }))
-  expect(part.text).toContain("<lca-skill-advice>")
+  console.log("LIVE_APPLIED_ADVICE", JSON.stringify({ applied: part.text.includes("<otter-skill-advice>"), log: logs.at(-1) }))
+  expect(part.text).toContain("<otter-skill-advice>")
   expect(readModeState(root, sessionID)).toEqual(EMPTY_MODE)
   const events = readFileSync(routingLogPath(root, sessionID), "utf8").trim().split("\n").map((line) => JSON.parse(line))
   expect(events.map((event) => event.event)).toEqual(["decision", "advice_applied"])

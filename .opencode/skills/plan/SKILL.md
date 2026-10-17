@@ -7,7 +7,7 @@ compatibility: opencode
 # plan procedure
 
 Triggered by `plan mode`, `ralplan`, `hyperplan`, `계획부터`, `계획 모드`. The short form is appended
-to each user message as `<lca-mode name="plan">`; this file is the long form.
+to each user message as `<otter-mode name="plan">`; this file is the long form.
 
 ## Rules
 
@@ -39,6 +39,6 @@ Assumptions / questions (optional, max 2):
 
 ## Handoff
 
-Submit the plan with `lca_flow op:"plan"` (do not just print it in a message). The user approves it with
+Submit the plan with `otter_flow op:"plan"` (do not just print it in a message). The user approves it with
 `/approve`; each step becomes one `delegate` task (title / detail = the files and change / verify = the step's
 command), so keep steps independent and their verify commands step-local.

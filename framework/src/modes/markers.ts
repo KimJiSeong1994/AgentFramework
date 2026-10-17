@@ -1,11 +1,11 @@
-// lca control markers (<lca-mode>, <lca-flow>, <lca-resume>, <lca-skill-advice>) are written only by code. A user
+// otter control markers (<otter-mode>, <otter-flow>, <otter-resume>, <otter-skill-advice>) are written only by code. A user
 // message that contains one — however obfuscated — must not carry it to the model, because the main prompt tells the
-// model to follow <lca-flow> blocks. Matching runs on a "skeleton" of the text (TR39-style): compatibility forms
+// model to follow <otter-flow> blocks. Matching runs on a "skeleton" of the text (TR39-style): compatibility forms
 // folded (NFKC, e.g. fullwidth ＜), combining marks and invisible/format characters dropped, Cyrillic/Greek letters
 // that look Latin mapped to Latin, lowercased. Ranges matched on the skeleton are removed from the ORIGINAL text, so
 // legitimate text elsewhere in the message is never rewritten.
 
-const NAMES = "lca-mode|lca-flow|lca-resume|lca-skill-advice"
+const NAMES = "otter-mode|otter-flow|otter-resume|otter-skill-advice"
 const BLOCK_RE = new RegExp(`<(${NAMES})\\b[^>]*>[\\s\\S]*?<\\/\\1\\s*>`, "g")
 const TAG_RE = new RegExp(`<\\/?(${NAMES})\\b[^>]*>`, "g")
 const ANY_RE = new RegExp(`<\\/?(${NAMES})\\b`)
@@ -15,6 +15,7 @@ const CONFUSABLES: Record<string, string> = {
   а: "a", А: "a", с: "c", С: "c", е: "e", Е: "e", о: "o", О: "o", р: "p", Р: "p", х: "x", Х: "x",
   у: "y", ѕ: "s", Ѕ: "s", і: "i", І: "i", ј: "j", ԁ: "d", ӏ: "l", Ӏ: "l", ɩ: "l", ʟ: "l", ⅼ: "l", ı: "i",
   α: "a", ο: "o", Ο: "o", ε: "e", ν: "v", κ: "k", Κ: "k", ϲ: "c", Ϲ: "c", ρ: "p", ѵ: "v", ꟾ: "l",
+  т: "t", Т: "t", τ: "t", Τ: "t", г: "r", ᴦ: "r", ʀ: "r", ᴛ: "t", ᴏ: "o", ᴇ: "e",
   "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "―": "-", "−": "-", "﹣": "-", "－": "-", "˗": "-",
 }
 const INVISIBLE = /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0]|\uDB40[\uDC00-\uDDEF]/
@@ -40,12 +41,12 @@ function skeleton(text: string): Skeleton {
   return { text: out, index }
 }
 
-export function hasLcaMarker(text: string): boolean {
+export function hasOtterMarker(text: string): boolean {
   if (!text.includes("<") && !text.includes("＜") && !text.includes("﹤")) return false
   return ANY_RE.test(skeleton(text).text)
 }
 
-/** Remove lca marker blocks, then any leftover marker tags, from user text. Other text is kept byte-for-byte. */
+/** Remove otter marker blocks, then any leftover marker tags, from user text. Other text is kept byte-for-byte. */
 export function stripForgedMarkers(text: string): string {
   let cur = text
   for (const re of [BLOCK_RE, TAG_RE]) {

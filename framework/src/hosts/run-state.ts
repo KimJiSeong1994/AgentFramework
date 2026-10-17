@@ -175,7 +175,7 @@ const verifierRefShape = (value: unknown): value is VerificationReference => obj
   typeof value.inputDigest === "string" && /^[a-f0-9]{64}$/.test(value.inputDigest) && timestamp(value.deadlineAt) &&
   integer(value.maxOutputChars) && value.maxOutputChars <= 65536 &&
   optional(value, "unit", text) && optional(value, "bootID", text) && !("cgroupInode" in value) &&
-  (value.profile === "legacy-unowned" || (value.unit === "lca-verifier.service" && text(value.bootID)))
+  (value.profile === "legacy-unowned" || (value.unit === "otter-verifier.service" && text(value.bootID)))
 const verificationShape = (value: unknown): value is VerificationResult => object(value) && profileShape(value.profile) &&
   (value.parentExit === null || Number.isSafeInteger(value.parentExit)) && typeof value.timedOut === "boolean" &&
   typeof value.cancelled === "boolean" && typeof value.isolationEstablished === "boolean" &&

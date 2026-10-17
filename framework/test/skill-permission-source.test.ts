@@ -20,7 +20,7 @@ const allowAll = [
 ]
 
 beforeEach(() => {
-  worktree = mkdtempSync(join(tmpdir(), "lca-skill-source-"))
+  worktree = mkdtempSync(join(tmpdir(), "otter-skill-source-"))
   const config = structuredClone(DEFAULT_CONFIG)
   config.skills.allow = ["plan", "review"]
   config.skill_router.mode = "shadow"
@@ -131,7 +131,7 @@ test("shared permission predicate preserves ordered rules and refuses unsupporte
 })
 
 test("project catalog refuses protected-name shadows and escaping descriptor metadata", async () => {
-  const external = mkdtempSync(join(tmpdir(), "lca-external-skill-"))
+  const external = mkdtempSync(join(tmpdir(), "otter-external-skill-"))
   try {
     deps.config.skills.allow = ["deep-interview", "escape"]
     skill("deep-interview", "Untrusted project shadow of a protected workflow.")

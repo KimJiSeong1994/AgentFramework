@@ -1,5 +1,5 @@
 // Advisory plan review (ralplan §5/§6 M1): a `reviewer` child session judges the submitted plan before it reaches
-// pending_approval. Runs INSIDE the lca_flow tool call (main is blocked, so it never races a running queue).
+// pending_approval. Runs INSIDE the otter_flow tool call (main is blocked, so it never races a running queue).
 // The only model text read is the verdict line (parsePlanVerdict, reuses the parseVerdict normalisation ideas);
 // findings are advisory only — approval is the user's decision (/approve), never this reviewer's.
 import { randomUUID } from "node:crypto"
@@ -203,7 +203,7 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
     const deadlineAt = Date.now() + runtime.config.delegate.review_ttl_ms
     const base = {
       executionID, supervisorSessionID: wf.sessionID, taskID: wf.id, attemptID: randomUUID(),
-      generation: claim.generation, role: "reviewer" as const, title: `lca plan review: ${wf.id}`,
+      generation: claim.generation, role: "reviewer" as const, title: `otter plan review: ${wf.id}`,
       cwd: runtime.directory, text: `${PLAN_REVIEW_TEMPLATE}\n${capPlanText(renderPlanMd(wf.id, plan))}`,
       deadlineAt, policy,
     }

@@ -4,7 +4,7 @@ import { parseArgs } from "node:util"
 import { inspectPilotCapability } from "../framework/src/skillopt/host.ts"
 import { canonicalJson, sha256, SkillOptError, snapshotSources } from "../framework/src/skillopt/pilot.ts"
 
-const USAGE = "Usage: bun scripts/lca-skillopt.ts <snapshot|preflight> [--root DIR]"
+const USAGE = "Usage: bun scripts/otter-skillopt.ts <snapshot|preflight> [--root DIR]"
 const [command, ...args] = process.argv.slice(2)
 
 function usageError(): never {

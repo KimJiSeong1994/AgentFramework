@@ -59,7 +59,7 @@ def make_reference() -> dict[str, object]:
         "inputDigest": hashlib.sha256(tree.encode("ascii")).hexdigest(),
         "deadlineAt": 1_900_000_000_000,
         "maxOutputChars": 256,
-        "unit": "lca-verifier.service",
+        "unit": "otter-verifier.service",
         "bootID": "d2c6325f-8c1b-4633-9669-b881d0c2b364",
     }
 
@@ -377,7 +377,7 @@ class JournalAdmissionTests(unittest.TestCase):
 Storage=volatile
 [Journal]
 Storage=volatile
-# /etc/systemd/journald.conf.d/lca-verifier.conf
+# /etc/systemd/journald.conf.d/otter-verifier.conf
 [Journal]
 Storage=persistent
 """
@@ -386,13 +386,13 @@ Storage=persistent
         self.assertFalse(gate._journal_storage_is_persistent(valid + "# /etc/systemd/journald.conf.d/90-override.conf\n[Journal]\nStorage=persistent\n"))
         self.assertTrue(gate._journal_storage_is_persistent(valid + "# /etc/systemd/journald.conf.d/90-override.conf\n[Other]\nStorage=volatile\n"))
         self.assertFalse(gate._journal_storage_is_persistent(
-            "# /etc/systemd/journald.conf.d/lca-verifier.conf\n[Journal]\nStorage=volatile\n"
+            "# /etc/systemd/journald.conf.d/otter-verifier.conf\n[Journal]\nStorage=volatile\n"
         ))
         self.assertFalse(gate._journal_storage_is_persistent(
             "# /etc/systemd/journald.conf\n[Journal]\nStorage=persistent\n"
         ))
         self.assertFalse(gate._journal_storage_is_persistent(
-            "# /etc/systemd/journald.conf.d/lca-verifier.conf\n[Journal]\nStorage=\n"
+            "# /etc/systemd/journald.conf.d/otter-verifier.conf\n[Journal]\nStorage=\n"
         ))
 
     def test_persistent_and_default_queries_require_current_boot_pid_one_json(self) -> None:
@@ -669,7 +669,7 @@ class ProfileEpochTests(unittest.TestCase):
             "files": {path: "a" * 64 for path in gate.REQUIRED_PROFILE_FILES},
         }
         controller = Mock(pw_uid=1000, pw_gid=1000, pw_name="controller", pw_shell="/bin/bash")
-        verifier = Mock(pw_uid=1001, pw_gid=1001, pw_name="lca-verifier", pw_shell="/usr/sbin/nologin")
+        verifier = Mock(pw_uid=1001, pw_gid=1001, pw_name="otter-verifier", pw_shell="/usr/sbin/nologin")
         with patch.object(gate, "_safe_path"), \
                 patch.object(gate, "_read_secure_file", return_value=json.dumps(profile).encode("utf-8")), \
                 patch.object(gate, "_check_profile_files"), \
@@ -690,7 +690,7 @@ class InstallerAdmissionTests(unittest.TestCase):
             polkit_dir = os.path.join(directory, "polkit")
             sudoers_dir = os.path.join(directory, "sudoers")
             journald_dir = os.path.join(directory, "journald")
-            journal_path = os.path.join(journald_dir, "lca-verifier.conf")
+            journal_path = os.path.join(journald_dir, "otter-verifier.conf")
             for path in (helper_dir, systemd_dir, polkit_dir, sudoers_dir, journald_dir):
                 os.mkdir(path)
             source_paths = (
@@ -700,16 +700,16 @@ class InstallerAdmissionTests(unittest.TestCase):
                 os.path.join(systemd_dir, install.UNIT),
                 os.path.join(systemd_dir, install.GATE_UNIT),
                 os.path.join(systemd_dir, install.SLICE_UNIT),
-                os.path.join(polkit_dir, "90-lca-verifier.rules"),
-                os.path.join(sudoers_dir, "00-lca-verifier-deny"),
+                os.path.join(polkit_dir, "90-otter-verifier.rules"),
+                os.path.join(sudoers_dir, "00-otter-verifier-deny"),
                 journal_path,
             )
             for path in source_paths:
                 Path(path).write_bytes(b"fixed installation input\n")
             with patch.object(install, "HELPER_DIR", helper_dir), \
                     patch.object(install, "SYSTEMD_DIR", systemd_dir), \
-                    patch.object(install, "POLKIT_RULE", os.path.join(polkit_dir, "90-lca-verifier.rules")), \
-                    patch.object(install, "SUDOERS_DROPIN", os.path.join(sudoers_dir, "00-lca-verifier-deny")), \
+                    patch.object(install, "POLKIT_RULE", os.path.join(polkit_dir, "90-otter-verifier.rules")), \
+                    patch.object(install, "SUDOERS_DROPIN", os.path.join(sudoers_dir, "00-otter-verifier-deny")), \
                     patch.object(install, "JOURNALD_DROPIN", journal_path):
                 hashes = install._profile_files()
             self.assertEqual(hashes[journal_path], hashlib.sha256(b"fixed installation input\n").hexdigest())
@@ -934,7 +934,7 @@ class CryptoTransportTests(unittest.TestCase):
     def test_regular_file_signing_and_verification_reject_tampering(self) -> None:
         # Bypass privilege predicates ONLY in this isolated crypto unit test.
         # This ephemeral key is never installed or accepted by native admission.
-        with tempfile.TemporaryDirectory(prefix="lca-test-crypto-") as directory:
+        with tempfile.TemporaryDirectory(prefix="otter-test-crypto-") as directory:
             key = Path(directory) / "test-private.pem"
             subprocess.run([gate.OPENSSL, "genpkey", "-algorithm", "ED25519", "-out", str(key)],
                            check=True, capture_output=True)

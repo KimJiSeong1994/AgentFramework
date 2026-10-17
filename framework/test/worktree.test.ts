@@ -247,16 +247,16 @@ describe("task worktree", () => {
   })
 
   test("recovery state is rejected before creation when the configured state base is inside the repository", async () => {
-    const oldLca = process.env.LCA_STATE_HOME
+    const oldLca = process.env.OTTER_STATE_HOME
     const oldXdg = process.env.XDG_STATE_HOME
-    delete process.env.LCA_STATE_HOME
+    delete process.env.OTTER_STATE_HOME
     process.env.XDG_STATE_HOME = join(wt.worktree, ".inside-state")
     try {
       await expect(createTaskWorktree(wt.worktree, S, "inside-state", [])).rejects.toThrow(/outside the main worktree/)
       expect(existsSync(join(wt.worktree, ".inside-state"))).toBe(false)
     } finally {
-      if (oldLca === undefined) delete process.env.LCA_STATE_HOME
-      else process.env.LCA_STATE_HOME = oldLca
+      if (oldLca === undefined) delete process.env.OTTER_STATE_HOME
+      else process.env.OTTER_STATE_HOME = oldLca
       if (oldXdg === undefined) delete process.env.XDG_STATE_HOME
       else process.env.XDG_STATE_HOME = oldXdg
     }
@@ -306,11 +306,11 @@ describe("task worktree", () => {
   test("failed worktree snapshot and cancellation at the final guard never apply a patch", async () => {
     const t = (await createTaskWorktree(wt.worktree, S, "snapshot-fault", []))!
     writeFileSync(join(t.path, "lib.py"), "X = 10\n")
-    symlinkSync(wt.stateHome, join(t.path, ".lca"))
+    symlinkSync(wt.stateHome, join(t.path, ".otter"))
     const failed = await t.merge([])
     expect(failed).toMatchObject({ ok: false, reason: "could not snapshot the worktree" })
     expect(read(wt.worktree, "lib.py")).toBe("X = 1\n")
-    unlinkSync(join(t.path, ".lca"))
+    unlinkSync(join(t.path, ".otter"))
     let applied = false
     const cancelled = await t.merge([], { guard: () => false, applied: () => { applied = true } })
     expect(cancelled).toMatchObject({ ok: false, reason: "task cancelled before merge" })
@@ -345,18 +345,18 @@ describe("task worktree", () => {
   })
 
   test("tracked legacy handoff paths share the verifier and merge exclusion set", async () => {
-    mkdirSync(join(wt.worktree, ".lca", "handoffs"), { recursive: true })
-    writeFileSync(join(wt.worktree, ".lca", "handoffs", "legacy.txt"), "previous\n")
-    g(wt.worktree, "add", "-f", ".lca/handoffs/legacy.txt")
+    mkdirSync(join(wt.worktree, ".otter", "handoffs"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".otter", "handoffs", "legacy.txt"), "previous\n")
+    g(wt.worktree, "add", "-f", ".otter/handoffs/legacy.txt")
     g(wt.worktree, "commit", "-m", "tracked historical handoff")
     const t = (await createTaskWorktree(wt.worktree, S, "excluded-match", []))!
     writeFileSync(join(t.path, "lib.py"), "X = 2\n")
-    writeFileSync(join(t.path, ".lca", "handoffs", "legacy.txt"), "unverified handoff\n")
+    writeFileSync(join(t.path, ".otter", "handoffs", "legacy.txt"), "unverified handoff\n")
     const store = (await createSnapshotStore(t.path))!
     const verified = (await store.snapshot())!
     expect(await t.merge([], { guard: () => true, applied: () => {} }, verified.tree)).toMatchObject({ ok: true, files: ["lib.py"] })
     expect(read(wt.worktree, "lib.py")).toBe("X = 2\n")
-    expect(read(wt.worktree, ".lca/handoffs/legacy.txt")).toBe("previous\n")
+    expect(read(wt.worktree, ".otter/handoffs/legacy.txt")).toBe("previous\n")
     store.dispose()
     await t.remove()
   })
@@ -577,11 +577,11 @@ describe("queue with delegate.worktree", () => {
       console.info("blocked/not-run: Linux native verifier qualification is not applicable on this platform")
       return
     }
-    if (process.env.LCA_RUN_LINUX_QUALIFICATION !== "1") {
-      console.info("blocked/not-run: set LCA_RUN_LINUX_QUALIFICATION=1 in the isolated Linux systemd verifier guest")
+    if (process.env.OTTER_RUN_LINUX_QUALIFICATION !== "1") {
+      console.info("blocked/not-run: set OTTER_RUN_LINUX_QUALIFICATION=1 in the isolated Linux systemd verifier guest")
       return
     }
-    const driver = join(import.meta.dir, "../../scripts/lca-linux-verifier-queue.ts")
+    const driver = join(import.meta.dir, "../../scripts/otter-linux-verifier-queue.ts")
     const receiptPath = join(wt.stateHome, `linux-verifier-${process.pid}-${Date.now()}.json`)
     const result = spawnSync(process.execPath, [driver, "--scenario", "success", "--receipt", receiptPath], {
       cwd: join(import.meta.dir, "../.."), env: { ...process.env }, encoding: "utf8", timeout: 120_000, maxBuffer: 4 * 1024 * 1024,
@@ -590,7 +590,7 @@ describe("queue with delegate.worktree", () => {
     expect(result.status).toBe(0)
     const receipt = JSON.parse(readFileSync(receiptPath, "utf8"))
     expect(receipt).toMatchObject({
-      schema: "lca.linux-verifier.queue-e2.v1",
+      schema: "otter.linux-verifier.queue-e2.v1",
       scenario: "success",
       qualification: "pass",
       observation: { queue: { done: 1, failed: 0 }, authenticatedReceiptCount: 1,
@@ -660,7 +660,7 @@ describe("queue with delegate.worktree", () => {
     expect(t2!.status).toBe("failed")
     expect(t2!.blocked).toMatch(/does not apply/)
     expect(t2!.error).toMatch(/not merged/)
-    const patch = join(wt.worktree, ".lca", "handoffs", S, "task-2.patch")
+    const patch = join(wt.worktree, ".otter", "handoffs", S, "task-2.patch")
     expect(existsSync(patch)).toBe(true)
     expect(readFileSync(patch, "utf8")).toContain("+X = 2")
     expect(read(join(worktreeRoot(wt.worktree), S, "t1"), "junk.py")).toBe("BAD = 1\n")

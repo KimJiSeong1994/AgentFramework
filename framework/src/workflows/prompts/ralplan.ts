@@ -1,4 +1,4 @@
-// Ralplan stage prompts (P6a S3): planner, revision, architect, critic. LCA-authored text; the only upstream influence
+// Ralplan stage prompts (P6a S3): planner, revision, architect, critic. Otter-authored text; the only upstream influence
 // is the consensus shape recorded in ../ATTRIBUTION (planner -> independent first-pass review -> join gate -> revision,
 // five-opener cap). The prompts hold no executable instructions, tool grants or skill bodies: tools come from the
 // runtime policy snapshot, and the model returns typed stage events that code validates and records. Text supplied after

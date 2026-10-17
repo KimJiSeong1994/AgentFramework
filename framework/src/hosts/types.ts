@@ -1,4 +1,4 @@
-import type { LcaConfig, ModelSelection } from "../config.ts"
+import type { OtterConfig, ModelSelection } from "../config.ts"
 import type { CheckRun } from "../data/check.ts"
 import type { SkillTaskFactInput, SkillVerificationFactInput } from "../telemetry/skills.ts"
 import type { ExecutionRunStore } from "./run-state.ts"
@@ -16,7 +16,7 @@ export type ComboRoute = Readonly<{ engine: ComboEngine; model: string }>
 /** role -> route; only roles that differ from the anchor; keys are ExecutionRole */
 export type ComboRoutes = Readonly<Partial<Record<ExecutionRole, ComboRoute>>>
 export type WorkflowReadOnlyRole = (typeof WORKFLOW_READ_ONLY_ROLES)[number]
-export const EXECUTION_TOOL_NAMES = Object.freeze(["read", "glob", "grep", "list", "bash", "write", "edit", "patch", "apply_patch", "multiedit", "webfetch", "skill", "todowrite", "todoread", "delegate", "lca_flow", "db_query", "schema_lookup", "task"] as const)
+export const EXECUTION_TOOL_NAMES = Object.freeze(["read", "glob", "grep", "list", "bash", "write", "edit", "patch", "apply_patch", "multiedit", "webfetch", "skill", "todowrite", "todoread", "delegate", "otter_flow", "db_query", "schema_lookup", "task"] as const)
 
 const CLI_WRITE_CAPABILITY = Object.freeze({
   main: false, worker: true, reviewer: false,
@@ -58,7 +58,7 @@ export type ExecutionPolicySnapshot = {
   maxOutputTokens: number
   tools: ExecutionToolPolicy
   system: readonly string[]
-  /** LCA-authored native input outside the JSON prompt; included in policy identity and input estimates. */
+  /** Otter-authored native input outside the JSON prompt; included in policy identity and input estimates. */
   nativeContext?: Readonly<{ identity: string; instructions: string }>
   thinking: "inherit" | "enabled" | "disabled"
 }
@@ -192,7 +192,7 @@ export class LinuxAdmissionRefused extends Error {
       throw new TypeError("invalid Linux admission refusal")
     }
     const bounded = [...new Set(reasons)]
-    super(`lca: linux admission refused (${phase}): ${bounded.join(",")}`)
+    super(`otter: linux admission refused (${phase}): ${bounded.join(",")}`)
     this.name = "LinuxAdmissionRefused"
     this.phase = phase
     this.reasons = Object.freeze(bounded)
@@ -217,7 +217,7 @@ export type ExecutionRuntime = {
   directory: string
   worktree: string
   stateRoot: string
-  config: Readonly<LcaConfig>
+  config: Readonly<OtterConfig>
   log: (message: string, safeFields?: Record<string, unknown>) => void
   host: ExecutionHost
   verificationProfile: VerificationProfile

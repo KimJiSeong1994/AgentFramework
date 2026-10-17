@@ -22,7 +22,7 @@ type CallProof = Readonly<{
 
 const proofs = new Map<string, CallProof>()
 const key = (sessionID: string, callID: string) => `${sessionID}\u0000${callID}`
-const referenceRelativePath = ".agents/skills/lca-native-contract/reference.txt"
+const referenceRelativePath = ".agents/skills/otter-native-contract/reference.txt"
 const isRecord = (value: unknown): value is RecordValue => value !== null && typeof value === "object" && !Array.isArray(value)
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex")
 function assertReadArgs(args: RecordValue, directory: string): void {
@@ -37,12 +37,12 @@ function assertReadArgs(args: RecordValue, directory: string): void {
 }
 
 function requireCondition(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(`native LCA product qualification observer: ${message}`)
+  if (!condition) throw new Error(`native Otter product qualification observer: ${message}`)
 }
 
 function configuredPrompts(): Record<string, string> {
-  const raw = process.env.LCA_NATIVE_PRODUCT_PROMPTS
-  if (!raw) throw new Error("LCA_NATIVE_PRODUCT_PROMPTS is not configured")
+  const raw = process.env.OTTER_NATIVE_PRODUCT_PROMPTS
+  if (!raw) throw new Error("OTTER_NATIVE_PRODUCT_PROMPTS is not configured")
   const value: unknown = JSON.parse(raw)
   requireCondition(isRecord(value), "prompt map is not an object")
   requireCondition(typeof value.common === "string" && typeof value.changed === "string", "common and changed prompts are required")
@@ -50,8 +50,8 @@ function configuredPrompts(): Record<string, string> {
 }
 
 async function appendEvidence(value: RecordValue): Promise<void> {
-  const path = process.env.LCA_NATIVE_PRODUCT_EVIDENCE
-  if (!path) throw new Error("LCA_NATIVE_PRODUCT_EVIDENCE is not configured")
+  const path = process.env.OTTER_NATIVE_PRODUCT_EVIDENCE
+  if (!path) throw new Error("OTTER_NATIVE_PRODUCT_EVIDENCE is not configured")
   await appendFile(path, `${JSON.stringify(value)}\n`, "utf8")
 }
 
@@ -61,7 +61,7 @@ function promptForText(text: string, prompts: Record<string, string>): { scenari
     .map(([scenario, prompt]) => ({ scenario, prompt }))
 }
 
-export default async function nativeLcaProductContractObserver(pluginInput: PluginInput): Promise<Hooks> {
+export default async function nativeOtterProductContractObserver(pluginInput: PluginInput): Promise<Hooks> {
   const prompts = configuredPrompts()
   let productMainPrompt: string | undefined
   let transformCount = 0
@@ -78,7 +78,7 @@ export default async function nativeLcaProductContractObserver(pluginInput: Plug
   async function canonicalCall(input: { sessionID: string; callID: string }, tool: NativeToolName, args: unknown, expectedStatus: "running" | "completed"): Promise<CallProof> {
     requireCondition(isRecord(args), "native tool arguments are not an object")
     if (tool === "skill") {
-      requireCondition(Object.keys(args).length === 1 && args.name === "lca-native-contract", "native skill arguments are not the exact product fixture")
+      requireCondition(Object.keys(args).length === 1 && args.name === "otter-native-contract", "native skill arguments are not the exact product fixture")
     } else {
       assertReadArgs(args, pluginInput.directory)
     }
@@ -114,7 +114,7 @@ export default async function nativeLcaProductContractObserver(pluginInput: Plug
     requireCondition(isRecord(state.input), "canonical tool input is not an object")
     const stateInput = state.input as Record<string, unknown>
     if (tool === "skill") {
-      requireCondition(stateInput.name === "lca-native-contract" && Object.keys(stateInput).length === 1, "canonical skill input differs from the actual hook arguments")
+      requireCondition(stateInput.name === "otter-native-contract" && Object.keys(stateInput).length === 1, "canonical skill input differs from the actual hook arguments")
     } else {
       assertReadArgs(stateInput, pluginInput.directory)
       requireCondition(Object.keys(args).every(name => stateInput[name] === args[name]), "canonical read input differs from the actual native read arguments")
@@ -170,8 +170,8 @@ export default async function nativeLcaProductContractObserver(pluginInput: Plug
     config: async (value) => {
       const config = value as unknown as { agent?: Record<string, Record<string, unknown> | undefined> }
       const main = config.agent?.main
-      requireCondition(main && typeof main.prompt === "string" && main.prompt.length > 0, "actual LCA config hook did not install a main system prompt")
-      requireCondition(main.system === undefined, "main agent has an explicit system prompt outside the actual LCA policy")
+      requireCondition(main && typeof main.prompt === "string" && main.prompt.length > 0, "actual Otter config hook did not install a main system prompt")
+      requireCondition(main.system === undefined, "main agent has an explicit system prompt outside the actual Otter policy")
       productMainPrompt = main.prompt
       await appendEvidence({
         at: new Date().toISOString(),
@@ -187,7 +187,7 @@ export default async function nativeLcaProductContractObserver(pluginInput: Plug
       requireCondition(productMainPrompt !== undefined, "the actual product main configuration was not observed before system transformation")
       requireCondition(Array.isArray(output.system), "native product system transform output is not an array")
       const system = [...output.system]
-      requireCondition(system.length === 1 && system[0] === productMainPrompt, "system channel differs from the actual LCA main policy prompt")
+      requireCondition(system.length === 1 && system[0] === productMainPrompt, "system channel differs from the actual Otter main policy prompt")
       transformCount++
       await appendEvidence({
         at: new Date().toISOString(),
@@ -196,10 +196,10 @@ export default async function nativeLcaProductContractObserver(pluginInput: Plug
         sessionID: input.sessionID ?? null,
         system,
         systemSha256: sha256(JSON.stringify(system)),
-        uncheckedDescriptionMarkerPresent: system.some(text => text.includes(process.env.LCA_NATIVE_PRODUCT_VENDOR_DESCRIPTION_MARKER ?? "\u0000")),
-        uncheckedBodyMarkerPresent: system.some(text => text.includes(process.env.LCA_NATIVE_PRODUCT_VENDOR_BODY_MARKER ?? "\u0000")),
-        changedBodyMarkerPresent: system.some(text => text.includes(process.env.LCA_NATIVE_PRODUCT_CHANGED_BODY_MARKER ?? "\u0000")),
-        trustedReferenceMarkerPresent: system.some(text => text.includes(process.env.LCA_NATIVE_PRODUCT_REFERENCE_MARKER ?? "\u0000")),
+        uncheckedDescriptionMarkerPresent: system.some(text => text.includes(process.env.OTTER_NATIVE_PRODUCT_VENDOR_DESCRIPTION_MARKER ?? "\u0000")),
+        uncheckedBodyMarkerPresent: system.some(text => text.includes(process.env.OTTER_NATIVE_PRODUCT_VENDOR_BODY_MARKER ?? "\u0000")),
+        changedBodyMarkerPresent: system.some(text => text.includes(process.env.OTTER_NATIVE_PRODUCT_CHANGED_BODY_MARKER ?? "\u0000")),
+        trustedReferenceMarkerPresent: system.some(text => text.includes(process.env.OTTER_NATIVE_PRODUCT_REFERENCE_MARKER ?? "\u0000")),
       })
     },
 

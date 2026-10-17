@@ -25,7 +25,7 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
-import { DEFAULT_CONFIG, type LcaConfig } from "../framework/src/config.ts"
+import { DEFAULT_CONFIG, type OtterConfig } from "../framework/src/config.ts"
 import type { ExecutionRequest, ExecutionRuntime } from "../framework/src/hosts/types.ts"
 import { createExecutionPolicy } from "../framework/src/hosts/tool-policy.ts"
 import { authenticateLinuxVerification } from "../framework/src/hosts/linux-domain.ts"
@@ -38,7 +38,7 @@ import { worktreeRoot } from "../framework/src/orchestration/worktree.ts"
 import type { VerificationReference, VerificationResult } from "../framework/src/orchestration/verifier.ts"
 
 const SCRIPT = fileURLToPath(import.meta.url)
-const UNIT_CGROUP_EVENTS = "/sys/fs/cgroup/lca.slice/lca-verifier.service/cgroup.events"
+const UNIT_CGROUP_EVENTS = "/sys/fs/cgroup/otter.slice/otter-verifier.service/cgroup.events"
 const GIT_ENV = {
   PATH: "/usr/bin:/bin",
   LANG: "C",
@@ -112,7 +112,7 @@ function parseArgs(argv: string[]): Args {
   if (receipt && !isAbsolute(receipt)) fail("receipt-path-must-be-absolute")
   return {
     scenario: scenario as Scenario,
-    receipt: receipt ?? join(tmpdir(), `lca-linux-verifier-queue-${randomUUID()}.json`),
+    receipt: receipt ?? join(tmpdir(), `otter-linux-verifier-queue-${randomUUID()}.json`),
     keepSuccessArtifacts,
   }
 }
@@ -147,7 +147,7 @@ function git(cwd: string, ...args: string[]): string {
 function initializeRepository(path: string, scenario: Scenario, marker: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 })
   git(path, "init", "--quiet")
-  git(path, "config", "user.name", "LCA Linux verifier qualification")
+  git(path, "config", "user.name", "Otter Linux verifier qualification")
   git(path, "config", "user.email", "verifier-qualification@localhost")
   writeFileSync(join(path, "README.md"), "isolated native-verifier queue fixture\n")
   writeFileSync(join(path, "verify_e2.sh"), "#!/bin/sh\ntest \"$(/usr/bin/cat qualification.txt)\" = PASS\n")
@@ -163,7 +163,7 @@ function initializeRepository(path: string, scenario: Scenario, marker: string):
     "if pid:",
     "    os._exit(0)",
     "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
-    `path = '/run/lca-verifier-output/${marker}'`,
+    `path = '/run/otter-verifier-output/${marker}'`,
     "with open(path + '.ready', 'x', encoding='ascii') as ready:",
     "    ready.write(str(os.getpid()))",
     "counter = 0",
@@ -194,7 +194,7 @@ function readEvents(path: string): EventRecord[] {
   }
 }
 
-function makeConfig(scenario: Scenario): LcaConfig {
+function makeConfig(scenario: Scenario): OtterConfig {
   return {
     ...DEFAULT_CONFIG,
     delegate: {
@@ -212,7 +212,7 @@ function makeConfig(scenario: Scenario): LcaConfig {
 }
 
 function makeRuntime(args: { repo: string; stateHome: string; eventLog: string; scenario: Scenario; pauseTaskID?: string }): ExecutionRuntime {
-  process.env.LCA_STATE_HOME = args.stateHome
+  process.env.OTTER_STATE_HOME = args.stateHome
   const config = makeConfig(args.scenario)
   const policy = createExecutionPolicy(config, { directory: args.repo, worktree: args.repo })
   const runs = createExecutionRunStore(args.repo)
@@ -278,7 +278,7 @@ function makeRuntime(args: { repo: string; stateHome: string; eventLog: string; 
     },
   }
   return {
-    instance: "lca-linux-verifier-qualification",
+    instance: "otter-linux-verifier-qualification",
     directory: args.repo,
     worktree: args.repo,
     stateRoot: stateRoot(args.repo),
@@ -433,7 +433,7 @@ function queueResultFile(path: string, run: QueueRun, repo: string, sessionID: s
 
 function childEnvironment(stateHome: string): NodeJS.ProcessEnv {
   return { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: tmpdir(), TMPDIR: tmpdir(), LANG: "C", LC_ALL: "C",
-    LCA_STATE_HOME: stateHome, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TEMPLATE_DIR: "" }
+    OTTER_STATE_HOME: stateHome, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TEMPLATE_DIR: "" }
 }
 
 async function spawnCoordinator(values: CoordinatorArgs): Promise<{ child: ReturnType<typeof spawn>; closed: Promise<[number | null, NodeJS.Signals | null]> }> {
@@ -728,9 +728,9 @@ async function runSupervisor(args: Args): Promise<number> {
   const eventLog = join(scratch, "host-events.jsonl")
   const scenario = args.scenario
   const sessionID = `ses_linux_verifier_e2_${randomUUID().replaceAll("-", "")}`
-  const writerMarker = `lca-queue-e2-${randomUUID().replaceAll("-", "")}`
+  const writerMarker = `otter-queue-e2-${randomUUID().replaceAll("-", "")}`
   const report: Report = {
-    schema: "lca.linux-verifier.queue-e2.v1",
+    schema: "otter.linux-verifier.queue-e2.v1",
     startedAt: nowISO(),
     scenario,
     scope: "real queue, real Git worktree/baseline, real fixed Linux verifier and authenticated native receipts; worker/reviewer are synthetic and no model ran",
@@ -742,7 +742,7 @@ async function runSupervisor(args: Args): Promise<number> {
     mkdirSync(stateHome, { mode: 0o700 })
     writeFileSync(eventLog, "", { flag: "wx", mode: 0o600 })
     initializeRepository(repo, scenario, writerMarker)
-    process.env.LCA_STATE_HOME = stateHome
+    process.env.OTTER_STATE_HOME = stateHome
     const runtime = makeRuntime({ repo, stateHome, eventLog, scenario })
     const queue = createQueue(runtime)
     const added = queue.add(sessionID, taskInputs(scenario))
@@ -773,7 +773,7 @@ async function runSupervisor(args: Args): Promise<number> {
     else report.artifacts = { receipt: receiptPath, scratchPreserved: false }
     try { writeNewJson(receiptPath, report) }
     catch {
-      process.stderr.write("lca-linux-verifier-queue: could-not-write-receipt\n")
+      process.stderr.write("otter-linux-verifier-queue: could-not-write-receipt\n")
       return 1
     }
   }
@@ -782,7 +782,7 @@ async function runSupervisor(args: Args): Promise<number> {
 }
 
 function mkdirTemp(): string {
-  const path = join(tmpdir(), `lca-linux-verifier-queue-${randomUUID()}`)
+  const path = join(tmpdir(), `otter-linux-verifier-queue-${randomUUID()}`)
   mkdirSync(path, { mode: 0o700 })
   return path
 }
@@ -825,7 +825,7 @@ async function main(): Promise<void> {
   let args: Args
   try { args = parseArgs(process.argv.slice(2)) }
   catch (error) {
-    process.stderr.write(`lca-linux-verifier-queue: ${error instanceof QualificationFailure ? error.code : "usage-error"}\n`)
+    process.stderr.write(`otter-linux-verifier-queue: ${error instanceof QualificationFailure ? error.code : "usage-error"}\n`)
     process.exitCode = 2
     return
   }
@@ -836,7 +836,7 @@ async function main(): Promise<void> {
   }
   try { process.exitCode = await runSupervisor(args) }
   catch (error) {
-    process.stderr.write(`lca-linux-verifier-queue: ${error instanceof QualificationFailure ? error.code : "qualification-failed"}\n`)
+    process.stderr.write(`otter-linux-verifier-queue: ${error instanceof QualificationFailure ? error.code : "qualification-failed"}\n`)
     process.exitCode = 1
   }
 }

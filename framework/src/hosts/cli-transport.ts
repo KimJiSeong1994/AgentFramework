@@ -322,7 +322,7 @@ function createScratchDirectory(): OwnedScratchDirectory {
 
     let directory: string
     try {
-      directory = mkdtempSync(join(canonicalBase, "lca-cli-"))
+      directory = mkdtempSync(join(canonicalBase, "otter-cli-"))
     } catch {
       continue
     }

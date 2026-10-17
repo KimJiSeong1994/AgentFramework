@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only sqlite query helper for lca's `db_query` (stdlib only).
+"""Read-only sqlite query helper for otter's `db_query` (stdlib only).
 
 stdin:  {"path": "<sqlite file>", "sql": "<one SELECT/WITH>", "timeout_ms": 15000, "max_rows": 51}
 stdout: {"columns": [...], "rows": [[...], ...]}   or   {"error": "<message>"}

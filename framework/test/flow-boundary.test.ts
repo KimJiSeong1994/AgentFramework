@@ -84,13 +84,13 @@ describe("planning boundary (AC0.4)", () => {
       putWorkflow(phase)
       for (const tool of POLICY_DENIED_TOOLS) {
         await expect(invokeBefore(deps, native, tool, { filePath: "x", path: "x" })).rejects.toThrow(
-          "lca: OpenCode tool call refused (disallowed-tool)",
+          "otter: OpenCode tool call refused (disallowed-tool)",
         )
       }
       for (const tool of BOUNDARY_DENIED_TOOLS) {
         const args = tool === "delegate" ? { tasks: [{ title: "x" }] } : { filePath: "x", path: "x" }
         await expect(invokeBefore(deps, native, tool, args)).rejects.toThrow(
-          'lca: planning phase — read-only. Submit the plan with lca_flow op:"plan", or /cancel.',
+          'otter: planning phase — read-only. Submit the plan with otter_flow op:"plan", or /cancel.',
         )
       }
     })
@@ -113,7 +113,7 @@ describe("planning boundary (AC0.4)", () => {
       putWorkflow(phase)
       for (const command of DENIED_BASH) {
         await expect(invokeBefore(deps, native, "bash", { command })).rejects.toThrow(
-          'lca: planning phase — read-only. Submit the plan with lca_flow op:"plan", or /cancel.',
+          'otter: planning phase — read-only. Submit the plan with otter_flow op:"plan", or /cancel.',
         )
       }
       for (const command of ALLOWED_BASH) {
@@ -128,7 +128,7 @@ describe("planning boundary (AC0.4)", () => {
       const native = await nativeFixture(deps)
       putWorkflow("stuck", { stuckCause: cause })
       await expect(invokeBefore(deps, native, "write", { filePath: "x" })).rejects.toThrow(
-        'lca: planning phase — read-only. Submit the plan with lca_flow op:"plan", or /cancel.',
+        'otter: planning phase — read-only. Submit the plan with otter_flow op:"plan", or /cancel.',
       )
       await invokeBefore(deps, native, "read", {})
     })
@@ -139,7 +139,7 @@ describe("planning boundary (AC0.4)", () => {
     const native = await nativeFixture(deps)
     const wf = putWorkflow("planning")
     await expect(invokeBefore(deps, native, "delegate", { tasks: [{ title: "x" }] })).rejects.toThrow(
-      'lca: planning phase — read-only. Submit the plan with lca_flow op:"plan", or /cancel.',
+      'otter: planning phase — read-only. Submit the plan with otter_flow op:"plan", or /cancel.',
     )
     const events = readEvents(wt.worktree, wf.id)
     const denied = events.filter((e) => e.type === "boundary_denied")
@@ -205,7 +205,7 @@ describe("forced resume in executing (AC0.5)", () => {
     const native = await nativeFixture(deps)
     putWorkflow("executing")
     await expect(invokeBefore(deps, native, "delegate", { tasks: [{ title: "x" }] })).rejects.toThrow(
-      "lca: an approved plan is running; call delegate with resume:true only",
+      "otter: an approved plan is running; call delegate with resume:true only",
     )
   })
 
@@ -214,7 +214,7 @@ describe("forced resume in executing (AC0.5)", () => {
     const native = await nativeFixture(deps)
     putWorkflow("executing")
     await expect(invokeBefore(deps, native, "delegate", {})).rejects.toThrow(
-      "lca: an approved plan is running; call delegate with resume:true only",
+      "otter: an approved plan is running; call delegate with resume:true only",
     )
   })
 
@@ -226,7 +226,7 @@ describe("forced resume in executing (AC0.5)", () => {
     const args = { resume: true, tasks: [{ title: "x" }] }
     const call = native.primeCall({ tool: "delegate", args, callID: `flow_boundary_${++callSequence}` })
     await expect(hook(call.input, call.output)).rejects.toThrow(
-      "lca: delegate resume must omit tasks; retry with the exact approved resume arguments",
+      "otter: delegate resume must omit tasks; retry with the exact approved resume arguments",
     )
     expect(call.output.args).toEqual(args)
   })
@@ -244,11 +244,11 @@ describe("forced resume in executing (AC0.5)", () => {
     const native = await nativeFixture(deps)
     putWorkflow("executing")
     for (const [tool, args] of [["write", { filePath: "x" }], ["edit", { filePath: "x" }], ["apply_patch", { patchText: "x" }], ["bash", { command: "rm x" }], ["bash", { command: "python3 -m pytest" }]] as const) {
-      await expect(invokeBefore(deps, native, tool, { ...args })).rejects.toThrow("lca: an approved plan is running")
+      await expect(invokeBefore(deps, native, tool, { ...args })).rejects.toThrow("otter: an approved plan is running")
     }
     await invokeBefore(deps, native, "read", { filePath: "x" })
     await invokeBefore(deps, native, "bash", { command: "git status" })
-    await invokeBefore(deps, native, "lca_flow", { op: "status" })
+    await invokeBefore(deps, native, "otter_flow", { op: "status" })
   })
 
   test("a non-owning session's delegate is unaffected in executing", async () => {

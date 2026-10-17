@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded headless qualification of the real LCA OpenCode skill product path."""
+"""Bounded headless qualification of the real Otter OpenCode skill product path."""
 
 from __future__ import annotations
 
@@ -35,10 +35,10 @@ DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoR
 EXPECTED_OPENCODE_VERSION = "1.18.35"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 MODEL = "qwen3.6:35b-a3b-coding-mtp-q4_K_M"
-PROVIDER_ID = "ollama-lca-product"
-SKILL_NAME = "lca-native-contract"
-SKILL_TOOL_DESCRIPTION = "Load one registered LCA skill by name. Source, role, and current-session authorization are checked by the runtime."
-VENDOR_SKILL_NAME = "lca-unchecked-vendor"
+PROVIDER_ID = "ollama-otter-product"
+SKILL_NAME = "otter-native-contract"
+SKILL_TOOL_DESCRIPTION = "Load one registered Otter skill by name. Source, role, and current-session authorization are checked by the runtime."
+VENDOR_SKILL_NAME = "otter-unchecked-vendor"
 REFERENCE_RELATIVE_PATH = f".agents/skills/{SKILL_NAME}/reference.txt"
 MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_PROVIDER_REQUESTS = 12
@@ -99,7 +99,7 @@ def unique_run_dir(out_root: Path) -> Path:
     out_root.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     while True:
-        run_dir = out_root / f"lca-skill-contract-{stamp}-{os.getpid()}-{secrets.token_hex(3)}"
+        run_dir = out_root / f"otter-skill-contract-{stamp}-{os.getpid()}-{secrets.token_hex(3)}"
         try:
             run_dir.mkdir()
             return run_dir
@@ -347,7 +347,7 @@ class RecordingProxy:
                 self.close_connection = True
 
             def do_GET(self) -> None:
-                if self.path == "/__lca_health":
+                if self.path == "/__otter_health":
                     self._respond(200, b'{"healthy":true}\n', "application/json")
                     return
                 self._respond(404, b"not found\n")
@@ -427,11 +427,11 @@ class RecordingProxy:
                 else:
                     expected_system = read_effective_main_prompt(owner.product_evidence)
                     if expected_system is None:
-                        block_reason = "actual LCA main prompt was not observed from the product config hook"
+                        block_reason = "actual Otter main prompt was not observed from the product config hook"
                     elif record["system_message_texts"] != [expected_system]:
-                        block_reason = "provider request system channel differs from the actual frozen LCA main policy"
+                        block_reason = "provider request system channel differs from the actual frozen Otter main policy"
                     elif len(record["request_tool_names"]) != 2 or set(record["request_tool_names"]) != {"skill", "read"}:
-                        block_reason = "native provider request did not expose exactly the actual LCA skill and SDK read tools"
+                        block_reason = "native provider request did not expose exactly the actual Otter skill and SDK read tools"
                     else:
                         tools = record["tool_definitions"]
                         definitions = {
@@ -447,9 +447,9 @@ class RecordingProxy:
                         read_properties = read_parameters.get("properties") if isinstance(read_parameters, dict) else None
                         file_path_schema = read_properties.get("filePath") if isinstance(read_properties, dict) else None
                         if len(definitions) != 2 or not isinstance(skill_function, dict) or skill_function.get("description") != SKILL_TOOL_DESCRIPTION:
-                            block_reason = "provider did not expose the exact actual LCA skill tool definition"
+                            block_reason = "provider did not expose the exact actual Otter skill tool definition"
                         elif not isinstance(skill_parameters, dict) or not isinstance(skill_name_schema, dict) or skill_name_schema.get("type") != "string" or not isinstance(skill_parameters.get("required"), list) or "name" not in skill_parameters["required"]:
-                            block_reason = "actual LCA skill tool did not retain its required string name argument"
+                            block_reason = "actual Otter skill tool did not retain its required string name argument"
                         elif not isinstance(read_parameters, dict) or not isinstance(file_path_schema, dict) or file_path_schema.get("type") != "string" or not isinstance(read_parameters.get("required"), list) or "filePath" not in read_parameters["required"]:
                             block_reason = "native SDK read tool did not retain its required filePath argument"
                     if block_reason is None and not any(prompt in text for text in record["user_message_texts"] for prompt in owner.prompts.values()):
@@ -458,7 +458,7 @@ class RecordingProxy:
                 if block_reason:
                     record["forwarding_block_reason"] = block_reason
                     owner.save_record(record, started)
-                    self._respond(422, f"LCA product qualification proxy refused forwarding: {block_reason}.\n".encode("utf-8"))
+                    self._respond(422, f"Otter product qualification proxy refused forwarding: {block_reason}.\n".encode("utf-8"))
                     return
 
                 connection = http.client.HTTPConnection(owner.upstream.hostname, owner.upstream.port, timeout=MODEL_TIMEOUT_SECONDS)
@@ -477,7 +477,7 @@ class RecordingProxy:
                     connection.request("POST", self.path, body=request_body, headers={
                         "Content-Type": self.headers.get("Content-Type", "application/json"),
                         "Accept": self.headers.get("Accept", "application/json"),
-                        "User-Agent": "lca-native-product-contract/1",
+                        "User-Agent": "otter-native-product-contract/1",
                     })
                     record["forwarded"] = True
                     upstream_response = connection.getresponse()
@@ -492,7 +492,7 @@ class RecordingProxy:
                     if unexpected or len(observations["tool_calls"]) > 1:
                         record["response_block_reason"] = "real Ollama response requested an unauthorized or parallel native tool call"
                         owner.save_record(record, started)
-                        self._respond(422, b"LCA product qualification proxy refused a non-skill call; no tool was executed.\n")
+                        self._respond(422, b"Otter product qualification proxy refused a non-skill call; no tool was executed.\n")
                         return
                     response_type = upstream_response.getheader("Content-Type") or "application/json"
                     owner.save_record(record, started)
@@ -508,7 +508,7 @@ class RecordingProxy:
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = False
-        self.thread = threading.Thread(target=self.server.serve_forever, name="lca-native-product-proxy", daemon=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, name="otter-native-product-proxy", daemon=True)
         self.thread.start()
         self.port = int(self.server.server_address[1])
         self.base_url = f"http://127.0.0.1:{self.port}"
@@ -557,22 +557,22 @@ def git_value(command: list[str], cwd: Path, env: dict[str, str], log_path: Path
     return result.stdout.decode("utf-8", errors="strict").rstrip("\r\n")
 
 
-def prepare_git_worktree(workspace: Path, skill_path: Path, reference_path: Path, lca_config_path: Path, env: dict[str, str], git_evidence: Path) -> dict[str, Any]:
+def prepare_git_worktree(workspace: Path, skill_path: Path, reference_path: Path, otter_config_path: Path, env: dict[str, str], git_evidence: Path) -> dict[str, Any]:
     init = run_command(["git", "init", "--quiet"], workspace, env)
     record_command(git_evidence, "init", init)
     ensure(init.returncode == 0, f"git init failed: {init.stderr.decode('utf-8', errors='replace')}")
     for command, label in [
-        (["config", "user.name", "Native LCA product fixture"], "user-name"),
+        (["config", "user.name", "Native Otter product fixture"], "user-name"),
         (["config", "user.email", "native-product@example.invalid"], "user-email"),
         (["config", "core.hooksPath", "/dev/null"], "hooks-path"),
     ]:
         result = run_command(["git", *command], workspace, env)
         record_command(git_evidence, label, result)
         ensure(result.returncode == 0, f"git {label} configuration failed")
-    add = run_command(["git", "add", "--", str(skill_path.relative_to(workspace)), str(reference_path.relative_to(workspace)), str(lca_config_path.relative_to(workspace))], workspace, env)
+    add = run_command(["git", "add", "--", str(skill_path.relative_to(workspace)), str(reference_path.relative_to(workspace)), str(otter_config_path.relative_to(workspace))], workspace, env)
     record_command(git_evidence, "add-fixtures", add)
-    ensure(add.returncode == 0, "git could not stage the ordinary project skill and LCA config")
-    commit = run_command(["git", "commit", "--quiet", "-m", "native LCA product contract fixture"], workspace, env)
+    ensure(add.returncode == 0, "git could not stage the ordinary project skill and Otter config")
+    commit = run_command(["git", "commit", "--quiet", "-m", "native Otter product contract fixture"], workspace, env)
     record_command(git_evidence, "commit", commit)
     ensure(commit.returncode == 0, f"git commit failed: {commit.stderr.decode('utf-8', errors='replace')}")
     root = git_value(["rev-parse", "--show-toplevel"], workspace, env, git_evidence, "show-toplevel")
@@ -581,7 +581,7 @@ def prepare_git_worktree(workspace: Path, skill_path: Path, reference_path: Path
     tracked_paths = git_value(["ls-files"], workspace, env, git_evidence, "tracked-files").splitlines()
     canonical = str(workspace.resolve(strict=True))
     ensure(root == canonical and is_worktree == "true" and status == "", "fixture is not a clean canonical Git worktree")
-    expected_paths = {str(skill_path.relative_to(workspace)), str(reference_path.relative_to(workspace)), str(lca_config_path.relative_to(workspace))}
+    expected_paths = {str(skill_path.relative_to(workspace)), str(reference_path.relative_to(workspace)), str(otter_config_path.relative_to(workspace))}
     ensure(set(tracked_paths) == expected_paths, f"fixture Git index does not contain exactly the tracked qualification inputs: {tracked_paths!r}")
     return {"path": canonical, "git_root": root, "is_worktree": True, "initial_status": status, "initially_clean": True,
             "tracked_paths": tracked_paths}
@@ -655,19 +655,19 @@ def cleanup_process(process: subprocess.Popen[bytes] | None, base_url: str | Non
 def prompt_for(scenario: str) -> str:
     if scenario == "changed_baseline":
         return (
-            "Native LCA product qualification scenario: changed_baseline.\n"
+            "Native Otter product qualification scenario: changed_baseline.\n"
             "Do not call any tool. Reply with exactly `baseline ready`; this real main turn establishes the session before the tracked skill file is changed. "
             "Do not mention fixture markers."
         )
     if scenario == "common":
         return (
-            "Native LCA product qualification scenario: common.\n"
+            "Native Otter product qualification scenario: common.\n"
             f"Call the `skill` tool exactly once with name `{SKILL_NAME}`. Only after that skill call succeeds, call the native `read` tool exactly once "
             f"on `{REFERENCE_RELATIVE_PATH}` to read the companion captured resource. Do not call the tools in parallel or use any other tool. "
             "Then reply with exactly two lines: the `Verification phrase:` value from the skill, and the complete single-line text returned by read."
         )
     return (
-        f"Native LCA product qualification scenario: {scenario}.\n"
+        f"Native Otter product qualification scenario: {scenario}.\n"
         f"Call the `skill` tool exactly once with name `{SKILL_NAME}` before answering. "
         "If the tool succeeds, copy exactly the one-line value following `Verification phrase:` from its returned instructions. "
         "If the tool refuses, report that it was refused without guessing any phrase. Do not use another tool or mention fixture markers."
@@ -678,10 +678,10 @@ def make_fixture_bytes(trusted_marker: str, trusted_phrase: str) -> bytes:
     text = (
         "---\n"
         f"name: {SKILL_NAME}\n"
-        "description: Ordinary tracked project skill for native LCA product qualification.\n"
+        "description: Ordinary tracked project skill for native Otter product qualification.\n"
         "allowed-tools: [read]\n"
         "---\n\n"
-        "Ordinary tracked project skill for native LCA product qualification.\n"
+        "Ordinary tracked project skill for native Otter product qualification.\n"
         f"Trusted captured-body marker: {trusted_marker}\n"
         f"Verification phrase: {trusted_phrase}\n"
         f"After loading this skill, read `{REFERENCE_RELATIVE_PATH}` exactly once using the native read tool.\n"
@@ -698,7 +698,7 @@ def changed_fixture_bytes(changed_body_marker: str, changed_phrase: str) -> byte
     text = (
         "---\n"
         f"name: {SKILL_NAME}\n"
-        "description: Ordinary tracked project skill for native LCA product qualification.\n"
+        "description: Ordinary tracked project skill for native Otter product qualification.\n"
         "allowed-tools: [read]\n"
         "---\n\n"
         "This project skill was changed after its trusted Git baseline.\n"
@@ -725,10 +725,10 @@ def make_opencode_config(proxy_base: str, product_plugin: Path, observer_plugin:
     disabled_tools = (
         "bash", "glob", "grep", "list", "edit", "write", "patch", "apply_patch", "multiedit",
         "task", "todowrite", "todoread", "question", "lsp", "webfetch", "fetch", "websearch", "search",
-        "delegate", "lca_flow", "db_query", "schema_lookup", "shell", "execute",
+        "delegate", "otter_flow", "db_query", "schema_lookup", "shell", "execute",
     )
     native_tools = {name: False for name in disabled_tools}
-    # Leave `skill` unlisted: `tools.skill: true` becomes permission skill=allow and overrides LCA's allowlist.
+    # Leave `skill` unlisted: `tools.skill: true` becomes permission skill=allow and overrides Otter's allowlist.
     native_tools["read"] = True
     return {
         "$schema": "https://opencode.ai/config.json",
@@ -740,9 +740,9 @@ def make_opencode_config(proxy_base: str, product_plugin: Path, observer_plugin:
         "provider": {
             PROVIDER_ID: {
                 "npm": "@ai-sdk/openai-compatible",
-                "name": "Local Ollama (recording LCA product qualification proxy)",
+                "name": "Local Ollama (recording Otter product qualification proxy)",
                 "options": {
-                    "baseURL": f"{proxy_base}/v1", "apiKey": "lca-local-product-contract-only",
+                    "baseURL": f"{proxy_base}/v1", "apiKey": "otter-local-product-contract-only",
                     "timeout": MODEL_TIMEOUT_SECONDS * 1000,
                     "headerTimeout": MODEL_TIMEOUT_SECONDS * 1000,
                     "chunkTimeout": MODEL_TIMEOUT_SECONDS * 1000,
@@ -760,7 +760,7 @@ def make_opencode_config(proxy_base: str, product_plugin: Path, observer_plugin:
         "agent": {
             "main": {
                 "mode": "primary",
-                "description": "Headless qualification of the actual LCA main skill tool.",
+                "description": "Headless qualification of the actual Otter main skill tool.",
                 "model": f"{PROVIDER_ID}/{MODEL}",
                 # skill call, captured-resource read, final answer, plus one bounded spare step.
                 "maxSteps": 4,
@@ -815,7 +815,7 @@ def run_case(scenario: str, prompt: str, api_url: str, workspace: Path, api_evid
     try:
         if existing_session is None:
             status, session, error = request_json(api_evidence, api_url, "POST", f"/session?{directory_query}",
-                                                  {"title": f"LCA native product qualification {scenario}"})
+                                                  {"title": f"Otter native product qualification {scenario}"})
             ensure(status == 200 and isinstance(session, dict) and isinstance(session.get("id"), str),
                    f"native {scenario} session creation failed (HTTP {status}): {session!r} {error or ''}")
         else:
@@ -914,7 +914,7 @@ def validate_result(
            "the changed-case session baseline was not established while the exact common fixture bytes were present")
 
     config_events = [event for event in observer_events if event.get("phase") == "product.config.after" and event.get("role") == "main"]
-    ensure(config_events and all(isinstance(event.get("prompt"), str) and event["prompt"] for event in config_events), "actual LCA config hook did not provide the main system prompt")
+    ensure(config_events and all(isinstance(event.get("prompt"), str) and event["prompt"] for event in config_events), "actual Otter config hook did not provide the main system prompt")
     product_prompt = config_events[0]["prompt"]
     ensure(all(event.get("prompt") == product_prompt for event in config_events), "actual main policy prompt changed during the native run")
     skill_permission = config_events[0].get("skillPermission")
@@ -922,7 +922,7 @@ def validate_result(
            set(skill_permission) == {"*", SKILL_NAME}, "actual product config did not restrict the runtime skill tool to the ordinary tracked fixture")
     ensure(markers["unchecked_vendor_description"] not in product_prompt and markers["unchecked_vendor_body"] not in product_prompt and
            markers["changed_body"] not in product_prompt and markers["changed_phrase"] not in product_prompt and reference_marker not in product_prompt,
-           "actual configured LCA main system prompt contains unchecked skill metadata")
+           "actual configured Otter main system prompt contains unchecked skill metadata")
     transform_events = [event for event in observer_events if event.get("phase") == "product.system.transform.after"]
     ensure(transform_events, "the real product system-transform path was not observed")
     ensure(all(event.get("system") == [product_prompt] and not event.get("uncheckedDescriptionMarkerPresent") and
@@ -939,12 +939,12 @@ def validate_result(
     ensure(not refused_requests, f"recording proxy refused or failed a provider request: {[item.get('forwarding_block_reason') or item.get('response_block_reason') or item.get('proxy_error') for item in refused_requests]!r}")
     ensure(forwarded and all(request.get("http_status") == 200 for request in forwarded), "no successful real local Ollama inference was observed")
     ensure(all(request.get("request_body_sha256") for request in forwarded), "provider request capture is missing exact request-body hashes")
-    ensure(all(request.get("system_message_texts") == [product_prompt] for request in forwarded), "a forwarded provider request differed from the actual frozen LCA main prompt")
+    ensure(all(request.get("system_message_texts") == [product_prompt] for request in forwarded), "a forwarded provider request differed from the actual frozen Otter main prompt")
     ensure(all(MODEL in (request.get("upstream_observations") or {}).get("model_names", []) for request in forwarded),
            "a real Ollama response did not identify the required local Qwen model")
     ensure(not blocked_markers, "marker request crossed the local proxy boundary")
     ensure(all(len(request.get("request_tool_names", [])) == 2 and set(request.get("request_tool_names", [])) == {"skill", "read"}
-               for request in forwarded), "a real model request exposed a tool other than read plus the LCA skill tool")
+               for request in forwarded), "a real model request exposed a tool other than read plus the Otter skill tool")
     baseline_requests = [request for request in forwarded if request.get("scenario") == "changed_baseline"]
     ensure(baseline_requests and all(not (request.get("upstream_observations") or {}).get("tool_calls") for request in baseline_requests),
            "pre-change baseline turn did not complete through the real model without a skill call")
@@ -956,8 +956,8 @@ def validate_result(
             system_events_by_session[session_id] = system_events_by_session.get(session_id, 0) + 1
     observer_init = [event for event in observer_events if event.get("phase") == "observer.initialized"]
     ensure(observer_init and all(event.get("pid") == summary.get("native_server_pid") for event in observer_init), "observer plugin process identity does not match the actual OpenCode server")
-    ensure(any(Path(str(event.get("pluginURL", "")).split("?")[0].split("#")[0]).name == "lca-skill-contract-plugin.ts" for event in observer_init), "actual product observer plugin URL was not loaded")
-    ensure(summary.get("plugin_uris", {}).get("actual_lca_product") == Path(summary["source_files"]["product_plugin"]).as_uri(),
+    ensure(any(Path(str(event.get("pluginURL", "")).split("?")[0].split("#")[0]).name == "otter-skill-contract-plugin.ts" for event in observer_init), "actual product observer plugin URL was not loaded")
+    ensure(summary.get("plugin_uris", {}).get("actual_otter_product") == Path(summary["source_files"]["product_plugin"]).as_uri(),
            "native server configuration did not target the actual framework/src/index.ts product plugin")
     ensure(all(event.get("directory") == summary["git_worktree"]["path"] and event.get("worktree") == summary["git_worktree"]["path"] for event in observer_init),
            "native observer plugin did not share the canonical isolated worktree identity")
@@ -1113,17 +1113,17 @@ def validate_result(
             ensure(read_event.get("canonicalToolStatus") == "running" and read_event.get("callID") == read_part.get("callID") and
                    read_event.get("canonicalAssistantMessageID") == read_part.get("assistantMessageID") and
                    read_event.get("canonicalParentUserMessageID") == case.get("submitted_user_message_id"),
-                   "LcaPlugin read after-hook proof is not bound to the canonical same-call assistant parent")
-            ensure(read_event.get("args") == expected_reference_args and read_event.get("title") == "LCA captured source" and
+                   "OtterPlugin read after-hook proof is not bound to the canonical same-call assistant parent")
+            ensure(read_event.get("args") == expected_reference_args and read_event.get("title") == "Otter captured source" and
                    read_event.get("output") == expected_reference_output and read_event.get("outputSha256") == sha256_bytes(reference_bytes),
-                   "LcaPlugin did not render the exact tracked captured reference bytes through the native read formatter")
+                   "OtterPlugin did not render the exact tracked captured reference bytes through the native read formatter")
             read_metadata = read_event.get("metadata")
             ensure(isinstance(read_metadata, dict) and read_metadata == metadata and read_metadata.get("source") == "project" and
                    read_metadata.get("name") == SKILL_NAME and read_metadata.get("contentHash") == metadata.get("contentHash") and
                    read_metadata.get("callID") == part.get("callID"),
-                   "LcaPlugin captured read output lost provenance to the authorized skill invocation")
+                   "OtterPlugin captured read output lost provenance to the authorized skill invocation")
             ensure(read_state.get("output") == expected_reference_output,
-                   "canonical native read tool result differs from the exact LcaPlugin captured-resource rendering")
+                   "canonical native read tool result differs from the exact OtterPlugin captured-resource rendering")
 
             exposed_requests = []
             for index, request in enumerate(proxy_requests):
@@ -1195,7 +1195,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opencode", default=shutil.which("opencode"), help="absolute path to the pinned OpenCode executable")
     parser.add_argument("--ollama-base-url", default=DEFAULT_OLLAMA_BASE_URL, help="loopback Ollama OpenAI-compatible base URL")
-    parser.add_argument("--out-root", default=str(Path(__file__).resolve().parents[3] / "artifacts" / "lca-tui-P4-product-skill-contract"),
+    parser.add_argument("--out-root", default=str(Path(__file__).resolve().parents[3] / "artifacts" / "otter-tui-P4-product-skill-contract"),
                         help="directory for retained evidence (failed runs are never deleted)")
     args = parser.parse_args()
 
@@ -1214,15 +1214,15 @@ def main() -> int:
         "opencode_config": run_dir / "opencode-config.json",
     }
     product_plugin = Path(__file__).resolve().parents[2] / "src" / "index.ts"
-    observer_plugin = Path(__file__).resolve().with_name("lca-skill-contract-plugin.ts")
+    observer_plugin = Path(__file__).resolve().with_name("otter-skill-contract-plugin.ts")
     framework_root = Path(__file__).resolve().parents[2]
     plugin_package_path = framework_root / "node_modules" / "@opencode-ai" / "plugin" / "package.json"
     summary: dict[str, Any] = {
-        "harness": "lca-native-product-skill-contract",
+        "harness": "otter-native-product-skill-contract",
         "started_at": utc_now(),
         "success": False,
         "run_directory": str(run_dir),
-        "qualification_scope": "Real framework/src/index.ts LcaPlugin on a headless OpenCode main session, actual local Ollama inference, ordinary tracked common skill success and changed/custom refusal. This is not a full TUI or production rollout qualification.",
+        "qualification_scope": "Real framework/src/index.ts OtterPlugin on a headless OpenCode main session, actual local Ollama inference, ordinary tracked common skill success and changed/custom refusal. This is not a full TUI or production rollout qualification.",
         "limitations": [
             "No TUI interaction is exercised; the changed/custom case intentionally has no attached foreground consent UI.",
             "Only the fixed local Ollama model and this isolated fixture are qualified; no other host, model, or project policy is implied.",
@@ -1274,20 +1274,20 @@ def main() -> int:
         opencode = opencode_arg.resolve(strict=True)
         ensure(opencode.is_file() and os.access(opencode, os.X_OK), f"OpenCode executable is not executable: {opencode}")
         upstream = ensure_loopback_base_url(args.ollama_base_url)
-        ensure(product_plugin.is_file() and observer_plugin.is_file(), "actual LCA product plugin or observer source is missing")
+        ensure(product_plugin.is_file() and observer_plugin.is_file(), "actual Otter product plugin or observer source is missing")
         ensure(plugin_package_path.is_file(), f"installed public plugin SDK package is missing: {plugin_package_path}")
         plugin_package = json.loads(plugin_package_path.read_text(encoding="utf-8"))
         ensure(plugin_package.get("name") == "@opencode-ai/plugin", "installed plugin SDK package identity is unexpected")
 
         markers = {
-            "trusted_body": f"LCA_TRUSTED_CAPTURED_BODY_{secrets.token_hex(12)}",
-            "trusted_phrase": f"LCA_TRUSTED_SKILL_REPLY_{secrets.token_hex(12)}",
-            "unchecked_vendor_description": f"LCA_UNCHECKED_VENDOR_DESCRIPTION_{secrets.token_hex(12)}",
-            "unchecked_vendor_body": f"LCA_UNCHECKED_VENDOR_BODY_{secrets.token_hex(12)}",
-            "changed_body": f"LCA_UNAUTHORIZED_CHANGED_BODY_{secrets.token_hex(12)}",
-            "changed_phrase": f"LCA_UNAUTHORIZED_CHANGED_REPLY_{secrets.token_hex(12)}",
+            "trusted_body": f"OTTER_TRUSTED_CAPTURED_BODY_{secrets.token_hex(12)}",
+            "trusted_phrase": f"OTTER_TRUSTED_SKILL_REPLY_{secrets.token_hex(12)}",
+            "unchecked_vendor_description": f"OTTER_UNCHECKED_VENDOR_DESCRIPTION_{secrets.token_hex(12)}",
+            "unchecked_vendor_body": f"OTTER_UNCHECKED_VENDOR_BODY_{secrets.token_hex(12)}",
+            "changed_body": f"OTTER_UNAUTHORIZED_CHANGED_BODY_{secrets.token_hex(12)}",
+            "changed_phrase": f"OTTER_UNAUTHORIZED_CHANGED_REPLY_{secrets.token_hex(12)}",
         }
-        reference_marker = f"LCA_TRUSTED_CAPTURED_REFERENCE_{secrets.token_hex(12)}"
+        reference_marker = f"OTTER_TRUSTED_CAPTURED_REFERENCE_{secrets.token_hex(12)}"
         common_bytes = make_fixture_bytes(markers["trusted_body"], markers["trusted_phrase"])
         changed_bytes = changed_fixture_bytes(markers["changed_body"], markers["changed_phrase"])
         vendor_bytes = vendor_fixture_bytes(markers["unchecked_vendor_description"], markers["unchecked_vendor_body"])
@@ -1310,20 +1310,20 @@ def main() -> int:
         skill_path = workspace / ".agents" / "skills" / SKILL_NAME / "SKILL.md"
         reference_path = workspace / REFERENCE_RELATIVE_PATH
         vendor_skill_path = home / ".agents" / "skills" / VENDOR_SKILL_NAME / "SKILL.md"
-        lca_config_path = workspace / ".lca" / "lca.jsonc"
+        otter_config_path = workspace / ".otter" / "otter.jsonc"
         skill_path.parent.mkdir(parents=True, exist_ok=True)
         vendor_skill_path.parent.mkdir(parents=True, exist_ok=True)
-        lca_config_path.parent.mkdir(parents=True, exist_ok=True)
+        otter_config_path.parent.mkdir(parents=True, exist_ok=True)
         skill_path.write_bytes(common_bytes)
         reference_path.write_bytes(reference_bytes)
         vendor_skill_path.write_bytes(vendor_bytes)
-        lca_config_path.write_text(json.dumps({"models": {"main": f"{PROVIDER_ID}/{MODEL}"}, "skills": {"allow": [SKILL_NAME]}}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        otter_config_path.write_text(json.dumps({"models": {"main": f"{PROVIDER_ID}/{MODEL}"}, "skills": {"allow": [SKILL_NAME]}}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         initial_env = os.environ.copy()
         isolated_dirs = run_dir / "isolated"
         for name, directory in {
             "HOME": home, "XDG_CONFIG_HOME": isolated_dirs / "xdg-config", "XDG_DATA_HOME": isolated_dirs / "xdg-data",
             "XDG_STATE_HOME": isolated_dirs / "xdg-state", "XDG_CACHE_HOME": isolated_dirs / "xdg-cache",
-            "TMPDIR": isolated_dirs / "tmp", "WORKSPACE": workspace, "LCA_STATE_HOME": isolated_dirs / "lca-state",
+            "TMPDIR": isolated_dirs / "tmp", "WORKSPACE": workspace, "OTTER_STATE_HOME": isolated_dirs / "otter-state",
         }.items():
             directory.mkdir(parents=True, exist_ok=True)
         keep_env = {key: initial_env[key] for key in ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME", "SHELL") if initial_env.get(key)}
@@ -1335,12 +1335,12 @@ def main() -> int:
             "XDG_DATA_HOME": str(isolated_dirs / "xdg-data"), "XDG_STATE_HOME": str(isolated_dirs / "xdg-state"),
             "XDG_CACHE_HOME": str(isolated_dirs / "xdg-cache"), "TMPDIR": str(isolated_dirs / "tmp"),
             "TMP": str(isolated_dirs / "tmp"), "TEMP": str(isolated_dirs / "tmp"),
-            "LCA_STATE_HOME": str(isolated_dirs / "lca-state"), "GIT_CONFIG_GLOBAL": str(git_config),
+            "OTTER_STATE_HOME": str(isolated_dirs / "otter-state"), "GIT_CONFIG_GLOBAL": str(git_config),
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
         })
-        git_worktree = prepare_git_worktree(workspace, skill_path, reference_path, lca_config_path, env, git_evidence)
+        git_worktree = prepare_git_worktree(workspace, skill_path, reference_path, otter_config_path, env, git_evidence)
         summary["git_worktree"] = git_worktree
-        summary["isolation"] = {key: env[key] for key in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMPDIR", "LCA_STATE_HOME")}
+        summary["isolation"] = {key: env[key] for key in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMPDIR", "OTTER_STATE_HOME")}
         summary["fixture"] = {
             "skill_name": SKILL_NAME, "skill_path": str(skill_path), "common_bytes": len(common_bytes),
             "common_sha256": sha256_bytes(common_bytes), "changed_bytes": len(changed_bytes),
@@ -1381,17 +1381,17 @@ def main() -> int:
         summary["ollama_proxy_url"] = proxy.base_url
         config = make_opencode_config(proxy.base_url, product_plugin, observer_plugin)
         write_json(paths["opencode_config"], config)
-        summary["plugin_uris"] = {"actual_lca_product": product_plugin.as_uri(), "observer": observer_plugin.as_uri()}
+        summary["plugin_uris"] = {"actual_otter_product": product_plugin.as_uri(), "observer": observer_plugin.as_uri()}
         env.update({
             "OPENCODE_DISABLE_PROJECT_CONFIG": "1", "OPENCODE_DISABLE_AUTOUPDATE": "1",
             "OPENCODE_DISABLE_MODELS_FETCH": "1",
             "OPENCODE_CONFIG_CONTENT": json.dumps(config, ensure_ascii=False, separators=(",", ":")),
-            "LCA_NATIVE_PRODUCT_EVIDENCE": str(observer_evidence),
-            "LCA_NATIVE_PRODUCT_PROMPTS": json.dumps(prompts, ensure_ascii=False, separators=(",", ":")),
-            "LCA_NATIVE_PRODUCT_VENDOR_DESCRIPTION_MARKER": markers["unchecked_vendor_description"],
-            "LCA_NATIVE_PRODUCT_VENDOR_BODY_MARKER": markers["unchecked_vendor_body"],
-            "LCA_NATIVE_PRODUCT_CHANGED_BODY_MARKER": markers["changed_body"],
-            "LCA_NATIVE_PRODUCT_REFERENCE_MARKER": reference_marker,
+            "OTTER_NATIVE_PRODUCT_EVIDENCE": str(observer_evidence),
+            "OTTER_NATIVE_PRODUCT_PROMPTS": json.dumps(prompts, ensure_ascii=False, separators=(",", ":")),
+            "OTTER_NATIVE_PRODUCT_VENDOR_DESCRIPTION_MARKER": markers["unchecked_vendor_description"],
+            "OTTER_NATIVE_PRODUCT_VENDOR_BODY_MARKER": markers["unchecked_vendor_body"],
+            "OTTER_NATIVE_PRODUCT_CHANGED_BODY_MARKER": markers["changed_body"],
+            "OTTER_NATIVE_PRODUCT_REFERENCE_MARKER": reference_marker,
         })
         server_port = available_tcp_port()
         api_url = f"http://127.0.0.1:{server_port}"
@@ -1434,7 +1434,7 @@ def main() -> int:
                     break
                 time.sleep(0.2)
             ensure(any(event.get("phase") == "product.config.after" for event in read_jsonl(observer_evidence)),
-                   "actual LCA plugin config hook was not observed before main inference")
+                   "actual Otter plugin config hook was not observed before main inference")
             observer_init = [event for event in read_jsonl(observer_evidence) if event.get("phase") == "observer.initialized"]
             ensure(any(event.get("pid") == process.pid for event in observer_init), "native observer plugin did not initialize in the actual server process")
 
@@ -1455,7 +1455,7 @@ def main() -> int:
             scenarios["changed"] = changed_case
             summary["scenarios"]["changed"] = changed_case
 
-            audit_values = product_transcript_audits(Path(env["LCA_STATE_HOME"]), workspace)
+            audit_values = product_transcript_audits(Path(env["OTTER_STATE_HOME"]), workspace)
             proxy_requests = proxy.snapshot()
             observer_events = read_jsonl(observer_evidence)
             summary["native_tool_evidence"] = {
@@ -1485,7 +1485,7 @@ def main() -> int:
         if proxy is not None:
             try:
                 proxy.stop()
-                proxy_port_unreachable = port_unreachable(proxy.base_url, "/__lca_health")
+                proxy_port_unreachable = port_unreachable(proxy.base_url, "/__otter_health")
             except BaseException as error:
                 summary["cleanup_errors"].append(f"recording proxy cleanup: {type(error).__name__}: {error}")
             summary["ollama_proxy"] = {
@@ -1507,7 +1507,7 @@ def main() -> int:
             cleanup.get("process_alive_after_cleanup") is False and cleanup.get("server_port_unreachable_after_cleanup") is True and
             proxy_port_unreachable is True and not cleanup.get("errors") and not summary.get("cleanup_errors")
         )
-        line = f"LCA native product skill qualification {'PASSED' if summary['success'] else 'FAILED'}; evidence: {paths['summary']}\n"
+        line = f"Otter native product skill qualification {'PASSED' if summary['success'] else 'FAILED'}; evidence: {paths['summary']}\n"
         error_text = line
         if not summary["success"] and summary.get("failure"):
             error_text += f"{summary['failure']['type']}: {summary['failure']['message']}\n"

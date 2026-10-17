@@ -1,6 +1,6 @@
 // /status (M0 step 3, ARCH-08/ARCH-13): command.execute.before marks the turn by name, chat.message rewrites the
 // command's own text part in place with the code-rendered status marker, and the config hook records only the
-// names lca actually injected so a user-defined command with the same name is never acted on.
+// names otter actually injected so a user-defined command with the same name is never acted on.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
@@ -101,7 +101,7 @@ describe("/status", () => {
       engine: "codex",
       phase: "pending_approval",
       owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 },
-      planRef: { jsonSha: planSha, mdPath: ".lca/plans/fixture.md", mdSha: "b".repeat(64), revision: 1 },
+      planRef: { jsonSha: planSha, mdPath: ".otter/plans/fixture.md", mdSha: "b".repeat(64), revision: 1 },
     })
     const before = readFileSync(workflowPath(wt.worktree))
     const runs = createExecutionRunStore(wt.worktree)
@@ -117,7 +117,7 @@ describe("/status", () => {
     // Index-bound snapshot whose bytes hash correctly but fail strict parsing: status reports invalid_state only.
     writeRawSnapshot(wt.worktree, { version: 2, id: "wf_bad", kind: "plan", phase: "planning", sessionID: S, secret: "must-not-leak" }, { id: "wf_bad", sessionID: S })
     const text = await runStatus()
-    expect(text).toBe("[lca status]\nstatus unavailable: workflow invalid_state\n\nReply only: ok")
+    expect(text).toBe("[otter status]\nstatus unavailable: workflow invalid_state\n\nReply only: ok")
     expect(text).not.toContain("must-not-leak")
   })
 
@@ -220,7 +220,7 @@ describe("/status", () => {
     expect(readIfPresent(eventsPath(wt.worktree))).toEqual(eventsBefore)
   })
 
-  test("a user-defined status command is not acted on (text untouched, no lca command logic runs)", async () => {
+  test("a user-defined status command is not acted on (text untouched, no otter command logic runs)", async () => {
     const deps = makeDeps(client, wt.worktree)
     const native = await createNativeToolFixture(deps, { sessionID: S })
     await createConfigHook(deps)({ command: { status: { template: "my custom status output" } } })
@@ -250,21 +250,21 @@ describe("/status", () => {
     expect(hookOff.command?.status).toBeUndefined()
   })
 
-  test("lca_flow tool is absent from the effective config when flow is disabled (M0 AC0.7 semantics: main never denies it)", async () => {
+  test("otter_flow tool is absent from the effective config when flow is disabled (M0 AC0.7 semantics: main never denies it)", async () => {
     const cfg: any = {}
     await createConfigHook(fakeDeps(wt.worktree, { flow: { enabled: false, max_code_invalid: 3, max_review_iterations: 2, nudge_max: 1, review_max_tool_calls: 6 } }))(cfg)
     for (const name of ["main", "worker", "reviewer"]) {
-      expect((cfg.agent?.[name]?.tools ?? {}).lca_flow).toBeUndefined()
+      expect((cfg.agent?.[name]?.tools ?? {}).otter_flow).toBeUndefined()
     }
-    // main never has lca_flow denied (it is the only agent allowed to call it, when the tool is registered)
-    expect((cfg.agent?.main?.permission as Record<string, unknown> | undefined)?.lca_flow).toBeUndefined()
+    // main never has otter_flow denied (it is the only agent allowed to call it, when the tool is registered)
+    expect((cfg.agent?.main?.permission as Record<string, unknown> | undefined)?.otter_flow).toBeUndefined()
   })
 
-  test("M1: lca_flow is denied for worker/reviewer, not denied for main (default config, flow on)", async () => {
+  test("M1: otter_flow is denied for worker/reviewer, not denied for main (default config, flow on)", async () => {
     const cfg: any = {}
     await createConfigHook(fakeDeps(wt.worktree))(cfg)
-    expect((cfg.agent?.main?.permission as Record<string, unknown> | undefined)?.lca_flow).toBeUndefined()
-    expect((cfg.agent?.worker?.permission as Record<string, unknown> | undefined)?.lca_flow).toBe("deny")
-    expect((cfg.agent?.reviewer?.permission as Record<string, unknown> | undefined)?.lca_flow).toBe("deny")
+    expect((cfg.agent?.main?.permission as Record<string, unknown> | undefined)?.otter_flow).toBeUndefined()
+    expect((cfg.agent?.worker?.permission as Record<string, unknown> | undefined)?.otter_flow).toBe("deny")
+    expect((cfg.agent?.reviewer?.permission as Record<string, unknown> | undefined)?.otter_flow).toBe("deny")
   })
 })

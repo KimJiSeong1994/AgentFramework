@@ -12,21 +12,21 @@ const { privateKey, publicKey } = generateKeyPairSync("ed25519")
 const bootID = "11111111-1111-4111-8111-111111111111"
 const ticket = "2".repeat(32)
 const tree = "a".repeat(40)
-const JOURNAL_DROPIN_PATH = "/etc/systemd/journald.conf.d/lca-verifier.conf"
+const JOURNAL_DROPIN_PATH = "/etc/systemd/journald.conf.d/otter-verifier.conf"
 const reference: VerificationReference = {
   kind: "verifier", executionID: "execution-1", profile: "linux-single-use", invocationID: ticket,
   inputSnapshotID: tree, inputDigest: createHash("sha256").update(tree).digest("hex"),
-  deadlineAt: 2_000_000_000_000, maxOutputChars: 128, unit: "lca-verifier.service", bootID,
+  deadlineAt: 2_000_000_000_000, maxOutputChars: 128, unit: "otter-verifier.service", bootID,
 }
 const profileFiles = [
-  "/usr/local/libexec/lca-verifier/gate.py",
-  "/usr/local/libexec/lca-verifier/runner.py",
-  "/usr/local/libexec/lca-verifier/client.py",
-  "/etc/systemd/system/lca-verifier.service",
-  "/etc/systemd/system/lca-verifier-gate.service",
-  "/etc/systemd/system/lca.slice",
-  "/etc/polkit-1/rules.d/90-lca-verifier.rules",
-  "/etc/sudoers.d/00-lca-verifier-deny",
+  "/usr/local/libexec/otter-verifier/gate.py",
+  "/usr/local/libexec/otter-verifier/runner.py",
+  "/usr/local/libexec/otter-verifier/client.py",
+  "/etc/systemd/system/otter-verifier.service",
+  "/etc/systemd/system/otter-verifier-gate.service",
+  "/etc/systemd/system/otter.slice",
+  "/etc/polkit-1/rules.d/90-otter-verifier.rules",
+  "/etc/sudoers.d/00-otter-verifier-deny",
   JOURNAL_DROPIN_PATH,
 ]
 
@@ -36,11 +36,11 @@ function signedResult(options: {
 } = {}): VerificationResult {
   const output = "verification output"
   const payload = options.receipt ?? {
-    schema: "lca.linux-verifier.retirement.v1",
+    schema: "otter.linux-verifier.retirement.v1",
     reference,
     binding: {
-      unit: "lca-verifier.service", bootID, systemdInvocationID: "3".repeat(32), mainPID: 431,
-      startTimeTicks: 9001, cgroupPath: "/lca.slice/lca-verifier.service", device: "42", inode: "991",
+      unit: "otter-verifier.service", bootID, systemdInvocationID: "3".repeat(32), mainPID: 431,
+      startTimeTicks: 9001, cgroupPath: "/otter.slice/otter-verifier.service", device: "42", inode: "991",
     },
     retirement: { kind: "held-deleted-journal", messageID: "7ad2d189f7e94e70a38c781354912448" },
     result: {
@@ -80,7 +80,7 @@ test("pure Ed25519 receipt validation binds reference, result, output and native
     publicKey.export({ type: "spki", format: "pem" }).toString())).toBe(false)
 
   const payload = JSON.parse(valid.proof!.receipt!) as Record<string, unknown>
-  expect(verifyLinuxVerificationCrypto(reSign({ ...payload, schema: "lca.unknown.receipt.v9" }), reference,
+  expect(verifyLinuxVerificationCrypto(reSign({ ...payload, schema: "otter.unknown.receipt.v9" }), reference,
     publicKey.export({ type: "spki", format: "pem" }).toString())).toBe(false)
   const wrongBootBinding = { ...(payload.binding as Record<string, unknown>), bootID: "44444444-4444-4444-8444-444444444444" }
   expect(verifyLinuxVerificationCrypto(reSign({ ...payload, binding: wrongBootBinding }), reference,
@@ -145,9 +145,9 @@ test("root profile path metadata rejects foreign owners, writable modes and syml
 
 test("only the exact v2 profile shape with a canonical boot epoch and journal drop-in hash is accepted", () => {
   const profile = {
-    schema: "lca.linux-verifier.profile.v2",
+    schema: "otter.linux-verifier.profile.v2",
     bootEpoch: bootID,
-    unit: "lca-verifier.service",
+    unit: "otter-verifier.service",
     controllerUID: 1000,
     verifierUID: 1001,
     publicKeyPem: "ed25519 public key",
@@ -155,7 +155,7 @@ test("only the exact v2 profile shape with a canonical boot epoch and journal dr
     qualified: false,
   }
   expect(linuxVerifierProfileShapeValid(profile)).toBe(true)
-  expect(linuxVerifierProfileShapeValid({ ...profile, schema: "lca.linux-verifier.profile.v1" })).toBe(false)
+  expect(linuxVerifierProfileShapeValid({ ...profile, schema: "otter.linux-verifier.profile.v1" })).toBe(false)
   expect(linuxVerifierProfileShapeValid({ ...profile, bootEpoch: "11111111111141118111111111111111" })).toBe(false)
   const withoutDropin = Object.fromEntries(
     Object.entries(profile.files).filter(([path]) => path !== JOURNAL_DROPIN_PATH),

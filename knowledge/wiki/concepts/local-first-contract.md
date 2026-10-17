@@ -1,6 +1,6 @@
 # 로컬 우선 설계 계약
 
-> 출처: [OpenCode 기반 자체 에이전트 프레임워크 심층 검토](../sources/documents-e23212dec8bc6f31aa6120397f75f7dd1d58f0df41dc8275b9b0e3a93df6265a.md) §0, §3. 적용 대상: [lca 프레임워크](../entities/lca-framework.md).
+> 출처: [OpenCode 기반 자체 에이전트 프레임워크 심층 검토](../sources/documents-e23212dec8bc6f31aa6120397f75f7dd1d58f0df41dc8275b9b0e3a93df6265a.md) §0, §3. 적용 대상: [otter 프레임워크](../entities/lca-framework.md).
 
 ## 계약 (출처가 제시한 세 가지)
 

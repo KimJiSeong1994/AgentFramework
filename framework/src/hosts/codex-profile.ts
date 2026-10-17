@@ -4,13 +4,13 @@ import catalog from "./codex-models-0.159.3.json"
 
 // Generated from Codex 0.159.3's public `codex debug models --bundled` metadata export.
 // Original base instructions and source model-message prompts are excluded; only verified
-// model metadata remains, with every emitted entry carrying the fixed LCA-owned instructions.
+// model metadata remains, with every emitted entry carrying the fixed Otter-owned instructions.
 const bundledModels = catalog as {
   models: Array<{ slug: string } & Record<string, unknown>>
 }
 
 export const CODEX_VERSION = "0.159.3"
-export const CODEX_INSTRUCTIONS = "You are an LCA text-only inference engine. Follow the supplied LCA JSON response protocol. Native tools are unavailable; propose LCA tool requests only as JSON text."
+export const CODEX_INSTRUCTIONS = "You are an Otter text-only inference engine. Follow the supplied Otter JSON response protocol. Native tools are unavailable; propose Otter tool requests only as JSON text."
 
 export type CodexProfile = Readonly<{
   version: string
@@ -116,8 +116,8 @@ export function codexProfileArgv(profile: CodexProfile, scratchWorkdir: string, 
   assertAbsolutePath(catalogPath, "catalogPath")
 
   return [
-    "-c", 'default_permissions="lca_text_only"',
-    "-c", `permissions.lca_text_only={ filesystem = { ${tomlBasicString(scratchWorkdir)} = "read" } }`,
+    "-c", 'default_permissions="otter_text_only"',
+    "-c", `permissions.otter_text_only={ filesystem = { ${tomlBasicString(scratchWorkdir)} = "read" } }`,
     "-c", `model_catalog_json=${tomlBasicString(catalogPath)}`,
     "-c", "features.code_mode=false",
     "-c", "tools.experimental_request_user_input.enabled=false",

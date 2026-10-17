@@ -7,7 +7,7 @@ import { loadOpenCodeSkill, OpenCodeSkillRefused } from "../skills/opencode.ts"
 /** Fixed schema/description: unchecked discovery metadata never enters the native tool definition. */
 export function createSkillTool(deps: HookDeps) {
   return tool({
-    description: "Load one registered LCA skill by name. Source, role, and current-session authorization are checked by the runtime.",
+    description: "Load one registered Otter skill by name. Source, role, and current-session authorization are checked by the runtime.",
     args: { name: tool.schema.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/u).describe("The explicitly requested ordinary skill name.") },
     async execute(args, context) {
       const callID = (context as { callID?: unknown }).callID

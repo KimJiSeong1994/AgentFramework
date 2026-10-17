@@ -1,6 +1,6 @@
-# fib fixture (lca stage-1 acceptance)
+# fib fixture (otter stage-1 acceptance)
 
-`fib.py` is intentionally absent. Prompt used by `scripts/lca-e2e.sh`:
+`fib.py` is intentionally absent. Prompt used by `scripts/otter-e2e.sh`:
 
 > Implement fib(n) in fib.py so that test_fib.py passes. Run the tests.
 

@@ -11,7 +11,7 @@ const reference: VerificationReference = {
   kind: "verifier", executionID: "execution-1", profile: "linux-single-use",
   invocationID: "2".repeat(32), inputSnapshotID: snapshotID,
   inputDigest: createHash("sha256").update(snapshotID).digest("hex"), deadlineAt: Date.now() + 30_000,
-  maxOutputChars: 256, unit: "lca-verifier.service", bootID: "11111111-1111-4111-8111-111111111111",
+  maxOutputChars: 256, unit: "otter-verifier.service", bootID: "11111111-1111-4111-8111-111111111111",
 }
 
 function request(overrides: Partial<VerificationRequest> = {}): VerificationRequest {

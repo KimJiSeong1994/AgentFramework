@@ -1,11 +1,11 @@
-// D12e opencode-pin: rows asserted from `lca-doctor.sh --json` over temp trees and a fake `opencode` on PATH.
+// D12e opencode-pin: rows asserted from `otter-doctor.sh --json` over temp trees and a fake `opencode` on PATH.
 import { afterEach, beforeEach, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-const DOCTOR = join(import.meta.dir, "..", "..", "scripts", "lca-doctor.sh")
+const DOCTOR = join(import.meta.dir, "..", "..", "scripts", "otter-doctor.sh")
 const PIN = "1.18.32"
 let root: string
 let bin: string
@@ -32,21 +32,21 @@ function tree(opts: { framework?: string; installed?: string | null; opencodeBin
 function rows(only = "D12e") {
   const r = spawnSync("bash", [DOCTOR, "--json"], {
     encoding: "utf8",
-    env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, LCA_DOCTOR_ONLY: only, LCA_DOCTOR_ROOT: root },
+    env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, OTTER_DOCTOR_ONLY: only, OTTER_DOCTOR_ROOT: root },
   })
   return (JSON.parse(r.stdout).checks as Array<{ status: string; id: string; observed: string }>)
 }
-/** No LCA_DOCTOR_ONLY at all (unset, not empty-string): the fast-path filter must not short-circuit an unfiltered run. */
+/** No OTTER_DOCTOR_ONLY at all (unset, not empty-string): the fast-path filter must not short-circuit an unfiltered run. */
 function rowsUnfiltered() {
-  const env = { ...process.env, PATH: `${bin}:/usr/bin:/bin`, LCA_DOCTOR_ROOT: root }
-  delete (env as Record<string, string | undefined>).LCA_DOCTOR_ONLY
+  const env = { ...process.env, PATH: `${bin}:/usr/bin:/bin`, OTTER_DOCTOR_ROOT: root }
+  delete (env as Record<string, string | undefined>).OTTER_DOCTOR_ONLY
   const r = spawnSync("bash", [DOCTOR, "--json"], { encoding: "utf8", env })
   return (JSON.parse(r.stdout).checks as Array<{ status: string; id: string; observed: string }>)
 }
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "lca-doctor-root-"))
-  bin = mkdtempSync(join(tmpdir(), "lca-doctor-bin-"))
+  root = mkdtempSync(join(tmpdir(), "otter-doctor-root-"))
+  bin = mkdtempSync(join(tmpdir(), "otter-doctor-bin-"))
 })
 afterEach(() => { rmSync(root, { recursive: true, force: true }); rmSync(bin, { recursive: true, force: true }) })
 
@@ -82,7 +82,7 @@ test("D01 below MIN stays WARN (unchanged semantics)", () => {
   expect(rows("D01")).toEqual([expect.objectContaining({ id: "D01", status: "WARN" })])
 })
 
-test("an unfiltered run (no LCA_DOCTOR_ONLY) does not short-circuit after D01/D12e", () => {
+test("an unfiltered run (no OTTER_DOCTOR_ONLY) does not short-circuit after D01/D12e", () => {
   tree()
   const ids = rowsUnfiltered().map((r) => r.id)
   expect(ids).toContain("D01")

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test"
 import { existsSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { join, resolve } from "node:path"
-import { loadConfig, projectConfigPath, type LcaConfig } from "../src/config.ts"
+import { loadConfig, projectConfigPath, type OtterConfig } from "../src/config.ts"
 import type { CoreDeps } from "../src/deps.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
 import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
@@ -26,7 +26,7 @@ function fixtureClient(directory = wt.worktree) {
   return client
 }
 
-function fixtureDeps(directory = wt.worktree, patch: Partial<LcaConfig> = configuration): HookDeps {
+function fixtureDeps(directory = wt.worktree, patch: Partial<OtterConfig> = configuration): HookDeps {
   return makeDeps(fixtureClient(directory), directory, patch)
 }
 
@@ -121,7 +121,7 @@ test("copied enabled configuration cannot collect a foreign worktree into its ow
   const foreign = join(wt.worktree, "foreign-project")
   const copied = { skill_observation: { ...configuration.skill_observation, owner_root: wt.worktree } }
   for (const root of [wt.worktree, foreign]) {
-    mkdirSync(join(root, ".lca"), { recursive: true })
+    mkdirSync(join(root, ".otter"), { recursive: true })
     writeFileSync(projectConfigPath(root), JSON.stringify(copied))
   }
   const deps = fixtureDeps(foreign, loadConfig(foreign))
@@ -150,13 +150,13 @@ test("canonical aliases of the same worktree retain their bound campaign", () =>
 })
 
 test.each(["observer.fixture", "observer:fixture"])("CLI activation and observer share campaign grammar: %s", (campaignID) => {
-  const cli = resolve(import.meta.dir, "../../scripts/lca-skill-observation.ts")
+  const cli = resolve(import.meta.dir, "../../scripts/otter-skill-observation.ts")
   const activation = spawnSync(process.execPath, [cli, "activate", "--root", wt.worktree, "--campaign-id", campaignID], {
-    env: { ...process.env, LCA_STATE_HOME: wt.stateHome }, encoding: "utf8",
+    env: { ...process.env, OTTER_STATE_HOME: wt.stateHome }, encoding: "utf8",
   })
   expect(activation.status).toBe(0)
   const receipt = JSON.parse(activation.stdout)
-  mkdirSync(join(wt.worktree, ".lca"), { recursive: true })
+  mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
   writeFileSync(projectConfigPath(wt.worktree), JSON.stringify({
     skill_observation: { enabled: true, campaign_id: campaignID, owner_root: wt.worktree, owner_binding: receipt.ownerBinding },
   }))

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Stage 4 check: does OLLAMA_NUM_PARALLEL=2 give two independent prefix caches (main slot + worker slot)?
 
-    python3 scripts/lca-np-probe.py --host 127.0.0.1:11434            # the user's server (NUM_PARALLEL=1)
-    python3 scripts/lca-np-probe.py --host 127.0.0.1:11435            # a second instance started with NUM_PARALLEL=2
+    python3 scripts/otter-np-probe.py --host 127.0.0.1:11434            # the user's server (NUM_PARALLEL=1)
+    python3 scripts/otter-np-probe.py --host 127.0.0.1:11435            # a second instance started with NUM_PARALLEL=2
 
 Sends two long, different prefixes (A ≈ main's system prompt, B ≈ a worker's) in the order A A B A B A and prints
 `prompt_eval_count` per call from /api/generate. With one slot the 4th call (A after B) re-prefills the whole prefix;

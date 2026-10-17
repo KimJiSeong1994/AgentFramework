@@ -561,22 +561,22 @@ describe("status v1 model", () => {
   test("generic view: JSON carries kind/stage/revision/stopIntent/artifacts and artifact state is recomputed after tampering", () => {
     const deps = setup()
     const body = "rendered plan"
-    const mdPath = ".lca/plans/generic.md"
-    mkdirSync(join(wt.worktree, ".lca/plans"), { recursive: true })
+    const mdPath = ".otter/plans/generic.md"
+    mkdirSync(join(wt.worktree, ".otter/plans"), { recursive: true })
     writeFileSync(join(wt.worktree, mdPath), body)
     const mdSha = createHash("sha256").update(body).digest("hex")
     const workflow = {
       ...newStatusWorkflow(SESSION, currentOwner(), "command", "generic view"),
       id: "wf_generic_view", phase: "pending_approval" as const, stage: "decision" as const,
       planRef: { jsonSha: "a".repeat(64), mdPath, mdSha, revision: 1 },
-      artifacts: [{ key: "absent", path: ".lca/workflows/x/y/absent.md", sha256: "c".repeat(64) }],
+      artifacts: [{ key: "absent", path: ".otter/workflows/x/y/absent.md", sha256: "c".repeat(64) }],
     }
     writeStatusWorkflow(wt.worktree, workflow)
     const first = statusJson(deps, SESSION)
     expect(first.workflow).toMatchObject({ kind: "plan", stage: "decision", revision: 0, stopIntent: null })
     expect(first.workflow?.artifacts).toEqual([
       { key: "plan.md", path: mdPath, state: "verified" },
-      { key: "absent", path: ".lca/workflows/x/y/absent.md", state: "incomplete" },
+      { key: "absent", path: ".otter/workflows/x/y/absent.md", state: "incomplete" },
     ])
     const text = renderStatusSnapshot(first, SESSION)
     expect(text).toContain("kind: plan · stage decision · revision 0")
@@ -588,8 +588,8 @@ describe("status v1 model", () => {
   test("a committed planning-kind envelope renders the generic view and bounds artifact reads (P6a S1)", () => {
     const deps = setup()
     const artifacts = Array.from({ length: 20 }, (_, i) => {
-      const path = `.lca/workflows/${SESSION}/wf_gen/a${i}.md`
-      mkdirSync(join(wt.worktree, ".lca/workflows", SESSION, "wf_gen"), { recursive: true })
+      const path = `.otter/workflows/${SESSION}/wf_gen/a${i}.md`
+      mkdirSync(join(wt.worktree, ".otter/workflows", SESSION, "wf_gen"), { recursive: true })
       writeFileSync(join(wt.worktree, path), `body ${i}`)
       return { key: `a${i}`, path, sha256: createHash("sha256").update(`body ${i}`).digest("hex") }
     })
@@ -618,7 +618,7 @@ describe("status v1 model", () => {
       ...newStatusWorkflow(SESSION, currentOwner(), "command", "rich status snapshot"),
       id: wfID,
       phase: "reviewing" as const,
-      planRef: { jsonSha: planSha, mdPath: ".lca/plans/plan.md", mdSha: "b".repeat(64), revision: 3 },
+      planRef: { jsonSha: planSha, mdPath: ".otter/plans/plan.md", mdSha: "b".repeat(64), revision: 3 },
       review: { verdict: "iterate" as const, findings: ["review finding"], planSha, note: "cap" as const },
       taskIds: ["t1"],
       counters: { code_invalid: 2, review_iterations: 3, user_rejections: 1, nudges: 4 },

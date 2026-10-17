@@ -14,7 +14,7 @@ export function getBackend(deps: CoreDeps): Backend {
   let b: Backend
   if (d.backend === "sqlite") b = openSqlite(resolvePath(deps.worktree, d.sqlite_path), d.evo.python)
   else if (d.backend === "postgres") b = openPostgres({ dsnEnv: d.pg_dsn_env, allowRemote: d.pg_allow_remote, psql: d.psql_path })
-  else throw new Error('lca: no database backend configured (data.backend is "none")')
+  else throw new Error('otter: no database backend configured (data.backend is "none")')
   backends.set(deps, b)
   return b
 }

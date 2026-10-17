@@ -1,11 +1,11 @@
 // Shared dependency bag every hook factory receives. Owned by the scaffold; do not add per-hook state here.
 import type { PluginInput } from "@opencode-ai/plugin"
-import type { LcaConfig } from "../config.ts"
+import type { OtterConfig } from "../config.ts"
 import type { CoreDeps } from "../deps.ts"
 
 export type HookDeps = CoreDeps & {
   client: PluginInput["client"]
-  /** Interactive LCA launcher mode, enabled only after the plugin validates its worktree binding. */
+  /** Interactive Otter launcher mode, enabled only after the plugin validates its worktree binding. */
   interactive?: boolean
 }
 
@@ -32,6 +32,6 @@ export const HOOK_IDS = [
 ] as const
 export type HookId = (typeof HOOK_IDS)[number]
 
-export function enabled(config: LcaConfig, id: HookId): boolean {
+export function enabled(config: OtterConfig, id: HookId): boolean {
   return !config.disabled_hooks.includes(id)
 }

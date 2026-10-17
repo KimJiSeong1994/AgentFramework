@@ -79,7 +79,7 @@ async function binding(allowed: readonly string[], role: ExecutionRole = "main",
   const request: ExecutionRequest = { ...scope, skillContext: bound.context, handlers: bound.handlers }
   const tools = createCliTools({ root: request.cwd, role, allowed: request.policy.tools.allowed, denied: request.policy.tools.denied })
   const event = (callID = "call-1", path = "data.txt"): Extract<ExecutionEvent, { type: "tool-before" }> => ({
-    type: "tool-before", sessionID: request.executionID, callID, toolID: "lca:read", name: "read", input: { path },
+    type: "tool-before", sessionID: request.executionID, callID, toolID: "otter:read", name: "read", input: { path },
   })
   return { source, bound, request, tools, event, instructions, directory }
 }

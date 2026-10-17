@@ -210,7 +210,7 @@ describe("durable session store", () => {
     const sid = "stale_reclaim_race"
     const env = {
       ...process.env,
-      LCA_STATE_HOME: wt.stateHome,
+      OTTER_STATE_HOME: wt.stateHome,
       SESSION_REBIND_ADMISSION_URL: new URL("../src/sessions/admission.ts", import.meta.url).href,
       SESSION_REBIND_RUNTIME_URL: new URL("../src/hosts/opencode-runtime.ts", import.meta.url).href,
       SESSION_REBIND_HELPERS_URL: new URL("./guards-helpers.ts", import.meta.url).href,

@@ -87,7 +87,7 @@ describe("deep-interview then ralplan through the interactive session", () => {
     // exactly one DI and one ralplan were created; nothing executed
     const created = readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)
     expect(created).toEqual(["deep-interview", "ralplan"])
-    expect(readLedger(wt.worktree, "lca-fixture0").tasks).toHaveLength(0)
+    expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
     const roles = new Set(s.seen.map(item => item.role))
     expect([...roles].every(role => ["interviewer", "researcher", "contrarian", "simplifier", "planner", "architect", "critic"].includes(role))).toBe(true)
   })
@@ -134,7 +134,7 @@ describe("deep-interview then ralplan through the interactive session", () => {
     expect(created).toEqual(["ralplan"])
     expect(s.output).toContain("Execution not started")
     expect(committed()).toMatchObject({ kind: "ralplan", stage: "pending_execution", phase: "pending_approval" })
-    expect(readLedger(wt.worktree, "lca-fixture0").tasks).toHaveLength(0)
+    expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
   })
 })
 
@@ -157,7 +157,7 @@ describe("names, collisions and consent", () => {
     expect(committed()).toMatchObject({ kind: "ultragoal", stage: "unit_approval", phase: "pending_approval" })
     const created = readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)
     expect(created).toEqual(["ultragoal"])
-    expect(readLedger(wt.worktree, "lca-fixture0").tasks).toHaveLength(0)
+    expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
     expect(s.seen.map(item => item.promptId)).toEqual(["ug.decompose", "ug.unit_plan", "ug.unit_review"])
   })
 
@@ -167,7 +167,7 @@ describe("names, collisions and consent", () => {
     expect(committed()).toMatchObject({ kind: "autoresearch", stage: "experiment_approval", phase: "pending_approval" })
     const created = readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)
     expect(created).toEqual(["autoresearch"])
-    expect(readLedger(wt.worktree, "lca-fixture0").tasks).toHaveLength(0)
+    expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
     expect(s.seen.map(item => item.promptId)).toEqual(["ar.intake", "ar.hypothesis", "ar.evidence", "ar.experiment"])
   })
 

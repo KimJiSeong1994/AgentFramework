@@ -80,7 +80,7 @@ describe("exclusive application input ownership", () => {
     internal.draw()
 
     const frame = plain(frames.at(-1))
-    expect(frame).toContain("╭─ LCA · local coding agent ─")
+    expect(frame).toContain("╭─ Otter · local coding agent ─")
     expect(frame).toContain("⬢ local / model-known")
     expect(frame).toContain("No messages yet.")
     expect(frame).toContain("Type, then press Enter.")
@@ -136,9 +136,9 @@ describe("exclusive application input ownership", () => {
     await Bun.sleep(400)
     // The clock redraws on its own; successive frames show different spinner glyphs.
     expect(frames.length).toBeGreaterThan(before + 1)
-    const glyphs = new Set(frames.slice(before).map(frame => /([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]) LCA · working/u.exec(plain(frame))?.[1]).filter(Boolean))
+    const glyphs = new Set(frames.slice(before).map(frame => /([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]) Otter · working/u.exec(plain(frame))?.[1]).filter(Boolean))
     expect(glyphs.size).toBeGreaterThan(1)
-    expect(plain(frames.at(-1))).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] LCA · working · Escape cancels · 0s/u)
+    expect(plain(frames.at(-1))).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Otter · working · Escape cancels · 0s/u)
 
     // A choice waits on the user: no spinner, no redraw clock.
     const choice = app.choose("Decide", ["Yes", "No"], new AbortController().signal)

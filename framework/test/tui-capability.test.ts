@@ -28,9 +28,9 @@ describe("TUI capability", () => {
     expect(tuiCapability({ ...base, rows: Number.POSITIVE_INFINITY }).enabled).toBe(false)
   })
 
-  test("explicit LCA_TUI=0 opt-out wins and reasons are bounded plain text", () => {
+  test("explicit OTTER_TUI=0 opt-out wins and reasons are bounded plain text", () => {
     const result = tuiCapability({ ...base, optOut: "0" })
-    expect(result).toEqual({ enabled: false, reason: "disabled by LCA_TUI=0" })
+    expect(result).toEqual({ enabled: false, reason: "disabled by OTTER_TUI=0" })
     expect(result.reason).toBeDefined()
     expect(result.reason!.length).toBeLessThanOrEqual(80)
     expect(result.reason).not.toMatch(/[\u001b-\u001f\u007f-\u009f]/)

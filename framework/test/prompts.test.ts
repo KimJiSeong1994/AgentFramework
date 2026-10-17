@@ -36,7 +36,7 @@ describe("prompt content", () => {
           expect(prompt.includes("Call the delegate tool once")).toBe(delegate)
           expect(prompt.includes("write a numbered task list first")).toBe(!delegate)
           expect(prompt.includes("Question about the project database")).toBe(data && delegate)
-          expect(prompt.includes("submit plans only with lca_flow")).toBe(flow)
+          expect(prompt.includes("submit plans only with otter_flow")).toBe(flow)
           const numbers = [...prompt.matchAll(/^(\d+)\. /gm)].map((match) => Number(match[1]))
           const count = 8 + Number(data && delegate) + Number(flow)
           expect(numbers).toEqual(Array.from({ length: count }, (_, i) => i + 1))

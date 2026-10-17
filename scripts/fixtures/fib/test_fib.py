@@ -1,4 +1,4 @@
-"""Stage-1 acceptance fixture for lca. `fib.py` is missing on purpose; the agent must create it.
+"""Stage-1 acceptance fixture for otter. `fib.py` is missing on purpose; the agent must create it.
 
 Run with `python3 -m pytest -q` or plain `python3 test_fib.py`.
 """

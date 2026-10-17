@@ -380,7 +380,7 @@ describe("SDK transcript retention", () => {
     expect(client.calls.some(call => call.method === "messages" && (call.args as any).path.id === SESSION)).toBe(false)
   })
 
-  test("an authenticated session.created with canonical vendor history stays held without local LCA state", async () => {
+  test("an authenticated session.created with canonical vendor history stays held without local Otter state", async () => {
     releaseFixtureSession(fixture.worktree, fixtureSession)
     rmSync(sessionDir(fixture.worktree, SESSION), { recursive: true, force: true })
     const sdkSession = {
@@ -478,12 +478,12 @@ describe("SDK transcript retention", () => {
   })
 
   test("global lifetime-key capacity refuses a new owner without evicting captured identities", async () => {
-    if (process.env.LCA_SDK_LIFETIME_CAPACITY_CHILD !== "1") {
+    if (process.env.OTTER_SDK_LIFETIME_CAPACITY_CHILD !== "1") {
       const child = Bun.spawnSync([
         process.execPath, "test", import.meta.path, "--test-name-pattern",
         "global lifetime-key capacity refuses a new owner without evicting captured identities",
       ], {
-        env: { ...process.env, LCA_SDK_LIFETIME_CAPACITY_CHILD: "1" },
+        env: { ...process.env, OTTER_SDK_LIFETIME_CAPACITY_CHILD: "1" },
         stdout: "pipe",
         stderr: "pipe",
         timeout: 15_000,
@@ -533,14 +533,14 @@ describe("SDK transcript retention", () => {
 
     expect(getOwnedSession(fixture.worktree, SESSION)).toBeUndefined()
     expect(existsSync(sessionDir(fixture.worktree, SESSION))).toBe(false)
-    const script = `const { openSession } = await import(process.env.LCA_STORE_MODULE); const store = openSession(process.env.LCA_WORKTREE, process.env.LCA_SESSION, { engine: "opencode" }); store.release({ workflowQuiescent: true, evidence: "separate SDK CLI writer proof", workflowID: null, revision: null });`
+    const script = `const { openSession } = await import(process.env.OTTER_STORE_MODULE); const store = openSession(process.env.OTTER_WORKTREE, process.env.OTTER_SESSION, { engine: "opencode" }); store.release({ workflowQuiescent: true, evidence: "separate SDK CLI writer proof", workflowID: null, revision: null });`
     const child = Bun.spawnSync([process.execPath, "-e", script], {
       cwd: process.cwd(),
       env: {
         ...process.env,
-        LCA_STORE_MODULE: new URL("../src/sessions/store.ts", import.meta.url).href,
-        LCA_WORKTREE: fixture.worktree,
-        LCA_SESSION: SESSION,
+        OTTER_STORE_MODULE: new URL("../src/sessions/store.ts", import.meta.url).href,
+        OTTER_WORKTREE: fixture.worktree,
+        OTTER_SESSION: SESSION,
       },
       stdout: "pipe",
       stderr: "pipe",

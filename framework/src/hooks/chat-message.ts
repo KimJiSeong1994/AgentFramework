@@ -30,7 +30,7 @@ import { createOpenCodeSkillPermissionSource } from "../hosts/opencode-skill-sou
 import { enabled } from "./types.ts"
 import { flowSuffix, modeSuffix, type FlowPhase } from "../modes/instructions.ts"
 import { assertNever } from "../workflows/types.ts"
-import { hasLcaMarker, stripForgedMarkers } from "../modes/markers.ts"
+import { hasOtterMarker, stripForgedMarkers } from "../modes/markers.ts"
 import type { ActiveMode } from "../modes/instructions.ts"
 import { createSkillRouter } from "../routing/router.ts"
 import { recordRoutingAdvice } from "../telemetry/routing.ts"
@@ -66,12 +66,12 @@ function refuseUserText(parts: Part[], reason: string): void {
 }
 
 /**
- * Provenance of lca's own suffixes. The old check trusted any text ending in an `<lca-mode>`/`<lca-flow>` block, so a
+ * Provenance of otter's own suffixes. The old check trusted any text ending in an `<otter-mode>`/`<otter-flow>` block, so a
  * user could paste a forged marker and skip detection for that turn (red-team D3). Now only parts this plugin
  * already suffixed are skipped; markers in any other user text are stripped as untrusted before processing.
  */
 const SUFFIXED_PARTS_MAX = 512
-/** part id -> the exact text lca left in it; a re-delivery of that same text is skipped, anything else is new. */
+/** part id -> the exact text otter left in it; a re-delivery of that same text is skipped, anything else is new. */
 const suffixedParts = new Map<string, string>()
 function partKey(p: TextPart): string {
   return `${p.sessionID}\u0000${p.messageID}\u0000${p.id}`
@@ -221,7 +221,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
         catch (error) { log("chat.message: main SDK session authentication failed", { sessionID: input.sessionID, error: (error as Error)?.message ?? String(error) }) }
         if (!admission) {
           attachHeldFreshSessionIfUnowned(input.sessionID)
-          refuseUserText(output.parts, "LCA session held: this OpenCode session is not a fresh authenticated main session; explicit owner Resume is required.")
+          refuseUserText(output.parts, "Otter session held: this OpenCode session is not a fresh authenticated main session; explicit owner Resume is required.")
           return
         }
         epoch = admission.epoch
@@ -230,13 +230,13 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       }
       const parentEpoch = mainUser ? capturedUserMessageEpoch(worktree, input.sessionID, output.message.id) : undefined
       if (mainUser && ((parentEpoch !== undefined && parentEpoch !== epoch) || (replay && parentEpoch === undefined))) {
-        refuseUserText(output.parts, "LCA ignored a stale user message; no work was dispatched.")
+        refuseUserText(output.parts, "Otter ignored a stale user message; no work was dispatched.")
         return
       }
       if (epoch && mainUser && originalText.length > 0 && !replay) {
         const persisted = persistMainUserMessage(worktree, input.sessionID, output.message.id, originalText, epoch)
         if (persisted.status === "stale") {
-          refuseUserText(output.parts, "LCA ignored a stale user message; no work was dispatched.")
+          refuseUserText(output.parts, "Otter ignored a stale user message; no work was dispatched.")
           return
         }
         if (persisted.status === "failed") {
@@ -248,7 +248,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
               ...(persisted.holdError === undefined ? {} : { holdError: (persisted.holdError as Error)?.message ?? String(persisted.holdError) }),
             })
           } catch {}
-          refuseUserText(output.parts, "LCA session held: the user message could not be durably recorded; this request was refused.")
+          refuseUserText(output.parts, "Otter session held: the user message could not be durably recorded; this request was refused.")
           let stillOwned = false
           try {
             stillOwned = getOwnedSession(worktree, input.sessionID)?.epoch === epoch
@@ -281,7 +281,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
               error: (error as Error)?.message ?? String(error),
             })
           }
-          refuseUserText(output.parts, "LCA session held: this SDK session lifetime could not be retained; this request was refused.")
+          refuseUserText(output.parts, "Otter session held: this SDK session lifetime could not be retained; this request was refused.")
           if (heldCurrentOwner) {
             try { await deps.client.session.abort({ path: { id: input.sessionID } }) }
             catch (error) {
@@ -367,7 +367,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
             part.text = renderStatusError(error) + "\n\nReply only: ok"
             log("chat.message: /status unavailable", { sessionID, source: error.source, code: error.code })
           } else {
-            part.text = "[lca status]\nstatus unavailable: unknown unreadable\n\nReply only: ok"
+            part.text = "[otter status]\nstatus unavailable: unknown unreadable\n\nReply only: ok"
             log("chat.message: /status unavailable", { sessionID, source: "unknown", code: "unreadable" })
           }
         }
@@ -384,7 +384,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     }
     // M1 /plan /approve /reject /cancel: the state work (§5.2/§5.3/§5.5) happens here, in the command turn, then
     // the command's own template text is rewritten in place with the outcome (same ARCH-08 pattern as /status).
-    // Approval is only ever reachable through this branch for an lca-injected `approve` command turn: prose
+    // Approval is only ever reachable through this branch for an otter-injected `approve` command turn: prose
     // "/approve"/"approved" anywhere else never reaches approveWorkflow.
     const messageRole = (output.message as { role?: string }).role
     const userCommandText = lastUserText(output.parts)
@@ -413,12 +413,12 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       log("chat.message: suffix already present, skipping", { sessionID })
       return
     }
-    if (hasLcaMarker(part.text)) {
+    if (hasOtterMarker(part.text)) {
       part.text = stripForgedMarkers(part.text)
-      log("chat.message: removed lca markers not written by lca", { sessionID })
+      log("chat.message: removed otter markers not written by otter", { sessionID })
     }
     // Every path below may append a suffix; the final text is recorded in `finally` so a re-delivery of exactly the
-    // text lca produced is not suffixed twice.
+    // text otter produced is not suffixed twice.
     try {
       return await handlePart(input, part, commandTurn, now, output.message.id, messageRole === "user")
     } finally {
@@ -470,7 +470,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       }
     }
 
-    // Interactive LCA treats each ordinary main-agent request as a plan request. The flow's existing authority
+    // Interactive Otter treats each ordinary main-agent request as a plan request. The flow's existing authority
     // rules decide whether a new workflow may start; an active workflow is never replaced by conversational text.
     if (deps.interactive && isUserMessage && input.agent === "main" && !commandTurn && part.text.trim()) {
       if (!flowOn(config)) {
@@ -522,7 +522,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     if (detection && detection.mode === "plan" && flowOn(config)) {
       const refusal = persistedWorkflowRefusal()
       if (refusal) {
-        part.text = `lca: ${refusal}`
+        part.text = `otter: ${refusal}`
         log("chat.message: plan keyword refused", { sessionID, refusal })
         return
       }
@@ -579,7 +579,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       if (!admitted()) return
       let adviceInserted = false
       if (config.skill_router.mode === "suggest" && recommendation.skill) {
-        part.text += `\n\n<lca-skill-advice>Potentially relevant skill: ${recommendation.skill}. This is optional advice, not a request to load a skill, change mode, or execute work. Preserve the user's explicit choices and existing authorization requirements.</lca-skill-advice>`
+        part.text += `\n\n<otter-skill-advice>Potentially relevant skill: ${recommendation.skill}. This is optional advice, not a request to load a skill, change mode, or execute work. Preserve the user's explicit choices and existing authorization requirements.</otter-skill-advice>`
         adviceInserted = true
         if (recommendation.decisionID) recordRoutingAdvice(deps, sessionID, messageID, recommendation.decisionID, recommendation.skill)
       }
@@ -617,7 +617,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       if (open.every((t) => told.has(t.id))) return ""
       markResumeOffered(deps, sessionID, open.map((t) => t.id))
       log("resume offer attached to user message", { sessionID, open: open.length })
-      return `\n\n<lca-resume>${resumeMessage(open.length, open.map((t) => t.title))}</lca-resume>`
+      return `\n\n<otter-resume>${resumeMessage(open.length, open.map((t) => t.title))}</otter-resume>`
     } catch (e) {
       log("resume suffix failed", { sessionID, error: (e as Error).message })
       return ""
@@ -629,7 +629,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
    * planning/stuck(no_submission); legacy ulw/data keywords never activate a mode (notice only); cancel keywords
    * keep their legacy effect (mode off) plus a workflow note; legacy plan keyword without a workflow is unaffected
    * (handled by the normal path, never reached here since there is no active workflow in that case); router and
-   * <lca-resume> are both skipped; exactly one <lca-flow> suffix is appended (never <lca-mode>/<lca-resume>).
+   * <otter-resume> are both skipped; exactly one <otter-flow> suffix is appended (never <otter-mode>/<otter-resume>).
    */
   function handleWorkflowTurn(sessionID: string, wf: Workflow, part: TextPart, isCommandTurn: boolean): void {
     const detection = detectMode(part.text)
@@ -687,12 +687,12 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     const now = Date.now()
     const persistedRefusal = persistedWorkflowRefusal()
     if (persistedRefusal) {
-      part.text = `lca: ${persistedRefusal}`
+      part.text = `otter: ${persistedRefusal}`
       log(`chat.message: /${command} refused`, { sessionID, reason: persistedRefusal })
       return
     }
     if (command !== CANCEL_COMMAND && effectiveHold(worktree, sessionID)) {
-      part.text = "LCA session held: explicit owner Resume required; no workflow was changed."
+      part.text = "Otter session held: explicit owner Resume required; no workflow was changed."
       return
     }
     if (command === PLAN_COMMAND) {
@@ -722,7 +722,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       }
       const refusal = workflowEngineRefusal(wf, runtime.host.identity.engine)
       if (refusal) {
-        part.text = `lca: ${refusal}`
+        part.text = `otter: ${refusal}`
         return
       }
       const queueRunning = queue.isRunning(wf.sessionID)
@@ -744,11 +744,11 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       const current = readWorkflow(worktree)
       const currentRefusal = current && workflowEngineRefusal(current, runtime.host.identity.engine)
       if (currentRefusal) {
-        part.text = `lca: ${currentRefusal}`
+        part.text = `otter: ${currentRefusal}`
         return
       }
       if (!current || current.id !== wf.id || current.engine !== wf.engine || current.lastSeq !== wf.lastSeq || current.phase !== wf.phase) {
-        part.text = "lca: workflow changed meanwhile; stop and check /status"
+        part.text = "otter: workflow changed meanwhile; stop and check /status"
         return
       }
       const r = approveWorkflow(runtime, wf, inputs, { queueRunning, planShaOk, mdShaOk }, now)
@@ -769,7 +769,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       }
       const refusal = workflowEngineRefusal(wf, runtime.host.identity.engine)
       if (refusal) {
-        part.text = `lca: ${refusal}`
+        part.text = `otter: ${refusal}`
         return
       }
       const reason = args.trim() || "(no reason given)"
@@ -791,7 +791,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       }
       const refusal = workflowEngineRefusal(wf, runtime.host.identity.engine)
       if (refusal) {
-        part.text = `lca: ${refusal}`
+        part.text = `otter: ${refusal}`
         return
       }
       const queueRunning = queue.isRunning(wf.sessionID)

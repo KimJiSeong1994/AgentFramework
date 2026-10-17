@@ -364,7 +364,7 @@ describe("immutable hash-bound prompts", () => {
     expect(Object.isFrozen(PLAN_MAIN_PROMPT)).toBe(true)
     expect(PLAN_MAIN_PROMPT.sha256).toBe(promptSha(PLAN_MAIN_PROMPT.text))
     expect(promptIntact(PLAN_MAIN_PROMPT)).toBe(true)
-    expect(PLAN_MAIN_PROMPT.text).not.toMatch(/\bgjc\b|\/skill:|<lca-flow>|lca_flow/i)
+    expect(PLAN_MAIN_PROMPT.text).not.toMatch(/\bgjc\b|\/skill:|<otter-flow>|otter_flow/i)
     expect(SUMMARIZE_PROMPT.text).not.toMatch(/\bgjc\b|\/skill:/i)
   })
 
@@ -391,7 +391,7 @@ describe("typed stage events (never lifecycle/owner/receipts)", () => {
   test("accepts well-formed events", () => {
     const parsed = parseStageEvents(JSON.stringify({ events: [
       { type: "message", text: "hi" }, { type: "question", text: "which?" }, { type: "decision", id: "d1", text: "use X" },
-      { type: "artifact_ref", key: "plan", path: ".lca/plans/a.md", sha256: "a".repeat(64) },
+      { type: "artifact_ref", key: "plan", path: ".otter/plans/a.md", sha256: "a".repeat(64) },
       { type: "verdict", verdict: "iterate", findings: ["f"] },
     ] }))
     expect(parsed).toMatchObject({ ok: true })

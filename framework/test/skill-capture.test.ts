@@ -38,28 +38,28 @@ function installRaceGit(mutation: string, mode: "once" | "always"): { mutations(
   mkdirSync(state, { recursive: true })
   writeFileSync(join(bin, "git"), `#!/bin/sh
 case " $* " in *" ls-tree "*)
-  if [ -n "$LCA_RACE_DIR" ]; then
-    n=$(cat "$LCA_RACE_DIR/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$LCA_RACE_DIR/n"
-    m=$(cat "$LCA_RACE_DIR/m" 2>/dev/null || echo 0)
-    if [ "$n" -ge 2 ] && { [ "$LCA_RACE_MODE" = always ] || [ "$m" -lt 1 ]; }; then
-      m=$((m+1)); echo $m > "$LCA_RACE_DIR/m"
-      LCA_RACE_N=$m env -u LCA_RACE_DIR sh -c "$LCA_RACE_MUTATION"
+  if [ -n "$OTTER_RACE_DIR" ]; then
+    n=$(cat "$OTTER_RACE_DIR/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$OTTER_RACE_DIR/n"
+    m=$(cat "$OTTER_RACE_DIR/m" 2>/dev/null || echo 0)
+    if [ "$n" -ge 2 ] && { [ "$OTTER_RACE_MODE" = always ] || [ "$m" -lt 1 ]; }; then
+      m=$((m+1)); echo $m > "$OTTER_RACE_DIR/m"
+      OTTER_RACE_N=$m env -u OTTER_RACE_DIR sh -c "$OTTER_RACE_MUTATION"
     fi
   fi;;
 esac
-exec "$LCA_REAL_GIT" "$@"
+exec "$OTTER_REAL_GIT" "$@"
 `, { mode: 0o755 })
   const saved = { PATH: process.env.PATH }
   process.env.PATH = `${bin}:${saved.PATH}`
-  process.env.LCA_REAL_GIT = REAL_GIT
-  process.env.LCA_RACE_DIR = state
-  process.env.LCA_RACE_MODE = mode
-  process.env.LCA_RACE_MUTATION = mutation
+  process.env.OTTER_REAL_GIT = REAL_GIT
+  process.env.OTTER_RACE_DIR = state
+  process.env.OTTER_RACE_MODE = mode
+  process.env.OTTER_RACE_MUTATION = mutation
   return {
     mutations: () => existsSync(join(state, "m")) ? Number(readFileSync(join(state, "m"), "utf8").trim()) : 0,
     restore() {
       process.env.PATH = saved.PATH
-      for (const key of ["LCA_REAL_GIT", "LCA_RACE_DIR", "LCA_RACE_MODE", "LCA_RACE_MUTATION"]) delete process.env[key]
+      for (const key of ["OTTER_REAL_GIT", "OTTER_RACE_DIR", "OTTER_RACE_MODE", "OTTER_RACE_MUTATION"]) delete process.env[key]
     },
   }
 }
@@ -118,7 +118,7 @@ async function findDescriptor(name: string, from = roots): Promise<SkillDescript
 }
 
 beforeEach(async () => {
-  sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "lca-skill-capture-")))
+  sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "otter-skill-capture-")))
   project = join(sandbox, "project")
   home = join(sandbox, "user-home")
   testHome = join(sandbox, "git-home")
@@ -345,15 +345,15 @@ describe("exact skill capture", () => {
   describe("Git snapshot races", () => {
     const kinds = {
       head: {
-        mutation: `"$LCA_REAL_GIT" -c user.name=Racer -c user.email=racer@example.invalid -c commit.gpgsign=false commit --quiet --allow-empty -m "race-$LCA_RACE_N"`,
+        mutation: `"$OTTER_REAL_GIT" -c user.name=Racer -c user.email=racer@example.invalid -c commit.gpgsign=false commit --quiet --allow-empty -m "race-$OTTER_RACE_N"`,
         expected: "common" as const,
       },
       index: {
-        mutation: `echo "racer $LCA_RACE_N" > "racer-$LCA_RACE_N.txt" && "$LCA_REAL_GIT" add "racer-$LCA_RACE_N.txt"`,
+        mutation: `echo "racer $OTTER_RACE_N" > "racer-$OTTER_RACE_N.txt" && "$OTTER_REAL_GIT" add "racer-$OTTER_RACE_N.txt"`,
         expected: "custom" as const,
       },
       file: {
-        mutation: `printf 'racing bytes %s\\n' "$LCA_RACE_N" >> ${BASE}/racy/reference.txt`,
+        mutation: `printf 'racing bytes %s\\n' "$OTTER_RACE_N" >> ${BASE}/racy/reference.txt`,
         expected: "custom" as const,
       },
     }

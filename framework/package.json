@@ -1,5 +1,5 @@
 {
-  "name": "lca",
+  "name": "otter",
   "version": "1.0.0",
   "description": "Coding agent framework that turns plan, approval, and tool execution history into reusable local knowledge.",
   "license": "MIT",

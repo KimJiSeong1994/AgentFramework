@@ -1,12 +1,12 @@
 // Control-plane state store: single writer (this plugin), atomic writes.
 //
-// Location: OUTSIDE the worktree, under $XDG_STATE_HOME/lca/<sha1(worktree)[:12]>/ (default ~/.local/state/lca/...).
+// Location: OUTSIDE the worktree, under $XDG_STATE_HOME/otter/<sha1(worktree)[:12]>/ (default ~/.local/state/otter/...).
 // Execution claims are the exception: executionRunDirectory resolves the effective UID's native account home,
-// independent of HOME/XDG_STATE_HOME/LCA_STATE_HOME, and refuses distinct configured legacy authority.
+// independent of HOME/XDG_STATE_HOME/OTTER_STATE_HOME, and refuses distinct configured legacy authority.
 // Stage 2 review (security M3/M5): a ledger inside the worktree could be edited by a worker (bash/edit allowed
 // inside the worktree) to schedule a `verify` command that the framework would later run outside any transcript,
-// and other repositories would commit .lca/state by accident. Handoffs (data plane, human-readable) stay in the
-// worktree under .lca/handoffs (see ledger.ts). The e2e script isolates this via XDG_STATE_HOME.
+// and other repositories would commit .otter/state by accident. Handoffs (data plane, human-readable) stay in the
+// worktree under .otter/handoffs (see ledger.ts). The e2e script isolates this via XDG_STATE_HOME.
 import { createHash } from "node:crypto"
 import * as childProcess from "node:child_process"
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs"
@@ -35,8 +35,8 @@ function canonical(p: string): string {
 /** Base directory for all control-plane state. An override that points INSIDE the worktree is ignored (it would let a worker edit the ledger again). */
 export function stateBase(worktree?: string): string {
   const xdg = process.env.XDG_STATE_HOME || join(homedir(), ".local", "state")
-  const fallback = join(xdg, "lca")
-  const override = process.env.LCA_STATE_HOME
+  const fallback = join(xdg, "otter")
+  const override = process.env.OTTER_STATE_HOME
   if (!override) return fallback
   if (worktree) {
     const root = canonical(worktree)
@@ -237,7 +237,7 @@ export function executionRunDirectory(worktree: string): string {
   }
   if (!statSync(homePath).isDirectory()) throw new Error("operating-system home is not a directory")
 
-  const candidate = join(homePath, ".local", "state", "lca", worktreeKey(worktreePath), "execution-runs")
+  const candidate = join(homePath, ".local", "state", "otter", worktreeKey(worktreePath), "execution-runs")
   const resolvedAuthority = canonicalExistingOrMissing(candidate)
   const authority = resolvedAuthority.path
   if (resolvedAuthority.exists) {

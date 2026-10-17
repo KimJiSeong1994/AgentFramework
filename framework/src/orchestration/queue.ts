@@ -33,7 +33,7 @@ import {
 import { abortVerifierExecution, beforeDeadline, runVerifierExecution } from "./verifier-run.ts"
 import { scanDiff } from "./gaming.ts"
 import { DEFAULT_SUITE, extractAnswer, formatCheckRun, sampleRows, type CheckRun } from "../data/check.ts"
-import type { LcaAgentName } from "../agents/prompts.ts"
+import type { OtterAgentName } from "../agents/prompts.ts"
 import type { SkillTaskFactInput, SkillVerificationFactInput } from "../telemetry/skills.ts"
 import { assertPreparedHostReference, hostReferenceHasVendorID, persistedHostReference, settled, strictQuiescent, type ExecutionClaim } from "../hosts/run-state.ts"
 import { authenticateLinuxVerification } from "../hosts/linux-domain.ts"
@@ -146,7 +146,7 @@ function attemptContext(attempt: AttemptObservation) {
   }
 }
 
-function observeChild(deps: ExecutionRuntime, attempt: AttemptObservation, childSessionID: string, agent: LcaAgentName, status: "started" | "done" | "failed" | "cancelled", childMessageID?: string): void {
+function observeChild(deps: ExecutionRuntime, attempt: AttemptObservation, childSessionID: string, agent: OtterAgentName, status: "started" | "done" | "failed" | "cancelled", childMessageID?: string): void {
   const role = actorRole(agent)
   bestEffortTaskObservation(deps, {
     ...attemptContext(attempt), sessionID: childSessionID,
@@ -156,7 +156,7 @@ function observeChild(deps: ExecutionRuntime, attempt: AttemptObservation, child
   })
 }
 
-function actorRole(agent: LcaAgentName): NonNullable<SkillTaskFactInput["actualRole"]> {
+function actorRole(agent: OtterAgentName): NonNullable<SkillTaskFactInput["actualRole"]> {
   if (agent === "worker" || agent === "reviewer" || agent === "data-analyst" || agent === "data-verifier") return agent
   return "unknown"
 }
@@ -633,7 +633,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
         entry.attempt = attempt
         observeTaskStart(attempt)
 
-        const worker = await runChild(deps, entry, sessionID, "worker", `lca task ${task.n}: ${task.title}`, workerPrompt(ledger, task, rejectReason, c.handoff_context_chars), c.task_ttl_ms, (child) => {
+        const worker = await runChild(deps, entry, sessionID, "worker", `otter task ${task.n}: ${task.title}`, workerPrompt(ledger, task, rejectReason, c.handoff_context_chars), c.task_ttl_ms, (child) => {
           ledger = writeLedger(deps.worktree, { ...ledger, running: { taskId: task.id, childSessionID: child, since: Date.now() } })
         }, wt?.path, attempt)
         task = { ...task, workerSessionID: worker.sessionID ?? task.workerSessionID, childSessions: [...task.childSessions, ...(worker.sessionID ? [worker.sessionID] : [])] }
@@ -870,7 +870,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
       entry.attempt = attempt
       observeTaskStart(attempt)
 
-      const analyst = await runChild(deps, entry, sessionID, "data-analyst", `lca data ${task.n}: ${task.title}`, analystPrompt(ledger, task, rejectReason, c.handoff_context_chars), c.task_ttl_ms, (child) => {
+      const analyst = await runChild(deps, entry, sessionID, "data-analyst", `otter data ${task.n}: ${task.title}`, analystPrompt(ledger, task, rejectReason, c.handoff_context_chars), c.task_ttl_ms, (child) => {
         ledger = writeLedger(deps.worktree, { ...ledger, running: { taskId: task.id, childSessionID: child, since: Date.now() } })
       }, undefined, attempt)
       task = { ...task, workerSessionID: analyst.sessionID ?? task.workerSessionID, childSessions: [...task.childSessions, ...(analyst.sessionID ? [analyst.sessionID] : [])] }
@@ -948,7 +948,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
   }
 
   async function runVerify(sessionID: string, entry: Active, task: LedgerTask, sql: string, check: CheckRun, ttl: number, attempt: AttemptObservation): Promise<ReviewResult> {
-    const r = await runChild(deps, entry, sessionID, "data-verifier", `lca verify ${task.n}: ${task.title}`, verifierPrompt(task, sql, check), ttl, undefined, undefined, attempt)
+    const r = await runChild(deps, entry, sessionID, "data-verifier", `otter verify ${task.n}: ${task.title}`, verifierPrompt(task, sql, check), ttl, undefined, undefined, attempt)
     if (r.status === "aborted") return { verdict: "error", reason: "aborted", sessionID: r.sessionID, aborted: true }
     if (r.status !== "ok") return { verdict: "error", reason: r.error ?? r.status, sessionID: r.sessionID }
     return { ...parseVerdict(r.text ?? ""), sessionID: r.sessionID }
@@ -981,7 +981,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     directory?: string,
     attempt?: AttemptObservation,
   ): Promise<ReviewResult> {
-    const r = await runChild(deps, entry, sessionID, "reviewer", `lca review ${task.n}: ${task.title}`, reviewerPrompt(task, diff, verify, prot, suspicious, hints), ttl, undefined, directory, attempt)
+    const r = await runChild(deps, entry, sessionID, "reviewer", `otter review ${task.n}: ${task.title}`, reviewerPrompt(task, diff, verify, prot, suspicious, hints), ttl, undefined, directory, attempt)
     if (r.status === "aborted") return { verdict: "error", reason: "aborted", sessionID: r.sessionID, aborted: true }
     if (r.status !== "ok") return { verdict: "error", reason: r.error ?? r.status, sessionID: r.sessionID }
     return { ...parseVerdict(r.text ?? ""), sessionID: r.sessionID }
@@ -1083,7 +1083,7 @@ async function runChild(
   deps: ExecutionRuntime,
   entry: Active,
   parentID: string,
-  agent: LcaAgentName,
+  agent: OtterAgentName,
   title: string,
   text: string,
   ttlMs: number,

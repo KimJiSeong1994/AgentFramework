@@ -7,7 +7,7 @@ import { assembleSkill, canonicalJson, COMPILE_ANCHOR, EVIDENCE_FILES, extractFr
 const repository = resolve(import.meta.dir, "../..")
 let root: string
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "lca-skillopt-unit-"))
+  root = mkdtempSync(join(tmpdir(), "otter-skillopt-unit-"))
   for (const path of EVIDENCE_FILES) {
     mkdirSync(dirname(join(root, path)), { recursive: true })
     copyFileSync(join(repository, path), join(root, path))
@@ -59,7 +59,7 @@ test("a live or stale Wiki lock is never removed to obtain a snapshot", () => {
 })
 
 test("off campaign, original binding and advice-only configuration are protected", () => {
-  const path = join(root, ".lca/lca.jsonc")
+  const path = join(root, ".otter/otter.jsonc")
   const baseline = readFileSync(path, "utf8")
   for (const changed of [baseline.replace('"enabled": false', '"enabled": true'), baseline.replace('"mode": "suggest"', '"mode": "off"'), baseline.replace('"ulw", "plan", "llm-wiki"', '"llm-wiki"'), baseline.replace("cd4d9d661baf48eb48fd0a20c6bdd015daba10b9389e6ed2d25c6ea8ef08948f", "0".repeat(64))]) {
     writeFileSync(path, changed)

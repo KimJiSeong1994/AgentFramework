@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os"
 import { delimiter, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { checkManifest } from "../../scripts/lca-soak-manifest.ts"
+import { checkManifest } from "../../scripts/otter-soak-manifest.ts"
 import {
   FAMILY_TABLE,
   acquireLock,
@@ -21,8 +21,8 @@ import {
   validateGrammar,
   validateSshTarget,
   verifyTail,
-} from "../../scripts/lca-soak-supervisor.ts"
-import type { Family } from "../../scripts/lca-soak-supervisor.ts"
+} from "../../scripts/otter-soak-supervisor.ts"
+import type { Family } from "../../scripts/otter-soak-supervisor.ts"
 
 const familyNames = Object.keys(FAMILY_TABLE) as Family[]
 
@@ -30,14 +30,14 @@ function fixtureInput(): Record<string, unknown> {
   const lineages = familyNames.flatMap(family => [1, 2, 3].map(repetition => {
     const lineage = `${family}-r${repetition}`
     const policy = FAMILY_TABLE[family]
-    const receiptPath = `/tmp/lca-soak/${lineage}.receipt.json`
+    const receiptPath = `/tmp/otter-soak/${lineage}.receipt.json`
     const invocations = Array.from({ length: policy.invocationCount }, (_, offset) => {
       const index = offset + 1
       const scenario = index === 1 ? policy.scenario : "resume"
       const argv = [
-        "python3", "scripts/lca-soak-pty-ssh.py", "--scenario", scenario,
+        "python3", "scripts/otter-soak-pty-ssh.py", "--scenario", scenario,
         "--receipt", receiptPath, "--verifier", "linux-production",
-        ...(index > 1 ? ["--session", "@lca-soak-parent-session"] : []),
+        ...(index > 1 ? ["--session", "@otter-soak-parent-session"] : []),
       ]
       return {
         scenario,
@@ -58,7 +58,7 @@ function fixtureInput(): Record<string, unknown> {
     }
   }))
   return {
-    schema: "lca.soak-fixtures.v1",
+    schema: "otter.soak-fixtures.v1",
     version: 1,
     provisioning: [{ vm: "vm-c", cwd: "/tmp", argv: ["provision", "--vm", "vm-c"] }, { vm: "vm-r", cwd: "/tmp", argv: ["provision", "--vm", "vm-r"] }],
     lineages,
@@ -69,7 +69,7 @@ const TEST_BINDING = createSupervisorBinding("stub-host", validateFixtureManifes
 const TEST_BINDING_SHA256 = supervisorBindingSha256(TEST_BINDING)
 
 function evidenceFixture() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "lca-soak-supervisor-")))
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "otter-soak-supervisor-")))
   const evidenceDir = join(root, "linux-eligibility-test")
   mkdirSync(evidenceDir, { mode: 0o700 })
   initializeManifest(evidenceDir, TEST_BINDING)
@@ -86,7 +86,7 @@ function integrationFixture(options: {
   descendantDelayMs?: number
   naturalSshExitMs?: number
 } = {}) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "lca-soak-supervisor-cli-")))
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "otter-soak-supervisor-cli-")))
   const binDir = join(root, "bin")
   const evidenceRoot = join(root, "host-evidence")
   const receiptsDir = join(root, "receipts")
@@ -114,11 +114,11 @@ const receiptPath = value("--receipt");
 const verifier = value("--verifier");
 const log = value("--test-log");
 if (!scenario || !receiptPath || verifier !== "linux-production" || !log) process.exit(91);
-if (process.env.LCA_TEST_DRIVER_MODE === "hang" && receiptPath.includes("success-r1")) {
+if (process.env.OTTER_TEST_DRIVER_MODE === "hang" && receiptPath.includes("success-r1")) {
   appendFileSync(log, "driver-started\\n");
   process.once("SIGTERM", () => { appendFileSync(log, "driver-terminated\\n"); process.exit(143); });
-  if (Number(process.env.LCA_TEST_DRIVER_NATURAL_EXIT_MS) > 0) {
-    setTimeout(() => { appendFileSync(log, "driver-natural-exit\\n"); process.exit(0); }, Number(process.env.LCA_TEST_DRIVER_NATURAL_EXIT_MS));
+  if (Number(process.env.OTTER_TEST_DRIVER_NATURAL_EXIT_MS) > 0) {
+    setTimeout(() => { appendFileSync(log, "driver-natural-exit\\n"); process.exit(0); }, Number(process.env.OTTER_TEST_DRIVER_NATURAL_EXIT_MS));
   }
   setInterval(() => {}, 1000);
 }
@@ -210,19 +210,19 @@ child.once("close", (code, signal) => process.exit(signal === "SIGKILL" ? 137 : 
   const sshSource = `#!/usr/bin/env bun
 import { appendFileSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
-appendFileSync(process.env.LCA_TEST_SSH_LOG, "ssh\\n");
+appendFileSync(process.env.OTTER_TEST_SSH_LOG, "ssh\\n");
 const command = process.argv.at(-1);
 const match = typeof command === "string" ? command.match(/^cat -- '([^']+)'$/) : null;
 if (!match) process.exit(93);
-if (match[1].includes("success-r1")) process.on("exit", () => appendFileSync(process.env.LCA_TEST_SSH_EXIT_MARKER, match[1] + "\\n"));
-if (match[1].includes("success-r1") && process.env.LCA_TEST_SSH_MODE === "overflow") {
+if (match[1].includes("success-r1")) process.on("exit", () => appendFileSync(process.env.OTTER_TEST_SSH_EXIT_MARKER, match[1] + "\\n"));
+if (match[1].includes("success-r1") && process.env.OTTER_TEST_SSH_MODE === "overflow") {
   process.stdout.write(Buffer.alloc(16 * 1024 * 1024 + 1, 65));
-  const naturalExitMs = Number(process.env.LCA_TEST_SSH_NATURAL_EXIT_MS);
+  const naturalExitMs = Number(process.env.OTTER_TEST_SSH_NATURAL_EXIT_MS);
   if (naturalExitMs > 0) setTimeout(() => process.exit(0), naturalExitMs);
   setInterval(() => {}, 1000);
 } else {
-  if (match[1].includes("success-r1") && process.env.LCA_TEST_SSH_MODE === "descendant-holds-pipe") {
-    const source = 'import { appendFileSync } from "node:fs"; setTimeout(() => appendFileSync(process.env.LCA_TEST_DESCENDANT_MARKER, "expired\\\\n"), Number(process.env.LCA_TEST_DESCENDANT_DELAY_MS));';
+  if (match[1].includes("success-r1") && process.env.OTTER_TEST_SSH_MODE === "descendant-holds-pipe") {
+    const source = 'import { appendFileSync } from "node:fs"; setTimeout(() => appendFileSync(process.env.OTTER_TEST_DESCENDANT_MARKER, "expired\\\\n"), Number(process.env.OTTER_TEST_DESCENDANT_DELAY_MS));';
     spawn(process.execPath, ["-e", source], { stdio: ["ignore", "inherit", "ignore"] }).unref();
   }
 process.stdout.write(readFileSync(match[1]));
@@ -232,9 +232,9 @@ process.stdout.write(readFileSync(match[1]));
 import { ChildProcess } from "node:child_process";
 const originalKill = ChildProcess.prototype.kill;
 ChildProcess.prototype.kill = function(signal = "SIGTERM") {
-  const mode = process.env.LCA_TEST_KILL_ERROR_MODE;
+  const mode = process.env.OTTER_TEST_KILL_ERROR_MODE;
   if (mode === "timeout" || mode === "stop" || mode === "overflow") {
-    appendFileSync(process.env.LCA_TEST_KILL_ATTEMPTS, String(signal) + "\\n");
+    appendFileSync(process.env.OTTER_TEST_KILL_ATTEMPTS, String(signal) + "\\n");
     const error = Object.assign(new Error("controlled signal delivery failure"), { code: "EPERM" });
     process.nextTick(() => this.emit("error", error));
     return false;
@@ -270,7 +270,7 @@ if (args.includes("--fail")) process.exit(23);
       const argv = [
         process.execPath, transportPath, driverPath, "--scenario", scenario, "--receipt", receiptPath,
         "--verifier", "linux-production", "--test-log", driverLog,
-        ...(offset > 0 ? ["--session", "@lca-soak-parent-session"] : []),
+        ...(offset > 0 ? ["--session", "@otter-soak-parent-session"] : []),
         ...(options.killFirstSuccess && lineage === "success-r1" && offset === 0 ? ["--test-local-kill"] : []),
       ]
       return { ...source, cwd: root, argv, receiptPath }
@@ -280,20 +280,20 @@ if (args.includes("--fail")) process.exit(23);
   const binding = createSupervisorBinding("stub-host", validateFixtureManifest(input))
   writeFileSync(manifestPath, JSON.stringify(input), { mode: 0o600 })
   const hostEvidence = join(root, "host-evidence")
-  const supervisorPath = fileURLToPath(new URL("../../scripts/lca-soak-supervisor.ts", import.meta.url))
-  const checkerPath = fileURLToPath(new URL("../../scripts/lca-soak-manifest.ts", import.meta.url))
+  const supervisorPath = fileURLToPath(new URL("../../scripts/otter-soak-supervisor.ts", import.meta.url))
+  const checkerPath = fileURLToPath(new URL("../../scripts/otter-soak-manifest.ts", import.meta.url))
   const env = {
     ...process.env,
     PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
-    LCA_TEST_SSH_LOG: sshLog,
-    LCA_TEST_DRIVER_MODE: options.hangDriver ? "hang" : "",
-    LCA_TEST_DRIVER_NATURAL_EXIT_MS: String(options.naturalDriverExitMs ?? 0),
-    LCA_TEST_SSH_MODE: options.sshMode ?? "",
-    LCA_TEST_SSH_NATURAL_EXIT_MS: String(options.naturalSshExitMs ?? 0),
-    LCA_TEST_DESCENDANT_MARKER: descendantMarker,
-    LCA_TEST_SSH_EXIT_MARKER: sshExitedMarker,
-    LCA_TEST_DESCENDANT_DELAY_MS: String(options.descendantDelayMs ?? 5_000),
-    LCA_TEST_KILL_ATTEMPTS: killAttempts,
+    OTTER_TEST_SSH_LOG: sshLog,
+    OTTER_TEST_DRIVER_MODE: options.hangDriver ? "hang" : "",
+    OTTER_TEST_DRIVER_NATURAL_EXIT_MS: String(options.naturalDriverExitMs ?? 0),
+    OTTER_TEST_SSH_MODE: options.sshMode ?? "",
+    OTTER_TEST_SSH_NATURAL_EXIT_MS: String(options.naturalSshExitMs ?? 0),
+    OTTER_TEST_DESCENDANT_MARKER: descendantMarker,
+    OTTER_TEST_SSH_EXIT_MARKER: sshExitedMarker,
+    OTTER_TEST_DESCENDANT_DELAY_MS: String(options.descendantDelayMs ?? 5_000),
+    OTTER_TEST_KILL_ATTEMPTS: killAttempts,
   }
   return {
     root,
@@ -464,7 +464,7 @@ function startSupervisorWithSignalFailures(
   fixture: ReturnType<typeof integrationFixture>,
   mode: "timeout" | "stop" | "overflow",
 ) {
-  const env = { ...fixture.env, LCA_TEST_KILL_ERROR_MODE: mode }
+  const env = { ...fixture.env, OTTER_TEST_KILL_ERROR_MODE: mode }
   return startCli([
     "--preload", fixture.killPreloadPath,
     fixture.supervisorPath,
@@ -483,7 +483,7 @@ function receiptBase(run: Record<string, unknown>) {
   return {
     schemaVersion: 2,
     scenario: run.scenario,
-    receiptPath: "/tmp/lca-soak/fake-receipt.json",
+    receiptPath: "/tmp/otter-soak/fake-receipt.json",
     baseIdentity: { verifier: "linux-production" },
     nativeSessionIDs: { parentSessionID: "session_01" },
     modelAborts: [],
@@ -603,17 +603,17 @@ test("resume session IDs are explicit argv values and never shell-expanded", () 
   const invocation = manifest.lineages.find(lineage => lineage.family === "active-verifier")!.invocations[1]!
   expect(invocation.resumeSession).toEqual({ fromInvocationIndex: 1 })
   const compiled = materializeArgv(invocation, "session_01")
-  const marker = invocation.argv.indexOf("@lca-soak-parent-session")
+  const marker = invocation.argv.indexOf("@otter-soak-parent-session")
   expect(compiled[marker]).toBe("session_01")
   expect(compiled.filter(arg => arg === "session_01")).toHaveLength(1)
-  expect(compiled.filter(arg => arg.startsWith("@lca-soak"))).toHaveLength(0)
+  expect(compiled.filter(arg => arg.startsWith("@otter-soak"))).toHaveLength(0)
   expect(() => materializeArgv(invocation, "bad; $(id)")).toThrow(/validated parentSessionID/)
 })
 
 test("SSH receipt reads use safe quoting and explicitly disable agent forwarding", () => {
   expect(() => validateSshTarget("vm-c;touch /tmp/pwned")).toThrow(/SSH config alias/)
   expect(() => remoteReceiptArgv("-oProxyCommand=id", "/tmp/receipt.json")).toThrow(/SSH config alias/)
-  const argv = remoteReceiptArgv("lca-vm-c", "/tmp/receipt'with-quote.json")
+  const argv = remoteReceiptArgv("otter-vm-c", "/tmp/receipt'with-quote.json")
   expect(argv).toContain("-a")
   expect(argv).toContain("ForwardAgent=no")
   expect(argv).toContain("ClearAllForwardings=yes")
@@ -621,7 +621,7 @@ test("SSH receipt reads use safe quoting and explicitly disable agent forwarding
 })
 
 test("supervisor cleanup uses directly owned child handles and never creates or signals process groups", () => {
-  const supervisorPath = fileURLToPath(new URL("../../scripts/lca-soak-supervisor.ts", import.meta.url))
+  const supervisorPath = fileURLToPath(new URL("../../scripts/otter-soak-supervisor.ts", import.meta.url))
   const source = readFileSync(supervisorPath, "utf8")
   expect(source).toContain("const activeOwnedChildren = new Map<ReturnType<typeof spawn>, (errorName: string) => void>()")
   expect(source).toContain("child.kill(signal)")
@@ -680,7 +680,7 @@ test("invocation-end requires explicit driver termination evidence and refuses i
       if (damage === "missing") delete end.orderedTermination
       else if (damage === "malformed") end.orderedTermination = "false"
       else {
-        for (const line of parsedLines) line.schema = "lca.soak-manifest.v1"
+        for (const line of parsedLines) line.schema = "otter.soak-manifest.v1"
         delete end.orderedTermination
       }
       const damagedBytes = Buffer.from(`${parsedLines.map(line => JSON.stringify(line)).join("\n")}\n`)
@@ -715,7 +715,7 @@ test("the checker CLI exits 2 for integrity failures", async () => {
   try {
     appendEvent(fixture.evidenceDir, "supervisor-start", { budget: { maxVMs: 2, headroomGiB: 20 }, bindingSha256: TEST_BINDING_SHA256 })
     writeFileSync(join(fixture.evidenceDir, "soak-manifest.jsonl"), "")
-    const checkerPath = fileURLToPath(new URL("../../scripts/lca-soak-manifest.ts", import.meta.url))
+    const checkerPath = fileURLToPath(new URL("../../scripts/otter-soak-manifest.ts", import.meta.url))
     const repoRoot = fileURLToPath(new URL("../../", import.meta.url))
     const result = await runCli([checkerPath, "--check", fixture.evidenceDir], repoRoot, process.env)
     expect(result.code).toBe(2)
@@ -859,7 +859,7 @@ test("active-verifier's intermediate linked resume is expected fail-closed, then
 })
 
 test("the family table pins driver SIGKILLs after the production OpenCode busy observation", () => {
-  const driverPath = fileURLToPath(new URL("../../scripts/lca-live-core-queue.ts", import.meta.url))
+  const driverPath = fileURLToPath(new URL("../../scripts/otter-live-core-queue.ts", import.meta.url))
   const source = readFileSync(driverPath, "utf8")
   expect(FAMILY_TABLE.interrupt.expectedExitCode).toBe(137)
   expect(FAMILY_TABLE.checkpoint.expectedExitCode).toBe(137)
@@ -1036,7 +1036,7 @@ test("restart refuses and preserves incomplete legacy invocation evidence instea
     const evidenceDir = seededKilledInvocationEvidence(fixture, [])
     const manifestPath = join(evidenceDir, "soak-manifest.jsonl")
     const lines = readFileSync(manifestPath, "utf8").trimEnd().split("\n").map(line => JSON.parse(line) as Record<string, unknown>)
-    for (const line of lines) line.schema = "lca.soak-manifest.v1"
+    for (const line of lines) line.schema = "otter.soak-manifest.v1"
     delete lines.at(-1)!.orderedTermination
     writeFileSync(manifestPath, `${lines.map(line => JSON.stringify(line)).join("\n")}\n`)
     const before = evidenceBytes(evidenceDir)

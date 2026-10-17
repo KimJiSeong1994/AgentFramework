@@ -3,11 +3,11 @@ import { spawnSync } from "node:child_process"
 import { realpathSync } from "node:fs"
 import { join } from "node:path"
 
-const required = process.env.LCA_TUI_LIVE_REQUIRED === "1"
-const model = process.env.LCA_TUI_LIVE_MODEL ?? ""
-const modelID = process.env.LCA_TUI_LIVE_MODEL_ID ?? ""
-const output = process.env.LCA_TUI_LIVE_OUT ?? ""
-const sourceHash = process.env.LCA_TUI_LIVE_SOURCE_HASH ?? ""
+const required = process.env.OTTER_TUI_LIVE_REQUIRED === "1"
+const model = process.env.OTTER_TUI_LIVE_MODEL ?? ""
+const modelID = process.env.OTTER_TUI_LIVE_MODEL_ID ?? ""
+const output = process.env.OTTER_TUI_LIVE_OUT ?? ""
+const sourceHash = process.env.OTTER_TUI_LIVE_SOURCE_HASH ?? ""
 
 test.skipIf(!required)("production TUI completes a genuine macOS native-model turn", () => {
   expect(process.platform).toBe("darwin")

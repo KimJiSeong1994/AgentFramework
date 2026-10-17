@@ -33,7 +33,7 @@ const scopes = new Map<string, Scope>()
 const loadResults = new WeakMap<OpenCodeToolCall, Scope>()
 
 export class OpenCodeSkillRefused extends Error {
-  constructor() { super("lca: native skill source or scope is not currently authorized"); this.name = "OpenCodeSkillRefused" }
+  constructor() { super("otter: native skill source or scope is not currently authorized"); this.name = "OpenCodeSkillRefused" }
 }
 const refuse = (): never => { throw new OpenCodeSkillRefused() }
 const key = (deps: HookDeps, sessionID: string): string => JSON.stringify([deps.worktree, sessionID])
@@ -240,7 +240,7 @@ export async function loadOpenCodeSkill(
     assertCall(deps, call, args, signal)
     scopes.set(key(deps, call.sessionID), scope)
     loadResults.set(call, scope)
-    return { title: "LCA skill loaded", output: source.text, metadata: audit }
+    return { title: "Otter skill loaded", output: source.text, metadata: audit }
   } catch { return refuse() }
 }
 
@@ -292,7 +292,7 @@ export async function afterOpenCodeSkillTool(
       if (capturedOutput !== undefined && scope) {
         const attachments = (output as { attachments?: unknown }).attachments
         if (attachments !== undefined && (!Array.isArray(attachments) || attachments.length !== 0)) return refuse()
-        output.title = call.tool === "skill" ? "LCA skill loaded" : "LCA captured source"
+        output.title = call.tool === "skill" ? "Otter skill loaded" : "Otter captured source"
         output.output = capturedOutput
         output.metadata = { ...scope.audit }
       }

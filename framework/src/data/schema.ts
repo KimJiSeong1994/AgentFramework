@@ -1,5 +1,5 @@
 // Static schema description for `schema_lookup`: a JSON file the project ships (generated from the DDL by
-// scripts/lca-schema-extract.py or written by hand). Never a live catalog dump — one table per call, ~500 est. tokens.
+// scripts/otter-schema-extract.py or written by hand). Never a live catalog dump — one table per call, ~500 est. tokens.
 import { existsSync, readFileSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
 import { estimateTokens } from "../tokens.ts"

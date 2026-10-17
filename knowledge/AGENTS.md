@@ -23,13 +23,13 @@
 캡처·등록·린트·상태 확인은 저장소 루트에서 실행한다.
 
 ```bash
-bun scripts/lca-wiki.ts capture
-bun scripts/lca-wiki.ts register <file> [--title T]
-bun scripts/lca-wiki.ts status
-bun scripts/lca-wiki.ts lint
+bun scripts/otter-wiki.ts capture
+bun scripts/otter-wiki.ts register <file> [--title T]
+bun scripts/otter-wiki.ts status
+bun scripts/otter-wiki.ts lint
 ```
 
-모든 명령은 `--root DIR`로 대상 저장소를 바꿀 수 있다(기본값은 현재 저장소 루트). 종료 코드: 0(성공), 1(거부·실패, stderr에 `Wiki operation failed: <reason>`), 2(사용법 오류). `register`와 `capture`는 `knowledge/.wiki.lock`(내용 `{pid, at}`)을 공유하며, 동시 쓰기를 막기 위해 작업 직전에 생성하고 자신이 만든 것만 종료 시 지운다. 쓰기 작업은 자신이 만들지 않은 락을 지우지 않는다. 기록된 pid가 이미 종료된 락은 `lint`/`status`가 stale로 보고하며, `bun scripts/lca-wiki.ts unlock`이 그 락만 제거한다(살아 있거나 읽을 수 없는 락은 거부). 락이 있는 동안 `lint`와 `status`는 이를 보고하고 거부(종료 1)한다.
+모든 명령은 `--root DIR`로 대상 저장소를 바꿀 수 있다(기본값은 현재 저장소 루트). 종료 코드: 0(성공), 1(거부·실패, stderr에 `Wiki operation failed: <reason>`), 2(사용법 오류). `register`와 `capture`는 `knowledge/.wiki.lock`(내용 `{pid, at}`)을 공유하며, 동시 쓰기를 막기 위해 작업 직전에 생성하고 자신이 만든 것만 종료 시 지운다. 쓰기 작업은 자신이 만들지 않은 락을 지우지 않는다. 기록된 pid가 이미 종료된 락은 `lint`/`status`가 stale로 보고하며, `bun scripts/otter-wiki.ts unlock`이 그 락만 제거한다(살아 있거나 읽을 수 없는 락은 거부). 락이 있는 동안 `lint`와 `status`는 이를 보고하고 거부(종료 1)한다.
 
 `capture`는 로컬 기록에서 종료된 도구 관찰을 추출하고, 허용된 메타데이터만 담은 불변 원본과 결정론적 출처 요약을 만들며, 집계 보고서·색인·로그를 관리한다. `register <file>`은 로컬 문서(`.md`/`.txt`, 0바이트 초과 이하 131072바이트 이하, 유효한 UTF-8, 비밀 패턴 없음)를 동일한 방식으로 등록하여 `raw/documents/<sha256>.<ext>` 원본과 `wiki/sources/documents-<sha256>.md` 요약 페이지를 만들고 색인·로그를 갱신한다. 같은 바이트를 다시 등록해도 로그를 중복 기록하지 않는다. `status`는 읽기 전용이며, 등록된 출처 중 `ingest` 로그 항목이 아직 연결하지 않은 미통합(pending) 항목과 구조 문제(problems)를 보고한다. 이 CLI들은 의미를 추론하거나 LLM 종합을 수행하지 않는다. 캡처·등록 후 에이전트가 원본 및 관련 위키 페이지를 읽고 의미적 통합(컴파일/ingest)을 별도로 수행한다. 출처는 그 자체로는 컴파일된(compiled) 것이 아니며, 컴파일 여부는 오직 그 출처 페이지를 링크하는 `ingest` 로그 항목이 있는지로만 판단한다.
 
@@ -75,7 +75,7 @@ bun scripts/lca-wiki.ts lint
 
 ### 린트 및 정리
 
-기계 검사는 저장소 루트에서 `bun scripts/lca-wiki.ts lint`로 수행한다. 에이전트의 의미 린트는 끊어진 상대 링크, 고아 페이지, 빠진 상호 참조, 오래되거나 출처가 없는 주장, 새 출처와의 모순을 점검하고 결과를 새 `lint` 로그 항목으로 남긴다. 원본은 수정하지 않고, 생성 보고서는 고치지 않는다. 린트는 원본에 없는 사건이나 품질 통계를 보충하지 않는다.
+기계 검사는 저장소 루트에서 `bun scripts/otter-wiki.ts lint`로 수행한다. 에이전트의 의미 린트는 끊어진 상대 링크, 고아 페이지, 빠진 상호 참조, 오래되거나 출처가 없는 주장, 새 출처와의 모순을 점검하고 결과를 새 `lint` 로그 항목으로 남긴다. 원본은 수정하지 않고, 생성 보고서는 고치지 않는다. 린트는 원본에 없는 사건이나 품질 통계를 보충하지 않는다.
 
 ## 안전 및 개인정보
 

@@ -78,7 +78,7 @@ describe("V-session-end-1 settled delete -> restore", () => {
     const planJson = planJsonPath(wt.worktree, wf.id)
     mkdirSync(dirname(planJson), { recursive: true })
     writeFileSync(planJson, '{"plan":"retained"}')
-    const planMd = join(wt.worktree, ".lca", "plans", `${wf.id}.md`)
+    const planMd = join(wt.worktree, ".otter", "plans", `${wf.id}.md`)
     mkdirSync(dirname(planMd), { recursive: true })
     writeFileSync(planMd, "# retained plan\n")
     const before = snapshotTree()
@@ -337,24 +337,24 @@ describe("V-session-end-3 duplicate and stale events", () => {
 })
 
 describe("V-session-end-4 deleted SDK handle", () => {
-  test("a retained LCA sid restores for display with the SDK session gone; work resume still refuses; nothing is recreated, purged or re-granted", async () => {
+  test("a retained Otter sid restores for display with the SDK session gone; work resume still refuses; nothing is recreated, purged or re-granted", async () => {
     const { hook, store, host } = await attached()
     store.append("user", { text: "question that outlives the SDK handle" }, "q-sdk")
     store.append("assistant", { text: "answer that outlives the SDK handle" }, "a-sdk")
     const started = startWorkflow(host, S, "command", "retained request", "user_command", "opencode")
     if (!started.ok) throw new Error(started.text)
     const wf = started.wf
-    const planMd = join(wt.worktree, ".lca", "plans", `${wf.id}.md`)
+    const planMd = join(wt.worktree, ".otter", "plans", `${wf.id}.md`)
     mkdirSync(dirname(planMd), { recursive: true })
     writeFileSync(planMd, "# retained artifact\n")
     await hook(deleted())
 
-    // From here the SDK reports session-exists=false for this id. LCA display must not consult it.
+    // From here the SDK reports session-exists=false for this id. Otter display must not consult it.
     ;(client.session as any).get = async () => ({ data: undefined, error: { name: "NotFoundError", data: { message: "session not found" } } })
     const callsBefore = client.calls.length
     const treeBefore = snapshotTree()
 
-    // display restore: transcript, listing, committed workflow history, all from LCA state only
+    // display restore: transcript, listing, committed workflow history, all from Otter state only
     const replay = replaySession(wt.worktree, S, { limit: 10 })
     expect(replay.complete).toBe(true)
     expect(replay.records.map(record => String(record.data.text))).toEqual(expect.arrayContaining([
@@ -364,7 +364,7 @@ describe("V-session-end-4 deleted SDK handle", () => {
     expect(readSessionCommitted(wt.worktree, S)).toMatchObject({ current: true, wf: { id: wf.id, sessionID: S, phase: "cancelled" } })
     expect(client.calls.length).toBe(callsBefore)
 
-    // reopening the LCA sid is a held restore, not a resurrection
+    // reopening the Otter sid is a held restore, not a resurrection
     const restored = attachAdmission(host, S, { engine: "opencode" })
     expect(restored.restored).toBe(true)
     expect(restored.metadata.held).toBe(true)

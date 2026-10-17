@@ -326,7 +326,7 @@ describe("no-progress cap and worker prose (5, 7)", () => {
     expect(data.progress.g1).toMatchObject({ noProgress: 10 })
     expect(data.progress.g1!.lastCheckpoint).toBeUndefined()
     expect(stuck.artifacts.map(ref => ref.key)).not.toContain("completion.json")
-    expect(existsSync(join(wt.worktree, ".lca", "workflows", h.sid, stuck.id, "completion.json"))).toBe(false)
+    expect(existsSync(join(wt.worktree, ".otter", "workflows", h.sid, stuck.id, "completion.json"))).toBe(false)
     expect(ultragoalView(stuck)).toContain("ULTRAGOAL-STUCK")
     // a blocked goal cannot be retried into completion
     expect(retryUltragoal(h.runtime, h.sid, stuck.id, stuck.lastSeq)).toMatchObject({ ok: false })
@@ -385,7 +385,7 @@ describe("all-goal aggregate proof (6)", () => {
   }
   void toFinal
 
-  const checkpointPath = (key: string) => join(wt.worktree, ".lca", "workflows", "X", key)
+  const checkpointPath = (key: string) => join(wt.worktree, ".otter", "workflows", "X", key)
   const tamper: Array<[string, (h: H, wf: UltragoalWorkflow) => void]> = [
     ["altering g2's checkpoint", (_h, wf) => writeFileSync(join(wt.worktree, wf.artifacts.find(r => r.key === "checkpoints/g2-1.json")!.path), "{}\n")],
     ["deleting g2's checkpoint", (_h, wf) => rmSync(join(wt.worktree, wf.artifacts.find(r => r.key === "checkpoints/g2-1.json")!.path))],
@@ -424,9 +424,9 @@ describe("all-goal aggregate proof (6)", () => {
       kind: "consensus", wid: wf.id, sid: wf.sessionID, revision: wf.lastSeq, action: "final-review-manual", inputSha: evidence.goalsSha!, body: { role: "critic", verdict: "OKAY", findings: [] },
     })
     const completionText = renderCompletion(wf, evidence.goalsSha!, evidence.entries!, finalRef)
-    const dir = join(wt.worktree, ".lca", "workflows", wf.sessionID, wf.id)
+    const dir = join(wt.worktree, ".otter", "workflows", wf.sessionID, wf.id)
     writeFileSync(join(dir, "completion.json"), completionText)
-    const completion = { key: "completion.json", path: join(".lca", "workflows", wf.sessionID, wf.id, "completion.json"), sha256: sha256(completionText) }
+    const completion = { key: "completion.json", path: join(".otter", "workflows", wf.sessionID, wf.id, "completion.json"), sha256: sha256(completionText) }
     // g2's checkpoint changes after everything else was prepared
     writeFileSync(join(wt.worktree, wf.artifacts.find(r => r.key === "checkpoints/g2-1.json")!.path), "{}\n")
     const refused = commitUltragoal(wt.worktree, wf, fresh => ({ ...reduce(fresh, { type: "aggregate_verified", completion, ref: finalRef }), receipts: [finalRef] }))
@@ -471,7 +471,7 @@ describe("malformed model output (8)", () => {
 
   test("a unit plan that fails the plan gates (forbidden path, unlisted verify command) is an attempt failure, never a unit", async () => {
     scripts(1)
-    const bad = j({ type: "unit_plan", risks: ["r"], steps: [{ title: "x", files: [".lca/state.json"], detail: "d", verify: "curl http://x" }] })
+    const bad = j({ type: "unit_plan", risks: ["r"], steps: [{ title: "x", files: [".otter/state.json"], detail: "d", verify: "curl http://x" }] })
     const h = harness({ script: { planner: [goals(1), bad, bad], architect: [OKAY], critic: [OKAY] }, worker: writer })
     await toUltragoal(h)
     const result = await runUltragoal(h.runtime, h.controller, h.sid, committed().id)

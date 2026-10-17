@@ -17,46 +17,46 @@ import tempfile
 from typing import Any
 
 
-SERVICE_USER = "lca-verifier"
-PROFILE_PATH = "/etc/lca-verifier/profile.json"
-PRIVATE_KEY = "/var/lib/lca-verifier/private/signing-key.pem"
-HELPER_DIR = "/usr/local/libexec/lca-verifier"
+SERVICE_USER = "otter-verifier"
+PROFILE_PATH = "/etc/otter-verifier/profile.json"
+PRIVATE_KEY = "/var/lib/otter-verifier/private/signing-key.pem"
+HELPER_DIR = "/usr/local/libexec/otter-verifier"
 SYSTEMD_DIR = "/etc/systemd/system"
 POLKIT_DIR = "/etc/polkit-1/rules.d"
-POLKIT_RULE = f"{POLKIT_DIR}/90-lca-verifier.rules"
+POLKIT_RULE = f"{POLKIT_DIR}/90-otter-verifier.rules"
 SUDOERS_DIR = "/etc/sudoers.d"
-SUDOERS_DROPIN = f"{SUDOERS_DIR}/00-lca-verifier-deny"
+SUDOERS_DROPIN = f"{SUDOERS_DIR}/00-otter-verifier-deny"
 JOURNALD_CONF_DIR = "/etc/systemd/journald.conf.d"
-JOURNALD_DROPIN = f"{JOURNALD_CONF_DIR}/lca-verifier.conf"
-UNIT = "lca-verifier.service"
-GATE_UNIT = "lca-verifier-gate.service"
-SLICE_UNIT = "lca.slice"
+JOURNALD_DROPIN = f"{JOURNALD_CONF_DIR}/otter-verifier.conf"
+UNIT = "otter-verifier.service"
+GATE_UNIT = "otter-verifier-gate.service"
+SLICE_UNIT = "otter.slice"
 OPENSSL = "/usr/bin/openssl"
 SYSTEMCTL = "/usr/bin/systemctl"
 JOURNALCTL = "/usr/bin/journalctl"
-QUARANTINE_PATH = "/var/lib/lca-verifier/quarantine.json"
+QUARANTINE_PATH = "/var/lib/otter-verifier/quarantine.json"
 BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 BOOT_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 JOURNALD_DROPIN_CONTENT = "[Journal]\nStorage=persistent\n"
 
 VERIFIER_UNIT_CONTENT = """[Unit]
-Description=LCA single-use Linux verifier workload
-After=local-fs.target lca-verifier-gate.service
-Requires=lca.slice
-ConditionPathIsSymbolicLink=/var/lib/lca-verifier/current
+Description=Otter single-use Linux verifier workload
+After=local-fs.target otter-verifier-gate.service
+Requires=otter.slice
+ConditionPathIsSymbolicLink=/var/lib/otter-verifier/current
 
 [Service]
 Type=exec
 ExitType=cgroup
-User=lca-verifier
-Group=lca-verifier
-Slice=lca.slice
-ExecStart=/usr/bin/python3 /usr/local/libexec/lca-verifier/runner.py
+User=otter-verifier
+Group=otter-verifier
+Slice=otter.slice
+ExecStart=/usr/bin/python3 /usr/local/libexec/otter-verifier/runner.py
 WorkingDirectory=/workspace
-BindReadOnlyPaths=/var/lib/lca-verifier/current:/workspace
-RuntimeDirectory=lca-verifier-output
+BindReadOnlyPaths=/var/lib/otter-verifier/current:/workspace
+RuntimeDirectory=otter-verifier-output
 RuntimeDirectoryMode=0700
-ReadWritePaths=/run/lca-verifier-output
+ReadWritePaths=/run/otter-verifier-output
 KillMode=control-group
 Delegate=no
 Restart=no
@@ -88,26 +88,26 @@ RestrictSUIDSGID=yes
 RestrictRealtime=yes
 SystemCallArchitectures=native
 DevicePolicy=closed
-InaccessiblePaths=-/etc/systemd -/etc/dbus-1 -/run/systemd/private -/run/dbus -/run/user /run/lca-verifier/control.sock
+InaccessiblePaths=-/etc/systemd -/etc/dbus-1 -/run/systemd/private -/run/dbus -/run/user /run/otter-verifier/control.sock
 UMask=0077
 
 [Install]
 """
 
 GATE_UNIT_CONTENT = """[Unit]
-Description=LCA root Linux verifier authority
-After=local-fs.target systemd-journald.service lca.slice
+Description=Otter root Linux verifier authority
+After=local-fs.target systemd-journald.service otter.slice
 Wants=systemd-journald.service
-Requires=lca.slice
+Requires=otter.slice
 
 [Service]
 Type=exec
 User=root
 Group=root
-ExecStart=/usr/bin/python3 /usr/local/libexec/lca-verifier/gate.py
+ExecStart=/usr/bin/python3 /usr/local/libexec/otter-verifier/gate.py
 Restart=on-failure
 RestartSec=1s
-RuntimeDirectory=lca-verifier
+RuntimeDirectory=otter-verifier
 RuntimeDirectoryMode=0755
 UMask=0077
 NoNewPrivileges=yes
@@ -117,7 +117,7 @@ PrivateTmp=yes
 PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX
 ProtectControlGroups=yes
-ReadWritePaths=/var/lib/lca-verifier /run/lca-verifier /sys/fs/cgroup/lca.slice
+ReadWritePaths=/var/lib/otter-verifier /run/otter-verifier /sys/fs/cgroup/otter.slice
 TimeoutStopSec=10s
 
 [Install]
@@ -125,7 +125,7 @@ WantedBy=multi-user.target
 """
 
 SLICE_UNIT_CONTENT = """[Unit]
-Description=LCA verifier workload slice
+Description=Otter verifier workload slice
 Before=slices.target
 
 [Slice]
@@ -135,12 +135,12 @@ TasksAccounting=yes
 """
 
 POLKIT_RULE_CONTENT = """polkit.addRule(function(action, subject) {
-    if (subject.user === "lca-verifier") {
+    if (subject.user === "otter-verifier") {
         return polkit.Result.NO;
     }
 });
 """
-SUDOERS_CONTENT = "lca-verifier ALL=(ALL:ALL) !ALL\n"
+SUDOERS_CONTENT = "otter-verifier ALL=(ALL:ALL) !ALL\n"
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -387,9 +387,9 @@ def install(controller_name: str) -> None:
     if controller.pw_uid == 0:
         raise RuntimeError("controller must be a non-root account")
     paths = [
-        "/etc/lca-verifier",
+        "/etc/otter-verifier",
         PROFILE_PATH,
-        "/var/lib/lca-verifier",
+        "/var/lib/otter-verifier",
         PRIVATE_KEY,
         HELPER_DIR,
         f"{SYSTEMD_DIR}/{UNIT}",
@@ -424,12 +424,12 @@ def install(controller_name: str) -> None:
         _mkdir(JOURNALD_CONF_DIR, 0o755)
 
     verifier = _create_workload_user(controller)
-    _mkdir("/etc/lca-verifier", 0o755)
-    _mkdir("/var/lib/lca-verifier", 0o700)
-    _mkdir("/var/lib/lca-verifier/records", 0o700)
-    _mkdir("/var/lib/lca-verifier/inputs", 0o700)
-    _mkdir("/var/lib/lca-verifier/private", 0o700)
-    _mkdir("/var/lib/lca-verifier/private/git-tmp", 0o700)
+    _mkdir("/etc/otter-verifier", 0o755)
+    _mkdir("/var/lib/otter-verifier", 0o700)
+    _mkdir("/var/lib/otter-verifier/records", 0o700)
+    _mkdir("/var/lib/otter-verifier/inputs", 0o700)
+    _mkdir("/var/lib/otter-verifier/private", 0o700)
+    _mkdir("/var/lib/otter-verifier/private/git-tmp", 0o700)
     _mkdir(HELPER_DIR, 0o755)
     if not os.path.isdir("/etc/polkit-1"):
         _mkdir("/etc/polkit-1", 0o755)
@@ -442,7 +442,7 @@ def install(controller_name: str) -> None:
     _write_units_and_policy()
     _run_fixed(["/usr/sbin/visudo", "-c"])
     profile = {
-        "schema": "lca.linux-verifier.profile.v2",
+        "schema": "otter.linux-verifier.profile.v2",
         "bootEpoch": boot_epoch,
         "unit": UNIT,
         "controllerUID": controller.pw_uid,
@@ -468,7 +468,7 @@ def main() -> int:
     try:
         install(arguments.controller)
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
-        print(f"lca-verifier installation failed: {str(exc)[:256]}", file=sys.stderr)
+        print(f"otter-verifier installation failed: {str(exc)[:256]}", file=sys.stderr)
         return 1
     return 0
 

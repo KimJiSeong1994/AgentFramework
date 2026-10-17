@@ -69,7 +69,7 @@ describe("held workflow owner epoch reattachment", () => {
     const host = runtime()
     const { wf, store } = releasedWorkflowWithHeldStore(host, {
       phase: "pending_approval",
-      planRef: { jsonSha: "plan-json-hash", mdPath: ".lca/plans/plan.md", mdSha: "plan-md-hash", revision: 3 },
+      planRef: { jsonSha: "plan-json-hash", mdPath: ".otter/plans/plan.md", mdSha: "plan-md-hash", revision: 3 },
       review: { verdict: "okay", findings: ["review note"], planSha: "plan-json-hash" },
       approval: { by: "user_command", subject: { kind: "plan", id: "wf_owner", sha256: "plan-json-hash" }, receiptRevision: 0, at: 1_700_000_000_000 },
       taskIds: ["task-a", "task-b"],

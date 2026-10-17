@@ -16,7 +16,7 @@
 ## 엔터티
 
 - [OpenJev 라우터](entities/openjev-router.md) — 프로젝트의 선택적 스킬 추천 모드와 근거·한계.
-- [lca 프레임워크](entities/lca-framework.md) — 2026-09-22 설계 문서가 제안한 레이어·에이전트·모드·안전장치.
+- [otter 프레임워크](entities/lca-framework.md) — 2026-09-22 설계 문서가 제안한 레이어·에이전트·모드·안전장치.
 - [claude.dev 전체 글 조사](entities/claude-dev.md) — 2026-10-02 공개 글 13편의 목록·분류·읽기 경로·출처 간 충돌.
 
 ## 캡처 산출물

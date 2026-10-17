@@ -1454,7 +1454,7 @@ describe("external foreground imported-plan controller", () => {
       unregister()
       expect(observeStopSettlement(owner.runtime, SESSION, submitted.result.wf!.owner.instance, "owner").kind).toBe("settled")
       expect(readWorkflow(wt.worktree)!.phase).toBe(kind === "pause" ? "paused" : "cancelled")
-      rmSync(join(wt.worktree, ".lca"), { recursive: true, force: true })
+      rmSync(join(wt.worktree, ".otter"), { recursive: true, force: true })
       wt.cleanup(); wt = tempGitWorktree(); wt.worktree = realpathSync(wt.worktree)
     }
   })
@@ -1544,7 +1544,7 @@ describe("external foreground imported-plan controller", () => {
     expect(viewed).toEqual([{ residual: [paused[1]!.id, paused[2]!.id], done: [paused[0]!.id], attempt: 2 }])
     const after = readLedger(wt.worktree, SESSION).tasks
     expect(JSON.stringify(after[0])).toBe(doneBefore)
-    expect(workers.slice(before).sort()).toEqual(["lca task 2: module 2", "lca task 3: module 3"])
+    expect(workers.slice(before).sort()).toEqual(["otter task 2: module 2", "otter task 3: module 3"])
     expect(after.map(task => task.status)).toEqual(["done", "done", "done"])
   }, 60_000)
 
@@ -1609,7 +1609,7 @@ describe("external foreground imported-plan controller", () => {
     expect(submissions).toBe(1)
     expect(existsSync(workflowPath(wt.worktree))).toBe(false)
     expect(existsSync(sessionDir(wt.worktree, SESSION))).toBe(true)
-    expect(existsSync(join(wt.worktree, ".lca", "plans"))).toBe(false)
+    expect(existsSync(join(wt.worktree, ".otter", "plans"))).toBe(false)
     expect(hostCalls).toBe(0)
     expect(f.runtime.runs.status().claim).toBeUndefined()
   })

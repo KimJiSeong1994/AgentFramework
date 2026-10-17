@@ -29,7 +29,7 @@ export function startShell(
   const decoder = new StringDecoder("utf8")
   const child = spawn("/bin/sh", ["-c", command], {
     cwd: opts.cwd,
-    env: { ...(opts.replaceEnv ? {} : process.env), ...(opts.env ?? {}), LCA_VERIFY: "1" },
+    env: { ...(opts.replaceEnv ? {} : process.env), ...(opts.env ?? {}), OTTER_VERIFY: "1" },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   })

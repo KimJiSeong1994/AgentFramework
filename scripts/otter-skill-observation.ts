@@ -6,7 +6,7 @@ import {
 } from "../framework/src/telemetry/skills.ts"
 
 const DEFAULT_ROOT = resolve(import.meta.dir, "..")
-const USAGE = "Usage: bun scripts/lca-skill-observation.ts <activate|status|stop> [--root DIR] [--campaign-id ID]"
+const USAGE = "Usage: bun scripts/otter-skill-observation.ts <activate|status|stop> [--root DIR] [--campaign-id ID]"
 const [command, ...args] = process.argv.slice(2)
 
 function usageError(): never {

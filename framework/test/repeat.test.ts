@@ -40,7 +40,7 @@ describe("RepeatGuard", () => {
     expect(blocked.blocked).toBe(true)
     expect(blocked.lastError).toContain("File already exists")
     const msg = repeatBlockMessage("write", blocked.count, blocked.lastError)
-    expect(msg).toContain("lca: blocked repeated call to write with identical arguments (3x)")
+    expect(msg).toContain("otter: blocked repeated call to write with identical arguments (3x)")
     expect(msg).toContain("The previous attempts failed with: Error: File already exists")
     expect(msg).toContain("Change the approach")
   })

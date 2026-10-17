@@ -154,7 +154,7 @@ function manifestHash(
   fileModes: ReadonlyMap<string, number>,
 ): string {
   const hash = createHash("sha256")
-  frame(hash, Buffer.from("lca-skill-capture-v1", "utf8"))
+  frame(hash, Buffer.from("otter-skill-capture-v1", "utf8"))
   frame(hash, Buffer.from(source, "utf8"))
   frame(hash, Buffer.from(identity, "utf8"))
   for (const entry of [...entries].sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)))) {

@@ -13,17 +13,17 @@ const ENV_KEYS = [
   "HOME",
   "GIT_CONFIG_NOSYSTEM",
   "GIT_CONFIG_GLOBAL",
-  "LCA_GIT_REAL",
-  "LCA_GIT_LOG",
-  "LCA_GIT_MODE",
-  "LCA_GIT_CHILD_PID",
-  "LCA_GIT_TERM_LOG",
-  "LCA_GIT_READY_LOG",
-  "LCA_GIT_RELEASE",
+  "OTTER_GIT_REAL",
+  "OTTER_GIT_LOG",
+  "OTTER_GIT_MODE",
+  "OTTER_GIT_CHILD_PID",
+  "OTTER_GIT_TERM_LOG",
+  "OTTER_GIT_READY_LOG",
+  "OTTER_GIT_RELEASE",
 ] as const
 
 function sandbox(): string {
-  const path = mkdtempSync(join(tmpdir(), "lca-git-safety-"))
+  const path = mkdtempSync(join(tmpdir(), "otter-git-safety-"))
   sandboxes.push(path)
   return path
 }
@@ -62,7 +62,7 @@ function createGitWrapper(root: string): string {
   const directory = join(root, "bin")
   mkdirSync(directory)
   const wrapper = join(directory, "git")
-  writeFileSync(wrapper, `#!${process.execPath}\nimport { appendFileSync, existsSync } from "node:fs"\nimport { spawnSync } from "node:child_process"\n\nconst args = process.argv.slice(2)\nappendFileSync(process.env.LCA_GIT_LOG, JSON.stringify(args) + "\\n")\nconst isHeadVerification = args.includes("--verify") && args.includes("HEAD")\nconst isRootQuery = args.includes("--show-toplevel")\nconst isCancellationTarget = isHeadVerification || isRootQuery\nif (isCancellationTarget && process.env.LCA_GIT_MODE === "cancel") {\n  appendFileSync(process.env.LCA_GIT_CHILD_PID, String(process.pid) + "\\n")\n  process.on("SIGTERM", () => appendFileSync(process.env.LCA_GIT_TERM_LOG, String(process.pid) + "\\n"))\n  setInterval(() => { if (existsSync(process.env.LCA_GIT_RELEASE)) process.exit(0) }, 10)\n  appendFileSync(process.env.LCA_GIT_READY_LOG, String(process.pid) + "\\n")\n} else if (isHeadVerification && process.env.LCA_GIT_MODE === "timeout") {\n  appendFileSync(process.env.LCA_GIT_CHILD_PID, String(process.pid))\n  process.on("SIGTERM", () => appendFileSync(process.env.LCA_GIT_TERM_LOG, String(process.pid) + "\\n"))\n  setInterval(() => {}, 1000)\n} else if (isHeadVerification && process.env.LCA_GIT_MODE === "overflow") {\n  appendFileSync(process.env.LCA_GIT_CHILD_PID, String(process.pid))\n  process.on("SIGTERM", () => appendFileSync(process.env.LCA_GIT_TERM_LOG, String(process.pid) + "\\n"))\n  process.stdout.write(Buffer.alloc(65 * 1024 * 1024, 0x61))\n  setInterval(() => {}, 1000)\n} else {\n  const result = spawnSync(process.env.LCA_GIT_REAL, args, { cwd: process.cwd(), env: process.env, stdio: "inherit" })\n  if (result.error) {\n    process.stderr.write(String(result.error))\n    process.exitCode = 127\n  } else process.exitCode = result.status ?? 1\n}\n`)
+  writeFileSync(wrapper, `#!${process.execPath}\nimport { appendFileSync, existsSync } from "node:fs"\nimport { spawnSync } from "node:child_process"\n\nconst args = process.argv.slice(2)\nappendFileSync(process.env.OTTER_GIT_LOG, JSON.stringify(args) + "\\n")\nconst isHeadVerification = args.includes("--verify") && args.includes("HEAD")\nconst isRootQuery = args.includes("--show-toplevel")\nconst isCancellationTarget = isHeadVerification || isRootQuery\nif (isCancellationTarget && process.env.OTTER_GIT_MODE === "cancel") {\n  appendFileSync(process.env.OTTER_GIT_CHILD_PID, String(process.pid) + "\\n")\n  process.on("SIGTERM", () => appendFileSync(process.env.OTTER_GIT_TERM_LOG, String(process.pid) + "\\n"))\n  setInterval(() => { if (existsSync(process.env.OTTER_GIT_RELEASE)) process.exit(0) }, 10)\n  appendFileSync(process.env.OTTER_GIT_READY_LOG, String(process.pid) + "\\n")\n} else if (isHeadVerification && process.env.OTTER_GIT_MODE === "timeout") {\n  appendFileSync(process.env.OTTER_GIT_CHILD_PID, String(process.pid))\n  process.on("SIGTERM", () => appendFileSync(process.env.OTTER_GIT_TERM_LOG, String(process.pid) + "\\n"))\n  setInterval(() => {}, 1000)\n} else if (isHeadVerification && process.env.OTTER_GIT_MODE === "overflow") {\n  appendFileSync(process.env.OTTER_GIT_CHILD_PID, String(process.pid))\n  process.on("SIGTERM", () => appendFileSync(process.env.OTTER_GIT_TERM_LOG, String(process.pid) + "\\n"))\n  process.stdout.write(Buffer.alloc(65 * 1024 * 1024, 0x61))\n  setInterval(() => {}, 1000)\n} else {\n  const result = spawnSync(process.env.OTTER_GIT_REAL, args, { cwd: process.cwd(), env: process.env, stdio: "inherit" })\n  if (result.error) {\n    process.stderr.write(String(result.error))\n    process.exitCode = 127\n  } else process.exitCode = result.status ?? 1\n}\n`)
   chmodSync(wrapper, 0o755)
   return directory
 }
@@ -76,13 +76,13 @@ function installGitFixture(root: string, mode = "delegate"): () => void {
   process.env.HOME = join(root, "home")
   process.env.GIT_CONFIG_NOSYSTEM = "1"
   process.env.GIT_CONFIG_GLOBAL = join(root, "gitconfig")
-  process.env.LCA_GIT_REAL = realGit
-  process.env.LCA_GIT_LOG = join(root, "git-args.jsonl")
-  process.env.LCA_GIT_MODE = mode
-  process.env.LCA_GIT_CHILD_PID = join(root, "child-pid")
-  process.env.LCA_GIT_TERM_LOG = join(root, "term-pids")
-  process.env.LCA_GIT_READY_LOG = join(root, "ready-pids")
-  process.env.LCA_GIT_RELEASE = join(root, "release")
+  process.env.OTTER_GIT_REAL = realGit
+  process.env.OTTER_GIT_LOG = join(root, "git-args.jsonl")
+  process.env.OTTER_GIT_MODE = mode
+  process.env.OTTER_GIT_CHILD_PID = join(root, "child-pid")
+  process.env.OTTER_GIT_TERM_LOG = join(root, "term-pids")
+  process.env.OTTER_GIT_READY_LOG = join(root, "ready-pids")
+  process.env.OTTER_GIT_RELEASE = join(root, "release")
   return () => {
     for (const key of ENV_KEYS) {
       const value = original[key]

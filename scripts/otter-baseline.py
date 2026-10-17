@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""lca-baseline: per-session prefix / cache-miss / compaction / repeat metrics from OpenCode's SQLite DB.
+"""otter-baseline: per-session prefix / cache-miss / compaction / repeat metrics from OpenCode's SQLite DB.
 
-Stage-0 tooling for the lca framework (docs/agent-framework-review-2026-09-22.md, section 6).
+Stage-0 tooling for the otter framework (docs/agent-framework-review-2026-09-22.md, section 6).
 Reads ~/.local/share/opencode/opencode.db strictly READ-ONLY (sqlite URI ?mode=ro). Stdlib only.
 
 Schema notes (OpenCode 1.18.x, verified 2026-09-22):
@@ -30,8 +30,8 @@ Definitions used here:
   run           longest streak of consecutive identical (tool, args-JSON) calls
 
 Usage:
-  scripts/lca-baseline.py [--db PATH] [--since YYYY-MM-DD] [--top N] [--json]
-  scripts/lca-baseline.py --session <id or prefix>          # adds a per-call timeline
+  scripts/otter-baseline.py [--db PATH] [--since YYYY-MM-DD] [--top N] [--json]
+  scripts/otter-baseline.py --session <id or prefix>          # adds a per-call timeline
 """
 
 import argparse

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { DEFAULT_CONFIG, type LcaConfig } from "../src/config.ts"
+import { DEFAULT_CONFIG, type OtterConfig } from "../src/config.ts"
 import { createExecutionRunStore } from "../src/hosts/run-state.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
 import type { ExecutionHandle, ExecutionOutcome, ExecutionReconciliation, ExecutionRequest, ExecutionRuntime } from "../src/hosts/types.ts"
@@ -35,8 +35,8 @@ function legacyVerificationResult(request: VerificationRequest, patch: Partial<V
   }
 }
 
-function fixture(patch: Partial<LcaConfig> = {}) {
-  const config: LcaConfig = {
+function fixture(patch: Partial<OtterConfig> = {}) {
+  const config: OtterConfig = {
     ...DEFAULT_CONFIG, ...patch,
     delegate: { ...DEFAULT_CONFIG.delegate, ...patch.delegate },
     models: { ...DEFAULT_CONFIG.models, ...patch.models },
@@ -124,7 +124,7 @@ describe("neutral execution queue", () => {
   })
 
   test("unknown persisted owner blocks queue recovery without changing ledger or run state", async () => {
-    const f = fixture({ delegate: { worktree: true, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: true, review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     const q = createQueue(f.runtime)
     q.add(S, [{ title: "already done" }, { title: "interrupted" }, { title: "still pending" }])
     let ledger = readLedger(wt.worktree, S)
@@ -177,7 +177,7 @@ describe("neutral execution queue", () => {
   })
 
   test("a no-ID prepared handle binds its first vendor ID after durable dispatch", async () => {
-    const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     f.runtime.host.prepare = async request => ({
       reference: { executionID: request.executionID },
       async run() {
@@ -208,7 +208,7 @@ describe("neutral execution queue", () => {
   })
 
   test("a live no-ID handle may settle only with explicit terminal quiescence", async () => {
-    const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     f.runtime.host.prepare = async request => ({
       reference: { executionID: request.executionID },
       async run() {
@@ -231,7 +231,7 @@ describe("neutral execution queue", () => {
   })
 
   test("a dispatched no-ID record remains unknown after restart and is never replayed", async () => {
-    const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     const q = createQueue(f.runtime)
     const [task] = q.add(S, [{ title: "do not replay after no-ID crash" }])
     const now = Date.now()
@@ -271,7 +271,7 @@ describe("neutral execution queue", () => {
 
   for (const referenceState of ["execution-only", "vendor-only", "boundary-only"] as const) {
     test(`persisted ${referenceState} references block recovery without adapter calls`, async () => {
-      const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+      const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as OtterConfig["delegate"] })
       const q = createQueue(f.runtime)
       const [task] = q.add(S, [{ title: "do not replay an unbound host reference" }])
       const now = Date.now()
@@ -318,7 +318,7 @@ describe("neutral execution queue", () => {
   }
 
   test("free-claim recovery refuses drifted vendor and boundary references without replay", async () => {
-    const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     const q = createQueue(f.runtime)
     const [task] = q.add(S, [{ title: "do not replay an ambiguous host reference" }])
     const now = Date.now()
@@ -375,7 +375,7 @@ describe("neutral execution queue", () => {
       (executionID: string) => ({ executionID, unexpected: "unknown-field" }),
       (executionID: string) => ({ executionID, vendorSessionID: "child", unexpected: undefined }),
     ]) {
-      const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+      const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as OtterConfig["delegate"] })
       f.runtime.host.prepare = async request => ({
         reference: malformed(request.executionID) as ExecutionHandle["reference"],
         async run() {
@@ -398,7 +398,7 @@ describe("neutral execution queue", () => {
   })
 
   test("restart with a foreign host engine remains unresolved without reconciliation or replay", async () => {
-    const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     const q = createQueue(f.runtime)
     const [task] = q.add(S, [{ title: "must not replay through a foreign host" }])
     const now = Date.now()
@@ -439,7 +439,7 @@ describe("neutral execution queue", () => {
   })
 
   test("untyped persisted host reference cannot be reconciled or replayed", async () => {
-    const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: false, review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     const q = createQueue(f.runtime)
     q.add(S, [{ title: "must not replay from an untyped execution" }])
     const ledgerPath = join(sessionDir(wt.worktree, S), "ledger.json")
@@ -490,7 +490,7 @@ describe("neutral execution queue", () => {
   })
 
   test("restarted in-place task reviews pre-restart edits even when its new worker is idle", async () => {
-    const f = fixture({ delegate: { review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: true, max_attempts: 1 } as OtterConfig["delegate"] })
     const q = createQueue(f.runtime)
     const [task] = q.add(S, [{ title: "recover orphan edits" }])
     const snapshots = join(sessionDir(wt.worktree, S), "snapshots", task!.id)
@@ -515,7 +515,7 @@ describe("neutral execution queue", () => {
   })
 
   test("interrupted isolated task reviews and merges original edits after the replacement worker is idle", async () => {
-    const f = fixture({ delegate: { worktree: true, review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: true, review: true, max_attempts: 1 } as OtterConfig["delegate"] })
     const q = createQueue(f.runtime)
     const [task] = q.add(S, [{ title: "recover isolated orphan" }])
     const old = (await createTaskWorktree(wt.worktree, S, task!.id, f.runtime.config.delegate.diff_exclude))!
@@ -546,7 +546,7 @@ describe("neutral execution queue", () => {
   })
 
   test("explicit resume authenticates an owned pre-dispatch worktree without a running ledger entry", async () => {
-    const f = fixture({ delegate: { worktree: true, review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: true, review: true, max_attempts: 1 } as OtterConfig["delegate"] })
     const q = createQueue(f.runtime)
     const [task] = q.add(S, [{ title: "recover pre-dispatch worktree" }])
     const old = (await createTaskWorktree(wt.worktree, S, task!.id, f.runtime.config.delegate.diff_exclude))!
@@ -571,7 +571,7 @@ describe("neutral execution queue", () => {
 
   for (const ownershipState of ["wrong", "missing"] as const) {
     test(`${ownershipState} isolated ownership blocks restart without changing ledger or worktree`, async () => {
-      const f = fixture({ delegate: { worktree: true, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+      const f = fixture({ delegate: { worktree: true, review: false, max_attempts: 1 } as OtterConfig["delegate"] })
       const q = createQueue(f.runtime)
       const [task] = q.add(S, [{ title: "preserve unauthenticated worktree" }])
       const old = (await createTaskWorktree(wt.worktree, S, task!.id, f.runtime.config.delegate.diff_exclude))!
@@ -602,7 +602,7 @@ describe("neutral execution queue", () => {
 
   for (const review of [false, true]) {
     test(`truncated task diff fails before verification or review (review=${review})`, async () => {
-      const f = fixture({ delegate: { worktree: true, review, review_strict: false, max_attempts: 1, diff_max_chars: 128 } as LcaConfig["delegate"] })
+      const f = fixture({ delegate: { worktree: true, review, review_strict: false, max_attempts: 1, diff_max_chars: 128 } as OtterConfig["delegate"] })
       const maliciousSource = `${"VALUE = 1\n".repeat(100)}_call_count = 0\n`
       f.replies.set("worker", request => {
         writeFileSync(join(request.cwd, "feature.py"), maliciousSource)
@@ -626,7 +626,7 @@ describe("neutral execution queue", () => {
 
   for (const reviewStrict of [false, true]) {
     test(`malformed reviewer verdict with passing verify (review_strict=${reviewStrict})`, async () => {
-      const f = fixture({ delegate: { review: true, review_strict: reviewStrict, max_attempts: 2 } as LcaConfig["delegate"] })
+      const f = fixture({ delegate: { review: true, review_strict: reviewStrict, max_attempts: 2 } as OtterConfig["delegate"] })
       f.replies.set("worker", request => {
         writeFileSync(join(request.cwd, "feature.py"), "VALUE = 1\n")
         return { status: "completed", text: "Files changed: feature.py\nOpen issues: none" }
@@ -647,7 +647,7 @@ describe("neutral execution queue", () => {
   }
 
   test("matching persisted workflow cancellation aborts a hanging worker without launching later tasks", async () => {
-    const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     f.setCancellation("ack-only")
     const workflow = { ...newWorkflow(S, currentOwner(), "command", "queue cancellation", "fixture"), phase: "executing" as const }
     withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, workflow))
@@ -670,7 +670,7 @@ describe("neutral execution queue", () => {
   })
 
   test("a persisted pause intent aborts the queue in pause mode: the running task reverts to pending uncounted and no open task is cancelled", async () => {
-    const f = fixture({ delegate: { review: false, max_attempts: 2 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false, max_attempts: 2 } as OtterConfig["delegate"] })
     f.setCancellation("ack-only")
     const workflow = { ...newWorkflow(S, currentOwner(), "command", "queue pause", "fixture"), phase: "executing" as const }
     withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, workflow))
@@ -696,7 +696,7 @@ describe("neutral execution queue", () => {
 
   for (const mismatch of ["workflow", "session"] as const) {
     test(`persisted cancellation for a different ${mismatch} does not abort the queue`, async () => {
-      const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+      const f = fixture({ delegate: { review: false, max_attempts: 1 } as OtterConfig["delegate"] })
       const workflow = newWorkflow(S, currentOwner(), "command", "queue cancellation mismatch", "fixture")
       withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, workflow))
       let releaseWorker!: (outcome: ExecutionOutcome) => void
@@ -723,7 +723,7 @@ describe("neutral execution queue", () => {
   }
 
   test("worktree snapshot loss with unproven restoration fences before verification or merge", async () => {
-    const f = fixture({ delegate: { worktree: true, review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: true, review: true, max_attempts: 1 } as OtterConfig["delegate"] })
     f.replies.set("worker", (request) => {
       writeFileSync(join(request.cwd, "feature.py"), "VALUE = 1\n")
       rmSync(join(request.cwd, ".git")) // break snapshot commands, without touching main's Git state
@@ -742,7 +742,7 @@ describe("neutral execution queue", () => {
     expect(f.requests.map((request) => request.role)).toEqual(["worker"])
   })
   test("in-place snapshot loss fences the live queue instead of running another task", async () => {
-    const f = fixture({ delegate: { worktree: false, review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: false, review: true, max_attempts: 1 } as OtterConfig["delegate"] })
     f.replies.set("worker", () => {
       write("test_fixture.py", "assert False\n")
       rmSync(join(wt.worktree, ".git"), { recursive: true, force: true })
@@ -813,7 +813,7 @@ describe("neutral execution queue", () => {
   })
 
   test("ledger.running spans task work and is cleared before the run claim is released", async () => {
-    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
     const q = createQueue(f.runtime)
     const [task] = q.add(S, [{ title: "running pointer lifecycle" }])
     let duringWork: ReturnType<typeof readLedger> | undefined
@@ -837,7 +837,7 @@ describe("neutral execution queue", () => {
   })
 
   test("legacy verifier persists its boundary and terminal risk before the next host intent", async () => {
-    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
     const base = f.runtime.verifier
     let dispatchAtRun: string | undefined
@@ -861,7 +861,7 @@ describe("neutral execution queue", () => {
   })
 
   test("verifier start progress follows dispatch and a failing observer cannot stop verification", async () => {
-    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
     const verifier = f.runtime.verifier
     let runCalled = false
@@ -892,7 +892,7 @@ describe("neutral execution queue", () => {
   })
 
   test("unsupported Linux profile refuses before any verifier spawn or intent", async () => {
-    const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     f.runtime.verificationProfile = "linux-single-use"
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
     const q = createQueue(f.runtime)
@@ -904,7 +904,7 @@ describe("neutral execution queue", () => {
   })
 
   test("a restored ledger with a disallowed command is refused before verifier preparation", async () => {
-    const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
     const q = createQueue(f.runtime)
     const [task] = q.add(S, [{ title: "stale command", verify: verify("check_safe.sh", "test -f README.md") }])
@@ -918,7 +918,7 @@ describe("neutral execution queue", () => {
 
   for (const dispatch of ["started", "markerless", "unknown-terminal"] as const) {
     test(`queue does not adopt dead-owner legacy verifier ${dispatch} state or mutate its baseline`, async () => {
-      const f = fixture({ delegate: { worktree: true, review: false } as LcaConfig["delegate"] })
+      const f = fixture({ delegate: { worktree: true, review: false } as OtterConfig["delegate"] })
       const q = createQueue(f.runtime)
       const [task] = q.add(S, [{ title: "restart" }])
       const oldWorktree = (await createTaskWorktree(wt.worktree, S, task!.id, f.runtime.config.delegate.diff_exclude))!
@@ -980,7 +980,7 @@ describe("neutral execution queue", () => {
   }
 
   test("queue refuses to adopt a dead-owner claim even when its verifier is prepared", async () => {
-    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
     const q = createQueue(f.runtime)
     const [task] = q.add(S, [{ title: "already complete" }])
     const completed = updateTask(readLedger(wt.worktree, S), task!.id, {
@@ -1018,7 +1018,7 @@ describe("neutral execution queue", () => {
   })
 
   test("a second queue does not retire a prepared verifier owned by a live same-generation claim", async () => {
-    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
     const firstQueue = createQueue(f.runtime)
     const [task] = firstQueue.add(S, [{ title: "still running" }])
     const claim = f.runtime.runs.claim(S, f.runtime.instance, process.pid)
@@ -1048,7 +1048,7 @@ describe("neutral execution queue", () => {
   })
 
   test("unknown claim keeps a Linux verifier and pending tasks untouched", async () => {
-    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
     const old = f.runtime.runs.claim(S, "dead-owner", 99999999)
     f.runtime.runs.registerIntent(old, {
       executionId: "linux-orphan", ownerSession: S, taskId: "old-task", attemptId: "old-attempt",
@@ -1074,7 +1074,7 @@ describe("neutral execution queue", () => {
 
   test("protected mutation by verifier is invalidated and restored before review", async () => {
     write("test_lock.py", "original\n")
-    const f = fixture({ delegate: { review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: true, max_attempts: 1 } as OtterConfig["delegate"] })
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
     const q = createQueue(f.runtime)
     q.add(S, [{ title: "mutating check", verify: verify("check_mutation.sh", "printf 'changed\\n' > test_lock.py") }])
@@ -1086,7 +1086,7 @@ describe("neutral execution queue", () => {
   })
 
   test("isolated task verifies its imported content before review and main-worktree merge", async () => {
-    const f = fixture({ delegate: { worktree: true, review: true } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: true, review: true } as OtterConfig["delegate"] })
     f.replies.set("worker", request => {
       writeFileSync(join(request.cwd, "feature.py"), "VALUE = 7\n")
       writeFileSync(join(request.cwd, "check_feature.sh"), "test -f feature.py\n")
@@ -1105,7 +1105,7 @@ describe("neutral execution queue", () => {
   })
 
   test("interrupted isolated merge conflict preserves parent edits, child edits, and the original baseline", async () => {
-    const f = fixture({ delegate: { worktree: true, review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: true, review: true, max_attempts: 1 } as OtterConfig["delegate"] })
     const q = createQueue(f.runtime)
     const [task] = q.add(S, [{ title: "conflicting parent edit" }])
     const old = (await createTaskWorktree(wt.worktree, S, task!.id, f.runtime.config.delegate.diff_exclude))!
@@ -1128,7 +1128,7 @@ describe("neutral execution queue", () => {
   })
 
   test("post-guard isolated worktree mutation is refused and its recovery state is retained", async () => {
-    const f = fixture({ delegate: { worktree: true, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: true, review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     const q = createQueue(f.runtime)
     const [task] = q.add(S, [{ title: "late isolated mutation", verify: verify("check_feature.sh", "test -f feature.py") }])
     const original = f.runtime.runs.assertQuiescent.bind(f.runtime.runs)
@@ -1156,7 +1156,7 @@ describe("neutral execution queue", () => {
 
   for (const isolated of [false, true]) {
     test(`reviewer mutation invalidates verified tree before ${isolated ? "merge" : "completion"}`, async () => {
-      const f = fixture({ delegate: { worktree: isolated, review: true, max_attempts: 1 } as LcaConfig["delegate"] })
+      const f = fixture({ delegate: { worktree: isolated, review: true, max_attempts: 1 } as OtterConfig["delegate"] })
       f.replies.set("worker", request => {
         writeFileSync(join(request.cwd, "feature.py"), "SAFE = 1\n")
         return { status: "completed", text: "Files changed: feature.py\nOpen issues: none" }
@@ -1175,7 +1175,7 @@ describe("neutral execution queue", () => {
   }
 
   test("Linux backend booleans and matching evidence cannot authorize verification or settlement", async () => {
-    const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     f.runtime.verificationProfile = "linux-single-use"
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
     const base = createLegacyVerifierExecutor()
@@ -1186,7 +1186,7 @@ describe("neutral execution queue", () => {
         expect(request.inputArchive?.byteLength).toBeGreaterThan(0)
         const reference = { kind: "verifier" as const, profile: "linux-single-use" as const, executionID: request.executionID,
           invocationID: "test-invocation", inputSnapshotID: request.inputSnapshotID, inputDigest: request.inputDigest,
-          deadlineAt: request.deadlineAt, maxOutputChars: request.maxOutputChars, unit: "lca-verifier.service", bootID: "test-boot" }
+          deadlineAt: request.deadlineAt, maxOutputChars: request.maxOutputChars, unit: "otter-verifier.service", bootID: "test-boot" }
         return { reference,
           async run() { return { profile: "linux-single-use" as const, parentExit: 0, timedOut: false, cancelled: false,
             isolationEstablished: true, domainState: "empty" as const, integrity: "unknown" as const, output: "",
@@ -1209,7 +1209,7 @@ describe("neutral execution queue", () => {
   })
 
   test("hanging verifier handle reconciliation fences without retry, review, or cancelling pending tasks", async () => {
-    const f = fixture({ delegate: { review: true, max_attempts: 2 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: true, max_attempts: 2 } as OtterConfig["delegate"] })
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
     const base = f.runtime.verifier
     f.runtime.verifier = { ...base, async prepare(request) {
@@ -1226,7 +1226,7 @@ describe("neutral execution queue", () => {
   })
 
   test("verifier replacement environment supplies a trusted executable path", async () => {
-    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
     const base = f.runtime.verifier
     let suppliedPath: string | undefined
@@ -1253,7 +1253,7 @@ describe("neutral execution queue", () => {
       kind: "verifier", profile: "linux-single-use", inputSnapshotID: snapshotID, inputDigest: digest, deadlineAt, maxOutputChars: 1500 })
     f.runtime.runs.bindVerifierRef(old, id, { kind: "verifier", profile: "linux-single-use", executionID: id,
       invocationID: "old-invocation", inputSnapshotID: snapshotID, inputDigest: digest, deadlineAt, maxOutputChars: 1500,
-      unit: "lca-verifier.service", bootID: "old-boot" })
+      unit: "otter-verifier.service", bootID: "old-boot" })
     f.runtime.runs.markVerifierDispatched(old, id)
     f.runtime.verifier = { ...f.runtime.verifier, reconcile: async () => new Promise<never>(() => {}) }
     const q = createQueue(f.runtime)
@@ -1277,7 +1277,7 @@ describe("neutral execution queue", () => {
       kind: "verifier" as const, profile: "linux-single-use" as const, executionID: id,
       invocationID: "old-ticket", inputSnapshotID: "old-tree", inputDigest: "a".repeat(64),
       deadlineAt: Date.now() + 5000, maxOutputChars: 1500,
-      unit: "lca-verifier.service", bootID: "old-boot",
+      unit: "otter-verifier.service", bootID: "old-boot",
     }
     f.runtime.runs.registerIntent(old, {
       executionId: id, ownerSession: S, taskId: "old-task", attemptId: "old-attempt",
@@ -1334,7 +1334,7 @@ describe("neutral execution queue", () => {
 
   for (const signal of ["cancelled", "timeout", "external-signal", "unknown-result"] as const) {
     test(`launched legacy verifier ${signal} stays fenced across resume without replacement children`, async () => {
-      const f = fixture({ delegate: { review: true, worktree: true, max_attempts: 2 } as LcaConfig["delegate"] })
+      const f = fixture({ delegate: { review: true, worktree: true, max_attempts: 2 } as OtterConfig["delegate"] })
       f.replies.set("worker", request => {
         writeFileSync(join(request.cwd, "unmerged.py"), "VALUE = 1\n")
         return { status: "completed", text: "done" }
@@ -1386,7 +1386,7 @@ describe("neutral execution queue", () => {
   }
 
   test("aborting verifier preparation retires without dispatch and ignores late reference callbacks", async () => {
-    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
     const base = f.runtime.verifier
     let pendingRequest: VerificationRequest | undefined
@@ -1437,7 +1437,7 @@ describe("neutral execution queue", () => {
 
   for (const failure of ["deadline", "prepare-error"] as const) {
     test(`verifier ${failure} before dispatch retires without a permanent fence`, async () => {
-      const f = fixture({ delegate: { review: false, verify_timeout_ms: failure === "deadline" ? 20 : DEFAULT_CONFIG.delegate.verify_timeout_ms } as LcaConfig["delegate"] })
+      const f = fixture({ delegate: { review: false, verify_timeout_ms: failure === "deadline" ? 20 : DEFAULT_CONFIG.delegate.verify_timeout_ms } as OtterConfig["delegate"] })
       f.replies.set("worker", () => ({ status: "completed", text: "done" }))
       const base = f.runtime.verifier
       f.runtime.verifier = { ...base, async prepare() {
@@ -1457,7 +1457,7 @@ describe("neutral execution queue", () => {
   }
 
   test("a prepared verifier returned after its deadline retires even when prepare beats the timer callback", async () => {
-    const f = fixture({ delegate: { review: false, verify_timeout_ms: 40 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false, verify_timeout_ms: 40 } as OtterConfig["delegate"] })
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
     const base = f.runtime.verifier
     let preparedAfterDeadline = false
@@ -1492,7 +1492,7 @@ describe("neutral execution queue", () => {
 
   test("protected-file mutation restores original test and invalidates verification", async () => {
     write("test_lock.py", "def test_lock():\n    assert True\n")
-    const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     f.replies.set("worker", () => { write("test_lock.py", "def test_lock():\n    assert False\n"); return { status: "completed", text: "done" } })
     const q = createQueue(f.runtime)
     q.add(S, [{ title: "protected", verify: "python3 -m pytest -q test_lock.py" }])
@@ -1502,7 +1502,7 @@ describe("neutral execution queue", () => {
   })
 
   test("cancel interleaved with the final merge guard neither applies nor marks done", async () => {
-    const f = fixture({ delegate: { worktree: true, review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { worktree: true, review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     f.replies.set("worker", (request) => {
       writeFileSync(join(request.cwd, "feature.py"), "VALUE = 1\n")
       return { status: "completed", text: "Files changed: feature.py\nOpen issues: none" }
@@ -1527,7 +1527,7 @@ describe("neutral execution queue", () => {
   })
 
   test("failed verification retries with a new generation-safe execution and preserves reason", async () => {
-    const f = fixture({ delegate: { review: false, max_attempts: 2 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false, max_attempts: 2 } as OtterConfig["delegate"] })
     f.replies.set("worker", () => {
       if (f.requests.length === 2) write("ready.txt", "ready\n")
       return { status: "completed", text: "done" }
@@ -1543,7 +1543,7 @@ describe("neutral execution queue", () => {
   })
 
   test("ACK without quiescence fences execution and blocks verifier and retry", async () => {
-    const f = fixture({ delegate: { review: false, task_ttl_ms: 20 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false, task_ttl_ms: 20 } as OtterConfig["delegate"] })
     f.setCancellation("ack-only")
     f.replies.set("worker", () => new Promise<ExecutionOutcome>(() => {}))
     const q = createQueue(f.runtime)
@@ -1560,7 +1560,7 @@ describe("neutral execution queue", () => {
   })
 
   test("timeout with affirmative terminal reconciliation can retry; policy is unbound only then", async () => {
-    const f = fixture({ delegate: { review: false, max_attempts: 2, task_ttl_ms: 20 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false, max_attempts: 2, task_ttl_ms: 20 } as OtterConfig["delegate"] })
     let n = 0
     f.replies.set("worker", () => ++n === 1 ? new Promise<ExecutionOutcome>(() => {}) : { status: "completed", text: "done" })
     const q = createQueue(f.runtime)
@@ -1578,7 +1578,7 @@ describe("neutral execution queue", () => {
   })
 
   test("external stop of a hanging child is bounded and cannot turn an ACK into completion", async () => {
-    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
     f.setCancellation("ack-only")
     f.replies.set("worker", () => new Promise<ExecutionOutcome>(() => {}))
     const q = createQueue(f.runtime)
@@ -1592,7 +1592,7 @@ describe("neutral execution queue", () => {
   })
 
   test("completion observes only the current owned runner and resolves after cleanup without relaunch", async () => {
-    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
     let workerStarted = false
     let releaseWorker!: (outcome: ExecutionOutcome) => void
     f.replies.set("worker", () => {
@@ -1625,7 +1625,7 @@ describe("neutral execution queue", () => {
   })
 
   test("unresolved runner completion does not imply execution quiescence", async () => {
-    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
     f.setCancellation("ack-only")
     f.setReconciliation("unknown")
     let workerStarted = false
@@ -1656,7 +1656,7 @@ describe("neutral execution queue", () => {
   })
 
   test("session-end cancellation retains outcomes and counts the active task once alongside remaining tasks", async () => {
-    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
     f.setCancellation("terminal")
     let workerStarted = false
     f.replies.set("worker", () => {
@@ -1690,7 +1690,7 @@ describe("neutral execution queue", () => {
 
   for (const reconciliation of ["settled", "unknown"] as const) {
     test(`run retains its claim until delayed cancellation bookkeeping finishes (${reconciliation})`, async () => {
-      const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+      const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
       if (reconciliation === "unknown") f.setReconciliation("unknown")
       let workerStarted = false
       let releaseWorker!: (outcome: ExecutionOutcome) => void
@@ -1740,7 +1740,7 @@ describe("neutral execution queue", () => {
   }
 
   test("host dispatch marker failure fences the prepared execution without invoking run", async () => {
-    const f = fixture({ delegate: { review: false, max_attempts: 1 } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false, max_attempts: 1 } as OtterConfig["delegate"] })
     f.replies.set("worker", () => ({ status: "completed", text: "done" }))
     const q = createQueue(f.runtime)
     q.add(S, [{ title: "marker failure" }])
@@ -1763,7 +1763,7 @@ describe("neutral execution queue", () => {
   })
 
   test("onCreated abort awaits observed prepared cancellation without a dispatch marker", async () => {
-    const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+    const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
     const q = createQueue(f.runtime)
     f.runtime.observe = { task: fact => {
       if (fact.childSessionID && fact.status === "started") void q.abort(S, "stop before host dispatch")
@@ -1787,7 +1787,7 @@ describe("neutral execution queue", () => {
 
   for (const reconciliation of ["unknown", "throws", "hangs"] as const) {
     test(`onCreated abort preserves an unresolved prepared child when reconciliation ${reconciliation}`, async () => {
-      const f = fixture({ delegate: { review: false } as LcaConfig["delegate"] })
+      const f = fixture({ delegate: { review: false } as OtterConfig["delegate"] })
       f.setCancellation("ack-only")
       f.setReconciliation(reconciliation)
       const q = createQueue(f.runtime)

@@ -32,11 +32,11 @@ export type UnsafeOpenCodeToolCallReason =
 
 /** Typed refusal when an OpenCode tool callback cannot be bound to one exact admitted call. */
 export class UnsafeOpenCodeToolCall extends Error {
-  readonly code = "LCA_UNSAFE_OPENCODE_TOOL_CALL"
+  readonly code = "OTTER_UNSAFE_OPENCODE_TOOL_CALL"
   readonly reason: UnsafeOpenCodeToolCallReason
 
   constructor(reason: UnsafeOpenCodeToolCallReason) {
-    super(`lca: OpenCode tool call refused (${reason})`)
+    super(`otter: OpenCode tool call refused (${reason})`)
     this.name = "UnsafeOpenCodeToolCall"
     this.reason = reason
   }

@@ -12,7 +12,7 @@ let worktree: string
 let deps: CoreDeps
 
 beforeEach(() => {
-  worktree = mkdtempSync(join(tmpdir(), "lca-core-deps-"))
+  worktree = mkdtempSync(join(tmpdir(), "otter-core-deps-"))
   const config = structuredClone(DEFAULT_CONFIG)
   config.data.backend = "sqlite"
   config.data.sqlite_path = join(worktree, "test.sqlite")

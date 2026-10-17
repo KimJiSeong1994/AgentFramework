@@ -48,7 +48,7 @@ describe("session admission process-crash durability", () => {
     const receiptPath = join(wt.stateHome, `admission-crash-${boundary}.json`)
     const childEnv = {
       ...process.env,
-      LCA_STATE_HOME: wt.stateHome,
+      OTTER_STATE_HOME: wt.stateHome,
       SESSION_CRASH_ADMISSION_URL: new URL("../src/sessions/admission.ts", import.meta.url).href,
       SESSION_CRASH_HELPERS_URL: new URL("./guards-helpers.ts", import.meta.url).href,
       SESSION_CRASH_RUNTIME_URL: new URL("../src/hosts/opencode-runtime.ts", import.meta.url).href,

@@ -10,7 +10,7 @@ let worktree: string
 let previousXdg: string | undefined
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "lca-default-model-"))
+  root = mkdtempSync(join(tmpdir(), "otter-default-model-"))
   worktree = join(root, "worktree")
   mkdirSync(worktree)
   previousXdg = process.env.XDG_CONFIG_HOME

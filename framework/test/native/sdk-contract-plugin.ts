@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises"
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 
-const commandName = "lca-contract"
+const commandName = "otter-contract"
 
 function errorText(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
@@ -22,7 +22,7 @@ export default async function sdkContractPlugin({ client }: PluginInput): Promis
       if (firstChatMessageCaptured) return
       firstChatMessageCaptured = true
 
-      const evidencePath = process.env.LCA_CONTRACT_CHAT_MESSAGE_EVIDENCE
+      const evidencePath = process.env.OTTER_CONTRACT_CHAT_MESSAGE_EVIDENCE
       if (!evidencePath) {
         throw new Error("SDK contract plugin is missing its chat.message evidence path")
       }
@@ -95,9 +95,9 @@ export default async function sdkContractPlugin({ client }: PluginInput): Promis
     "command.execute.before": async (input) => {
       if (input.command !== commandName) return
 
-      const evidencePath = process.env.LCA_CONTRACT_EVIDENCE
-      const inputPath = process.env.LCA_CONTRACT_INPUT
-      const sentinel = process.env.LCA_CONTRACT_SENTINEL
+      const evidencePath = process.env.OTTER_CONTRACT_EVIDENCE
+      const inputPath = process.env.OTTER_CONTRACT_INPUT
+      const sentinel = process.env.OTTER_CONTRACT_SENTINEL
       if (!evidencePath || !inputPath || !sentinel) {
         throw new Error("SDK contract plugin is missing its isolated evidence/input/sentinel paths")
       }

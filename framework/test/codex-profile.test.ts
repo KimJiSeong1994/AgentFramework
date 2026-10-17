@@ -29,7 +29,7 @@ function modelFor(slug: string): CatalogModel {
 
 describe("Codex 0.159.3 static text-only profile", () => {
   test("bundles the catalogue without a runtime JSON file dependency", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "lca-profile-bundle-"))
+    const directory = mkdtempSync(join(tmpdir(), "otter-profile-bundle-"))
     const identity = lstatSync(directory)
     try {
       const build = await Bun.build({
@@ -100,14 +100,14 @@ describe("Codex 0.159.3 static text-only profile", () => {
 
   test("emits only A+B config assignments and safely quotes absolute paths", () => {
     const profile = createCodexProfile("gpt-5.6-sol")
-    const scratchWorkdir = "/tmp/lca scratch/quo\"te\\dir\nchild"
-    const catalogPath = "/tmp/lca config/catalog\"copy\\model.json"
+    const scratchWorkdir = "/tmp/otter scratch/quo\"te\\dir\nchild"
+    const catalogPath = "/tmp/otter config/catalog\"copy\\model.json"
     const args = codexProfileArgv(profile, scratchWorkdir, catalogPath)
 
     expect(args).toEqual([
-      "-c", 'default_permissions="lca_text_only"',
-      "-c", String.raw`permissions.lca_text_only={ filesystem = { "/tmp/lca scratch/quo\"te\\dir\nchild" = "read" } }`,
-      "-c", String.raw`model_catalog_json="/tmp/lca config/catalog\"copy\\model.json"`,
+      "-c", 'default_permissions="otter_text_only"',
+      "-c", String.raw`permissions.otter_text_only={ filesystem = { "/tmp/otter scratch/quo\"te\\dir\nchild" = "read" } }`,
+      "-c", String.raw`model_catalog_json="/tmp/otter config/catalog\"copy\\model.json"`,
       "-c", "features.code_mode=false",
       "-c", "tools.experimental_request_user_input.enabled=false",
     ])

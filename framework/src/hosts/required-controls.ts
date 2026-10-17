@@ -74,7 +74,7 @@ export class AdmissionRefusal extends Error {
   }
 }
 
-// These statuses are necessary checks only, not engine/version/model/profile evidence, token proof, an authenticated LCA lease, or live admission.
+// These statuses are necessary checks only, not engine/version/model/profile evidence, token proof, an authenticated Otter lease, or live admission.
 export function assertRequiredControlStatuses(controls: unknown, role: ExecutionRole, controlProfile?: ControlProfile): void {
   if (!(EXECUTION_ROLES as readonly unknown[]).includes(role)) {
     throw new Error("unrecognized execution role")

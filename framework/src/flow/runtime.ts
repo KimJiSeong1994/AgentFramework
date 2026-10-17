@@ -171,7 +171,7 @@ export function applyEventIn(
   extraEvents: Array<(next: Workflow) => Parameters<typeof commitRevision>[2][number]> = [],
 ): FlowResult {
   assertFlowTxWorktree(tx, deps.worktree)
-  // Compare-and-swap: the caller's record may be stale (e.g. lca_flow awaited a review for minutes while a /cancel
+  // Compare-and-swap: the caller's record may be stale (e.g. otter_flow awaited a review for minutes while a /cancel
   // or a new /plan ran). Refuse without writing when the persisted workflow is a different one, has new events, or
   // a different phase. The transition applies to the fresh record, so a refreshed owner heartbeat is never rolled
   // back.
@@ -985,7 +985,7 @@ export function onCancelSettled(listener: (sessionID: string) => void): () => vo
 }
 
 /**
- * An owner observer that sees a stop it did not issue (another process ran `lca pause|cancel`) closes admission durably and
+ * An owner observer that sees a stop it did not issue (another process ran `otter pause|cancel`) closes admission durably and
  * aborts broker waits before anything can settle: a settled pause must leave the session held so Resume can admit it.
  */
 export function adoptForeignStop(runtime: ExecutionRuntime, ref: SettleRef): void {

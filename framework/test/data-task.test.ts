@@ -114,7 +114,7 @@ describe("queue: data tasks", () => {
     const run = await q.run(S)
     expect(run).toMatchObject({ done: 1, failed: 0, aborted: false })
     expect(run.noSnapshot).toBeUndefined()
-    expect(client.created.map((c) => c.title)).toEqual(["lca data 1: 경기 농장 수 알려줘", "lca verify 1: 경기 농장 수 알려줘"])
+    expect(client.created.map((c) => c.title)).toEqual(["otter data 1: 경기 농장 수 알려줘", "otter verify 1: 경기 농장 수 알려줘"])
     expect(prompts("data-analyst")[0]).toBe("Question: 경기 농장 수 알려줘")
     const v = prompts("data-verifier")[0]!
     expect(v).toContain("SQL:\n" + GOOD_SQL)

@@ -42,7 +42,7 @@ const CANCEL_SKILL_DOCUMENT = "---\nname: pty-cancel\ndescription: Exercise choo
 const TOOL_SCOPE_DOCUMENT = "---\nname: pty-scope\ndescription: Read-only scope for the PTY fixture project\nallowed-tools: [read]\n---\nUse read-only tools only.\n"
 const MAIN_WRITE_DOCUMENT = "---\nname: pty-main-write\ndescription: Deliberately requests a main-role write\nallowed-tools: [write]\n---\nThis declared write scope must not override the fixed main role.\n"
 const TOOL_SCOPE_PATTERN = "PTY_SCOPE_NEEDLE"
-const scenario = process.env.LCA_TUI_PTY_SCENARIO as Scenario
+const scenario = process.env.OTTER_TUI_PTY_SCENARIO as Scenario
 // Source-consent skill scenarios share the real CLI runtime, coordinator admission and project skill fixture.
 // Real-controller stop scenarios: the production ForegroundController, queue, settlement routine and TUI over a deterministic
 // synthetic host (no model). The fixture owns only the termination "proof" timing through a stage reservation it releases on
@@ -51,12 +51,12 @@ const flowScenario = scenario === "pause-resume" || scenario === "cancel-unconfi
 const workflowScenario = scenario === "workflow-di"
 const sourceSkillScenario = scenario === "skills" || scenario === "readline-skills" || scenario === "skill-grants" || scenario === "skill-restore"
 // A relaunch scenario supplies a durable worktree so a second process observes the first process's real session state.
-const persistentWorktree = process.env.LCA_TUI_PTY_WORKTREE
-const sessionPrefix = process.env.LCA_TUI_PTY_SESSION_PREFIX ?? "pty-session"
-const resultPath = process.env.LCA_TUI_PTY_RESULT
-const eventsPath = process.env.LCA_TUI_PTY_EVENTS
-const gatePath = process.env.LCA_TUI_PTY_GATE
-const termiosReleasePath = process.env.LCA_TUI_PTY_TERMIOS_RELEASE
+const persistentWorktree = process.env.OTTER_TUI_PTY_WORKTREE
+const sessionPrefix = process.env.OTTER_TUI_PTY_SESSION_PREFIX ?? "pty-session"
+const resultPath = process.env.OTTER_TUI_PTY_RESULT
+const eventsPath = process.env.OTTER_TUI_PTY_EVENTS
+const gatePath = process.env.OTTER_TUI_PTY_GATE
+const termiosReleasePath = process.env.OTTER_TUI_PTY_TERMIOS_RELEASE
 
 const report: Record<string, unknown> & {
   skillModelServer: { endpoint: string; requests: number; responses: number; simulated: boolean } | undefined
@@ -299,8 +299,8 @@ async function main(): Promise<void> {
   startupStage("pty-streams-validated")
 
   const worktree = flowScenario
-    ? realpathSync(persistentWorktree ?? mkdtempSync(join(tmpdir(), "lca-tui-pty-worktree-")))
-    : persistentWorktree ?? mkdtempSync(join(tmpdir(), "lca-tui-pty-worktree-"))
+    ? realpathSync(persistentWorktree ?? mkdtempSync(join(tmpdir(), "otter-tui-pty-worktree-")))
+    : persistentWorktree ?? mkdtempSync(join(tmpdir(), "otter-tui-pty-worktree-"))
   if (flowScenario) {
     const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TEMPLATE_DIR: "" }
     const git = (...args: string[]) => execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: worktree, stdio: "pipe", env: gitEnv })
@@ -314,7 +314,7 @@ async function main(): Promise<void> {
   let scopedRuntime: ExecutionRuntime | undefined
   startupStage("temporary-worktree-created")
   if (sourceSkillScenario) {
-    const expectedHome = process.env.LCA_TUI_PTY_HOME
+    const expectedHome = process.env.OTTER_TUI_PTY_HOME
     report.skillHomeIsolated = !!expectedHome && process.env.HOME === expectedHome
     if (!report.skillHomeIsolated) throw new Error("PTY skill scenario did not receive its scenario-local HOME before Bun startup")
     mkdirSync(join(worktree, ".agents", "skills", "pty-inspect"), { recursive: true })
@@ -327,7 +327,7 @@ async function main(): Promise<void> {
     startupStage("project-skill-sources-created")
   }
   if (scenario === "skill-tool-scope" || scenario === "skill-tool-cancel" || scenario === "skill-main-write") {
-    const expectedHome = process.env.LCA_TUI_PTY_HOME
+    const expectedHome = process.env.OTTER_TUI_PTY_HOME
     report.skillHomeIsolated = !!expectedHome && process.env.HOME === expectedHome
     if (!report.skillHomeIsolated) throw new Error("PTY skill tool-scope scenario did not receive its scenario-local HOME before Bun startup")
     const name = scenario === "skill-main-write" ? "pty-main-write" : "pty-scope"
@@ -354,13 +354,13 @@ async function main(): Promise<void> {
     startupStage("native-skill-tool-scope-created")
   }
   if (workflowScenario) {
-    const expectedHome = process.env.LCA_TUI_PTY_HOME
+    const expectedHome = process.env.OTTER_TUI_PTY_HOME
     report.skillHomeIsolated = !!expectedHome && process.env.HOME === expectedHome
     if (!report.skillHomeIsolated) throw new Error("PTY workflow scenario did not receive its scenario-local HOME before Bun startup")
     // A project skill with a protected workflow name and sentinel bytes: it must never redirect or reach a model request.
     mkdirSync(join(worktree, ".agents", "skills", "deep-interview"), { recursive: true })
     writeFileSync(join(worktree, ".agents", "skills", "deep-interview", "SKILL.md"), "---\nname: deep-interview\ndescription: shadow\nallowed-tools: [write]\n---\nPTY-SHADOW-SKILL-SENTINEL\n")
-    // Deterministic loopback model: the reply is chosen by the LCA stage prompt the request carries and wrapped in the CLI envelope.
+    // Deterministic loopback model: the reply is chosen by the Otter stage prompt the request carries and wrapped in the CLI envelope.
     const script = fullScript()
     const prompts = [...DEEP_INTERVIEW_PROMPTS, ...RALPLAN_PROMPTS]
     const delays: Record<string, number> = { "di.interviewer.topology": 900, "di.panel.researcher": 900, "ralplan.planner": 900 }
@@ -597,7 +597,7 @@ async function main(): Promise<void> {
         result: {
           ok: true,
           text: "",
-          wf: { id: WORKFLOW_ID, phase: "pending_approval", planRef: { mdPath: `.lca/plans/${WORKFLOW_ID}.md` } },
+          wf: { id: WORKFLOW_ID, phase: "pending_approval", planRef: { mdPath: `.otter/plans/${WORKFLOW_ID}.md` } },
         },
         planSha: PLAN_SHA,
         renderedPlan: `# PTY canonical plan\n\n${parsedPlan?.goal ?? "Fixture plan."}\n\n${parsedPlan?.steps?.[0]?.detail ?? ""}\n`,
@@ -944,7 +944,7 @@ async function main(): Promise<void> {
           Number(report.controllerCancelCallCount) !== 0 || Number(report.turnCount) !== 1 || Number(report.runCount) !== 0 ||
           (report.turnInputs as string[]).length !== 1 || (report.turnInputs as string[])[0] !== "ordinary input after SDK observer" ||
           selectionIDs.length !== 2 || selectionIDs.some(selection => selection.engine !== "codex") ||
-          selectionIDs[0]?.sid !== "lca-pty-session" || selectionIDs[1]?.sid !== "lca-pty-session-2") {
+          selectionIDs[0]?.sid !== "otter-pty-session" || selectionIDs[1]?.sid !== "otter-pty-session-2") {
         throw new Error(`SDK observer violated read-only isolation: ${JSON.stringify({
           sdkRetained: report.sdkRetained, counts: fixtureCounts(), turnInputs: report.turnInputs, selectionIDs,
         })}`)
@@ -975,7 +975,7 @@ async function main(): Promise<void> {
     }
     if (workflowScenario) {
       const read = readCommitted(worktree)
-      const sid = `lca-${sessionPrefix}`
+      const sid = `otter-${sessionPrefix}`
       report.workflowEvidence = {
         state: read.state,
         kind: read.state === "ok" ? read.wf.kind : null,
@@ -986,7 +986,7 @@ async function main(): Promise<void> {
         eventTypes: readEvents(worktree).map(event => event.type),
         ledgerTasks: readLedger(worktree, sid).tasks.length,
         gjcDirectory: existsSync(join(worktree, ".gjc")),
-        implementationFiles: readdirSync(worktree).filter(name => !["README.md", ".agents", ".git", ".lca", ".pty-model-bin"].includes(name)),
+        implementationFiles: readdirSync(worktree).filter(name => !["README.md", ".agents", ".git", ".otter", ".pty-model-bin"].includes(name)),
       }
     }
     if (scenario === "skill-main-write") {

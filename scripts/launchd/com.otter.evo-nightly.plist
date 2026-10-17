@@ -1,21 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Template: copy to ~/Library/LaunchAgents/com.lca.evo-nightly.plist, replace REPO with the repository path,
-     then `launchctl load ~/Library/LaunchAgents/com.lca.evo-nightly.plist`. Runs at 03:30 daily; the script exits
+<!-- Template: copy to ~/Library/LaunchAgents/com.otter.evo-nightly.plist, replace REPO with the repository path,
+     then `launchctl load ~/Library/LaunchAgents/com.otter.evo-nightly.plist`. Runs at 03:30 daily; the script exits
      immediately unless EvoOntology's trigger says an evolution is due. Not installed by the framework. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.lca.evo-nightly</string>
+  <key>Label</key><string>com.otter.evo-nightly</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>REPO/scripts/lca-evo-nightly.sh</string>
+    <string>REPO/scripts/otter-evo-nightly.sh</string>
   </array>
   <key>WorkingDirectory</key><string>REPO</string>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>30</integer></dict>
-  <key>StandardOutPath</key><string>/tmp/lca-evo-nightly.out</string>
-  <key>StandardErrorPath</key><string>/tmp/lca-evo-nightly.err</string>
+  <key>StandardOutPath</key><string>/tmp/otter-evo-nightly.out</string>
+  <key>StandardErrorPath</key><string>/tmp/otter-evo-nightly.err</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:REPO_HOME/.bun/bin</string>

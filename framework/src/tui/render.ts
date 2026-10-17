@@ -265,7 +265,7 @@ export type TranscriptSegment = {
 }
 
 /**
- * One physical transcript row. Speaker labels (`you`, `lca`, `plan`) and gutter glyphs
+ * One physical transcript row. Speaker labels (`you`, `otter`, `plan`) and gutter glyphs
  * (`·` notice, `✗` error, tool status) carry provenance without relying on color.
  */
 export type TranscriptRow = {
@@ -479,7 +479,7 @@ function transcriptEntries(lines: readonly string[]): TranscriptEntry[] {
 
 const speakerStyle: Record<Speaker, { label?: string; labelStyle: SemanticToken[]; glyph?: [string, string]; style: SemanticToken[] }> = {
   You: { label: "you", labelStyle: ["accent"], style: ["user"] },
-  Assistant: { label: "lca", labelStyle: ["focus"], style: [] },
+  Assistant: { label: "otter", labelStyle: ["focus"], style: [] },
   "Canonical plan": { label: "plan", labelStyle: ["warning", "focus"], style: [] },
   Notice: { glyph: ["·", "-"], labelStyle: ["muted"], style: ["muted"] },
   Error: { glyph: ["✗", "x"], labelStyle: ["error"], style: ["error"] },
@@ -969,7 +969,7 @@ export function renderFrame(input: {
   } else {
     const screen = input.header?.screen
     const duplicate = screen === undefined || screen === input.panel?.title || screen === input.composerTitle || screen === "Chat" || screen === "Home"
-    right = duplicate ? "LCA" : `LCA${separator}${oneLineText(screen)}`
+    right = duplicate ? "Otter" : `Otter${separator}${oneLineText(screen)}`
   }
   const badge = input.header?.selection ? `${glyph.model} ${oneLineText(input.header.selection)}` : `${glyph.model} no model`
   const left = clipToWidth(badge, Math.max(12, Math.min(Math.floor(columns / 2), columns - displayWidth(right) - 5)))

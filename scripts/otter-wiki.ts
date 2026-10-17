@@ -5,7 +5,7 @@ import { captureWiki, lintWiki, registerWiki, statusWiki, unlockWiki } from "../
 
 const DEFAULT_ROOT = resolve(import.meta.dir, "..")
 const USAGE = [
-  "Usage: bun scripts/lca-wiki.ts <capture|lint|status|unlock|register> [file] [--title TITLE] [--root DIR]",
+  "Usage: bun scripts/otter-wiki.ts <capture|lint|status|unlock|register> [file] [--title TITLE] [--root DIR]",
   "capture is explicit, manual evidence collection; it never compiles or ingests sources.",
 ].join("\n")
 

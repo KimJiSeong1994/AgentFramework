@@ -4,7 +4,7 @@
 
 ## 현재 프로젝트 상태
 
-저장소의 프로젝트 설정 `.lca/lca.jsonc`는 `skill_router.mode`를 `suggest`로 설정한다. 이는 이 프로젝트가 턴별 스킬 **추천**을 선택적으로 요청한다는 뜻이다. 공유 라이브러리 기본값은 `framework/src/config.ts`의 `DEFAULT_CONFIG.skill_router.mode: "off"`다. 프로젝트 설정이 라이브러리 기본값보다 우선한다.
+저장소의 프로젝트 설정 `.otter/otter.jsonc`는 `skill_router.mode`를 `suggest`로 설정한다. 이는 이 프로젝트가 턴별 스킬 **추천**을 선택적으로 요청한다는 뜻이다. 공유 라이브러리 기본값은 `framework/src/config.ts`의 `DEFAULT_CONFIG.skill_router.mode: "off"`다. 프로젝트 설정이 라이브러리 기본값보다 우선한다.
 
 `framework/README.md`의 기존 `shadow` 설명도 현재 프로젝트 설정과 일치하는 `suggest`로 갱신했다. `shadow`는 관찰 전용 대안으로 남아 있다. 실행 설정과 설명이 다시 달라지면 출처를 대조하고 모순을 표시한다.
 
@@ -18,6 +18,6 @@
 
 ## 근거와 한계
 
-구현·설정 근거는 `.lca/lca.jsonc`, `framework/src/config.ts`, `framework/src/routing/router.ts`, `framework/README.md`의 “Optional OpenJev skill recommendations” 절, `scripts/openjev-local.sh`다. 프로젝트 README는 평가와 부하 시험 전 프로덕션에서 추천을 켜지 말라고 경고하며, 확률·마진 기준도 보정된 정확도나 권한 보장이 아니라고 설명한다.
+구현·설정 근거는 `.otter/otter.jsonc`, `framework/src/config.ts`, `framework/src/routing/router.ts`, `framework/README.md`의 “Optional OpenJev skill recommendations” 절, `scripts/openjev-local.sh`다. 프로젝트 README는 평가와 부하 시험 전 프로덕션에서 추천을 켜지 말라고 경고하며, 확률·마진 기준도 보정된 정확도나 권한 보장이 아니라고 설명한다.
 
 이 자료는 설정과 설계 경계를 설명할 뿐 추천 품질이나 업무 결과를 측정하지 않는다. 검토된 자료에 측정된 업무 영향이 없으므로 **측정된 비즈니스 임팩트는 알 수 없다**. 정확도·시간 절약·생산성·성공률을 추정하거나 생성하지 않는다. 프로젝트 모드가 `suggest`라는 사실만으로 실제 추천이 성공했거나 스킬이 적용됐다고 결론내리지 않는다.

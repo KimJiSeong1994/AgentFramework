@@ -368,7 +368,7 @@ describe("in-memory tool observations", () => {
       await before(call.input as any, call.output as any)
       const output = { output: "completed", metadata: {} }
       await after(call.input as any, output as any)
-      await expect(after(call.input as any, output as any)).rejects.toThrow("lca: OpenCode tool call refused (completed-call)")
+      await expect(after(call.input as any, output as any)).rejects.toThrow("otter: OpenCode tool call refused (completed-call)")
     }
 
     expect(readToolObservations(wt.worktree, sessionID).map(({ name, callID, status }) => ({ name, callID, status }))).toEqual([
@@ -430,7 +430,7 @@ describe("in-memory tool observations", () => {
     const after = createToolAfterHook(deps)
     const output = { output: "Error: command failed", metadata: {} }
     await after(call.input as any, output as any)
-    await expect(after(call.input as any, output as any)).rejects.toThrow("lca: OpenCode tool call refused (completed-call)")
+    await expect(after(call.input as any, output as any)).rejects.toThrow("otter: OpenCode tool call refused (completed-call)")
     let resultRead = false
     const lateState: Record<string, unknown> = { status: "error", input: call.output.args, time: {} }
     for (const key of ["error", "output", "metadata"]) Object.defineProperty(lateState, key, {

@@ -42,12 +42,12 @@ afterEach(() => {
 const RICH: Partial<Workflow> = {
   phase: "pending_approval",
   stage: "decision",
-  planRef: { jsonSha: "a".repeat(64), mdPath: ".lca/plans/plan.md", mdSha: "b".repeat(64), revision: 3 },
+  planRef: { jsonSha: "a".repeat(64), mdPath: ".otter/plans/plan.md", mdSha: "b".repeat(64), revision: 3 },
   review: { verdict: "okay", findings: ["note"], planSha: "a".repeat(64) },
   approval: { by: "user_command", subject: { kind: "plan", id: "wf_fault", sha256: "a".repeat(64) }, receiptRevision: 0, at: 1_700_000_000_000 },
   taskIds: ["task-a", "task-b"],
   counters: { code_invalid: 2, review_iterations: 1, user_rejections: 3, nudges: 1 },
-  artifacts: [{ key: "plan", path: ".lca/plans/plan.md", sha256: "b".repeat(64) }],
+  artifacts: [{ key: "plan", path: ".otter/plans/plan.md", sha256: "b".repeat(64) }],
 }
 
 function reattachEvents(workflowID: string) {
@@ -499,10 +499,10 @@ describe("V-reattach-7 / D5 pending and settled stops across a reattach", () => 
       void wid
     }],
     ["subject/hash (a plan appears that no saved plan matches)", /subject|approved plan/, () => {
-      rewriteCommitted(wt.worktree, current => ({ ...current, planRef: { jsonSha: "a".repeat(64), mdPath: ".lca/plans/none.md", mdSha: "b".repeat(64), revision: 1 }, pausedFrom: { phase: "executing", stage: "unit" } }))
+      rewriteCommitted(wt.worktree, current => ({ ...current, planRef: { jsonSha: "a".repeat(64), mdPath: ".otter/plans/none.md", mdSha: "b".repeat(64), revision: 1 }, pausedFrom: { phase: "executing", stage: "unit" } }))
     }],
     ["artifacts (a retained artifact is missing)", /artifact/, () => {
-      rewriteCommitted(wt.worktree, current => ({ ...current, artifacts: [{ key: "evidence", path: ".lca/missing-evidence.txt", sha256: "c".repeat(64) }] }))
+      rewriteCommitted(wt.worktree, current => ({ ...current, artifacts: [{ key: "evidence", path: ".otter/missing-evidence.txt", sha256: "c".repeat(64) }] }))
     }],
     ["unrelated open task", /unrelated|residual/, (wid) => {
       writeLedger(wt.worktree, addTasks(emptyLedger(S), [{ title: "stray" }], Date.now(), { id: `${wid}_other`, planSha: "x" }).ledger)

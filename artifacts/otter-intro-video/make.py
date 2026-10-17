@@ -1,13 +1,13 @@
-"""LCA intro video renderer. Python + Pillow + numpy + ffmpeg, macOS `say -v Yuna` Korean TTS.
+"""Otter intro video renderer. Python + Pillow + numpy + ffmpeg, macOS `say -v Yuna` Korean TTS.
 
-Run from repo root: python3 artifacts/lca-intro-video/make.py   (reads /tmp/lca-video/status.txt)
+Run from repo root: python3 artifacts/otter-intro-video/make.py   (reads /tmp/otter-video/status.txt)
 Everything is rendered at 2x (S) into cached sprites, downscaled with LANCZOS, then composited per frame.
 """
 import os, re, math, json, subprocess
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageChops, ImageFilter
 
-OUT = "/tmp/lca-video"
+OUT = "/tmp/otter-video"
 W, H, FPS = 1920, 1080, 30
 S = 2  # supersampling factor
 SD = "/System/Library/Fonts/AppleSDGothicNeo.ttc"
@@ -44,29 +44,29 @@ def wiki_tree():
     return lines
 
 status_lines = open(f"{OUT}/status.txt").read().strip().splitlines()[:6]
-wiki_status = subprocess.run(["bun", "scripts/lca-wiki.ts", "status"], capture_output=True, text=True).stdout.strip().splitlines()[:7]
+wiki_status = subprocess.run(["bun", "scripts/otter-wiki.ts", "status"], capture_output=True, text=True).stdout.strip().splitlines()[:7]
 
 # scene: (narration, kind, payload)
 SCENES = [
-    ("에이전트 프레임워크, 엘씨에이. 에이전트의 실행 이력을 버리지 않고, 자산으로 쌓는 코딩 에이전트입니다.",
-     "title", ("AgentFramework  ·  lca", "에이전트 실행 이력을 자산으로 쌓는 코딩 에이전트")),
+    ("에이전트 프레임워크, 오터. 에이전트의 실행 이력을 버리지 않고, 자산으로 쌓는 코딩 에이전트입니다.",
+     "title", ("AgentFramework  ·  otter", "에이전트 실행 이력을 자산으로 쌓는 코딩 에이전트")),
     ("에이전트와의 대화는 끝나면 사라집니다. 하지만 어떤 계획을 세웠고, 무엇을 승인했고, 어떤 도구가 성공하고 실패했는지는 다음 작업의 근거가 되어야 합니다.",
      "bullets", ("왜 필요한가", ["대화는 끝나면 사라진다", "계획 · 승인 · 도구 실행 결과는 남아야 한다", "남은 이력 = 다음 작업의 근거"])),
-    ("설치는 한 줄입니다. 맥오에스나 리눅스에서 이 명령을 실행하면, 번 런타임까지 확인하고 엘씨에이 명령을 만들어 줍니다.",
+    ("설치는 한 줄입니다. 맥오에스나 리눅스에서 이 명령을 실행하면, 번 런타임까지 확인하고 오터 명령을 만들어 줍니다.",
      "term", ("설치", [("$ ", CURL)], ["macOS / Linux · git 필요 · bun 없으면 자동 설치", "다시 실행하면 업데이트 · --uninstall 로 제거"])),
-    ("작업할 깃 저장소에서 엘씨에이 챗을 실행하고, 슬래시 모델로 엔진을 고릅니다. 로컬 올라마, 코덱스, 클로드 중 무엇을 써도 이력은 같은 형식으로 쌓입니다.",
-     "term", ("시작하기", [("$ ", "cd my-project"), ("$ ", "lca chat"), ("› ", "/model"), ("› ", "/model codex gpt-5.6-sol")], ["엔진: local(Ollama) · codex · claude", "엔진이 달라도 이력 형식은 동일"])),
-    ("엘씨에이는 바로 실행하지 않습니다. 슬래시 플랜으로 계획을 만들고, 사람이 슬래시 어프루브로 승인한 뒤에만 실행합니다. 승인과 실행은 원장에 기록됩니다.",
+    ("작업할 깃 저장소에서 오터 챗을 실행하고, 슬래시 모델로 엔진을 고릅니다. 로컬 올라마, 코덱스, 클로드 중 무엇을 써도 이력은 같은 형식으로 쌓입니다.",
+     "term", ("시작하기", [("$ ", "cd my-project"), ("$ ", "otter chat"), ("› ", "/model"), ("› ", "/model codex gpt-5.6-sol")], ["엔진: local(Ollama) · codex · claude", "엔진이 달라도 이력 형식은 동일"])),
+    ("오터는 바로 실행하지 않습니다. 슬래시 플랜으로 계획을 만들고, 사람이 슬래시 어프루브로 승인한 뒤에만 실행합니다. 승인과 실행은 원장에 기록됩니다.",
      "flow", ("통제된 실행", ["/plan", "/approve", "실행", "원장 기록"])),
     ("실행하는 동안 도구 호출 결과가 추가 전용 에스큐엘라이트 로그에 남습니다. 인자나 출력 본문은 저장하지 않고, 성공과 실패의 메타데이터만 기록합니다.",
      "bullets", ("실행 이력 기록", ["tool-outcomes.sqlite — 추가 전용(append-only)", "도구 · 세션 · 결과 · 시간만 저장", "인자 · 출력 본문은 저장하지 않음"])),
     ("쌓인 이력은 위키 캡처 명령으로 자산이 됩니다. 변하지 않는 원본 스냅샷과 집계 리포트가 만들어지고, 에이전트가 이를 출처가 연결된 개념과 엔티티 페이지로 정리합니다.",
-     "termtree", ("이력 → 지식 자산", [("$ ", "bun scripts/lca-wiki.ts capture")], wiki_tree())),
+     "termtree", ("이력 → 지식 자산", [("$ ", "bun scripts/otter-wiki.ts capture")], wiki_tree())),
     ("위키 스테이터스로 등록된 출처와 정리 상태를 확인하고, 린트로 링크와 해시 무결성을 검사합니다. 이 위키가 다음 작업의 컨텍스트가 됩니다.",
-     "termout", ("자산 확인", [("$ ", "bun scripts/lca-wiki.ts status")], wiki_status)),
-    ("지난 작업은 슬래시 세션즈로 보고, 슬래시 리쥼으로 복원합니다. 엘씨에이 스테이터스는 엔진 없이도 현재 워크플로와 원장 상태를 보여 줍니다.",
-     "termout", ("세션과 상태", [("› ", "/sessions"), ("› ", "/resume <sid>"), ("$ ", "lca status --worktree .")], status_lines)),
-    ("실행할수록 쌓이는 에이전트, 엘씨에이. 깃허브에서 엠아이티 라이선스로 공개되어 있습니다.",
+     "termout", ("자산 확인", [("$ ", "bun scripts/otter-wiki.ts status")], wiki_status)),
+    ("지난 작업은 슬래시 세션즈로 보고, 슬래시 리쥼으로 복원합니다. 오터 스테이터스는 엔진 없이도 현재 워크플로와 원장 상태를 보여 줍니다.",
+     "termout", ("세션과 상태", [("› ", "/sessions"), ("› ", "/resume <sid>"), ("$ ", "otter status --worktree .")], status_lines)),
+    ("실행할수록 쌓이는 에이전트, 오터. 깃허브에서 엠아이티 라이선스로 공개되어 있습니다.",
      "title", ("실행할수록 쌓이는 에이전트", GH + "  ·  MIT")),
 ]
 
@@ -78,7 +78,7 @@ ICONS = {1: ["bubble", "clipboard", "loop"], 5: ["db", "tag", "lock"]}
 # ----------------------------------------------------------------------------------------------
 MX = 96
 TXT = (208, 214, 226)
-WINTITLE = {2: "~ — zsh — 100×30", 3: "my-project — lca", 6: "AgentFramework — zsh", 7: "AgentFramework — zsh", 8: "AgentFramework — zsh"}
+WINTITLE = {2: "~ — zsh — 100×30", 3: "my-project — otter", 6: "AgentFramework — zsh", 7: "AgentFramework — zsh", 8: "AgentFramework — zsh"}
 
 
 def ease(p):
@@ -720,7 +720,7 @@ def main():
     scenes = [Scene(i, Ts[i], sc) for i, sc in enumerate(SCENES)]
     starts = [sum(Ts[:i]) for i in range(len(Ts))]; total = sum(Ts)
     tr, pfill, phead, hp = progress_sprites(Ts); pw = W - 2 * MX
-    final = os.path.abspath("artifacts/lca-intro-video/lca-intro.mp4"); os.makedirs(os.path.dirname(final), exist_ok=True)
+    final = os.path.abspath("artifacts/otter-intro-video/otter-intro.mp4"); os.makedirs(os.path.dirname(final), exist_ok=True)
     ff = subprocess.Popen(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
                            "-i", full, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "19",
                            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-shortest", final], stdin=subprocess.PIPE)

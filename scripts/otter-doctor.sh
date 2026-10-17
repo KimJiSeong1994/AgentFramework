@@ -1,8 +1,8 @@
 #!/bin/bash
-# lca-doctor.sh — static (no GPU, no model load) health checks for the lca OpenCode plugin.
+# otter-doctor.sh — static (no GPU, no model load) health checks for the otter OpenCode plugin.
 #
-#   scripts/lca-doctor.sh            # human-readable, one line per check
-#   scripts/lca-doctor.sh --json     # single JSON object
+#   scripts/otter-doctor.sh            # human-readable, one line per check
+#   scripts/otter-doctor.sh --json     # single JSON object
 #
 # Line format (docs/automation-design-2026-09-21.md §6):
 #   [PASS/WARN/FAIL/SKIP] id name  observed (expected)  fix: <what to do>
@@ -12,35 +12,35 @@
 #   D01 opencode binary + version        D05 effective config (opencode debug config from repo root):
 #   D02 bun present                          D05a agents main/worker/reviewer, D05b permission.task=deny, D05c plugin list / OMO
 #   D03 framework/ installed             D06 prompt prefix budget per agent (main 1500 / worker 800 / reviewer 600 est. tokens)
-#   D04 .opencode/plugins/lca.ts         D07 Ollama server env (scripts/ollama-env.sh show)
+#   D04 .opencode/plugins/otter.ts         D07 Ollama server env (scripts/ollama-env.sh show)
 #                                        D08 configured model present in `ollama ls`
 #   D09 stage-2 wiring: /stop command in effective config, effective tools of worker/reviewer/main (opencode debug
 #       agent: task/delegate/todowrite hidden, steps set), delegate tool schema <= 400 est. tokens
-#   D12a lca_flow tool schema <= 300 est. tokens and only visible on main; D12b M1 command set: effective config
+#   D12a otter_flow tool schema <= 300 est. tokens and only visible on main; D12b M1 command set: effective config
 #       contains stop,status,plan,approve,reject,cancel (WARN if missing); D12c PLAN_REVIEW_TEMPLATE <= 350 est. tokens
 #   D10 chat.params option keys are AI-SDK camelCase keys also used by the user's model options (reasoningEffort)
 #   D11 stage-3 data layer: vendored EvoOntology MCP server answers initialize/tools/list (python3, stdio), the sqlite
 #       query helper runs a read-only query, and the fixture ontology validates; D11d = effective config when the
 #       project enables a data backend (data-analyst agent + evo-semantic MCP present), SKIP when backend is none;
-#       D11e = stage-4 evolution driver self-test (scripts/lca-evo-evolve.py --self-test)
+#       D11e = stage-4 evolution driver self-test (scripts/otter-evo-evolve.py --self-test)
 #   D12e opencode pin: OPENCODE_PIN vs opencode --version, framework/package.json plugin+sdk, installed
 #       framework/node_modules plugin+sdk, .opencode/package.json plugin, installed .opencode/node_modules plugin.
 #       Any mismatch or missing source = WARN (D01 keeps its semantics: below MIN = WARN, no binary = FAIL).
 #
-# Env: LCA_DOCTOR_ONLY=<id,id>  run only these check ids (supported early exit for D01,D12e; other ids are
-#      filtered from the output).   LCA_DOCTOR_ROOT=<dir>  repo root override (tests).
+# Env: OTTER_DOCTOR_ONLY=<id,id>  run only these check ids (supported early exit for D01,D12e; other ids are
+#      filtered from the output).   OTTER_DOCTOR_ROOT=<dir>  repo root override (tests).
 #
 # Notes (verified 2026-09-22, opencode 1.18.32):
 #   * `opencode debug config` output is TRUNCATED at 64 KiB when stdout is a pipe; always redirect to a file.
 #   * OPENCODE_CONFIG_DIR (set by orca in some shells) adds another global config dir. The doctor unsets it so
-#     the result matches a plain terminal; set LCA_DOCTOR_KEEP_ENV=1 to keep it.
+#     the result matches a plain terminal; set OTTER_DOCTOR_KEEP_ENV=1 to keep it.
 #   * Token estimate ports framework/src/tokens.ts estimateTokens() (Gemma-calibrated char classes);
 #     if that file is missing the fallback is chars/4.
 # bash 3.2 compatible (no associative arrays, no mapfile). `set -e` is deliberately NOT used.
 set -uo pipefail
 
-ROOT="${LCA_DOCTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-ONLY="${LCA_DOCTOR_ONLY:-}"
+ROOT="${OTTER_DOCTOR_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+ONLY="${OTTER_DOCTOR_ONLY:-}"
 # want ID: true when no filter is set or ID is in the comma list.
 want() { [ -z "$ONLY" ] || case ",$ONLY," in *",$1,"*) return 0;; *) return 1;; esac; }
 JSON=0
@@ -55,7 +55,7 @@ done
 OPENCODE_MIN="1.18.32"
 OPENCODE_PIN="1.18.32"
 BUDGET_MAIN=1500; BUDGET_WORKER=800; BUDGET_REVIEWER=600
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/lca-doctor.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/otter-doctor.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 RESULTS="$TMP/results.tsv"; : > "$RESULTS"
 N_WARN=0; N_FAIL=0
@@ -114,7 +114,7 @@ if cmd=="summary":
     plugins=[p if isinstance(p,str) else p[0] for p in (d.get("plugin") or [])]
     print("plugins="+" ".join(plugins))
     print("omo="+("1" if any("oh-my-openagent" in p for p in plugins) else "0"))
-    print("lca_plugin="+("1" if any(p.rstrip("/").endswith("lca.ts") for p in plugins) else "0"))
+    print("otter_plugin="+("1" if any(p.rstrip("/").endswith("otter.ts") for p in plugins) else "0"))
     print("model="+str(d.get("model")))
     print("small_model="+str(d.get("small_model")))
     print("default_agent="+str(d.get("default_agent")))
@@ -214,21 +214,21 @@ else
 fi
 
 # ---------------------------------------------------------------- D04 project plugin loader
-LOADER="$ROOT/.opencode/plugins/lca.ts"
+LOADER="$ROOT/.opencode/plugins/otter.ts"
 if [ -f "$LOADER" ]; then
   if grep -q "framework/src/index.ts" "$LOADER"; then
-    report PASS D04 plugin-loader ".opencode/plugins/lca.ts -> framework/src/index.ts" "present"
+    report PASS D04 plugin-loader ".opencode/plugins/otter.ts -> framework/src/index.ts" "present"
   else
-    report WARN D04 plugin-loader ".opencode/plugins/lca.ts present but does not import framework/src/index.ts" "re-export from ../../framework/src/index.ts" "check .opencode/plugins/lca.ts"
+    report WARN D04 plugin-loader ".opencode/plugins/otter.ts present but does not import framework/src/index.ts" "re-export from ../../framework/src/index.ts" "check .opencode/plugins/otter.ts"
   fi
 else
-  report FAIL D04 plugin-loader ".opencode/plugins/lca.ts missing" "present" "echo 'export { LcaPlugin } from \"../../framework/src/index.ts\"' > .opencode/plugins/lca.ts"
+  report FAIL D04 plugin-loader ".opencode/plugins/otter.ts missing" "present" "echo 'export { OtterPlugin } from \"../../framework/src/index.ts\"' > .opencode/plugins/otter.ts"
 fi
 
 # ---------------------------------------------------------------- D05 effective config
 CFG="$TMP/config.json"; CFGERR="$TMP/config.err"; CFG_OK=0
 if command -v opencode >/dev/null 2>&1; then
-  if [ "${LCA_DOCTOR_KEEP_ENV:-0}" = 1 ]; then ENVCMD="env"; else ENVCMD="env -u OPENCODE_CONFIG_DIR -u ORCA_OPENCODE_CONFIG_DIR"; fi
+  if [ "${OTTER_DOCTOR_KEEP_ENV:-0}" = 1 ]; then ENVCMD="env"; else ENVCMD="env -u OPENCODE_CONFIG_DIR -u ORCA_OPENCODE_CONFIG_DIR"; fi
   ( cd "$ROOT" && with_timeout 90 $ENVCMD opencode debug config > "$CFG" 2> "$CFGERR" </dev/null )
   rc=$?
   python3 "$TMP/cfg.py" summary "$CFG" > "$TMP/summary.txt" 2>&1
@@ -236,14 +236,14 @@ if command -v opencode >/dev/null 2>&1; then
     err="$(grep -iE 'error|fail|cannot|unexpected' "$CFGERR" | head -2 | tr '\n' ' ')"
     [ -z "$err" ] && err="$(tail -2 "$CFGERR" | tr '\n' ' ')"
     [ -z "$err" ] && err="$(val "$TMP/summary.txt" error)"
-    report FAIL D05 effective-config "opencode debug config rc=$rc: ${err:-no output}" "valid JSON" "LCA_DEBUG=1 opencode debug config --print-logs  (plugin import error?)"
+    report FAIL D05 effective-config "opencode debug config rc=$rc: ${err:-no output}" "valid JSON" "OTTER_DEBUG=1 opencode debug config --print-logs  (plugin import error?)"
   else
     CFG_OK=1
     present="$(val "$TMP/summary.txt" agents_present)"; missing="$(val "$TMP/summary.txt" agents_missing)"
     if [ -z "$missing" ]; then
-      report PASS D05a agents "main,worker,reviewer present; default_agent=$(val "$TMP/summary.txt" default_agent)" "lca agents injected by config hook"
+      report PASS D05a agents "main,worker,reviewer present; default_agent=$(val "$TMP/summary.txt" default_agent)" "otter agents injected by config hook"
     else
-      report FAIL D05a agents "present: ${present:-none}; missing: $missing; all: $(val "$TMP/summary.txt" agents_all)" "main,worker,reviewer" "check framework/src/hooks/config.ts and lca_plugin=$(val "$TMP/summary.txt" lca_plugin) in plugin list"
+      report FAIL D05a agents "present: ${present:-none}; missing: $missing; all: $(val "$TMP/summary.txt" agents_all)" "main,worker,reviewer" "check framework/src/hooks/config.ts and otter_plugin=$(val "$TMP/summary.txt" otter_plugin) in plugin list"
     fi
     tt="$(val "$TMP/summary.txt" perm_task)"
     if [ "$tt" = '"deny"' ]; then
@@ -253,11 +253,11 @@ if command -v opencode >/dev/null 2>&1; then
     fi
     plugins="$(val "$TMP/summary.txt" plugins)"
     if [ "$(val "$TMP/summary.txt" omo)" = 1 ]; then
-      report WARN D05c plugins "oh-my-openagent loaded with lca: [$plugins]" "lca only; OMO and lca both overwrite config.agent (last wins)" "remove oh-my-openagent from ~/.config/opencode/opencode.jsonc plugin[] before using lca"
-    elif [ "$(val "$TMP/summary.txt" lca_plugin)" = 1 ]; then
-      report PASS D05c plugins "[$plugins]" "lca loader present, no oh-my-openagent"
+      report WARN D05c plugins "oh-my-openagent loaded with otter: [$plugins]" "otter only; OMO and otter both overwrite config.agent (last wins)" "remove oh-my-openagent from ~/.config/opencode/opencode.jsonc plugin[] before using otter"
+    elif [ "$(val "$TMP/summary.txt" otter_plugin)" = 1 ]; then
+      report PASS D05c plugins "[$plugins]" "otter loader present, no oh-my-openagent"
     else
-      report WARN D05c plugins "[${plugins:-none}]" "lca loader in plugin list" "run from the repo root; .opencode/plugins/lca.ts is project-scoped"
+      report WARN D05c plugins "[${plugins:-none}]" "otter loader in plugin list" "run from the repo root; .opencode/plugins/otter.ts is project-scoped"
     fi
   fi
 else
@@ -382,7 +382,7 @@ print("bad=" + "; ".join(bad))
 print("warn=" + "; ".join(warn))
 PY
   if [ "$(val "$TMP/s2.txt" stop)" = 1 ]; then report PASS D09a stop-command "command.stop present: '$(val "$TMP/s2.txt" stop_template)'" "registered by config hook"
-  else report FAIL D09a stop-command "command.stop missing in effective config" "registered by config hook" "check disabled_hooks in .lca/lca.jsonc (command.stop)"; fi
+  else report FAIL D09a stop-command "command.stop missing in effective config" "registered by config hook" "check disabled_hooks in .otter/otter.jsonc (command.stop)"; fi
   # D12b: the milestone's command set must be a subset of the effective config's registered commands.
   # M1: flow is on by default, so the full set is stop,status,plan,approve,reject,cancel.
   present_cmds=",$(val "$TMP/s2.txt" commands),"
@@ -390,8 +390,8 @@ PY
   for c in stop status plan approve reject cancel; do case "$present_cmds" in *",$c,"*) ;; *) missing_cmds="$missing_cmds $c";; esac; done
   if [ -z "$missing_cmds" ]; then report PASS D12b commands "effective command set: [$(val "$TMP/s2.txt" commands)]" "contains stop,status,plan,approve,reject,cancel"
   else report WARN D12b commands "missing:$missing_cmds (present: [$(val "$TMP/s2.txt" commands)])" "contains stop,status,plan,approve,reject,cancel" "check disabled_hooks (command.stop/command.status) and config.flow.enabled"; fi
-  if [ -n "$(val "$TMP/s2b.txt" bad)" ]; then report FAIL D09b agent-tools "$(val "$TMP/s2b.txt" bad)" "task/delegate/todowrite hidden via permission; reviewer read-only" "framework/src/agents/prompts.ts denied_tools / hooks/config.ts; remove other plugins (OMO) when using lca"
-  elif [ -n "$(val "$TMP/s2b.txt" warn)" ]; then report WARN D09b agent-tools "$(val "$TMP/s2b.txt" warn)" "only lca + built-in tools visible" "remove oh-my-openagent from the plugin list before using lca (extra tool schemas cost prefix)"
+  if [ -n "$(val "$TMP/s2b.txt" bad)" ]; then report FAIL D09b agent-tools "$(val "$TMP/s2b.txt" bad)" "task/delegate/todowrite hidden via permission; reviewer read-only" "framework/src/agents/prompts.ts denied_tools / hooks/config.ts; remove other plugins (OMO) when using otter"
+  elif [ -n "$(val "$TMP/s2b.txt" warn)" ]; then report WARN D09b agent-tools "$(val "$TMP/s2b.txt" warn)" "only otter + built-in tools visible" "remove oh-my-openagent from the plugin list before using otter (extra tool schemas cost prefix)"
   else report PASS D09b agent-tools "worker=[$(val "$TMP/s2b.txt" worker_tools)] reviewer=[$(val "$TMP/s2b.txt" reviewer_tools)] main has delegate, steps 40/15" "task/delegate/todowrite hidden via permission"; fi
 else
   report SKIP D09a stop-command "effective config unavailable" "" ""
@@ -414,34 +414,34 @@ else
   report SKIP D09c delegate-schema "bun or framework/src/tools/delegate.ts missing" "" ""
 fi
 
-# ---------------------------------------------------------------- D12a lca_flow schema budget + main-only visibility
+# ---------------------------------------------------------------- D12a otter_flow schema budget + main-only visibility
 FLOW_BUDGET=300
-if command -v bun >/dev/null 2>&1 && [ -f "$ROOT/framework/src/tools/lca-flow.ts" ]; then
+if command -v bun >/dev/null 2>&1 && [ -f "$ROOT/framework/src/tools/otter-flow.ts" ]; then
   ( cd "$ROOT/framework" && with_timeout 60 bun -e '
 import { z } from "zod";
-import { LCA_FLOW_DESCRIPTION, lcaFlowArgs } from "./src/tools/lca-flow.ts";
+import { OTTER_FLOW_DESCRIPTION, otterFlowArgs } from "./src/tools/otter-flow.ts";
 import { estimateToolSchemaTokens } from "./src/tokens.ts";
-const json = z.toJSONSchema(z.object(lcaFlowArgs));
-console.log("tokens=" + estimateToolSchemaTokens(LCA_FLOW_DESCRIPTION, json));
+const json = z.toJSONSchema(z.object(otterFlowArgs));
+console.log("tokens=" + estimateToolSchemaTokens(OTTER_FLOW_DESCRIPTION, json));
 ' > "$TMP/lf.txt" 2>&1 </dev/null )
   lftok="$(val "$TMP/lf.txt" tokens)"
   lf_ok=1
   if [ "$CFG_OK" = 1 ]; then
-    # lca_flow must only be visible on main (worker/reviewer/data agents deny it; build/plan deny it too)
+    # otter_flow must only be visible on main (worker/reviewer/data agents deny it; build/plan deny it too)
     for a in worker reviewer; do
-      d="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(1 if (d.get('tools') or {}).get('lca_flow') else 0)" "$TMP/agent-$a.json" 2>/dev/null || echo 0)"
+      d="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(1 if (d.get('tools') or {}).get('otter_flow') else 0)" "$TMP/agent-$a.json" 2>/dev/null || echo 0)"
       [ "$d" = 1 ] && lf_ok=0
     done
   fi
   if [ -n "$lftok" ] && [ "$lftok" -le "$FLOW_BUDGET" ] 2>/dev/null && [ "$lf_ok" = 1 ]; then
     report PASS D12a flow-tool-schema "~$lftok est. tokens, only on main" "<= $FLOW_BUDGET, main-only"
   elif [ -n "$lftok" ]; then
-    report FAIL D12a flow-tool-schema "~$lftok est. tokens, main-only=$lf_ok" "<= $FLOW_BUDGET, main-only" "shorten LCA_FLOW_DESCRIPTION / lcaFlowArgs in framework/src/tools/lca-flow.ts, or check denied_tools for worker/reviewer"
+    report FAIL D12a flow-tool-schema "~$lftok est. tokens, main-only=$lf_ok" "<= $FLOW_BUDGET, main-only" "shorten OTTER_FLOW_DESCRIPTION / otterFlowArgs in framework/src/tools/otter-flow.ts, or check denied_tools for worker/reviewer"
   else
     report WARN D12a flow-tool-schema "bun eval failed: $(tail -1 "$TMP/lf.txt")" "schema measurable" "cd framework && bun install"
   fi
 else
-  report SKIP D12a flow-tool-schema "bun or framework/src/tools/lca-flow.ts missing" "" ""
+  report SKIP D12a flow-tool-schema "bun or framework/src/tools/otter-flow.ts missing" "" ""
 fi
 
 # ---------------------------------------------------------------- D12c PLAN_REVIEW_TEMPLATE budget
@@ -528,10 +528,10 @@ PY
   else report SKIP D11d data-config "data.backend is none in this project (no data agents)" "" ""; fi
 fi
 
-EVOLVE="$ROOT/scripts/lca-evo-evolve.py"
+EVOLVE="$ROOT/scripts/otter-evo-evolve.py"
 if [ -f "$EVOLVE" ] && command -v python3 >/dev/null 2>&1; then
   out="$(with_timeout 60 python3 "$EVOLVE" --self-test 2>&1)"
-  [ "$out" = "self-test ok" ] && bash -n "$ROOT/scripts/lca-evo-nightly.sh" 2>/dev/null && report PASS D11e evo-evolve "ontology evolution driver + nightly wrapper: self-test ok (patch validation, judge decoding)" "self-test ok" || report FAIL D11e evo-evolve "$(printf '%s' "$out" | tail -1 | head -c 160)" "self-test ok" "python3 scripts/lca-evo-evolve.py --self-test"
+  [ "$out" = "self-test ok" ] && bash -n "$ROOT/scripts/otter-evo-nightly.sh" 2>/dev/null && report PASS D11e evo-evolve "ontology evolution driver + nightly wrapper: self-test ok (patch validation, judge decoding)" "self-test ok" || report FAIL D11e evo-evolve "$(printf '%s' "$out" | tail -1 | head -c 160)" "self-test ok" "python3 scripts/otter-evo-evolve.py --self-test"
 else
   report SKIP D11e evo-evolve "driver or python3 missing" "" ""
 fi

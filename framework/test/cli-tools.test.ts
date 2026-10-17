@@ -15,8 +15,8 @@ function text(result: ReturnType<typeof tools.execute>): string {
 }
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "lca-cli-tools-"))
-  outside = mkdtempSync(join(tmpdir(), "lca-cli-tools-outside-"))
+  root = mkdtempSync(join(tmpdir(), "otter-cli-tools-"))
+  outside = mkdtempSync(join(tmpdir(), "otter-cli-tools-outside-"))
   tools = createCliTools({
     root,
     role: "worker",
@@ -221,7 +221,7 @@ describe("scoped CLI file tools", () => {
 
   test("rejects traversal, protected/credential paths, and symlink escapes", () => {
     writeFileSync(join(outside, "outside.txt"), "outside sentinel")
-    for (const directory of [".git", ".lca", ".gjc"]) {
+    for (const directory of [".git", ".otter", ".gjc"]) {
       mkdirSync(join(root, directory))
       writeFileSync(join(root, directory, "private.txt"), "private")
       expect(tools.execute("read", { path: `${directory}/private.txt` })).toMatchObject({ ok: false })
@@ -301,19 +301,19 @@ describe("scoped CLI file tools", () => {
 
   test("glob and grep skip protected and ignored directories", () => {
     mkdirSync(join(root, ".git"))
-    mkdirSync(join(root, ".lca"))
+    mkdirSync(join(root, ".otter"))
     mkdirSync(join(root, "node_modules"))
     mkdirSync(join(root, "ignored"))
     mkdirSync(join(root, "src"))
     writeFileSync(join(root, ".gitignore"), "ignored/\n")
-    for (const path of [".git/private.txt", ".lca/private.txt", "node_modules/private.txt", "ignored/private.txt", "src/visible.txt"]) {
+    for (const path of [".git/private.txt", ".otter/private.txt", "node_modules/private.txt", "ignored/private.txt", "src/visible.txt"]) {
       writeFileSync(join(root, path), "needle")
     }
     const glob = text(tools.execute("glob", { pattern: "**/*.txt" }))
     const grep = text(tools.execute("grep", { pattern: "needle" }))
     expect(glob).toContain("src/visible.txt")
     expect(grep).toContain("src/visible.txt")
-    for (const hidden of [".git/private.txt", ".lca/private.txt", "node_modules/private.txt", "ignored/private.txt"]) {
+    for (const hidden of [".git/private.txt", ".otter/private.txt", "node_modules/private.txt", "ignored/private.txt"]) {
       expect(glob).not.toContain(hidden)
       expect(grep).not.toContain(hidden)
     }

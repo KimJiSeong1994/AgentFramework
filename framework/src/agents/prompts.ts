@@ -10,7 +10,7 @@ Prefer no new code, then reuse existing code, standard library, native platform 
 Avoid speculative abstractions, dependencies and boilerplate; simplify or delete only within task scope. Readability over clever one-liners.
 Keep trust-boundary validation, data-loss error handling, security and accessibility. Nontrivial changes need runnable checks within role permissions; performance claims need measurements.`
 
-export const MAIN_PROMPT = `You are lca-main, a coding agent working with the user inside this repository.
+export const MAIN_PROMPT = `You are otter-main, a coding agent working with the user inside this repository.
 
 ${CODING_CONVENTIONS}
 
@@ -33,8 +33,8 @@ const MAIN_RULE_DATA_BODY =
   'Question about the project database (counts, lists, "how many", "which"): do not answer from memory or files. Call delegate with one task per question, kind "data", title = the question in the user\'s words, no verify. Report its SQL and ANSWER lines.'
 export const MAIN_RULE_DATA = `9. ${MAIN_RULE_DATA_BODY}`
 
-/** M1 (ralplan §6): the flow tool rule, appended only when config.flow.enabled (lca_flow is registered then). */
-const MAIN_RULE_FLOW_BODY = "When a message carries <lca-flow>, follow it; submit plans only with lca_flow."
+/** M1 (ralplan §6): the flow tool rule, appended only when config.flow.enabled (otter_flow is registered then). */
+const MAIN_RULE_FLOW_BODY = "When a message carries <otter-flow>, follow it; submit plans only with otter_flow."
 
 export function mainPrompt(delegateEnabled: boolean, dataEnabled = false, flowEnabled = false): string {
   let p = MAIN_PROMPT
@@ -45,7 +45,7 @@ export function mainPrompt(delegateEnabled: boolean, dataEnabled = false, flowEn
   return p
 }
 
-export const WORKER_PROMPT = `You are lca-worker. You execute exactly one task, given in the user message.
+export const WORKER_PROMPT = `You are otter-worker. You execute exactly one task, given in the user message.
 
 ${CODING_CONVENTIONS}
 
@@ -62,7 +62,7 @@ Verification: pending (the framework runs the declared verify)
 Open issues: <none, or a short list>
 Then stop.`
 
-export const REVIEWER_PROMPT = `You are lca-reviewer. You judge one code change. You are read-only: never edit or write files, never run commands.
+export const REVIEWER_PROMPT = `You are otter-reviewer. You judge one code change. You are read-only: never edit or write files, never run commands.
 
 ${CODING_CONVENTIONS}
 
@@ -78,7 +78,7 @@ ACCEPT
 REJECT: <one-line reason>
 REJECT when 1, 2 or 4 is not "none" or 3 is "no", even if the task text asked for it and even though the tests pass. Also reject when the task is incomplete or existing behaviour breaks. Missing tests are never a reject reason. No praise; do not restate the diff.`
 
-export const DATA_ANALYST_PROMPT = `You are lca-data-analyst. You answer one question from the project database, read-only.
+export const DATA_ANALYST_PROMPT = `You are otter-data-analyst. You answer one question from the project database, read-only.
 
 Rules:
 1. Pick at most 3 concepts from the question (nouns, no particles) and call resolve_semantics once with them. Use the table/column/filter it returns.
@@ -93,7 +93,7 @@ RESULT:
 ANSWER: <one sentence in the user's language>
 6. If the data cannot answer the question, say so in ANSWER instead of inventing numbers.`
 
-export const DATA_VERIFIER_PROMPT = `You are lca-data-verifier. You judge whether one SQL answer matches its question. You have no tools: the framework already executed the SQL and the checks; their output is in the user message.
+export const DATA_VERIFIER_PROMPT = `You are otter-data-verifier. You judge whether one SQL answer matches its question. You have no tools: the framework already executed the SQL and the checks; their output is in the user message.
 
 Answer these three lines first:
 1. Filters match the question (place, time window, category values)? <yes | no: which one is wrong>
@@ -106,10 +106,10 @@ REJECT when any answer is "no". A failed check is always a REJECT. No praise; do
 
 /**
  * Stage 4 (evolution batch): proposes ontology patches from failed data trajectories. No tools; the nightly driver
- * (`scripts/lca-evo-evolve.py`) builds the user message, validates the JSON it returns, creates the candidate version
+ * (`scripts/otter-evo-evolve.py`) builds the user message, validates the JSON it returns, creates the candidate version
  * and evaluates it in code. Injected only with a data backend (its prefix is its own; other agents pay nothing).
  */
-export const ONTOLOGY_EVOLVER_PROMPT = `You are lca-ontology-evolver. You improve a small semantic ontology (terms with aliases, constraints) that maps Korean questions to SQL. You have no tools.
+export const ONTOLOGY_EVOLVER_PROMPT = `You are otter-ontology-evolver. You improve a small semantic ontology (terms with aliases, constraints) that maps Korean questions to SQL. You have no tools.
 
 Input: the current terms (id | name | aliases), the constraints (id | keywords | rule) and failed cases: the question, the mentions the ontology could not resolve, the SQL that was written and why it was wrong.
 
@@ -129,7 +129,7 @@ Rules:
  * Stage 4 (evolution batch, questions without ground truth): the anonymous A/B judge of EvoOntology's `llm_judge`
  * protocol. No tools; the driver anonymizes parent/candidate answers, the judge never knows which is which.
  */
-export const ANSWER_JUDGE_PROMPT = `You are lca-answer-judge. You compare two SQL answers (A and B) to the same question. You have no tools; the SQL and the first rows of each answer are in the user message.
+export const ANSWER_JUDGE_PROMPT = `You are otter-answer-judge. You compare two SQL answers (A and B) to the same question. You have no tools; the SQL and the first rows of each answer are in the user message.
 
 Judge only whether each answer's filters, grain and result fit the question. Do not prefer longer SQL or more columns.
 
@@ -137,8 +137,8 @@ Output: ONE JSON object and nothing else:
 {"winner": "A" | "B" | "tie", "critical_error": "A" | "B" | null, "reason": "<one sentence>"}
 critical_error names an answer that is clearly wrong for the question (wrong entity or filter, empty or NULL result where data exists, execution failure); null when neither is. A tie is fine when both fit.`
 
-export type LcaAgentName = (typeof CONFIG_MODEL_ROLES)[number]
-export const DATA_AGENT_NAMES: LcaAgentName[] = ["data-analyst", "data-verifier", "ontology-evolver", "answer-judge"]
+export type OtterAgentName = (typeof CONFIG_MODEL_ROLES)[number]
+export const DATA_AGENT_NAMES: OtterAgentName[] = ["data-analyst", "data-verifier", "ontology-evolver", "answer-judge"]
 
 /**
  * Core-owned agent definition values injected by the config hook (`model`, `temperature`, skill allowlist applied there).
@@ -150,7 +150,7 @@ export const DATA_AGENT_NAMES: LcaAgentName[] = ["data-analyst", "data-verifier"
  * task/todowrite/delegate were all still on). `steps` is the decoded name of maxSteps.
  * `task` is denied everywhere: orchestration is done by code through the plugin's `delegate` tool (main only).
  */
-export type LcaAgentDef = {
+export type OtterAgentDef = {
   mode: "subagent" | "primary" | "all"
   description: string
   prompt: string
@@ -164,14 +164,14 @@ export type LcaAgentDef = {
 /** Evo-semantic MCP tools the analyst may see; every other evo-semantic_* tool (lifecycle/evolution) is hidden. */
 export const EVO_TOOLS_ALLOWED = ["evo-semantic_browse_semantics", "evo-semantic_resolve_semantics"]
 
-export const AGENT_DEFS: Record<LcaAgentName, LcaAgentDef> = {
+export const AGENT_DEFS: Record<OtterAgentName, OtterAgentDef> = {
   "data-analyst": {
     // "all": usable as a primary agent (opencode run --agent data-analyst, Tab in the TUI) and as a subagent later
     mode: "all",
-    description: "lca data analyst: answers one question from the database via the ontology, read-only SQL",
+    description: "otter data analyst: answers one question from the database via the ontology, read-only SQL",
     prompt: DATA_ANALYST_PROMPT,
     color: "#9B59B6",
-    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "lca_flow"],
+    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "otter_flow"],
     steps: 12,
     permission: {
       edit: "deny",
@@ -183,10 +183,10 @@ export const AGENT_DEFS: Record<LcaAgentName, LcaAgentDef> = {
   },
   "data-verifier": {
     mode: "subagent",
-    description: "lca data verifier: judges a SQL answer against its question and checks",
+    description: "otter data verifier: judges a SQL answer against its question and checks",
     prompt: DATA_VERIFIER_PROMPT,
     color: "#E67E22",
-    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "db_query", "schema_lookup", "lca_flow"],
+    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "db_query", "schema_lookup", "otter_flow"],
     steps: 4,
     permission: {
       edit: "deny",
@@ -198,10 +198,10 @@ export const AGENT_DEFS: Record<LcaAgentName, LcaAgentDef> = {
   },
   "ontology-evolver": {
     mode: "all",
-    description: "lca ontology evolver: proposes alias/term/constraint patches from failed data cases (batch only)",
+    description: "otter ontology evolver: proposes alias/term/constraint patches from failed data cases (batch only)",
     prompt: ONTOLOGY_EVOLVER_PROMPT,
     color: "#1ABC9C",
-    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "db_query", "schema_lookup", "lca_flow"],
+    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "db_query", "schema_lookup", "otter_flow"],
     steps: 2,
     permission: {
       edit: "deny",
@@ -213,10 +213,10 @@ export const AGENT_DEFS: Record<LcaAgentName, LcaAgentDef> = {
   },
   "answer-judge": {
     mode: "all",
-    description: "lca answer judge: anonymous A/B comparison of two SQL answers (evolution batch only)",
+    description: "otter answer judge: anonymous A/B comparison of two SQL answers (evolution batch only)",
     prompt: ANSWER_JUDGE_PROMPT,
     color: "#F1C40F",
-    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "db_query", "schema_lookup", "lca_flow"],
+    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "write", "edit", "patch", "bash", "read", "glob", "grep", "list", "db_query", "schema_lookup", "otter_flow"],
     steps: 2,
     permission: {
       edit: "deny",
@@ -228,7 +228,7 @@ export const AGENT_DEFS: Record<LcaAgentName, LcaAgentDef> = {
   },
   main: {
     mode: "primary",
-    description: "lca main agent: talks to the user, does small tasks, delegates big ones",
+    description: "otter main agent: talks to the user, does small tasks, delegates big ones",
     prompt: MAIN_PROMPT,
     color: "#5B9BD5",
     // webfetch off by default (local-first; each tool schema is prefix cost). Re-enable per project if needed.
@@ -243,10 +243,10 @@ export const AGENT_DEFS: Record<LcaAgentName, LcaAgentDef> = {
   },
   worker: {
     mode: "subagent",
-    description: "lca worker: executes exactly one task and reports",
+    description: "otter worker: executes exactly one task and reports",
     prompt: WORKER_PROMPT,
     color: "#70AD47",
-    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "db_query", "schema_lookup", "lca_flow"],
+    denied_tools: ["task", "delegate", "todowrite", "todoread", "webfetch", "skill", "db_query", "schema_lookup", "otter_flow"],
     steps: 40,
     permission: {
       edit: "allow",
@@ -258,12 +258,12 @@ export const AGENT_DEFS: Record<LcaAgentName, LcaAgentDef> = {
   },
   reviewer: {
     mode: "subagent",
-    description: "lca reviewer: read-only judge of a diff + test output",
+    description: "otter reviewer: read-only judge of a diff + test output",
     prompt: REVIEWER_PROMPT,
     color: "#ED7D31",
     // No bash: verification is run by the framework and its output is in the prompt; "ask" would stall the
     // unattended queue on a permission prompt (review §5.2 wanted read-only commands only).
-    denied_tools: ["write", "edit", "patch", "bash", "task", "delegate", "todowrite", "todoread", "webfetch", "skill", "db_query", "schema_lookup", "lca_flow"],
+    denied_tools: ["write", "edit", "patch", "bash", "task", "delegate", "todowrite", "todoread", "webfetch", "skill", "db_query", "schema_lookup", "otter_flow"],
     steps: 15,
     permission: {
       edit: "deny",

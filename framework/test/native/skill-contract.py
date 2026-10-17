@@ -326,7 +326,7 @@ class RecordingProxy:
                 return
 
             def do_GET(self) -> None:
-                if self.path == "/__lca_health":
+                if self.path == "/__otter_health":
                     body = b"{\"healthy\":true}\n"
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
@@ -438,7 +438,7 @@ class RecordingProxy:
                         block_reason = "registered skill tool description or fixed safe argument schema was not observed"
                 if block_reason:
                     record["forwarding_block_reason"] = block_reason
-                    response = f"LCA skill contract proxy refused unsafe or unsupported inference request: {block_reason}.\n".encode("utf-8")
+                    response = f"Otter skill contract proxy refused unsafe or unsupported inference request: {block_reason}.\n".encode("utf-8")
                     self.send_response(422, "Unchecked project skill text blocked")
                     self.send_header("Content-Type", "text/plain; charset=utf-8")
                     self.send_header("Content-Length", str(len(response)))
@@ -478,7 +478,7 @@ class RecordingProxy:
                         headers={
                             "Content-Type": self.headers.get("Content-Type", "application/json"),
                             "Accept": self.headers.get("Accept", "application/json"),
-                            "User-Agent": "lca-skill-contract-proxy/1",
+                            "User-Agent": "otter-skill-contract-proxy/1",
                         },
                     )
                     record["forwarded"] = True
@@ -496,7 +496,7 @@ class RecordingProxy:
                     if unexpected_tool_calls:
                         record["response_block_reason"] = "real model requested a tool other than skill"
                         record["unexpected_model_tool_calls"] = unexpected_tool_calls
-                        blocked_response = b"LCA skill contract proxy refused a non-skill tool call; no tool was executed.\n"
+                        blocked_response = b"Otter skill contract proxy refused a non-skill tool call; no tool was executed.\n"
                         self.send_response(422, "Non-skill tool call refused")
                         self.send_header("Content-Type", "text/plain; charset=utf-8")
                         self.send_header("Content-Length", str(len(blocked_response)))
@@ -614,13 +614,13 @@ def isolated_environment(
             "OPENCODE_DISABLE_AUTOUPDATE": "1",
             "OPENCODE_DISABLE_MODELS_FETCH": "1",
             "OPENCODE_CONFIG_CONTENT": json.dumps(config, ensure_ascii=False, separators=(",", ":")),
-            "LCA_SKILL_CONTRACT_OUTPUT": str(output_path),
-            "LCA_SKILL_CONTRACT_OUTPUT_SHA256": output_hash,
-            "LCA_SKILL_CONTRACT_SYSTEM_SHA256": output_system_hash,
-            "LCA_SKILL_CONTRACT_PROMPT": prompt,
-            "LCA_SKILL_CONTRACT_UNCHECKED_BODY_MARKER": unchecked_body_marker,
-            "LCA_SKILL_CONTRACT_UNCHECKED_DESCRIPTION_MARKER": unchecked_description_marker,
-            "LCA_SKILL_CONTRACT_TOOL_EVIDENCE": str(tool_evidence),
+            "OTTER_SKILL_CONTRACT_OUTPUT": str(output_path),
+            "OTTER_SKILL_CONTRACT_OUTPUT_SHA256": output_hash,
+            "OTTER_SKILL_CONTRACT_SYSTEM_SHA256": output_system_hash,
+            "OTTER_SKILL_CONTRACT_PROMPT": prompt,
+            "OTTER_SKILL_CONTRACT_UNCHECKED_BODY_MARKER": unchecked_body_marker,
+            "OTTER_SKILL_CONTRACT_UNCHECKED_DESCRIPTION_MARKER": unchecked_description_marker,
+            "OTTER_SKILL_CONTRACT_TOOL_EVIDENCE": str(tool_evidence),
         }
     )
     return env
@@ -754,7 +754,7 @@ def main() -> int:
         "artifacts": {key: str(value) for key, value in paths.items()},
         "limitations": [
             "This probes OpenCode's native plugin tool registry, native plugin lifecycle hooks, HTTP prompt path, and one local Ollama model only.",
-            "The tool implementation is a deterministic probe adapter; the product LCA adapter must replace it and rerun qualification.",
+            "The tool implementation is a deterministic probe adapter; the product Otter adapter must replace it and rerun qualification.",
             "The experimental system transform hook replaces OpenCode's merged system channel only in this capability probe; this is not approval or authority to modify production prompts.",
             "It does not establish or grant production product authorization, least-privilege policy, or transcript-capture qualification.",
             "Any unchecked vendor marker detected in a native inference request is blocked by the proxy before Ollama and fails this capability probe.",
@@ -775,9 +775,9 @@ def main() -> int:
         plugin_package = json.loads(plugin_package_path.read_text(encoding="utf-8"))
         ensure(plugin_package.get("name") == "@opencode-ai/plugin", "installed public plugin SDK package identity was unexpected")
 
-        output_token = f"LCA_RUNTIME_OWNED_SKILL_REPLY_{secrets.token_hex(12)}"
-        vendor_body_marker = f"LCA_UNCHECKED_VENDOR_BODY_{secrets.token_hex(12)}"
-        vendor_description_marker = f"LCA_UNCHECKED_VENDOR_DESCRIPTION_{secrets.token_hex(12)}"
+        output_token = f"OTTER_RUNTIME_OWNED_SKILL_REPLY_{secrets.token_hex(12)}"
+        vendor_body_marker = f"OTTER_UNCHECKED_VENDOR_BODY_{secrets.token_hex(12)}"
+        vendor_description_marker = f"OTTER_UNCHECKED_VENDOR_DESCRIPTION_{secrets.token_hex(12)}"
         owned_output = (
             "# Runtime-owned skill fixture\n\n"
             f"Verified adapter phrase: {output_token}\n"
@@ -845,7 +845,7 @@ def main() -> int:
                     "name": "Local Ollama (recording skill-contract proxy)",
                     "options": {
                         "baseURL": f"{proxy_base}/v1",
-                        "apiKey": "lca-local-contract-only",
+                        "apiKey": "otter-local-contract-only",
                         "timeout": MODEL_TIMEOUT_MILLISECONDS,
                         "headerTimeout": MODEL_TIMEOUT_MILLISECONDS,
                         "chunkTimeout": MODEL_TIMEOUT_MILLISECONDS,
@@ -1410,7 +1410,7 @@ def main() -> int:
         if proxy is not None:
             try:
                 proxy.stop()
-                proxy_port_unreachable = port_unreachable(proxy.base_url, "/__lca_health")
+                proxy_port_unreachable = port_unreachable(proxy.base_url, "/__otter_health")
             except BaseException as error:
                 summary.setdefault("cleanup_errors", []).append(f"recording proxy cleanup: {type(error).__name__}: {error}")
             proxy_requests = proxy.snapshot()

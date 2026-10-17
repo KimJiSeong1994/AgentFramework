@@ -38,25 +38,25 @@ export class CliUsageError extends Error {
 }
 
 const CLI_USAGE = `Usage:
-  lca [chat] [--worktree PATH] [--engine local|codex|claude] [--model ID]
-  lca <command> --worktree PATH [options]
+  otter [chat] [--worktree PATH] [--engine local|codex|claude] [--model ID]
+  otter <command> --worktree PATH [options]
 
 Interactive chat:
-  lca
-  lca chat [--worktree PATH] [--engine local|codex|claude] [--model ID]
+  otter
+  otter chat [--worktree PATH] [--engine local|codex|claude] [--model ID]
 
-Bare 'lca' and 'lca chat' start LCA's interactive terminal in the current Git worktree,
+Bare 'otter' and 'otter chat' start Otter's interactive terminal in the current Git worktree,
 or in the canonical worktree selected by --worktree. Choose an engine from the menu, or
 specify --engine. Enter a native model ID or supply --model; local selects the Ollama CLI,
 not OpenCode. The model picker lists bounded native choices when available; explicit IDs are
 also accepted. In chat, /model shows the current selection and picker, /model <engine> <native-id>
 switches directly, and /help lists local commands. A switch requires no active workflow, valid
 workflow state and settled execution ownership, and starts a new conversation context. Plans require a separate local human approval.
-Role combo: chat.combo in lca.jsonc routes planner/architect/critic/worker/reviewer roles to other engines and models;
+Role combo: chat.combo in otter.jsonc routes planner/architect/critic/worker/reviewer roles to other engines and models;
 roles without a route use the main model. /model combo shows it, /model combo <role> <engine> <native-id> saves it,
 /model combo clear [role] removes it, and /model combo apply starts a new session under it. A combo applies only to new
 sessions; /resume and the common-engine recovery commands use the session's pinned routes from its metadata, never current config.
-LCA workflows (chat only; each start is a submitted /skill: command, and invoking a name is not consent to execute):
+Otter workflows (chat only; each start is a submitted /skill: command, and invoking a name is not consent to execute):
   /skill:deep-interview <request>   code-owned interview: topology, panels, closure, restatement, verified spec.md (available)
   /skill:ralplan <request>          consensus planning: planner, architect, critic, same-plan-hash join (available)
   /skill:ultragoal <objective>      goal ledger execution: every unit needs APPROVE-UNIT before queue work
@@ -65,7 +65,7 @@ LCA workflows (chat only; each start is a submitted /skill: command, and invokin
 A verified interview spec connects to ralplan in the same live session; consensus never executes anything on its own
 ("execution pending"). Workflow choices are inline lists. Fake-model tests are not live-model proof.
 Supported terminals default to a full-screen transcript, status line and composer (minimum 60x20).
-LCA_TUI=0 forces readline; unsupported terminals fall back with a notice. NO_COLOR disables styling.
+OTTER_TUI=0 forces readline; unsupported terminals fall back with a notice. NO_COLOR disables styling.
 Enter sends, enhanced Shift+Enter/Ctrl+J inserts a newline, Escape cancels, and a second Ctrl+C
 strictly within 500ms requests shutdown. Busy turns can be queued with macOS Alt+Q / Linux Alt+Enter.
 
@@ -91,33 +91,33 @@ Status reads local workflow state without an engine or server. OpenCode mutation
 Status watch defaults to a two-second interval; --json watch emits newline-delimited JSON and works without a TTY.
 
 Examples:
-  lca status --worktree /path/to/repo
-  lca status --worktree /path/to/repo --json
-  lca run --plan plan.json --worktree /path/to/repo --server http://127.0.0.1:4096
-  lca resume --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID
+  otter status --worktree /path/to/repo
+  otter status --worktree /path/to/repo --json
+  otter run --plan plan.json --worktree /path/to/repo --server http://127.0.0.1:4096
+  otter resume --worktree /path/to/repo --engine codex --model gpt-5.6-sol --session SESSION_ID
 
 Prerequisites and safety:
   The --worktree path must name an accessible directory. OpenCode mutations require an already-running,
-  trusted local service and the project's LCA plugin. Common-engine recovery requires the exact original
+  trusted local service and the project's Otter plugin. Common-engine recovery requires the exact original
   engine, model and session; unresolved execution ownership is refused without replay or forced release.
   Common-engine approve and reject require a local interactive terminal for explicit human decisions.
   Standalone commands do not start a server.
   Interactive chat requires a terminal on stdin and stderr; EOF or interruption never approves a plan.
   Bare interactive chat opens with no engine or model selected; enter /model in the composer to choose.
   Startup selection is opt-in with both --engine and --model; partial flags leave the composer unselected.
-  Without either flag, chat.default_model in ~/.config/lca/lca.jsonc (or the project .lca/lca.jsonc) is used;
+  Without either flag, chat.default_model in ~/.config/otter/otter.jsonc (or the project .otter/otter.jsonc) is used;
   set it with /model default save or /model default <engine> <native-id>, remove it with /model default clear.
   Native CLI input limits are estimated and output limits are reactive, not strict guarantees; no process
   or filesystem containment is claimed. Plans are never auto-approved. Host admission refuses when
   required control evidence is unavailable; the CLI does not expose raw vendor preflight diagnostics.
 
-Run 'lca --help' for this usage. Exit codes: 0 success/help, 1 runtime refusal/failure,
+Run 'otter --help' for this usage. Exit codes: 0 success/help, 1 runtime refusal/failure,
 2 invalid arguments or inaccessible worktree, 3 status read failure or Linux admission refusal.`
 
 export function parseCliArgs(argv: string[]): CliArgs {
   const [command, ...rest] = argv
-  if (!command) throw new CliUsageError("missing command; see 'lca --help'")
-  if (!COMMANDS.has(command)) throw new CliUsageError("unknown command; see 'lca --help' for supported commands")
+  if (!command) throw new CliUsageError("missing command; see 'otter --help'")
+  if (!COMMANDS.has(command)) throw new CliUsageError("unknown command; see 'otter --help' for supported commands")
   const usageError = (message: string): CliUsageError => new CliUsageError(message)
   const fields: Record<string, string> = {}
   let json = false
@@ -141,7 +141,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
       watch = true
       continue
     }
-    if (!allowed.has(flag)) throw usageError("unknown option; see 'lca --help' for supported options")
+    if (!allowed.has(flag)) throw usageError("unknown option; see 'otter --help' for supported options")
     if (!rest[index + 1] || rest[index + 1]!.startsWith("--")) {
       throw usageError(`missing value for ${flag}`)
     }
@@ -228,14 +228,14 @@ async function checkedClient(server: string, root: string): Promise<OpencodeClie
     client.app.agents({ query: { directory: root } }),
   ])
   if (path.error || !path.data || realpathSync(path.data.worktree) !== root) throw new Error("server worktree does not match the canonical source worktree")
-  const plugin = pathToFileURL(resolve(root, ".opencode/plugins/lca.ts")).href
+  const plugin = pathToFileURL(resolve(root, ".opencode/plugins/otter.ts")).href
   if (config.error || !config.data || !Array.isArray(config.data.plugin) ||
     config.data.plugin.length !== 1 || config.data.plugin[0] !== plugin) {
-    throw new Error("server must advertise only the project LCA plugin")
+    throw new Error("server must advertise only the project Otter plugin")
   }
   const listed = agents.data
   if (agents.error || !listed || !["main", "worker", "reviewer"].every(name => listed.some(a => a.name === name))) {
-    throw new Error("server lacks the LCA execution agent inventory")
+    throw new Error("server lacks the Otter execution agent inventory")
   }
   if (listed.find(a => a.name === "worker")?.mode !== "subagent" || listed.find(a => a.name === "reviewer")?.mode !== "subagent") {
     throw new Error("server execution roles differ from the expected child profiles")
@@ -259,7 +259,7 @@ async function checkedClient(server: string, root: string): Promise<OpencodeClie
     expectedReviewer && listedModel && listedModel !== expectedReviewer ||
     effectiveModel && listedModel && effectiveModel !== listedModel ||
     !dangerousTools.every(tool => configuredPermissions?.[tool] === "deny" && deniedByNativeRules(tool))) {
-    throw new Error("server reviewer agent or model conflicts with the LCA execution profile")
+    throw new Error("server reviewer agent or model conflicts with the Otter execution profile")
   }
   return client
 }
@@ -287,10 +287,10 @@ async function runStatusWatch(args: CliArgs, runtime: FlowRuntime): Promise<void
         const { frame } = watchTick(state, runtime, Date.now())
         if (args.json && frame) process.stdout.write(`${JSON.stringify(frame)}\n`)
         else if (!args.json && frame?.type === "error") {
-          process.stdout.write(`\u001b[2J\u001b[H[lca status]\nstatus unavailable: ${frame.error?.source} ${frame.error?.code}\n`)
+          process.stdout.write(`\u001b[2J\u001b[H[otter status]\nstatus unavailable: ${frame.error?.source} ${frame.error?.code}\n`)
         } else if (!args.json && state.errors.size > 0 && state.tick % 10 === 0) {
           const [source, code] = [...state.errors].at(-1)!.split(":", 2)
-          process.stdout.write(`\u001b[2J\u001b[H[lca status]\nstatus unavailable: ${source} ${code}\n`)
+          process.stdout.write(`\u001b[2J\u001b[H[otter status]\nstatus unavailable: ${source} ${code}\n`)
         } else if (!args.json && state.errors.size === 0 && (frame || state.tick % 10 === 0) && state.status) {
           const text = renderStatusSnapshot(state.status, args.session)
           const detail = args.detail ? `\n${renderStatusDetail(state.status)}` : ""
@@ -394,7 +394,7 @@ function confirmationWorkflow(
 async function pausedResumeText(controller: ReturnType<typeof createForegroundController>, sessionID: string): Promise<string> {
   const outcome = await controller.resumePaused(sessionID, async (view) => {
     if (!process.stdin.isTTY || !process.stderr.isTTY) throw new Error("resuming a paused workflow requires an interactive terminal")
-    console.error(`lca: paused from ${view.pausedFrom.phase}/${view.pausedFrom.stage}; residual ${view.residual.join(", ") || "none"}; done ${view.done.join(", ") || "none"}${view.worktreeChanged ? "; worktree changed since the pause" : ""}; attempt ${view.attempt}`)
+    console.error(`otter: paused from ${view.pausedFrom.phase}/${view.pausedFrom.stage}; residual ${view.residual.join(", ") || "none"}; done ${view.done.join(", ") || "none"}${view.worktreeChanged ? "; worktree changed since the pause" : ""}; attempt ${view.attempt}`)
     const { createInterface } = await import("node:readline/promises")
     const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: false })
     try { return (await rl.question("Type RESUME to resume the residual work; anything else keeps the hold: ")).trim() === "RESUME" }
@@ -509,7 +509,7 @@ async function runCommonCommand(args: CliArgs, runtime: ExecutionRuntime): Promi
       if (!submitted.result.ok || submitted.result.wf.phase !== "pending_approval") {
         throw new Error("plan did not reach pending operator approval")
       }
-      console.error(`lca: inspect ${submitted.result.wf.planRef?.mdPath ?? "saved canonical plan"}; workflow ${submitted.result.wf.id}; sha ${submitted.planSha}`)
+      console.error(`otter: inspect ${submitted.result.wf.planRef?.mdPath ?? "saved canonical plan"}; workflow ${submitted.result.wf.id}; sha ${submitted.planSha}`)
       const decision = await humanDecision("choose", planBinding(sessionID, submitted.result.wf, submitted.planSha))
       if (runtime.linuxAdmission) runtime.linuxAdmission.assertBootEpoch()
       const current = confirmationWorkflow(controller, runtime, sessionID, submitted.result.wf.id, submitted.planSha)
@@ -576,7 +576,7 @@ export async function runCli(
       (!process.stdin.isTTY || !process.stderr.isTTY)) {
       throw new Error("local human approval or rejection requires an interactive terminal")
     }
-    // Recovery uses the session's pinned routes from metadata, never the current lca.jsonc combo.
+    // Recovery uses the session's pinned routes from metadata, never the current otter.jsonc combo.
     const routes = args.session ? readSessionMetadata(root, args.session)?.routes : undefined
     const runtime = cliRuntimeFactory({ worktree: root, engine: args.engine, model: args.model, ...(routes ? { routes } : {}) })
     return runCommonCommand(args, runtime)
@@ -591,7 +591,7 @@ export async function runCli(
   const client = await checkedClient(server, root)
   const deps: HookDeps = {
     client, directory: root, worktree: root, config,
-    log: (message, fields) => console.error(`lca: ${message}`, fields ? Object.keys(fields).join(",") : ""),
+    log: (message, fields) => console.error(`otter: ${message}`, fields ? Object.keys(fields).join(",") : ""),
   }
   const runtime = getOpenCodeRuntime(deps)
   runtime.linuxAdmission?.assertBootEpoch()
@@ -652,7 +652,7 @@ export async function runCli(
     const existing = readWorkflow(root)
     let sessionID = args.session ?? (existing?.phase === "planning" ? existing.sessionID : undefined)
     if (!sessionID) {
-      const created = await client.session.create({ body: { title: "lca foreground imported plan" }, query: { directory: root } })
+      const created = await client.session.create({ body: { title: "otter foreground imported plan" }, query: { directory: root } })
       if (created.error || !created.data?.id) throw new Error("could not create an inert parent session")
       sessionID = created.data.id
     }
@@ -674,7 +674,7 @@ export async function runCli(
         if (!submitted.result.ok || submitted.result.wf.phase !== "pending_approval") {
           throw new Error("plan did not reach pending operator approval")
         }
-        console.error(`lca: inspect ${submitted.result.wf.planRef?.mdPath ?? "saved canonical plan"}; workflow ${submitted.result.wf.id}; sha ${submitted.planSha}`)
+        console.error(`otter: inspect ${submitted.result.wf.planRef?.mdPath ?? "saved canonical plan"}; workflow ${submitted.result.wf.id}; sha ${submitted.planSha}`)
         const decision = await humanDecision("choose", planBinding(sessionID, submitted.result.wf, submitted.planSha))
         runtime.linuxAdmission?.assertBootEpoch()
         const current = confirmationWorkflow(controller, runtime, sessionID, submitted.result.wf.id, submitted.planSha)
@@ -715,12 +715,12 @@ export async function runCli(
 
 function failCli(error: unknown, command?: string): void {
   if (command === "status" && error instanceof StatusReadError) {
-    console.error(`lca status: ${error.source} ${error.code}`)
+    console.error(`otter status: ${error.source} ${error.code}`)
     process.exitCode = 3
     return
   }
   if (error instanceof AdmissionRefusal) {
-    console.error("lca: host admission refused; required host control evidence is unavailable. Use a host that can provide all required execution controls before proceeding.")
+    console.error("otter: host admission refused; required host control evidence is unavailable. Use a host that can provide all required execution controls before proceeding.")
     process.exitCode = 1
     return
   }
@@ -730,17 +730,17 @@ function failCli(error: unknown, command?: string): void {
     return
   }
   if (error instanceof CliUsageError) {
-    console.error(`lca: ${error.message}`)
-    console.error("Run 'lca --help' for usage.")
+    console.error(`otter: ${error.message}`)
+    console.error("Run 'otter --help' for usage.")
     process.exitCode = 2
     return
   }
   if (error instanceof InteractiveLaunchError) {
-    console.error(`lca: ${error.message}`)
+    console.error(`otter: ${error.message}`)
     process.exitCode = 1
     return
   }
-  console.error("lca: command refused or failed; inspect read-only status for durable state")
+  console.error("otter: command refused or failed; inspect read-only status for durable state")
   process.exitCode = 1
 }
 

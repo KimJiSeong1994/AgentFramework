@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto"
 import { closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
-import { DEFAULT_CONFIG, type LcaConfig } from "../src/config.ts"
+import { DEFAULT_CONFIG, type OtterConfig } from "../src/config.ts"
 import { readWorkflow } from "../src/flow/state.ts"
 import { requestStop } from "../src/flow/runtime.ts"
 import type { ExecutionRuntime } from "../src/hosts/types.ts"
@@ -292,31 +292,31 @@ function selectStateHome(selected: string): StateHomeSelection {
   let previous: StateHomeSelection | undefined
   for (let i = stateHomeSelections.length - 1; i >= 0; i--) {
     const candidate = stateHomeSelections[i]!
-    if (!candidate.closed && candidate.selected === process.env.LCA_STATE_HOME) {
+    if (!candidate.closed && candidate.selected === process.env.OTTER_STATE_HOME) {
       previous = candidate
       break
     }
   }
   const selection: StateHomeSelection = {
     selected,
-    rootValue: previous ? previous.rootValue : process.env.LCA_STATE_HOME,
+    rootValue: previous ? previous.rootValue : process.env.OTTER_STATE_HOME,
     previous,
     closed: false,
   }
   stateHomeSelections.push(selection)
-  process.env.LCA_STATE_HOME = selected
+  process.env.OTTER_STATE_HOME = selected
   return selection
 }
 
 function releaseStateHome(selection: StateHomeSelection): void {
   if (selection.closed) return
   selection.closed = true
-  if (process.env.LCA_STATE_HOME === selection.selected) {
+  if (process.env.OTTER_STATE_HOME === selection.selected) {
     let previous = selection.previous
     while (previous?.closed) previous = previous.previous
     const restore = previous?.selected ?? selection.rootValue
-    if (restore === undefined) delete process.env.LCA_STATE_HOME
-    else process.env.LCA_STATE_HOME = restore
+    if (restore === undefined) delete process.env.OTTER_STATE_HOME
+    else process.env.OTTER_STATE_HOME = restore
   }
   while (stateHomeSelections.at(-1)?.closed) stateHomeSelections.pop()
 }
@@ -327,9 +327,9 @@ export function tempWorktree(): TempWorktree {
   let stateHome: string | undefined
   let stateHomeSelection: StateHomeSelection | undefined
   try {
-    const worktreePath = mkdtempSync(join(tmpdir(), "lca-test-"))
+    const worktreePath = mkdtempSync(join(tmpdir(), "otter-test-"))
     worktree = worktreePath
-    const stateHomePath = realpathSync.native(mkdtempSync(join(tmpdir(), "lca-state-")))
+    const stateHomePath = realpathSync.native(mkdtempSync(join(tmpdir(), "otter-state-")))
     stateHome = stateHomePath
     stateHomeSelection = selectStateHome(stateHomePath)
     const executionAuthority = tempExecutionAuthority(worktreePath)
@@ -359,9 +359,9 @@ export function tempWorktree(): TempWorktree {
   }
 }
 
-export function makeDeps(client: FakeClient, worktree: string, patch: Partial<LcaConfig> = {}): HookDeps & { logs: string[] } {
+export function makeDeps(client: FakeClient, worktree: string, patch: Partial<OtterConfig> = {}): HookDeps & { logs: string[] } {
   const logs: string[] = []
-  const config: LcaConfig = {
+  const config: OtterConfig = {
     ...DEFAULT_CONFIG,
     ...patch,
     guards: { ...DEFAULT_CONFIG.guards, ...(patch.guards ?? {}) },
@@ -410,8 +410,8 @@ export function tempGitWorktree(files: Record<string, string> = { "README.md": "
   try {
     const g = (...args: string[]) => execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: wt.worktree, stdio: "pipe", env: GIT_TEST_ENV })
     g("init", "-q")
-    g("config", "user.email", "lca-test@localhost")
-    g("config", "user.name", "lca-test")
+    g("config", "user.email", "otter-test@localhost")
+    g("config", "user.name", "otter-test")
     for (const [name, content] of Object.entries(files)) writeFileSync(join(wt.worktree, name), content)
     g("add", "-A")
     g("commit", "-q", "-m", "fixture")

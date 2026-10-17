@@ -1,6 +1,6 @@
 import { AGENT_DEFS, DATA_ANALYST_PROMPT, DATA_VERIFIER_PROMPT, REVIEWER_PROMPT, WORKER_PROMPT, mainPrompt } from "../agents/prompts.ts"
 import { createHash } from "node:crypto"
-import { parseModelSelection, type LcaConfig, type ModelSelection } from "../config.ts"
+import { parseModelSelection, type OtterConfig, type ModelSelection } from "../config.ts"
 import { RepeatGuard, errorExcerpt, repeatBlockMessage } from "../guards/repeat.ts"
 import { RepetitionDetector } from "../guards/repetition.ts"
 import { trimToolOutput } from "../guards/trim.ts"
@@ -23,18 +23,18 @@ export function isErrorOutput(output: string): boolean { return ERROR_OUTPUT.tes
 const KNOWN_TOOLS: readonly string[] = EXECUTION_TOOL_NAMES
 const REVIEW_TOOLS = ["read", "glob", "grep", "list"]
 const PLANNING_MAIN_TOOLS: readonly string[] = Object.freeze(["read", "list", "glob", "grep"])
-const PLANNING_MAIN_PROMPT = "You are the planning role of the common LCA terminal. Discuss the request, inspect files with read-only tools, and create a concrete plan when asked. Never modify files, run commands, execute or approve plans, or delegate work. Do not imply work was executed."
+const PLANNING_MAIN_PROMPT = "You are the planning role of the common Otter terminal. Discuss the request, inspect files with read-only tools, and create a concrete plan when asked. Never modify files, run commands, execute or approve plans, or delegate work. Do not imply work was executed."
 const SYSTEM: Record<ExecutionRole, string> = {
   main: "", worker: WORKER_PROMPT, reviewer: REVIEWER_PROMPT,
   "data-analyst": DATA_ANALYST_PROMPT, "data-verifier": DATA_VERIFIER_PROMPT,
   "ontology-evolver": AGENT_DEFS["ontology-evolver"].prompt!, "answer-judge": AGENT_DEFS["answer-judge"].prompt!,
-  interviewer: "You are LCA's interviewer. Clarify requirements, constraints, ambiguities, and acceptance criteria. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
-  planner: "You are LCA's planner. Produce a concrete, dependency-aware plan with verifiable acceptance criteria. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
-  architect: "You are LCA's architect. Assess architecture, invariants, integration risks, and maintainability against evidence. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
-  critic: "You are LCA's critic. Evaluate the supplied proposal against its requirements and identify concrete blockers or a justified verdict. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
-  researcher: "You are LCA's researcher. Gather evidence and distinguish observations, hypotheses, and limitations. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
-  contrarian: "You are LCA's contrarian. Challenge assumptions and develop evidence-backed counterarguments and failure cases. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
-  simplifier: "You are LCA's simplifier. Identify the smallest complete solution and remove unnecessary proposed complexity without weakening requirements. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
+  interviewer: "You are Otter's interviewer. Clarify requirements, constraints, ambiguities, and acceptance criteria. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
+  planner: "You are Otter's planner. Produce a concrete, dependency-aware plan with verifiable acceptance criteria. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
+  architect: "You are Otter's architect. Assess architecture, invariants, integration risks, and maintainability against evidence. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
+  critic: "You are Otter's critic. Evaluate the supplied proposal against its requirements and identify concrete blockers or a justified verdict. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
+  researcher: "You are Otter's researcher. Gather evidence and distinguish observations, hypotheses, and limitations. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
+  contrarian: "You are Otter's contrarian. Challenge assumptions and develop evidence-backed counterarguments and failure cases. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
+  simplifier: "You are Otter's simplifier. Identify the smallest complete solution and remove unnecessary proposed complexity without weakening requirements. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
 }
 
 export type ExecutionPolicyOptions = {
@@ -56,7 +56,7 @@ function freezeNativeContext(supplied: unknown): Readonly<{ identity: string; in
   return Object.freeze({ identity: value.identity, instructions: value.instructions })
 }
 
-export function createExecutionPolicy(config: Readonly<LcaConfig>, options: ExecutionPolicyOptions = {}): ExecutionPolicy {
+export function createExecutionPolicy(config: Readonly<OtterConfig>, options: ExecutionPolicyOptions = {}): ExecutionPolicy {
   const planningOnlyMain = options.planningOnlyMain === true
   const nativeContext = options.nativeContext === undefined ? undefined : freezeNativeContext(options.nativeContext)
   // `chat` (launch model) and `skill_trust` (user-config consent prompt skip) are host UI state; they never shape
@@ -93,7 +93,7 @@ export function createExecutionPolicy(config: Readonly<LcaConfig>, options: Exec
       ...(roleNativeContext ? { nativeContext: roleNativeContext } : {}),
       thinking: role !== "main" && model && /ollama|:11434/i.test(model.providerID) ? "disabled" : "inherit",
     }
-    const id = `lca:${role}:${createHash("sha256").update(JSON.stringify({ resolved, config: identityConfig })).digest("hex")}`
+    const id = `otter:${role}:${createHash("sha256").update(JSON.stringify({ resolved, config: identityConfig })).digest("hex")}`
     snapshots.set(role, Object.freeze({ id, ...resolved }))
   }
   const repeat = new RepeatGuard(config.guards.repeat_limit)
@@ -113,15 +113,15 @@ export function createExecutionPolicy(config: Readonly<LcaConfig>, options: Exec
       return {
         beforeTool(event) {
           if (request.role === "reviewer" && ++reviewerCalls > config.flow.review_max_tool_calls) {
-            return { allow: false, reason: "lca: reviewer tool-call cap reached; give your verdict now" }
+            return { allow: false, reason: "otter: reviewer tool-call cap reached; give your verdict now" }
           }
           const key = callKey(event.sessionID, event.callID)
           callInputs.delete(key)
           callInputs.set(key, event.input)
           while (callInputs.size > 1000) callInputs.delete(callInputs.keys().next().value!)
-          if (request.role === "reviewer" && !REVIEW_TOOLS.includes(event.name)) return { allow: false, reason: `lca: reviewer tool ${event.name} is not read-only` }
-          if (planningOnlyMain && request.role === "main" && !policy.tools.allowed.includes(event.name)) return { allow: false, reason: `lca: tool ${event.name} is not allowed for planning-only main` }
-          if (!policy.tools.allowed.includes(event.name) || policy.tools.denied.includes(event.name)) return { allow: false, reason: `lca: tool ${event.name} is not allowed for ${request.role}` }
+          if (request.role === "reviewer" && !REVIEW_TOOLS.includes(event.name)) return { allow: false, reason: `otter: reviewer tool ${event.name} is not read-only` }
+          if (planningOnlyMain && request.role === "main" && !policy.tools.allowed.includes(event.name)) return { allow: false, reason: `otter: tool ${event.name} is not allowed for planning-only main` }
+          if (!policy.tools.allowed.includes(event.name) || policy.tools.denied.includes(event.name)) return { allow: false, reason: `otter: tool ${event.name} is not allowed for ${request.role}` }
           if (!config.disabled_hooks.includes("guard.repeat")) {
             const check = repeat.check(event.sessionID, event.name, event.input, event.callID)
             if (check.blocked) return { allow: false, reason: repeatBlockMessage(event.name, check.count, check.lastError) }

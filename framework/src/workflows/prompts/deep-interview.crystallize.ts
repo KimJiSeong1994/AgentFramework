@@ -1,4 +1,4 @@
-// Crystallize prompt: the narrative body of the specification. The runtime writes the metadata and the file. LCA-authored; see ../ATTRIBUTION.
+// Crystallize prompt: the narrative body of the specification. The runtime writes the metadata and the file. Otter-authored; see ../ATTRIBUTION.
 import { definePrompt } from "./prompt.ts"
 import { DI_CONTEXT_MARKER, DI_READ_ONLY_RULES } from "./deep-interview.rules.ts"
 

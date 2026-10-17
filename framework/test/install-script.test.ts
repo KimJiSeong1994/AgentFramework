@@ -16,7 +16,7 @@ function run(args: string[] = [], env: Record<string, string> = {}, input?: stri
     env: {
       HOME: home, SHELL: "/bin/zsh", PATH: `${dirname(bun)}:/usr/bin:/bin`,
       // Install the committed HEAD of this checkout; no network or credentials needed.
-      LCA_REPO: `file://${repo}`, LCA_REF: "HEAD", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+      OTTER_REPO: `file://${repo}`, OTTER_REF: "HEAD", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
       ...env,
     },
     encoding: "utf8",
@@ -25,15 +25,15 @@ function run(args: string[] = [], env: Record<string, string> = {}, input?: stri
   return { code: result.status, out: `${result.stdout}${result.stderr}` }
 }
 
-beforeEach(() => { home = realpathSync(mkdtempSync(join(tmpdir(), "lca-install-"))) })
+beforeEach(() => { home = realpathSync(mkdtempSync(join(tmpdir(), "otter-install-"))) })
 afterEach(() => rmSync(home, { recursive: true, force: true }))
 
 test("one command installs a working launcher, updates in place, and uninstalls only what it created", () => {
   writeFileSync(join(home, ".zshrc"), "existing line\n")
   const first = run()
   expect(first.code).toBe(0)
-  const shim = join(home, ".local/bin/lca")
-  expect(readFileSync(shim, "utf8")).toContain("# managed by the lca installer")
+  const shim = join(home, ".local/bin/otter")
+  expect(readFileSync(shim, "utf8")).toContain("# managed by the otter installer")
   const help = spawnSync(shim, ["--help"], { encoding: "utf8", env: { HOME: home, PATH: "/usr/bin:/bin" } })
   expect(help.status).toBe(0)
   expect(help.stdout).toContain("Usage:")
@@ -42,10 +42,10 @@ test("one command installs a working launcher, updates in place, and uninstalls 
 
   // Re-running updates in place and never duplicates the PATH block.
   expect(run().code).toBe(0)
-  expect(readFileSync(join(home, ".zshrc"), "utf8").split("# >>> lca installer >>>").length).toBe(2)
+  expect(readFileSync(join(home, ".zshrc"), "utf8").split("# >>> otter installer >>>").length).toBe(2)
 
   // A modified checkout is never overwritten.
-  const readme = join(home, ".local/share/lca/AgentFramework/README.md")
+  const readme = join(home, ".local/share/otter/AgentFramework/README.md")
   writeFileSync(readme, `${readFileSync(readme, "utf8")}local edit\n`)
   const dirty = run()
   expect(dirty.code).toBe(1)
@@ -55,21 +55,21 @@ test("one command installs a working launcher, updates in place, and uninstalls 
   const removed = run(["--uninstall"])
   expect(removed.code).toBe(0)
   expect(existsSync(shim)).toBe(false)
-  expect(existsSync(join(home, ".local/share/lca"))).toBe(false)
-  expect(readFileSync(join(home, ".zshrc"), "utf8")).not.toContain("lca installer")
+  expect(existsSync(join(home, ".local/share/otter"))).toBe(false)
+  expect(readFileSync(join(home, ".zshrc"), "utf8")).not.toContain("otter installer")
   expect(readFileSync(join(home, ".zshrc"), "utf8")).toContain("existing line")
 }, 180_000)
 
 test("the installer works when piped into bash and refuses to replace a launcher it did not create", () => {
   const binDir = join(home, "bin")
   spawnSync("mkdir", ["-p", binDir])
-  writeFileSync(join(binDir, "lca"), "#!/bin/sh\necho mine\n")
-  const refused = run([], { LCA_BIN_DIR: binDir, LCA_NO_MODIFY_PATH: "1" }, readFileSync(script, "utf8"))
+  writeFileSync(join(binDir, "otter"), "#!/bin/sh\necho mine\n")
+  const refused = run([], { OTTER_BIN_DIR: binDir, OTTER_NO_MODIFY_PATH: "1" }, readFileSync(script, "utf8"))
   expect(refused.code).toBe(1)
   expect(refused.out).toContain("was not created by this installer")
-  expect(readFileSync(join(binDir, "lca"), "utf8")).toBe("#!/bin/sh\necho mine\n")
+  expect(readFileSync(join(binDir, "otter"), "utf8")).toBe("#!/bin/sh\necho mine\n")
 
-  const piped = run([], { LCA_NO_MODIFY_PATH: "1" }, readFileSync(script, "utf8"))
+  const piped = run([], { OTTER_NO_MODIFY_PATH: "1" }, readFileSync(script, "utf8"))
   expect(piped.code).toBe(0)
   expect(piped.out).toContain("installed:")
   expect(existsSync(join(home, ".zshrc"))).toBe(false)
@@ -77,7 +77,7 @@ test("the installer works when piped into bash and refuses to replace a launcher
 
 test("missing bun fails with guidance when automatic bun installation is disabled", () => {
   const result = spawnSync("bash", [script], {
-    env: { HOME: home, PATH: "/usr/bin:/bin", LCA_NO_BUN_INSTALL: "1" }, encoding: "utf8",
+    env: { HOME: home, PATH: "/usr/bin:/bin", OTTER_NO_BUN_INSTALL: "1" }, encoding: "utf8",
   })
   expect(result.status).toBe(1)
   expect(`${result.stdout}${result.stderr}`).toContain("bun >= 1.2 is required")

@@ -156,7 +156,7 @@ test("canonical worktree activity excludes symlink aliases across runtime engine
 })
 
 test("independent canonical worktrees have independent local activity slots", () => {
-  const otherWorktree = mkdtempSync(join(tmpdir(), "lca-runtime-independent-"))
+  const otherWorktree = mkdtempSync(join(tmpdir(), "otter-runtime-independent-"))
   try {
     const firstRuntime = createExecutionRuntime(deps(), () => host("engine-one"))
     const otherRuntime = createExecutionRuntime({

@@ -105,7 +105,7 @@ if not sent:
     raise RuntimeError("PTY fixture did not observe the real operator prompt")
 sys.exit(os.waitstatus_to_exitcode(status))
 `
-  const cwd = mkdtempSync(join(tmpdir(), "lca-operator-pty-"))
+  const cwd = mkdtempSync(join(tmpdir(), "otter-operator-pty-"))
   try {
     const result = spawnSync("python3", ["-c", harness, process.execPath, source], {
       cwd, env: ptyEnvironment, encoding: "utf8", timeout: 5_000,

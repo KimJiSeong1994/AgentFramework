@@ -1,6 +1,6 @@
-// Shared read model for `/status`, `lca_flow status`, and the SDK-free CLI.
+// Shared read model for `/status`, `otter_flow status`, and the SDK-free CLI.
 import type { FlowRuntime } from "../hosts/types.ts"
-import type { LcaConfig } from "../config.ts"
+import type { OtterConfig } from "../config.ts"
 import { existsSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { claimPidAlive, createExecutionRunStore, settled, ExecutionRunCorruptError, type ExecutionRecord } from "../hosts/run-state.ts"
@@ -33,9 +33,9 @@ function interviewReview(worktree: string, wf: WorkflowEnvelope): { plan?: strin
   } catch { return { review: "interview state unreadable" } }
 }
 
-export const STATUS_MARKER = "[lca status]"
+export const STATUS_MARKER = "[otter status]"
 
-export function flowOn(config: LcaConfig): boolean {
+export function flowOn(config: OtterConfig): boolean {
   return config.flow.enabled && !config.disabled_hooks.includes("flow")
 }
 

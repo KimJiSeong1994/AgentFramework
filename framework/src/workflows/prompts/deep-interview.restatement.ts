@@ -1,4 +1,4 @@
-// Restatement prompt: one sentence that covers every active component. LCA-authored; see ../ATTRIBUTION.
+// Restatement prompt: one sentence that covers every active component. Otter-authored; see ../ATTRIBUTION.
 import { definePrompt } from "./prompt.ts"
 import { DI_CONTEXT_MARKER, DI_READ_ONLY_RULES } from "./deep-interview.rules.ts"
 

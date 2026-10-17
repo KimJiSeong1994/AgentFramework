@@ -22,7 +22,7 @@ export type CliToolOutput = { ok: true; text: string } | { ok: false; error: str
 
 export class CliToolInputError extends Error {
   constructor() {
-    super("invalid LCA file tool input")
+    super("invalid Otter file tool input")
     this.name = "CliToolInputError"
   }
 }
@@ -53,7 +53,7 @@ const MAX_IGNORE_RULES = 1000
 const MAX_GREP_FILE_BYTES = 256 * 1024
 // Darwin's O_NOFOLLOW_ANY is intentionally used without constants.O_NOFOLLOW.
 const DARWIN_O_NOFOLLOW_ANY = 0x20000000
-const PROTECTED_DIRECTORIES = new Set([".git", ".lca", ".gjc"])
+const PROTECTED_DIRECTORIES = new Set([".git", ".otter", ".gjc"])
 const IGNORED_DIRECTORIES = new Set([
   ...PROTECTED_DIRECTORIES,
   "node_modules", ".cache", ".turbo", ".next", "dist", "build", "coverage",
@@ -787,7 +787,7 @@ export function createCliTools(options: CliToolsOptions): CliTools {
     },
     execute(name, input) {
       if (!CLI_TOOL_NAMES.includes(name as CliToolName) || !availableSet.has(name)) {
-        return { ok: false, error: "Tool refused: this LCA tool is not allowed for the execution role." }
+        return { ok: false, error: "Tool refused: this Otter tool is not allowed for the execution role." }
       }
       validateCliToolInput(name, input)
       try {

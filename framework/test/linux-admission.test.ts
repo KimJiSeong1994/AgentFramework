@@ -318,7 +318,7 @@ const { writeWorkflow } = await import(${JSON.stringify(fileURLToPath(new URL(".
 const { planMdPath } = await import(${JSON.stringify(modules.plan)});
 const { readFileSync, existsSync } = await import("node:fs");
 const { join } = await import("node:path");
-const root = process.env.LCA_ADMISSION_TEST_WORKTREE;
+const root = process.env.OTTER_ADMISSION_TEST_WORKTREE;
 const owner = createLinuxAdmission({ qualification: true });
 const other = createLinuxAdmission({ qualification: true });
 const token = await owner.admitPlanSubmission("session-A");
@@ -346,7 +346,7 @@ for (const [label, runtime, sessionID, admission] of [
   catch (error) { errorName = error.name; }
   outcomes.push({ label, errorName, unchanged: readFileSync(workflowPath(root)).equals(before), noPlanFiles: !existsSync(jsonPath) && !existsSync(mdPath) });
 }
-console.log(JSON.stringify(outcomes));`, { LCA_ADMISSION_TEST_WORKTREE: root })
+console.log(JSON.stringify(outcomes));`, { OTTER_ADMISSION_TEST_WORKTREE: root })
   expect(outcome).toEqual([
     { label: "fabricated", errorName: "TypeError", unchanged: true, noPlanFiles: true },
     { label: "reused", errorName: "TypeError", unchanged: true, noPlanFiles: true },
@@ -371,7 +371,7 @@ import { createLegacyVerifierExecutor } from ${JSON.stringify(fileURLToPath(new 
 import { stateRoot } from ${JSON.stringify(fileURLToPath(new URL("../src/state/store.ts", import.meta.url)))};
 import { ledgerPath } from ${JSON.stringify(fileURLToPath(new URL("../src/state/ledger.ts", import.meta.url)))};
 import { LinuxAdmissionRefused } from ${JSON.stringify(fileURLToPath(new URL("../src/hosts/types.ts", import.meta.url)))};
-const root = process.env.LCA_ADMISSION_TEST_WORKTREE;
+const root = process.env.OTTER_ADMISSION_TEST_WORKTREE;
 const config = { ...DEFAULT_CONFIG, delegate: { ...DEFAULT_CONFIG.delegate, worktree: false, review: false } };
 const runs = createExecutionRunStore(root);
 let claims = 0, statuses = 0, epochs = 0;
@@ -407,7 +407,7 @@ const failure = async (args, alreadyAborted) => {
 const fresh = await failure({ tasks: [{ title: "fresh" }] }, true);
 const resume = await failure({ resume: true }, false);
 console.log(JSON.stringify({ fresh, resume, epochs, claims, statuses,
-  ledgerUnchanged: readFileSync(path).equals(ledgerBefore), markerUnchanged: readFileSync(marker).equals(markerBefore) }));`, { LCA_ADMISSION_TEST_WORKTREE: wt.worktree })
+  ledgerUnchanged: readFileSync(path).equals(ledgerBefore), markerUnchanged: readFileSync(marker).equals(markerBefore) }));`, { OTTER_ADMISSION_TEST_WORKTREE: wt.worktree })
   expect(outcome).toEqual({
     fresh: { name: "LinuxAdmissionRefused", phase: "epoch", reasons: ["boot-epoch"] },
     resume: { name: "LinuxAdmissionRefused", phase: "epoch", reasons: ["boot-epoch"] },
@@ -415,10 +415,10 @@ console.log(JSON.stringify({ fresh, resume, epochs, claims, statuses,
   })
 })
 
-test("lca_flow A4 refuses both invalid and valid plans before either submission branch writes", () => {
+test("otter_flow A4 refuses both invalid and valid plans before either submission branch writes", () => {
   const modules = {
     runtime: fileURLToPath(new URL("../src/hosts/opencode-runtime.ts", import.meta.url)),
-    tool: fileURLToPath(new URL("../src/tools/lca-flow.ts", import.meta.url)),
+    tool: fileURLToPath(new URL("../src/tools/otter-flow.ts", import.meta.url)),
   }
   const root = wt.worktree
   const outcome = isolated(`import { mock } from "bun:test";
@@ -431,7 +431,7 @@ import { attachAdmission } from ${JSON.stringify(fileURLToPath(new URL("../src/s
 import { newWorkflow, withFlowTransaction, readWorkflow, workflowPath, planJsonPath } from ${JSON.stringify(fileURLToPath(new URL("../src/flow/state.ts", import.meta.url)))};
 import { writeWorkflow } from ${JSON.stringify(fileURLToPath(new URL("./commit-fixture.ts", import.meta.url)))};
 import { planMdPath } from ${JSON.stringify(fileURLToPath(new URL("../src/flow/plan.ts", import.meta.url)))};
-const root = process.env.LCA_ADMISSION_TEST_WORKTREE;
+const root = process.env.OTTER_ADMISSION_TEST_WORKTREE;
 let admissions = 0;
 const refused = new LinuxAdmissionRefused("admit", ["latched"]);
 const runtimeExports = await import(${JSON.stringify(modules.runtime)});
@@ -439,13 +439,13 @@ const config = DEFAULT_CONFIG;
 const deps = { client: {}, directory: root, worktree: root, config, log() {} };
 const runtime = { ...runtimeExports.getOpenCodeRuntime(deps), linuxAdmission: { assertBootEpoch() {}, async admitNewExecution() { admissions++; throw refused; } } };
 mock.module(${JSON.stringify(modules.runtime)}, () => ({ ...runtimeExports, getOpenCodeRuntime() { return runtime; } }));
-const { createLcaFlowTool } = await import(${JSON.stringify(modules.tool)});
-const sessionID = "lca-session";
+const { createOtterFlowTool } = await import(${JSON.stringify(modules.tool)});
+const sessionID = "otter-session";
 const store = attachAdmission(runtime, sessionID, { engine: "opencode" });
 const workflow = newWorkflow(sessionID, currentOwner(Date.now(), store.epoch), "command", "test", "opencode");
 withFlowTransaction(root, tx => writeWorkflow(tx, workflow));
 const before = readFileSync(workflowPath(root));
-const tool = createLcaFlowTool(deps);
+const tool = createOtterFlowTool(deps);
 const ctx = { sessionID, messageID: "m", agent: "main", abort: new AbortController().signal, metadata() {} };
 const valid = { goal: "g", steps: [1,2,3].map(n => ({ title: "s"+n, files: ["src/s"+n+".ts"], detail: "d", verify: "bun test test/s"+n+".test.ts" })), risks: ["r"] };
 const invalid = { ...valid, steps: [{ title: "bad", files: ["x"], verify: "true" }] };
@@ -456,10 +456,10 @@ const validResult = await tool.execute({ op: "plan", plan: valid }, ctx);
 console.log(JSON.stringify({ admissions,
   invalid: { title: invalidResult.title, output: invalidResult.output, unchanged: invalidUnchanged, noFiles: invalidNoFiles },
   valid: { title: validResult.title, output: validResult.output, unchanged: readFileSync(workflowPath(root)).equals(before), noFiles: !existsSync(planJsonPath(root, workflow.id)) && !existsSync(join(root, planMdPath(workflow.id))) },
-  phase: readWorkflow(root).phase }));`, { LCA_ADMISSION_TEST_WORKTREE: root })
+  phase: readWorkflow(root).phase }));`, { OTTER_ADMISSION_TEST_WORKTREE: root })
   expect(outcome.admissions).toBe(2)
-  expect(outcome.invalid).toMatchObject({ title: "lca_flow: refused", unchanged: true, noFiles: true, output: expect.stringContaining("latched") })
-  expect(outcome.valid).toMatchObject({ title: "lca_flow: refused", unchanged: true, noFiles: true, output: expect.stringContaining("latched") })
+  expect(outcome.invalid).toMatchObject({ title: "otter_flow: refused", unchanged: true, noFiles: true, output: expect.stringContaining("latched") })
+  expect(outcome.valid).toMatchObject({ title: "otter_flow: refused", unchanged: true, noFiles: true, output: expect.stringContaining("latched") })
   expect(outcome.phase).toBe("planning")
 })
 

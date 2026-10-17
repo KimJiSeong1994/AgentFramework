@@ -12,7 +12,7 @@ type Identity = { uid: bigint; dev: bigint; ino: bigint }
 type WorktreeFixture = { root: string; worktree: string; cleanup: () => void }
 
 function freshWorktree(): WorktreeFixture {
-  const root = mkdtempSync(join(tmpdir(), "lca-execution-authority-fixture-"))
+  const root = mkdtempSync(join(tmpdir(), "otter-execution-authority-fixture-"))
   const worktree = join(root, "worktree")
   mkdirSync(worktree)
   return { root, worktree, cleanup: () => rmSync(root, { recursive: true, force: true }) }
@@ -71,7 +71,7 @@ function markerPath(directory: string): string {
 
 test("fixture allocation refuses an existing namespace without changing its bytes", () => {
   const fixture = freshWorktree()
-  const envKeys = ["HOME", "XDG_STATE_HOME", "LCA_STATE_HOME"] as const
+  const envKeys = ["HOME", "XDG_STATE_HOME", "OTTER_STATE_HOME"] as const
   const savedEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]])) as Record<typeof envKeys[number], string | undefined>
   let authority: TempExecutionAuthority | undefined
   try {
@@ -93,7 +93,7 @@ test("fixture allocation refuses an existing namespace without changing its byte
     const envOverrides: Array<Partial<Record<typeof envKeys[number], string>>> = [
       { HOME: join(fixture.root, "home-one"), XDG_STATE_HOME: join(fixture.root, "xdg-one") },
       { HOME: join(fixture.root, "home-two"), XDG_STATE_HOME: join(fixture.root, "xdg-two") },
-      { HOME: join(fixture.root, "home-three"), XDG_STATE_HOME: join(fixture.root, "xdg-three"), LCA_STATE_HOME: join(fixture.root, "lca-three") },
+      { HOME: join(fixture.root, "home-three"), XDG_STATE_HOME: join(fixture.root, "xdg-three"), OTTER_STATE_HOME: join(fixture.root, "otter-three") },
     ]
     for (const overrides of envOverrides) {
       for (const key of envKeys) {
@@ -286,109 +286,109 @@ test("directory identity drift is retained and can be safely restored by its tes
 })
 
 
-test("temp worktree restores absent and prior LCA_STATE_HOME values", () => {
-  const previous = process.env.LCA_STATE_HOME
+test("temp worktree restores absent and prior OTTER_STATE_HOME values", () => {
+  const previous = process.env.OTTER_STATE_HOME
   const fixtures: ReturnType<typeof tempWorktree>[] = []
   try {
-    delete process.env.LCA_STATE_HOME
+    delete process.env.OTTER_STATE_HOME
     const absent = tempWorktree()
     fixtures.push(absent)
-    expect(String(process.env.LCA_STATE_HOME)).toBe(absent.stateHome)
+    expect(String(process.env.OTTER_STATE_HOME)).toBe(absent.stateHome)
     absent.cleanup()
-    expect(process.env.LCA_STATE_HOME).toBeUndefined()
+    expect(process.env.OTTER_STATE_HOME).toBeUndefined()
 
-    process.env.LCA_STATE_HOME = "prior-state-home"
+    process.env.OTTER_STATE_HOME = "prior-state-home"
     const valued = tempWorktree()
     fixtures.push(valued)
-    expect(String(process.env.LCA_STATE_HOME)).toBe(valued.stateHome)
+    expect(String(process.env.OTTER_STATE_HOME)).toBe(valued.stateHome)
     valued.cleanup()
-    expect(String(process.env.LCA_STATE_HOME)).toBe("prior-state-home")
+    expect(String(process.env.OTTER_STATE_HOME)).toBe("prior-state-home")
   } finally {
     for (const fixture of fixtures.reverse()) fixture.cleanup()
-    if (previous === undefined) delete process.env.LCA_STATE_HOME
-    else process.env.LCA_STATE_HOME = previous
+    if (previous === undefined) delete process.env.OTTER_STATE_HOME
+    else process.env.OTTER_STATE_HOME = previous
   }
 })
 
 test("nested temp worktrees restore in LIFO and out-of-order cleanup skips closed fixtures", () => {
-  const previous = process.env.LCA_STATE_HOME
+  const previous = process.env.OTTER_STATE_HOME
   const fixtures: ReturnType<typeof tempWorktree>[] = []
   try {
-    process.env.LCA_STATE_HOME = "original-state-home"
+    process.env.OTTER_STATE_HOME = "original-state-home"
     const first = tempWorktree(); fixtures.push(first)
     const second = tempWorktree(); fixtures.push(second)
     second.cleanup()
-    expect(String(process.env.LCA_STATE_HOME)).toBe(first.stateHome)
+    expect(String(process.env.OTTER_STATE_HOME)).toBe(first.stateHome)
     first.cleanup()
-    expect(String(process.env.LCA_STATE_HOME)).toBe("original-state-home")
+    expect(String(process.env.OTTER_STATE_HOME)).toBe("original-state-home")
 
     const a = tempWorktree(); fixtures.push(a)
     const b = tempWorktree(); fixtures.push(b)
     a.cleanup()
-    expect(String(process.env.LCA_STATE_HOME)).toBe(b.stateHome)
+    expect(String(process.env.OTTER_STATE_HOME)).toBe(b.stateHome)
     b.cleanup()
-    expect(String(process.env.LCA_STATE_HOME)).toBe("original-state-home")
+    expect(String(process.env.OTTER_STATE_HOME)).toBe("original-state-home")
   } finally {
     for (const fixture of fixtures.reverse()) fixture.cleanup()
-    if (previous === undefined) delete process.env.LCA_STATE_HOME
-    else process.env.LCA_STATE_HOME = previous
+    if (previous === undefined) delete process.env.OTTER_STATE_HOME
+    else process.env.OTTER_STATE_HOME = previous
   }
 })
 
 test("external state home between live fixtures is restored and independent cleanup is safe", () => {
-  const previous = process.env.LCA_STATE_HOME
+  const previous = process.env.OTTER_STATE_HOME
   const fixtures: ReturnType<typeof tempWorktree>[] = []
   try {
-    process.env.LCA_STATE_HOME = "root-state-home"
+    process.env.OTTER_STATE_HOME = "root-state-home"
     const a = tempWorktree(); fixtures.push(a)
-    process.env.LCA_STATE_HOME = "external-state-home"
+    process.env.OTTER_STATE_HOME = "external-state-home"
     const b = tempWorktree(); fixtures.push(b)
-    expect(String(process.env.LCA_STATE_HOME)).toBe(b.stateHome)
+    expect(String(process.env.OTTER_STATE_HOME)).toBe(b.stateHome)
     b.cleanup()
-    expect(String(process.env.LCA_STATE_HOME)).toBe("external-state-home")
+    expect(String(process.env.OTTER_STATE_HOME)).toBe("external-state-home")
     a.cleanup()
-    expect(String(process.env.LCA_STATE_HOME)).toBe("external-state-home")
+    expect(String(process.env.OTTER_STATE_HOME)).toBe("external-state-home")
 
-    process.env.LCA_STATE_HOME = "root-state-home"
+    process.env.OTTER_STATE_HOME = "root-state-home"
     const c = tempWorktree(); fixtures.push(c)
     const d = tempWorktree(); fixtures.push(d)
     c.cleanup()
-    expect(String(process.env.LCA_STATE_HOME)).toBe(d.stateHome)
+    expect(String(process.env.OTTER_STATE_HOME)).toBe(d.stateHome)
     d.cleanup()
-    expect(String(process.env.LCA_STATE_HOME)).toBe("root-state-home")
+    expect(String(process.env.OTTER_STATE_HOME)).toBe("root-state-home")
   } finally {
     for (const fixture of fixtures.reverse()) fixture.cleanup()
-    if (previous === undefined) delete process.env.LCA_STATE_HOME
-    else process.env.LCA_STATE_HOME = previous
+    if (previous === undefined) delete process.env.OTTER_STATE_HOME
+    else process.env.OTTER_STATE_HOME = previous
   }
 })
 
 test("temp worktree cleanup preserves unrelated replacement and is idempotent", () => {
-  const previous = process.env.LCA_STATE_HOME
+  const previous = process.env.OTTER_STATE_HOME
   let fixture: ReturnType<typeof tempWorktree> | undefined
   try {
-    delete process.env.LCA_STATE_HOME
+    delete process.env.OTTER_STATE_HOME
     fixture = tempWorktree()
-    process.env.LCA_STATE_HOME = "unrelated-later-selection"
+    process.env.OTTER_STATE_HOME = "unrelated-later-selection"
     fixture.cleanup()
-    expect(String(process.env.LCA_STATE_HOME)).toBe("unrelated-later-selection")
-    process.env.LCA_STATE_HOME = "another-later-selection"
+    expect(String(process.env.OTTER_STATE_HOME)).toBe("unrelated-later-selection")
+    process.env.OTTER_STATE_HOME = "another-later-selection"
     fixture.cleanup()
-    expect(String(process.env.LCA_STATE_HOME)).toBe("another-later-selection")
+    expect(String(process.env.OTTER_STATE_HOME)).toBe("another-later-selection")
   } finally {
     fixture?.cleanup()
-    if (previous === undefined) delete process.env.LCA_STATE_HOME
-    else process.env.LCA_STATE_HOME = previous
+    if (previous === undefined) delete process.env.OTTER_STATE_HOME
+    else process.env.OTTER_STATE_HOME = previous
   }
 })
 
 test("cleanup refusal restores environment but retains fixture paths and diagnostics", () => {
-  const previous = process.env.LCA_STATE_HOME
+  const previous = process.env.OTTER_STATE_HOME
   let fixture: ReturnType<typeof tempWorktree> | undefined
   let marker: string | undefined
   let markerBytes: Buffer | undefined
   try {
-    process.env.LCA_STATE_HOME = "prior-state-home"
+    process.env.OTTER_STATE_HOME = "prior-state-home"
     fixture = tempWorktree()
     marker = markerPath(fixture.executionAuthority.directory)
     markerBytes = readFileSync(marker)
@@ -399,19 +399,19 @@ test("cleanup refusal restores environment but retains fixture paths and diagnos
     expect(diagnostic).toContain(`execution authority retained at ${fixture.executionAuthority.keyDirectory}`)
     expect(diagnostic).toContain(`worktree retained at ${fixture.worktree}`)
     expect(diagnostic).toContain(`stateHome retained at ${fixture.stateHome}`)
-    expect(String(process.env.LCA_STATE_HOME)).toBe("prior-state-home")
+    expect(String(process.env.OTTER_STATE_HOME)).toBe("prior-state-home")
     expect(pathExists(fixture.stateHome)).toBe(true)
     expect(pathExists(fixture.executionAuthority.keyDirectory)).toBe(true)
   } finally {
     if (fixture && marker && markerBytes && pathExists(marker)) writeFileSync(marker, markerBytes)
     fixture?.cleanup()
-    if (previous === undefined) delete process.env.LCA_STATE_HOME
-    else process.env.LCA_STATE_HOME = previous
+    if (previous === undefined) delete process.env.OTTER_STATE_HOME
+    else process.env.OTTER_STATE_HOME = previous
   }
 })
 
 test("temp worktree setup failure restores environment and reports retained paths", () => {
-  const previous = process.env.LCA_STATE_HOME
+  const previous = process.env.OTTER_STATE_HOME
   const originalMkdirSync = mkdirSync
   const mkdirSpy = spyOn(fs, "mkdirSync").mockImplementation(((path: fs.PathLike, options?: fs.MakeDirectoryOptions) => {
     if (typeof path === "string" && path.endsWith("execution-runs")) {
@@ -422,25 +422,25 @@ test("temp worktree setup failure restores environment and reports retained path
     return originalMkdirSync(path, options as never)
   }) as typeof fs.mkdirSync)
   try {
-    process.env.LCA_STATE_HOME = "prior-state-home"
+    process.env.OTTER_STATE_HOME = "prior-state-home"
     let diagnostic = ""
     try { tempWorktree() } catch (error) { diagnostic = error instanceof Error ? error.message : String(error) }
     expect(diagnostic).toContain("tempWorktree setup failed")
     expect(diagnostic).toContain("worktree retained at")
     expect(diagnostic).toContain("stateHome retained at")
     expect(diagnostic).toContain("retained partial namespace at")
-    expect(String(process.env.LCA_STATE_HOME)).toBe("prior-state-home")
+    expect(String(process.env.OTTER_STATE_HOME)).toBe("prior-state-home")
   } finally {
     mkdirSpy.mockRestore()
-    if (previous === undefined) delete process.env.LCA_STATE_HOME
-    else process.env.LCA_STATE_HOME = previous
+    if (previous === undefined) delete process.env.OTTER_STATE_HOME
+    else process.env.OTTER_STATE_HOME = previous
   }
 })
 
 test("tempGitWorktree initialization failure retains and reports its owned paths", () => {
-  const previous = process.env.LCA_STATE_HOME
+  const previous = process.env.OTTER_STATE_HOME
   try {
-    process.env.LCA_STATE_HOME = "prior-state-home"
+    process.env.OTTER_STATE_HOME = "prior-state-home"
     let diagnostic = ""
     try { tempGitWorktree({ "missing/parent/file.txt": "cannot create\n" }) }
     catch (error) { diagnostic = error instanceof Error ? error.message : String(error) }
@@ -448,9 +448,9 @@ test("tempGitWorktree initialization failure retains and reports its owned paths
     expect(diagnostic).toContain("worktree retained at")
     expect(diagnostic).toContain("stateHome retained at")
     expect(diagnostic).toContain("execution-authority namespace retained at")
-    expect(String(process.env.LCA_STATE_HOME)).toBe("prior-state-home")
+    expect(String(process.env.OTTER_STATE_HOME)).toBe("prior-state-home")
   } finally {
-    if (previous === undefined) delete process.env.LCA_STATE_HOME
-    else process.env.LCA_STATE_HOME = previous
+    if (previous === undefined) delete process.env.OTTER_STATE_HOME
+    else process.env.OTTER_STATE_HOME = previous
   }
 })

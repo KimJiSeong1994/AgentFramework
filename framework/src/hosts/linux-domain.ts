@@ -6,31 +6,31 @@ import type {
   VerificationPreflight, VerificationReference, VerificationResult,
 } from "../orchestration/verifier.ts"
 
-const PROFILE_PATH = "/etc/lca-verifier/profile.json"
-const CLIENT_PATH = "/usr/local/libexec/lca-verifier/client.py"
-const UNIT_PATH = "/etc/systemd/system/lca-verifier.service"
-const JOURNAL_DROPIN_PATH = "/etc/systemd/journald.conf.d/lca-verifier.conf"
+const PROFILE_PATH = "/etc/otter-verifier/profile.json"
+const CLIENT_PATH = "/usr/local/libexec/otter-verifier/client.py"
+const UNIT_PATH = "/etc/systemd/system/otter-verifier.service"
+const JOURNAL_DROPIN_PATH = "/etc/systemd/journald.conf.d/otter-verifier.conf"
 const PRIVILEGED_POLICY_FILES = new Set([
-  "/etc/polkit-1/rules.d/90-lca-verifier.rules",
-  "/etc/sudoers.d/00-lca-verifier-deny",
+  "/etc/polkit-1/rules.d/90-otter-verifier.rules",
+  "/etc/sudoers.d/00-otter-verifier-deny",
 ])
 const REQUIRED_PROFILE_FILES = [
-  "/usr/local/libexec/lca-verifier/gate.py",
-  "/usr/local/libexec/lca-verifier/runner.py",
+  "/usr/local/libexec/otter-verifier/gate.py",
+  "/usr/local/libexec/otter-verifier/runner.py",
   CLIENT_PATH,
   UNIT_PATH,
-  "/etc/systemd/system/lca-verifier-gate.service",
-  "/etc/systemd/system/lca.slice",
-  "/etc/polkit-1/rules.d/90-lca-verifier.rules",
-  "/etc/sudoers.d/00-lca-verifier-deny",
+  "/etc/systemd/system/otter-verifier-gate.service",
+  "/etc/systemd/system/otter.slice",
+  "/etc/polkit-1/rules.d/90-otter-verifier.rules",
+  "/etc/sudoers.d/00-otter-verifier-deny",
   JOURNAL_DROPIN_PATH,
 ] as const
-const PROTOCOL = "lca.linux-verifier.v1"
-const PROFILE_SCHEMA = "lca.linux-verifier.profile.v2"
-const RECEIPT_SCHEMA = "lca.linux-verifier.retirement.v1"
+const PROTOCOL = "otter.linux-verifier.v1"
+const PROFILE_SCHEMA = "otter.linux-verifier.profile.v2"
+const RECEIPT_SCHEMA = "otter.linux-verifier.retirement.v1"
 const RECEIPT_EVIDENCE = "authenticated Linux gate retirement"
-const UNIT = "lca-verifier.service"
-const CONTROL_GROUP = "/lca.slice/lca-verifier.service"
+const UNIT = "otter-verifier.service"
+const CONTROL_GROUP = "/otter.slice/otter-verifier.service"
 const MAX_PROFILE_BYTES = 1024 * 1024
 const MAX_PROFILE_FILE_BYTES = 16 * 1024 * 1024
 const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024

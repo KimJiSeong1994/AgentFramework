@@ -16,7 +16,7 @@ export const MIN_SIZE_LABEL = `${MIN_COLUMNS}x${MIN_ROWS}`
 
 export function tuiCapability(input: TerminalCapabilities): { enabled: boolean; reason?: string } {
   if (input.optOut === "0") {
-    return { enabled: false, reason: "disabled by LCA_TUI=0" }
+    return { enabled: false, reason: "disabled by OTTER_TUI=0" }
   }
 
   if (!input.stdinTTY || !input.stdoutTTY || !input.stderrTTY) {

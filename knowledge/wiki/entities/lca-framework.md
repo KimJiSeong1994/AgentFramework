@@ -1,4 +1,4 @@
-# lca 프레임워크 (설계 근거)
+# otter 프레임워크 (설계 근거)
 
 > 출처: [OpenCode 기반 자체 에이전트 프레임워크 심층 검토](../sources/documents-e23212dec8bc6f31aa6120397f75f7dd1d58f0df41dc8275b9b0e3a93df6265a.md) (2026-09-22 설계 문서). 관련: [로컬 우선 설계 계약](../concepts/local-first-contract.md), [OpenJev 라우터](openjev-router.md).
 
@@ -6,7 +6,7 @@
 
 ## 정체성
 
-- `lca`(local coding agent)는 OpenCode 위에서 로컬 Gemma 4를 백엔드로 쓰는 자체 에이전트 프레임워크로 제안됐다. 위치는 저장소의 `framework/`(플러그인 패키지)와 `.opencode/`(프로젝트 자산)다.
+- `otter`(local coding agent)는 OpenCode 위에서 로컬 Gemma 4를 백엔드로 쓰는 자체 에이전트 프레임워크로 제안됐다. 위치는 저장소의 `framework/`(플러그인 패키지)와 `.opencode/`(프로젝트 자산)다.
 - 설계 결론은 OMC·OMO·OMX의 "복제"가 아니라 "반대 전제"로 만든다는 것이다. 근거는 [로컬 우선 설계 계약](../concepts/local-first-contract.md)에 정리했다.
 - OpenCode는 v1 플러그인 훅 API로 짓고, `experimental.*` 훅은 어댑터 한 겹으로 감싸며 버전을 고정한다고 적혀 있다.
 

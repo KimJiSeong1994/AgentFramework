@@ -9,7 +9,7 @@ import { discoverSkills, resolveSkillRoots } from "../src/skills/roots.ts"
 const sandboxes: string[] = []
 
 function sandbox(): string {
-  const path = realpathSync.native(mkdtempSync(join(tmpdir(), "lca-fd-tree-")))
+  const path = realpathSync.native(mkdtempSync(join(tmpdir(), "otter-fd-tree-")))
   sandboxes.push(path)
   return path
 }

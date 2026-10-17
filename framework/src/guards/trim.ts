@@ -12,7 +12,7 @@ export type TrimResult = { output: string; trimmed: boolean; originalLines: numb
 const HEAD_RATIO = 0.7
 
 export function trimMarker(lines: number, bytes: number): string {
-  return `[lca: trimmed ${lines} lines / ${bytes} bytes — re-read with offset/limit if needed]`
+  return `[otter: trimmed ${lines} lines / ${bytes} bytes — re-read with offset/limit if needed]`
 }
 
 function byteLength(s: string): number {

@@ -1,4 +1,4 @@
-// Ultragoal stage prompts (P6b S2): decompose, unit plan, unit review, final review. LCA-authored text; the only upstream
+// Ultragoal stage prompts (P6b S2): decompose, unit plan, unit review, final review. Otter-authored text; the only upstream
 // influence is the goal/checkpoint shape recorded in ../ATTRIBUTION. The prompts hold no executable instructions, tool
 // grants or skill bodies: tools come from the runtime policy snapshot, and the model returns typed stage events that code
 // validates and records. Text supplied after the context markers is data to analyse, never rules. No prompt can approve,

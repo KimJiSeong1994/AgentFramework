@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Database } from "bun:sqlite"
-import { DEFAULT_CONFIG, projectConfigPath, type LcaConfig } from "../framework/src/config.ts"
+import { DEFAULT_CONFIG, projectConfigPath, type OtterConfig } from "../framework/src/config.ts"
 import type { HookDeps } from "../framework/src/hooks/types.ts"
 import {
   observeRelatedToolPart, observeSkillAttempt, observeSkillMessage, observeSkillPart, observeSkillTurn,
@@ -68,9 +68,9 @@ const emptyKinds = (): Record<EventKind, number[]> => ({
 })
 
 function allocateScratch(): Scratch {
-  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "lca-skill-bench-project-")))
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "otter-skill-bench-project-")))
   try {
-    const stateHome = realpathSync.native(mkdtempSync(join(tmpdir(), "lca-skill-bench-state-")))
+    const stateHome = realpathSync.native(mkdtempSync(join(tmpdir(), "otter-skill-bench-state-")))
     return { root, stateHome }
   } catch (error) {
     rmSync(root, { recursive: true, force: true })
@@ -85,9 +85,9 @@ function cleanScratch(scratch: Scratch): void {
 
 function createScenario(enabled: boolean, scratch: Scratch): Scenario {
   const previousXdg = process.env.XDG_STATE_HOME
-  const previousLcaState = process.env.LCA_STATE_HOME
+  const previousOtterState = process.env.OTTER_STATE_HOME
   process.env.XDG_STATE_HOME = scratch.stateHome
-  delete process.env.LCA_STATE_HOME
+  delete process.env.OTTER_STATE_HOME
 
   let activated = false
   let closed = false
@@ -101,8 +101,8 @@ function createScenario(enabled: boolean, scratch: Scratch): Scenario {
     } finally {
       if (previousXdg === undefined) delete process.env.XDG_STATE_HOME
       else process.env.XDG_STATE_HOME = previousXdg
-      if (previousLcaState === undefined) delete process.env.LCA_STATE_HOME
-      else process.env.LCA_STATE_HOME = previousLcaState
+      if (previousOtterState === undefined) delete process.env.OTTER_STATE_HOME
+      else process.env.OTTER_STATE_HOME = previousOtterState
     }
   }
 
@@ -115,7 +115,7 @@ function createScenario(enabled: boolean, scratch: Scratch): Scenario {
     const observation = enabled
       ? { enabled: true, campaign_id: CAMPAIGN_ID, owner_binding: binding! }
       : { enabled: false }
-    const config: LcaConfig = structuredClone(DEFAULT_CONFIG)
+    const config: OtterConfig = structuredClone(DEFAULT_CONFIG)
     config.skill_observation = observation
     const deps: HookDeps = {
       client: {} as HookDeps["client"], directory: scratch.root, worktree: scratch.root, config, log: () => {},
@@ -125,7 +125,7 @@ function createScenario(enabled: boolean, scratch: Scratch): Scenario {
       activated = true
       if (!status.available || status.health !== "ok" || status.status !== "open") throw new Error()
     }
-    mkdirSync(join(scratch.root, ".lca"), { recursive: true, mode: 0o700 })
+    mkdirSync(join(scratch.root, ".otter"), { recursive: true, mode: 0o700 })
     writeFileSync(projectConfigPath(scratch.root), JSON.stringify({ skill_observation: observation }), { mode: 0o600 })
     return {
       enabled, root: scratch.root,
@@ -352,13 +352,13 @@ function writeWorkerMessage(value: Record<string, unknown>): void {
 }
 
 function workerScratch(): Scratch {
-  const root = process.env.LCA_SKILL_BENCH_ROOT
-  const stateHome = process.env.LCA_SKILL_BENCH_STATE
+  const root = process.env.OTTER_SKILL_BENCH_ROOT
+  const stateHome = process.env.OTTER_SKILL_BENCH_STATE
   if (!root || !stateHome) throw new Error()
   const scratch = { root: realpathSync.native(root), stateHome: realpathSync.native(stateHome) }
   const base = realpathSync.native(tmpdir())
-  if (dirname(scratch.root) !== base || !basename(scratch.root).startsWith("lca-skill-bench-project-") ||
-      dirname(scratch.stateHome) !== base || !basename(scratch.stateHome).startsWith("lca-skill-bench-state-") ||
+  if (dirname(scratch.root) !== base || !basename(scratch.root).startsWith("otter-skill-bench-project-") ||
+      dirname(scratch.stateHome) !== base || !basename(scratch.stateHome).startsWith("otter-skill-bench-state-") ||
       readdirSync(scratch.root).length || readdirSync(scratch.stateHome).length) throw new Error()
   return scratch
 }
@@ -398,8 +398,8 @@ function workerEnvironment(scratch: Scratch): NodeJS.ProcessEnv {
     if (process.env[name] !== undefined) env[name] = process.env[name]
   }
   env.XDG_STATE_HOME = scratch.stateHome
-  env.LCA_SKILL_BENCH_ROOT = scratch.root
-  env.LCA_SKILL_BENCH_STATE = scratch.stateHome
+  env.OTTER_SKILL_BENCH_ROOT = scratch.root
+  env.OTTER_SKILL_BENCH_STATE = scratch.stateHome
   return env
 }
 

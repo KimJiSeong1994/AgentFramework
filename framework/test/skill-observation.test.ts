@@ -21,17 +21,17 @@ let oldStateHome: string | undefined
 let oldXdgStateHome: string | undefined
 
 beforeEach(() => {
-  oldStateHome = process.env.LCA_STATE_HOME
+  oldStateHome = process.env.OTTER_STATE_HOME
   oldXdgStateHome = process.env.XDG_STATE_HOME
-  root = mkdtempSync(join(tmpdir(), "lca-skill-observation-root-"))
-  stateHome = mkdtempSync(join(tmpdir(), "lca-skill-observation-state-"))
-  process.env.LCA_STATE_HOME = stateHome
+  root = mkdtempSync(join(tmpdir(), "otter-skill-observation-root-"))
+  stateHome = mkdtempSync(join(tmpdir(), "otter-skill-observation-state-"))
+  process.env.OTTER_STATE_HOME = stateHome
   delete process.env.XDG_STATE_HOME
 })
 
 afterEach(() => {
-  if (oldStateHome === undefined) delete process.env.LCA_STATE_HOME
-  else process.env.LCA_STATE_HOME = oldStateHome
+  if (oldStateHome === undefined) delete process.env.OTTER_STATE_HOME
+  else process.env.OTTER_STATE_HOME = oldStateHome
   if (oldXdgStateHome === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = oldXdgStateHome
   rmSync(root, { recursive: true, force: true })
@@ -272,7 +272,7 @@ describe("skill fingerprints", () => {
   })
 
   test("refuses symlinked and duplicate project skill sources", () => {
-    const outside = mkdtempSync(join(tmpdir(), "lca-skill-outside-"))
+    const outside = mkdtempSync(join(tmpdir(), "otter-skill-outside-"))
     const linkedParent = join(root, ".agents", "skills")
     mkdirSync(join(outside, "plan"), { recursive: true })
     writeFileSync(join(outside, "plan", "SKILL.md"), "---\nname: plan\n---\nPrivate.\n")

@@ -1,4 +1,4 @@
-// lca configuration: user (~/.config/lca/lca.jsonc) -> project (<worktree>/.lca/lca.jsonc), project wins per key.
+// otter configuration: user (~/.config/otter/otter.jsonc) -> project (<worktree>/.otter/otter.jsonc), project wins per key.
 // Contract owned by the scaffold. Fill-in lives here; other modules only import the types + loadConfig.
 import { lstatSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
@@ -88,7 +88,7 @@ export function verifyCommandProblem(command: string, allow: string[]): string |
   return null
 }
 
-export type LcaConfig = {
+export type OtterConfig = {
   /** hook ids to disable, e.g. ["guard.repeat", "mode.detect"] */
   disabled_hooks: string[]
   /** prefix budgets in estimated tokens; doctor/tests assert these */
@@ -115,7 +115,7 @@ export type LcaConfig = {
     failures: number
     compaction_guard_ms: number
   }
-  /** Interactive `lca` chat. `default_model` is the persisted startup selection (`/model default` writes it). */
+  /** Interactive `otter` chat. `default_model` is the persisted startup selection (`/model default` writes it). */
   chat: {
     default_model?: { engine: string; model: string } | null
     /** Per-role engine/model routes (role -> {engine, model}); applied to new sessions only. A null role removes a user route. */
@@ -174,7 +174,7 @@ export type LcaConfig = {
     /**
      * Code tasks run in a linked git worktree under the state root (worker + verify bound to it); the task's diff is
      * applied to the main worktree only when the task is accepted (`git apply --check` first; a patch that no longer
-     * applies marks the task blocked and stays in .lca/handoffs). Needs a repository with at least one commit.
+     * applies marks the task blocked and stays in .otter/handoffs). Needs a repository with at least one commit.
      */
     worktree: boolean
     /**
@@ -201,7 +201,7 @@ export type LcaConfig = {
     diff_max_chars: number
     /** chars of verify output kept (tail) */
     verify_output_chars: number
-    /** path globs never counted as task changes (git pathspec globs, matched at any depth); .lca/state and .lca/handoffs are always excluded */
+    /** path globs never counted as task changes (git pathspec globs, matched at any depth); .otter/state and .otter/handoffs are always excluded */
     diff_exclude: string[]
     /**
      * Regexes (case-sensitive, tested against the trimmed command) at least one of which a task's `verify` command must
@@ -222,7 +222,7 @@ export type LcaConfig = {
     checks_dir: string
     /** sqlite file, relative to the worktree unless absolute; opened read-only */
     sqlite_path: string
-    /** JSON produced by scripts/lca-schema-extract.py (or by hand): { dialect, notes, tables: {...} }; relative to the worktree */
+    /** JSON produced by scripts/otter-schema-extract.py (or by hand): { dialect, notes, tables: {...} }; relative to the worktree */
     schema_file: string
     /** postgres: the DSN is read ONLY from this environment variable (never from config/logs) */
     pg_dsn_env: string
@@ -247,12 +247,12 @@ export type LcaConfig = {
   }
 }
 
-export const DATA_DEFAULTS: LcaConfig["data"] = {
+export const DATA_DEFAULTS: OtterConfig["data"] = {
   backend: "none",
   checks_dir: "data/checks",
   sqlite_path: "data/app.sqlite",
   schema_file: "data/schema.json",
-  pg_dsn_env: "LCA_PG_DSN",
+  pg_dsn_env: "OTTER_PG_DSN",
   pg_allow_remote: false,
   psql_path: "psql",
   max_rows: 50,
@@ -263,7 +263,7 @@ export const DATA_DEFAULTS: LcaConfig["data"] = {
   evo: { enabled: true, workspace: ".evoontology", python: "python3", server: "" },
 }
 
-export const DEFAULT_CONFIG: LcaConfig = {
+export const DEFAULT_CONFIG: OtterConfig = {
   disabled_hooks: [],
   chat: {},
   budget: { main: 8000, worker: 5000, reviewer: 3000 },
@@ -350,18 +350,18 @@ function deepMerge<T extends Record<string, any>>(base: T, patch: Partial<T> | u
 }
 
 export function userConfigPath(): string {
-  return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "lca", "lca.jsonc")
+  return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "otter", "otter.jsonc")
 }
 
 export function projectConfigPath(worktree: string): string {
-  return join(worktree, ".lca", "lca.jsonc")
+  return join(worktree, ".otter", "otter.jsonc")
 }
 
 export type ConfigErrorKind = "unreadable" | "not-a-file" | "invalid-jsonc" | "invalid-verifier-selector"
 
 export class ConfigError extends Error {
   constructor(readonly path: string, readonly kind: ConfigErrorKind) {
-    super(`lca: config ${path}: ${kind}`)
+    super(`otter: config ${path}: ${kind}`)
     this.name = "ConfigError"
   }
 }
@@ -394,7 +394,7 @@ function configIsAbsent(path: string): boolean {
   }
 }
 
-export function loadConfig(worktree: string): LcaConfig {
+export function loadConfig(worktree: string): OtterConfig {
   let cfg = DEFAULT_CONFIG
   let selectorPath = projectConfigPath(worktree)
   for (const p of [userConfigPath(), projectConfigPath(worktree)]) {
@@ -405,9 +405,9 @@ export function loadConfig(worktree: string): LcaConfig {
       if ((e as NodeJS.ErrnoException)?.code === "ENOENT" && configIsAbsent(p)) continue
       throw configReadError(p, e)
     }
-    let patch: Partial<LcaConfig>
+    let patch: Partial<OtterConfig>
     try {
-      patch = parseJsonc<Partial<LcaConfig>>(text)
+      patch = parseJsonc<Partial<OtterConfig>>(text)
       if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw new Error()
     } catch {
       throw new ConfigError(p, "invalid-jsonc")

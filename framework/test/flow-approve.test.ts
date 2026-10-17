@@ -215,7 +215,7 @@ describe("/approve — dispatch path", () => {
     const ledgerFile = ledgerPath(wt.worktree, S)
     const ledgerBeforeApprove = existsSync(ledgerFile) ? readFileSync(ledgerFile) : null
     const heldText = await runApprove(deps)
-    expect(heldText).toContain("LCA session held")
+    expect(heldText).toContain("Otter session held")
     expect(readWorkflow(wt.worktree)).toEqual(workflowBeforeApprove)
     expect(readEvents(wt.worktree, rebound.id)).toEqual(eventsBeforeApprove)
     expect(existsSync(ledgerFile) ? readFileSync(ledgerFile) : null).toEqual(ledgerBeforeApprove)
@@ -245,7 +245,7 @@ describe("/approve — dispatch path", () => {
     const path = ledgerPath(wt.worktree, S)
     const ledgerBytes = existsSync(path) ? readFileSync(path) : null
     const text = await runApprove(deps)
-    expect(text).toContain("LCA session held")
+    expect(text).toContain("Otter session held")
     expect(readWorkflow(wt.worktree)).toEqual(workflowBefore)
     expect(readEvents(wt.worktree, "wfid")).toEqual(eventsBefore)
     expect(existsSync(path) ? readFileSync(path) : null).toEqual(ledgerBytes)

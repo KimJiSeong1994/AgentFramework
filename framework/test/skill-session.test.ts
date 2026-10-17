@@ -145,7 +145,7 @@ test("user-config trust by name or folder skips the consent prompt and survives 
 })
 
 test("skill trust parses only names and absolute/~ folders and is read from the user config alone", () => {
-  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "lca-trust-home-")))
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "otter-trust-home-")))
   try {
     mkdirSync(join(home, ".codex", "skills"), { recursive: true })
     const parsed = parseSkillTrust(["code-review", "~/.codex/skills", "/opt/skills"], home) as SkillTrust
@@ -156,7 +156,7 @@ test("skill trust parses only names and absolute/~ folders and is read from the 
     expect(parseSkillTrust([1], home)).toContain("must be an array")
     expect(parseSkillTrust(undefined, home)).toBe(NO_SKILL_TRUST)
 
-    const config = join(home, "lca.jsonc")
+    const config = join(home, "otter.jsonc")
     expect(readSkillTrust(config, home)).toEqual({ trust: NO_SKILL_TRUST, source: config })
     writeFileSync(config, `{\n  // trusted by the operator\n  "skill_trust": ["code-review"],\n}\n`)
     expect([...readSkillTrust(config, home).trust.names]).toEqual(["code-review"])
@@ -232,7 +232,7 @@ test("a post-baseline checkout of another ref prompts once per new hash and rest
 })
 
 test("a post-baseline git pull from a local bare remote prompts once per new hash and never on repeat", async () => {
-  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "lca-skill-pull-")))
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "otter-skill-pull-")))
   try {
     put("inspect", "Baseline instructions.\n")
     commit()

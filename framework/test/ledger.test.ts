@@ -77,7 +77,7 @@ describe("ledger", () => {
       review: { verdict: "accept" },
     }
     const rel = writeHandoff(wt.worktree, S, task)
-    expect(rel).toBe(`.lca/handoffs/${S}/task-1.md`)
+    expect(rel).toBe(`.otter/handoffs/${S}/task-1.md`)
     const text = readFileSync(join(wt.worktree, rel), "utf8")
     expect(text).toContain("# Task 1: impl fib")
     expect(text).toContain("- status: done")
@@ -185,13 +185,13 @@ describe("ledger", () => {
       status: "failed",
       error: "verify failed (exit 1): boom",
       verify_result: { command: "false", ok: false, exitCode: 1, timedOut: false, output: "line1\nboom" },
-      handoff: ".lca/handoffs/ses_main/task-2.md",
+      handoff: ".otter/handoffs/ses_main/task-2.md",
     })
     const text = summarizeLedger(ledger)
     expect(text.split("\n")[0]).toBe("Delegate result: 3 task(s) — 1 done, 1 failed, 1 not run.")
     expect(text).toContain("1. [done] a — files: a.py; review: accept")
     expect(text).toContain("2. [failed] b — verify: FAIL; error: verify failed (exit 1): boom")
-    expect(text).toContain("Handoffs with details: .lca/handoffs/ses_main/task-2.md")
+    expect(text).toContain("Handoffs with details: .otter/handoffs/ses_main/task-2.md")
     expect(summarizeLedger(ledger, ["t1"])).toContain("1 task(s) — 1 done, 0 failed.")
     expect(summarizeLedger(ledger, undefined, { note: "1 stale task cancelled." })).toContain("1 stale task cancelled.")
   })
@@ -204,7 +204,7 @@ describe("ledger", () => {
         error: "verify failed (exit 1): assertion boom in test_something_long",
         filesChanged: ["a/b/c/d/file1.py", "a/b/c/d/file2.py", "a/b/c/d/file3.py", "a/b/c/d/file4.py", "a/b/c/d/file5.py", "a/b/c/d/file6.py", "a/b/c/d/file7.py"],
         verify_result: { command: "false", ok: false, exitCode: 1, timedOut: false, output: "x".repeat(400) },
-        handoff: `.lca/handoffs/${S}/task-${t.n}.md`,
+        handoff: `.otter/handoffs/${S}/task-${t.n}.md`,
       })
     }
     const s = summarizeLedger(ledger)

@@ -3,15 +3,15 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Config } from "@opencode-ai/plugin"
-import { effectiveOutputLimit, parseModelSelection, type LcaConfig } from "../src/config.ts"
+import { effectiveOutputLimit, parseModelSelection, type OtterConfig } from "../src/config.ts"
 import { AGENT_DEFS, MAIN_PROMPT, MAIN_RULE3_NO_DELEGATE, WORKER_PROMPT, mainPrompt } from "../src/agents/prompts.ts"
-import { createConfigHook, type LcaOpenCodeConfig } from "../src/hooks/config.ts"
+import { createConfigHook, type OtterOpenCodeConfig } from "../src/hooks/config.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
 import { fakeDeps, type LogEntry } from "./helpers.ts"
 import { WORKFLOW_READ_ONLY_ROLES } from "../src/hosts/types.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
 
-const worktree = mkdtempSync(join(tmpdir(), "lca-config-hook-"))
+const worktree = mkdtempSync(join(tmpdir(), "otter-config-hook-"))
 afterAll(() => rmSync(worktree, { recursive: true, force: true }))
 
 let logs: LogEntry[] = []
@@ -19,13 +19,13 @@ beforeEach(() => {
   logs = []
 })
 
-function deps(overrides: Partial<LcaConfig> = {}): HookDeps {
+function deps(overrides: Partial<OtterConfig> = {}): HookDeps {
   return fakeDeps(worktree, overrides, logs)
 }
 
-async function run(config: Config, d: HookDeps = deps()): Promise<LcaOpenCodeConfig> {
+async function run(config: Config, d: HookDeps = deps()): Promise<OtterOpenCodeConfig> {
   await createConfigHook(d)(config)
-  return config as LcaOpenCodeConfig
+  return config as OtterOpenCodeConfig
 }
 
 describe("config hook", () => {
@@ -64,7 +64,7 @@ describe("config hook", () => {
   test("injects main/worker/reviewer from AGENT_DEFS into an empty config", async () => {
     const c = await run({})
     expect(c.agent?.main?.mode).toBe("primary")
-    // flow is on by default (M1): main's prompt gains the <lca-flow> rule
+    // flow is on by default (M1): main's prompt gains the <otter-flow> rule
     expect(c.agent?.main?.prompt).toBe(mainPrompt(true, false, true))
     expect(c.agent?.worker?.mode).toBe("subagent")
     expect(c.agent?.worker?.prompt).toBe(WORKER_PROMPT)
@@ -168,7 +168,7 @@ describe("config hook", () => {
     expect(w?.model).toBe("ollama/user-model")
     expect(w?.temperature).toBe(0.7)
     expect((w as any)?.steps).toBe(10)
-    expect(w?.prompt).toBe(WORKER_PROMPT) // key not set by user keeps lca default
+    expect(w?.prompt).toBe(WORKER_PROMPT) // key not set by user keeps otter default
     expect(w?.mode).toBe("subagent")
     expect((w?.permission as Record<string, unknown>).bash).toBe("ask")
     expect((w?.permission as Record<string, unknown>).task).toBe("deny")
@@ -180,7 +180,7 @@ describe("config hook", () => {
 
   test("keeps unrelated user agents untouched apart from hiding delegate", async () => {
     const c = await run({ agent: { build: { prompt: "b" }, plan: { model: "x/y" }, other: { prompt: "o" } } })
-    const hidden = { delegate: "deny", db_query: "deny", schema_lookup: "deny", "evo-semantic_*": "deny", lca_flow: "deny" }
+    const hidden = { delegate: "deny", db_query: "deny", schema_lookup: "deny", "evo-semantic_*": "deny", otter_flow: "deny" }
     expect(c.agent?.build).toEqual({ prompt: "b", permission: hidden } as any)
     expect(c.agent?.plan).toEqual({ model: "x/y", permission: hidden } as any)
     expect(c.agent?.other).toEqual({ prompt: "o" })
@@ -197,7 +197,7 @@ describe("config hook", () => {
     expect(a.subagent_depth).toBe(1)
     expect(a.compaction).toEqual({ auto: true, prune: true })
 
-    const userCfg: LcaOpenCodeConfig = {
+    const userCfg: OtterOpenCodeConfig = {
       default_agent: "build",
       subagent_depth: 3,
       compaction: { prune: false, tail_turns: 4 },

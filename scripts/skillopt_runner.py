@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pinned SkillOpt adapter for the bounded LCA supervisor pipe.
+"""Pinned SkillOpt adapter for the bounded Otter supervisor pipe.
 
 The command intentionally has no data, path, or subprocess arguments on the
 model-facing pipe. The supervisor owns prompts, scoring, host execution, and

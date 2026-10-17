@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Helper for lca-e2e.sh --flow plan: reads the isolated plugin state root's workflow.json/events.jsonl
+"""Helper for otter-e2e.sh --flow plan: reads the isolated plugin state root's workflow.json/events.jsonl
 (framework/src/flow/state.ts stateRoot/worktreeKey/workflowPath/eventsPath port) and the session ledger, and
 prints small key=value / line-per-record reports consumed by the bash driver. Read-only.
 
 Usage:
-  lca-flow-e2e-helper.py state-root <XDG_STATE_HOME> <worktree>       -> prints the state root dir
-  lca-flow-e2e-helper.py workflow <state_root>                        -> key=value summary of workflow.json (or none=1)
-  lca-flow-e2e-helper.py events <state_root> [wf_id]                  -> one "seq type actor" line per event
-  lca-flow-e2e-helper.py plan-check <state_root> <worktree> <wf_id>   -> F01: plan json validates + md exists
-  lca-flow-e2e-helper.py ledger-check <state_root> <session_id> <wf_id> <expect_titles_file>
+  otter-flow-e2e-helper.py state-root <XDG_STATE_HOME> <worktree>       -> prints the state root dir
+  otter-flow-e2e-helper.py workflow <state_root>                        -> key=value summary of workflow.json (or none=1)
+  otter-flow-e2e-helper.py events <state_root> [wf_id]                  -> one "seq type actor" line per event
+  otter-flow-e2e-helper.py plan-check <state_root> <worktree> <wf_id>   -> F01: plan json validates + md exists
+  otter-flow-e2e-helper.py ledger-check <state_root> <session_id> <wf_id> <expect_titles_file>
                                                                        -> F04: tagged task count/titles/status
-  lca-flow-e2e-helper.py seed-task-check <state_root> <session_id> <seed_title>
+  otter-flow-e2e-helper.py seed-task-check <state_root> <session_id> <seed_title>
                                                                        -> F07: seeded task cancelled, never run
 """
 import hashlib
@@ -29,7 +29,7 @@ def canonical(path: str) -> str:
 def state_root(xdg_state_home: str, worktree: str) -> str:
     key = hashlib.sha1(canonical(worktree).encode("utf-8")).hexdigest()[:12]
     base = xdg_state_home or os.path.join(os.path.expanduser("~"), ".local", "state")
-    return os.path.join(base, "lca", key)
+    return os.path.join(base, "otter", key)
 
 
 def read_json(path, default=None):
@@ -97,7 +97,7 @@ def cmd_plan_check(args):
     plan_path = os.path.join(root, "workflow", "plans", f"{wf_id}.json")
     plan = read_json(plan_path)
     ok_json = bool(plan and isinstance(plan.get("steps"), list) and len(plan["steps"]) >= 1)
-    md_path = os.path.join(worktree, ".lca", "plans", f"{wf_id}.md")
+    md_path = os.path.join(worktree, ".otter", "plans", f"{wf_id}.md")
     ok_md = os.path.isfile(md_path)
     print("json_ok=" + ("1" if ok_json else "0"))
     print("md_ok=" + ("1" if ok_md else "0"))

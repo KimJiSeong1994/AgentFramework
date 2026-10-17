@@ -1,9 +1,9 @@
-// M1: the lca_flow tool — schema budget, op:"status", op:"plan" gating (T2/T3/T4) and the review it runs inline.
+// M1: the otter_flow tool — schema budget, op:"status", op:"plan" gating (T2/T3/T4) and the review it runs inline.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { existsSync, readFileSync, symlinkSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
 import { z } from "zod"
-import { createLcaFlowTool, LCA_FLOW_DESCRIPTION, lcaFlowArgs } from "../src/tools/lca-flow.ts"
+import { createOtterFlowTool, OTTER_FLOW_DESCRIPTION, otterFlowArgs } from "../src/tools/otter-flow.ts"
 import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
 import { estimateToolSchemaTokens } from "../src/tokens.ts"
 import { FlowTransactionBusyError, eventsPath, flowDir, newWorkflow, planJsonPath, readEvents, readWorkflow, sha256, workflowPath, withFlowTransaction } from "../src/flow/state.ts"
@@ -57,7 +57,7 @@ function validPlanArgs() {
 }
 
 function primeNativeToolCall(native: Awaited<ReturnType<typeof createNativeToolFixture>>, tool: string, args: Record<string, unknown>) {
-  return native.primeCall({ tool, args, callID: `lca_flow_fixture_${++nativeCallSequence}` })
+  return native.primeCall({ tool, args, callID: `otter_flow_fixture_${++nativeCallSequence}` })
 }
 
 const SECRET_MARKERS = [
@@ -96,15 +96,15 @@ function statusInputSnapshot() {
     join(executionRunDirectory(wt.worktree), "state.json")].map(path => [path, readIfPresent(path)])
 }
 
-describe("lca_flow schema budget", () => {
+describe("otter_flow schema budget", () => {
   test("description + schema <= 300 est. tokens", () => {
-    const schema = z.object(lcaFlowArgs)
+    const schema = z.object(otterFlowArgs)
     const json = z.toJSONSchema(schema)
-    expect(estimateToolSchemaTokens(LCA_FLOW_DESCRIPTION, json)).toBeLessThanOrEqual(300)
+    expect(estimateToolSchemaTokens(OTTER_FLOW_DESCRIPTION, json)).toBeLessThanOrEqual(300)
   })
 
   test("schema accepts op alone and op+plan, rejects an unknown op", () => {
-    const schema = z.object(lcaFlowArgs)
+    const schema = z.object(otterFlowArgs)
     expect(schema.safeParse({ op: "status" }).success).toBe(true)
     expect(schema.safeParse({ op: "plan", plan: validPlanArgs() }).success).toBe(true)
     expect(schema.safeParse({ op: "bogus" }).success).toBe(false)
@@ -114,16 +114,16 @@ describe("lca_flow schema budget", () => {
 describe('op:"status"', () => {
   test("renders the status text", async () => {
     putWorkflow({ phase: "planning" })
-    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     const res = (await tool.execute({ op: "status" }, ctx() as any)) as { output: string }
-    expect(res.output).toContain("[lca status]")
+    expect(res.output).toContain("[otter status]")
     expect(res.output).toContain("workflow:")
   })
 
   test("valid workflow and task secrets remain absent from model-facing status output", async () => {
     plantStatusSecrets()
     const before = statusInputSnapshot()
-    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     const res = (await tool.execute({ op: "status" }, ctx() as any)) as { output: string }
     for (const secret of SECRET_MARKERS) expect(res.output).not.toContain(secret)
     expect(res.output.split("\n").length).toBeLessThanOrEqual(25)
@@ -137,9 +137,9 @@ describe('op:"status"', () => {
   test("renders typed status failures without exposing state contents", async () => {
     // Index-bound snapshot whose bytes hash correctly but fail strict parsing: status reports invalid_state only.
     writeRawSnapshot(wt.worktree, { version: 2, id: "wf_bad", kind: "plan", phase: "planning", sessionID: S, secret: "must-not-leak" }, { id: "wf_bad", sessionID: S })
-    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     const res = (await tool.execute({ op: "status" }, ctx() as any)) as { title: string; output: string }
-    expect(res.title).toBe("lca_flow: status unavailable")
+    expect(res.title).toBe("otter_flow: status unavailable")
     expect(res.output).toContain("status unavailable: workflow invalid_state")
     expect(res.output).not.toContain("must-not-leak")
   })
@@ -154,20 +154,20 @@ describe('op:"plan" authority and phase gates', () => {
     test(`${label} workflow engine refuses plan mutation but remains observable`, async () => {
       putWorkflow({ engine })
       const before = readFileSync(workflowPath(wt.worktree))
-      const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+      const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
       const result = await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx())
       expect(result).toMatchObject({ output: expect.stringContaining("engine identity") })
       expect(client.created).toEqual([])
       expect(existsSync(ledgerPath(wt.worktree, S))).toBe(false)
       expect(before.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
-      expect(await tool.execute({ op: "status" }, ctx())).toMatchObject({ output: expect.stringContaining("[lca status]") })
+      expect(await tool.execute({ op: "status" }, ctx())).toMatchObject({ output: expect.stringContaining("[otter status]") })
       expect(before.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
     })
   }
 
   test("a non-owning session is refused (no workflow mutation, no reviewer child)", async () => {
     putWorkflow({ phase: "planning" })
-    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     const res = (await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx(OTHER) as any)) as { output: string }
     expect(res.output).toContain("owned by another session")
     expect(client.created.length).toBe(0)
@@ -175,7 +175,7 @@ describe('op:"plan" authority and phase gates', () => {
   })
 
   test("no active workflow is refused", async () => {
-    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     const res = (await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any)) as { output: string }
     expect(res.output).toContain("no plan workflow is active")
     expect(client.created.length).toBe(0)
@@ -183,7 +183,7 @@ describe('op:"plan" authority and phase gates', () => {
 
   test("wrong phase (not planning) is refused", async () => {
     putWorkflow({ phase: "pending_approval" })
-    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     const res = (await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any)) as { output: string }
     expect(res.output).toContain("not awaiting a plan")
     expect(client.created.length).toBe(0)
@@ -196,7 +196,7 @@ describe("flow transaction consumers", () => {
     holdAdmission(wt.worktree, S, "test-held")
     const before = readFileSync(workflowPath(wt.worktree))
     const events = readEvents(wt.worktree, workflow.id)
-    const result = await createLcaFlowTool(makeDeps(client, wt.worktree)).execute(
+    const result = await createOtterFlowTool(makeDeps(client, wt.worktree)).execute(
       { op: "plan", plan: validPlanArgs() }, ctx() as any,
     ) as { output: string }
     expect(result.output).toContain("held")
@@ -207,14 +207,14 @@ describe("flow transaction consumers", () => {
     expect(client.created).toEqual([])
   })
 
-  test("lca_flow refuses while the flow transaction is busy without writing artifacts or events", async () => {
+  test("otter_flow refuses while the flow transaction is busy without writing artifacts or events", async () => {
     const workflow = putWorkflow({ phase: "planning" })
     const workflowBefore = readFileSync(workflowPath(wt.worktree))
     const eventsBefore = readEvents(wt.worktree, workflow.id)
     const lock = join(flowDir(wt.worktree), "workflow.lock")
     symlinkSync("held-by-another-process", lock)
     try {
-      const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+      const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
       await expect(tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any)).rejects.toBeInstanceOf(FlowTransactionBusyError)
       expect(readFileSync(workflowPath(wt.worktree)).equals(workflowBefore)).toBe(true)
       expect(readEvents(wt.worktree, workflow.id)).toEqual(eventsBefore)
@@ -255,7 +255,7 @@ describe("flow transaction consumers", () => {
     expect(() => primeNativeToolCall(native, "delegate", { tasks: [] })).toThrow(/accept a native user turn/)
     const hook = createToolBeforeHook(deps)
     await expect(hook({ tool: "delegate", sessionID: S, callID: "foreign_engine_unminted" }, { args: { tasks: [] } })).rejects.toThrow(
-      "lca: OpenCode tool call refused (stale-turn)",
+      "otter: OpenCode tool call refused (stale-turn)",
     )
     expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
     expect(readEvents(wt.worktree, workflow.id).filter((event) => event.type === "boundary_denied")).toEqual([])
@@ -265,11 +265,11 @@ describe("flow transaction consumers", () => {
 describe('op:"plan" invalid plans (T2/T3)', () => {
   test("an invalid plan is refused, listed, and never reaches the reviewer (no child session created)", async () => {
     putWorkflow({ phase: "planning" })
-    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     const badPlan = { ...validPlanArgs(), steps: [{ title: "s1", files: ["x"], verify: "true" }] } // too few steps + trivial verify
     const res = (await tool.execute({ op: "plan", plan: badPlan }, ctx() as any)) as { output: string }
     expect(res.output).toContain("plan rejected")
-    expect(res.output).toMatch(/^lca: plan rejected/)
+    expect(res.output).toMatch(/^otter: plan rejected/)
     expect(client.created.length).toBe(0) // reviewer never invoked
     const wf = readWorkflow(wt.worktree)!
     expect(wf.phase).toBe("planning")
@@ -278,7 +278,7 @@ describe('op:"plan" invalid plans (T2/T3)', () => {
 
   test("3 invalid submissions -> stuck(plan_invalid)", async () => {
     putWorkflow({ phase: "planning" })
-    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     const badPlan = { ...validPlanArgs(), steps: [{ title: "s1", files: ["x"], verify: "true" }] }
     for (let i = 0; i < 3; i++) await tool.execute({ op: "plan", plan: badPlan }, ctx() as any)
     const wf = readWorkflow(wt.worktree)!
@@ -303,7 +303,7 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
         }
       },
     }
-    const result = await createLcaFlowTool(makeDeps(client, wt.worktree)).execute(
+    const result = await createOtterFlowTool(makeDeps(client, wt.worktree)).execute(
       { op: "plan", plan: validPlanArgs() }, ctx() as any,
     ) as { output: string }
     expect(snapshot).toBeDefined()
@@ -333,12 +333,12 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
         }
       },
     }
-    const tool = createLcaFlowTool(deps)
+    const tool = createOtterFlowTool(deps)
     const result = await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any) as { title: string; output: string }
-    expect(result.title).toBe("lca_flow: workflow changed")
+    expect(result.title).toBe("otter_flow: workflow changed")
     expect(cancellationSnapshot).toBeDefined()
     const snapshot = cancellationSnapshot!
-    // The cancel was pending while the review ran; the lca_flow finally-observer then commits only cancel_settled.
+    // The cancel was pending while the review ran; the otter_flow finally-observer then commits only cancel_settled.
     expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "cancelled", stopIntent: null })
     expect(readFileSync(planJsonPath(wt.worktree, initial.id)).equals(snapshot.planJson)).toBe(true)
     expect(readFileSync(join(wt.worktree, planMdPath(initial.id))).equals(snapshot.planMd)).toBe(true)
@@ -353,7 +353,7 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
     putWorkflow({ phase: "planning" })
     client.replies.reviewer = { text: "- looks solid\nVERDICT: OKAY" }
     const deps = makeDeps(client, wt.worktree)
-    const tool = createLcaFlowTool(deps)
+    const tool = createOtterFlowTool(deps)
     const res = (await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any)) as { output: string }
     expect(res.output).toContain("Plan saved to")
     expect(res.output).toContain("/approve or /reject")
@@ -373,7 +373,7 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
   test("valid plan + ITERATE review: back to planning with findings, no md pending_approval yet", async () => {
     putWorkflow({ phase: "planning" })
     client.replies.reviewer = { text: "- step 2 needs a narrower verify command\nVERDICT: ITERATE" }
-    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     const res = (await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any)) as { output: string }
     expect(res.output).toContain("Reviewer asked for changes")
     expect(res.output).toContain("step 2 needs a narrower verify command")
@@ -385,7 +385,7 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
   test("ITERATE at the cap goes to pending_approval with note 'cap'", async () => {
     putWorkflow({ phase: "planning", counters: { code_invalid: 0, review_iterations: 1, user_rejections: 0, nudges: 0 } })
     client.replies.reviewer = { text: "VERDICT: ITERATE" }
-    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any)
     const wf = readWorkflow(wt.worktree)!
     expect(wf.phase).toBe("pending_approval")
@@ -395,7 +395,7 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
   test("unparseable review verdict (none) also lands in pending_approval (T7)", async () => {
     putWorkflow({ phase: "planning" })
     client.replies.reviewer = { text: "hard to say, seems okay-ish" }
-    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any)
     const wf = readWorkflow(wt.worktree)!
     expect(wf.phase).toBe("pending_approval")
@@ -404,14 +404,14 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
 
   test("non-main agent is refused", async () => {
     putWorkflow({ phase: "planning" })
-    const tool = createLcaFlowTool(makeDeps(client, wt.worktree))
+    const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     await expect(tool.execute({ op: "status" }, ctx(S, "worker") as any)).rejects.toThrow(/only available to the main agent/)
   })
 
   test("flow.enabled=false refuses the tool entirely", async () => {
     putWorkflow({ phase: "planning" })
     const deps = makeDeps(client, wt.worktree, { flow: { enabled: false, max_code_invalid: 3, max_review_iterations: 2, nudge_max: 1, review_max_tool_calls: 6 } })
-    const tool = createLcaFlowTool(deps)
+    const tool = createOtterFlowTool(deps)
     await expect(tool.execute({ op: "status" }, ctx() as any)).rejects.toThrow(/disabled/)
   })
 })

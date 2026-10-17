@@ -8,7 +8,7 @@ let root: string
 let worktree: string
 let previousXdg: string | undefined
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "lca-config-admission-"))
+  root = mkdtempSync(join(tmpdir(), "otter-config-admission-"))
   worktree = join(root, "worktree")
   mkdirSync(worktree)
   previousXdg = process.env.XDG_CONFIG_HOME
@@ -28,7 +28,7 @@ function refused(path: string, kind: string) {
   try { loadConfig(worktree) } catch (caught) { error = caught }
   expect(error).toBeInstanceOf(ConfigError)
   expect(error).toMatchObject({ path, kind })
-  expect((error as Error).message).toBe(`lca: config ${path}: ${kind}`)
+  expect((error as Error).message).toBe(`otter: config ${path}: ${kind}`)
 }
 
 describe("explicit verifier configuration", () => {

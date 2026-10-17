@@ -119,11 +119,11 @@ describe("renderFrame", () => {
     })
     const drawn = frameRows(frame)
     expect(drawn).toHaveLength(rows)
-    expect(drawn.slice(0, 5)).toEqual(["you", "  question", "", "lca", "  first message"])
+    expect(drawn.slice(0, 5)).toEqual(["you", "  question", "", "otter", "  first message"])
     expect(drawn[rows - 6]).toBe("status one")
     expect(drawn[rows - 5]).toBe("status two")
     expect(drawn[rows - 4]).toStartWith(" ⬢ local / model-a ─")
-    expect(drawn[rows - 4]).toEndWith("─ LCA")
+    expect(drawn[rows - 4]).toEndWith("─ Otter")
     expect(displayWidth(drawn[rows - 4]!)).toBe(columns)
     expect(composerContent(drawn)).toEqual(["> ok"])
     expect(finalCursor(frame)).toEqual([rows - 1, 7])
@@ -220,7 +220,7 @@ describe("renderFrame", () => {
 
   test("user messages keep a speaker label without color and a full-width bar with color", () => {
     const plain = frameRows(basicFrame({ transcript: ["[You] mine", "[Assistant] reply"], color: false }))
-    expect(plain.slice(0, 5)).toEqual(["you", "  mine", "", "lca", "  reply"])
+    expect(plain.slice(0, 5)).toEqual(["you", "  mine", "", "otter", "  reply"])
     const colored = basicFrame({ transcript: ["[You] mine"], color: true })
     expect(colored).toContain(`\u001b[1;48;5;236;97m  mine${" ".repeat(74)}\u001b[0m`)
     expect(colored).toContain("\u001b[1;36myou\u001b[0m")
@@ -251,8 +251,8 @@ describe("renderFrame", () => {
 
   test("welcome box shows identity and sections without leaking into the undersized recovery frame", () => {
     const home = {
-      title: "LCA · local coding agent",
-      left: ["LCA", "No model is selected."],
+      title: "Otter · local coding agent",
+      left: ["Otter", "No model is selected."],
       sections: [
         { heading: "Get started", lines: ["/model  choose a model", "/help   commands and keys"] },
         { heading: "Flow keys", lines: ["/ commands"] },
@@ -261,7 +261,7 @@ describe("renderFrame", () => {
     for (const [columns, rows] of [[60, 20], [70, 58], [80, 24], [120, 40]] as const) {
       const frame = basicFrame({ columns, rows, transcript: [], home })
       const drawn = frameRows(frame)
-      expect(drawn[0]).toStartWith("╭─ LCA · local coding agent ─")
+      expect(drawn[0]).toStartWith("╭─ Otter · local coding agent ─")
       expect(drawn[0]).toEndWith("╮")
       expect(drawn.findIndex(row => row.startsWith("╰") && row.includes("┴"))).toBeGreaterThan(0)
       expect(stripCsi(frame)).toContain("No model is selected.")
@@ -297,7 +297,7 @@ describe("renderFrame", () => {
     expect(plain).not.toContain("private draft")
     expect(plain).not.toContain("You>")
     expect(drawn[rows - 1]).toStartWith(" ⬢ local / model-a ─")
-    expect(drawn[rows - 1]).toEndWith("─ LCA")
+    expect(drawn[rows - 1]).toEndWith("─ Otter")
     expect(frame).toContain("\u001b[?25l")
     expect(finalCursor(frame)).toEqual([rows, 1])
   })
@@ -314,13 +314,13 @@ describe("renderFrame", () => {
       prompt: "Filter> ",
     })
     const drawn = frameRows(frame)
-    expect(drawn.slice(0, 2)).toEqual(["lca", "  still visible"])
+    expect(drawn.slice(0, 2)).toEqual(["otter", "  still visible"])
     expect(drawn.at(-3)).toBe("> local — Ollama CLI")
     expect(drawn.at(-2)).toBe("  codex — Codex CLI")
     expect(drawn.at(-1)).toBe("(1/2) 2 matches")
     expect(drawn.at(-6)).toStartWith("╭─ Choose an execution engine ─")
     expect(drawn.at(-5)).toStartWith("│ Filter> lo")
-    expect(drawn.at(-7)).toEndWith("─ LCA")
+    expect(drawn.at(-7)).toEndWith("─ Otter")
     expect(stripCsi(frame).match(/Choose an execution engine/g)).toHaveLength(1)
     expect(finalCursor(frame)).toEqual([20, 13])
   })
@@ -359,7 +359,7 @@ describe("renderFrame", () => {
 
   test.each([80, 120])("physical transcript wraps keep distinct provenance and share scroll row accounting at %i columns", columns => {
     const labels = ["You", "Assistant", "Error", "Notice", "Canonical plan"] as const
-    const leads = ["you", "lca", "✗ ", "· ", "plan"]
+    const leads = ["you", "otter", "✗ ", "· ", "plan"]
     const transcript = labels.map(label => `[${label}] ${"x ".repeat(columns)}`)
     labels.forEach((label, index) => {
       const wrapped = wrapTranscriptLine(transcript[index]!, columns)
@@ -399,7 +399,7 @@ describe("renderFrame", () => {
     const lines = reply.map((line, index) => index === 0 ? `[Assistant] ${line}` : `  | ${line}`)
     const rows = transcriptDisplayRows(lines, 60).map(transcriptRowText)
     expect(rows).toEqual([
-      "lca",
+      "otter",
       "  Plan",
       "",
       "  • Analyze the bun test output.",

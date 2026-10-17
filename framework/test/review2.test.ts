@@ -220,11 +220,11 @@ describe("snapshot hardening", () => {
     }
   })
 
-  test("handoff writing refuses a symlinked .lca/handoffs and the unsafe snapshot fails closed", async () => {
+  test("handoff writing refuses a symlinked .otter/handoffs and the unsafe snapshot fails closed", async () => {
     const outside = tempWorktree()
     try {
-      mkdirSync(join(wt.worktree, ".lca"))
-      symlinkSync(outside.worktree, join(wt.worktree, ".lca/handoffs"))
+      mkdirSync(join(wt.worktree, ".otter"))
+      symlinkSync(outside.worktree, join(wt.worktree, ".otter/handoffs"))
       const deps = makeDeps(client, wt.worktree, noReview)
       const q = createQueue(getOpenCodeRuntime(deps))
       client.replies.worker = { text: "ok", run: () => write("a.py", "x") }
@@ -236,7 +236,7 @@ describe("snapshot hardening", () => {
       expect(existsSync(join(wt.worktree, "a.py"))).toBe(false)
       expect(t.handoff).toBeUndefined()
       expect(deps.logs).toContain("handoff write failed")
-      expect(readlinkSync(join(wt.worktree, ".lca/handoffs"))).toBe(outside.worktree)
+      expect(readlinkSync(join(wt.worktree, ".otter/handoffs"))).toBe(outside.worktree)
     } finally {
       outside.cleanup()
     }
@@ -244,16 +244,16 @@ describe("snapshot hardening", () => {
 })
 
 describe("state root containment", () => {
-  test("LCA_STATE_HOME inside the worktree is ignored; XDG empty string falls back", () => {
-    const saved = { lca: process.env.LCA_STATE_HOME, xdg: process.env.XDG_STATE_HOME }
+  test("OTTER_STATE_HOME inside the worktree is ignored; XDG empty string falls back", () => {
+    const saved = { otter: process.env.OTTER_STATE_HOME, xdg: process.env.XDG_STATE_HOME }
     try {
-      process.env.LCA_STATE_HOME = join(wt.worktree, ".lca", "state")
+      process.env.OTTER_STATE_HOME = join(wt.worktree, ".otter", "state")
       expect(stateRoot(wt.worktree).startsWith(wt.worktree)).toBe(false)
-      process.env.LCA_STATE_HOME = ""
+      process.env.OTTER_STATE_HOME = ""
       process.env.XDG_STATE_HOME = ""
-      expect(stateBase(wt.worktree)).toMatch(/\.local\/state\/lca$/)
+      expect(stateBase(wt.worktree)).toMatch(/\.local\/state\/otter$/)
     } finally {
-      process.env.LCA_STATE_HOME = saved.lca
+      process.env.OTTER_STATE_HOME = saved.otter
       process.env.XDG_STATE_HOME = saved.xdg
     }
   })
@@ -358,11 +358,11 @@ describe("resume offer on the next user message; /stop settles; session.deleted 
     admit(deps)
     writeLedger(wt.worktree, addTasks(emptyLedger(S), [{ title: "a" }, { title: "b" }]).ledger)
     const part = await userTurn(deps, "status?")
-    expect(part.text).toContain("<lca-resume>")
+    expect(part.text).toContain("<otter-resume>")
     expect(part.text).toContain("resume: true")
     const again = await userTurn(deps, "ulw: and now more")
-    expect(again.text).not.toContain("<lca-resume>")
-    expect(again.text).toContain('<lca-mode name="ulw">')
+    expect(again.text).not.toContain("<otter-resume>")
+    expect(again.text).toContain('<otter-mode name="ulw">')
     expect(readLedger(wt.worktree, S).resumeNotifiedFor).toEqual(["t1", "t2"])
   })
 
@@ -374,7 +374,7 @@ describe("resume offer on the next user message; /stop settles; session.deleted 
     await createCommandHook(deps)({ command: STOP_COMMAND, sessionID: S, arguments: "" }, { parts: [] })
     expect(readLedger(wt.worktree, S).tasks[0]!.status).toBe("cancelled")
     const part = await userTurn(deps, "ok")
-    expect(part.text).not.toContain("<lca-resume>")
+    expect(part.text).not.toContain("<otter-resume>")
   })
 
   test("session.deleted while the queue runs: abort, retain evidence and never replay", async () => {

@@ -171,7 +171,7 @@ function registerLiveChild(childSessionID: string): { claim: ReturnType<typeof r
 async function expectRefusal(promise: Promise<unknown>, reason?: string): Promise<void> {
   const error = await promise.then(() => { throw new Error("expected unsafe tool-call refusal") }, value => value)
   expect(error).toBeInstanceOf(UnsafeOpenCodeToolCall)
-  if (reason) expect(error).toMatchObject({ code: "LCA_UNSAFE_OPENCODE_TOOL_CALL", reason })
+  if (reason) expect(error).toMatchObject({ code: "OTTER_UNSAFE_OPENCODE_TOOL_CALL", reason })
 }
 
 test("main tool admission proves full SDK call parent and exact args, then completes once", async () => {

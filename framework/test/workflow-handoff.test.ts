@@ -75,8 +75,8 @@ describe("live DI -> ralplan handoff (W3)", () => {
     expect(wf.kind).toBe("ralplan")
     expect(wf.sessionID).toBe(h.SID)
     expect(wf.owner.instance).toBe(h.store.epoch)
-    const spec = join(wt.worktree, `.lca/workflows/${h.SID}/${started.id}/spec.md`)
-    expect(wf.lineage?.predecessor).toMatchObject({ id: started.id, kind: "deep-interview", artifact: { path: `.lca/workflows/${h.SID}/${started.id}/spec.md`, sha256: sha256(readFileSync(spec)) } })
+    const spec = join(wt.worktree, `.otter/workflows/${h.SID}/${started.id}/spec.md`)
+    expect(wf.lineage?.predecessor).toMatchObject({ id: started.id, kind: "deep-interview", artifact: { path: `.otter/workflows/${h.SID}/${started.id}/spec.md`, sha256: sha256(readFileSync(spec)) } })
     expect(ralplanDataOf(wf as never).seed).toMatchObject({ workflowID: started.id, specSha: sha256(readFileSync(spec)) })
 
     const archive = JSON.parse(readFileSync(join(stateRoot(wt.worktree), "workflow", "archive", `${started.id}.json`), "utf8"))
@@ -92,7 +92,7 @@ describe("live DI -> ralplan handoff (W3)", () => {
     const done = await runRalplan(h.runtime, h.SID, wf.id)
     expect(done.status).toBe("pending_execution")
     const planner = h.seen.find(item => item.promptId === "ralplan.planner")!
-    expect(planner.text).toContain(`.lca/workflows/${h.SID}/${started.id}/spec.md`)
+    expect(planner.text).toContain(`.otter/workflows/${h.SID}/${started.id}/spec.md`)
     expect(planner.text).toContain(sha256(readFileSync(spec)))
     expect(planner.text).toContain("Build it.")
   })
@@ -211,7 +211,7 @@ describe("refused handoffs change nothing", () => {
     const directory = workflowArtifactDirectory(wt.worktree, h.SID, id)
     mkdirSync(directory, { recursive: true })
     writeFileSync(join(directory, "spec.md"), "SPEC-BYTES\n")
-    const spec = { key: "spec.md", path: `.lca/workflows/${h.SID}/${id}/spec.md`, sha256: sha256(Buffer.from("SPEC-BYTES\n")) }
+    const spec = { key: "spec.md", path: `.otter/workflows/${h.SID}/${id}/spec.md`, sha256: sha256(Buffer.from("SPEC-BYTES\n")) }
     const done = { ...live, stage: "terminal", phase: "done", artifacts: [spec] } as never as Parameters<typeof handoffToRalplan>[2]
     const events = [{ wf: id, type: "spec_written", actor: "code" as const }]
     return { id, live, done, events, specPath: join(wt.worktree, spec.path) }

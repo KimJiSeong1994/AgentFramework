@@ -17,9 +17,9 @@ export function sha256(data: string | Buffer): string {
   return createHash("sha256").update(data).digest("hex")
 }
 
-/** Readable, model-addressable artifact directory: `<worktree>/.lca/workflows/<sid>/<wid>/`. */
+/** Readable, model-addressable artifact directory: `<worktree>/.otter/workflows/<sid>/<wid>/`. */
 export function workflowArtifactDirectory(worktree: string, sessionID: string, workflowID: string): string {
-  return join(worktree, ".lca", "workflows", sessionID, workflowID)
+  return join(worktree, ".otter", "workflows", sessionID, workflowID)
 }
 
 export type ArtifactBytes = { ok: true; bytes: Buffer } | { ok: false; reason: string }

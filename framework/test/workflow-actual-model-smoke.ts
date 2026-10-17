@@ -14,8 +14,8 @@ import { startUltragoal, runUltragoal } from "../src/workflows/ultragoal-driver.
 import { startAutoresearch, runAutoresearch } from "../src/workflows/autoresearch-driver.ts"
 import { DEEP_INTERVIEW_PROMPTS, RALPLAN_PROMPTS, ULTRAGOAL_PROMPTS, AUTORESEARCH_PROMPTS } from "../src/workflows/prompts/index.ts"
 
-const model = process.env.LCA_WORKFLOW_ACTUAL_MODEL || "llama3.2:3b"
-const out = process.env.LCA_WORKFLOW_ACTUAL_OUT || ""
+const model = process.env.OTTER_WORKFLOW_ACTUAL_MODEL || "llama3.2:3b"
+const out = process.env.OTTER_WORKFLOW_ACTUAL_OUT || ""
 const controls = Object.fromEntries(["boundedInput", "boundedOutput", "preExecutionToolPolicy", "headlessPermissionRefusal", "ownedCancellation", "quiescenceEvidence", "identityBinding", "noReplayRecovery", "readOnlyWorktree", "serialWorkerLease"].map(k => [k, "supported" as const]))
 const prompts = new Map([...DEEP_INTERVIEW_PROMPTS, ...RALPLAN_PROMPTS, ...ULTRAGOAL_PROMPTS, ...AUTORESEARCH_PROMPTS].map(p => [p.text, p.id]))
 const generated: Record<string, string> = {}
@@ -61,7 +61,7 @@ const script: Record<string, string[]> = {
   "ar.evidence": [stage.evidence],
   "ar.experiment": [stage.experiment],
 }
-function tempWorktree(name: string) { const dir = mkdtempSync(join(tmpdir(), `lca-actual-${name}-`)); writeFileSync(join(dir, "README.md"), `${name}\n`); writeFileSync(join(dir, "check_smoke.sh"), "test -f README.md\n"); writeFileSync(join(dir, "check_metric.sh"), "echo METRIC score=1\n"); return realpathSync(dir) }
+function tempWorktree(name: string) { const dir = mkdtempSync(join(tmpdir(), `otter-actual-${name}-`)); writeFileSync(join(dir, "README.md"), `${name}\n`); writeFileSync(join(dir, "check_smoke.sh"), "test -f README.md\n"); writeFileSync(join(dir, "check_metric.sh"), "echo METRIC score=1\n"); return realpathSync(dir) }
 function runtime(worktree: string, sid: string): { rt: ExecutionRuntime; seen: string[] } {
   const queues = Object.fromEntries(Object.entries(script).map(([k, v]) => [k, [...v]]))
   const seen: string[] = []

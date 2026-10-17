@@ -46,7 +46,7 @@ def preflight():
                 "dimensions": {"columns": 80, "rows": 24}, "enhancedPacketHex": received.hex(),
                 "termiosRestored": True, "observedLocalFlags": observed_lflag,
                 "excludedKernelPendingInputFlag": pending_input,
-                "scope": "prerequisites only; no LCA key or workflow qualification"}
+                "scope": "prerequisites only; no Otter key or workflow qualification"}
     finally:
         os.close(master)
         os.close(slave)

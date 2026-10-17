@@ -76,7 +76,7 @@ async function expectUnsafeTurn(promise: Promise<unknown>, reason: UnsafeOpenCod
   )
   expect(error).toBeInstanceOf(UnsafeOpenCodeSystemChannel)
   expect(error).toMatchObject({
-    code: "LCA_UNSAFE_OPENCODE_SYSTEM_CHANNEL",
+    code: "OTTER_UNSAFE_OPENCODE_SYSTEM_CHANNEL",
     reason,
   })
 }
@@ -169,7 +169,7 @@ describe("OpenJev skill router package", () => {
     deps.config.skill_router.mode = "suggest"
     const p = part("Investigate this module and list the implementation steps.")
     await turn(await createNativeChatHook(), p)
-    expect(p.text).toContain("lca-skill-advice")
+    expect(p.text).toContain("otter-skill-advice")
     expect(readFileSync(target, "utf8")).toBe("sentinel")
     expect(JSON.stringify(logs)).toContain("skill.router persistence failed")
     expect(JSON.stringify(logs)).not.toContain(target)
@@ -213,8 +213,8 @@ describe("OpenJev skill router package", () => {
     const hook = await createNativeChatHook()
     const p = part("Investigate architecture and give numbered implementation steps.")
     await turn(hook, p)
-    expect(p.text).toContain("<lca-skill-advice>")
-    expect(p.text).not.toContain("<lca-mode")
+    expect(p.text).toContain("<otter-skill-advice>")
+    expect(p.text).not.toContain("<otter-mode")
     expect(readModeState(root, "s1")).toEqual(EMPTY_MODE)
     const firstRouteEvents = routingEvents()
     expect(firstRouteEvents.map((event) => event.event)).toEqual(["decision", "advice_applied"])
@@ -222,7 +222,7 @@ describe("OpenJev skill router package", () => {
     expect(firstRouteEvents[1].skill).toBe("plan")
     const routingBeforeReplay = readFileSync(routingLogPath(root, "s1"), "utf8")
     await expectUnsafeTurn(turn(hook, p), "stale-turn")
-    expect(p.text.split("<lca-skill-advice>")).toHaveLength(2)
+    expect(p.text.split("<otter-skill-advice>")).toHaveLength(2)
     expect(requests).toHaveLength(1)
     expect(readFileSync(routingLogPath(root, "s1"), "utf8")).toBe(routingBeforeReplay)
     expect(readModeState(root, "s1")).toEqual(EMPTY_MODE)
@@ -326,7 +326,7 @@ describe("OpenJev skill router package", () => {
   test("missing, mismatched and escaping skill files are excluded", async () => {
     rmSync(join(root, ".opencode", "skills", "plan"), { recursive: true })
     expect((await createRouter().recommend("s", "a", "Investigate")).reason).toBe("no_candidates")
-    const external = mkdtempSync(join(tmpdir(), "lca-external-"))
+    const external = mkdtempSync(join(tmpdir(), "otter-external-"))
     try {
       writeFileSync(join(external, "SKILL.md"), "---\nname: plan\ndescription: External\n---\n")
       symlinkSync(external, join(root, ".opencode", "skills", "plan"))
@@ -437,8 +437,8 @@ describe("OpenJev skill router package", () => {
     await turn(hook, part("/stop", "stop"))
     release()
     await pending
-    expect(p.text).not.toContain("lca-skill-advice")
-    expect(other.text).not.toContain("lca-skill-advice")
+    expect(p.text).not.toContain("otter-skill-advice")
+    expect(other.text).not.toContain("otter-skill-advice")
     expect(readModeState(root, "s1").stopReason).toBe("user_cancel")
     expect(routingEvents().map((event) => event.reason)).toEqual(["aborted"])
     expect(routingEvents("s2").map((event) => event.reason)).toEqual(["busy"])
@@ -457,7 +457,7 @@ describe("OpenJev skill router package", () => {
 
   test("an escaping symlink under .agents/skills is excluded like under .opencode/skills", async () => {
     rmSync(join(root, ".opencode", "skills", "plan"), { recursive: true })
-    const external = mkdtempSync(join(tmpdir(), "lca-external-agents-"))
+    const external = mkdtempSync(join(tmpdir(), "otter-external-agents-"))
     try {
       writeFileSync(join(external, "SKILL.md"), "---\nname: plan\ndescription: External\n---\n")
       mkdirSync(join(root, ".agents", "skills"), { recursive: true })

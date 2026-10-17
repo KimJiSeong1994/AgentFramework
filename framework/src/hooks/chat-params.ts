@@ -40,12 +40,12 @@ export function createChatParamsHook(deps: HookDeps): NonNullable<Hooks["chat.pa
     const bound = policy.snapshotForSession(input.sessionID)
     if (!isRole(agent)) {
       if (bound || getOwnedSession(deps.worktree, input.sessionID)) {
-        throw new Error("lca: unknown role cannot dispatch in an owned session")
+        throw new Error("otter: unknown role cannot dispatch in an owned session")
       }
       return
     }
     if (isWorkflowReadOnlyRole(agent) && !bound) {
-      throw new Error("lca: workflow roles require a code-owned execution binding")
+      throw new Error("otter: workflow roles require a code-owned execution binding")
     }
     const snapshot = bound ?? policy.resolve(agent)
     if (snapshot.role !== agent) throw new Error(`Session ${input.sessionID} has a ${snapshot.role} policy but OpenCode selected ${agent}`)

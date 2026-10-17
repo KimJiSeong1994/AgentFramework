@@ -72,7 +72,7 @@ function writeTargets(tool: string, args: Record<string, unknown>): string[] {
   return []
 }
 
-// Raw wiki sources are immutable once registered; only `scripts/lca-wiki.ts register` may write under knowledge/raw/.
+// Raw wiki sources are immutable once registered; only `scripts/otter-wiki.ts register` may write under knowledge/raw/.
 // bash is not parsed; lint's byte-integrity check is the backstop for anything written outside these tools.
 export function wikiRawTarget(deps: HookDeps, tool: string, args: unknown): string | null {
   if (!args || typeof args !== "object") return null
@@ -81,7 +81,7 @@ export function wikiRawTarget(deps: HookDeps, tool: string, args: unknown): stri
 
 // §5.4 planning boundary allowlist: read-only tools while the owning session's workflow is planning/reviewing/
 // pending_approval or stuck(plan_invalid|no_submission). bash is allowed subject to bashPolicyProblem.
-const BOUNDARY_ALLOWED_TOOLS = new Set(["read", "glob", "grep", "list", "skill", "todowrite", "todoread", "lca_flow", "bash"])
+const BOUNDARY_ALLOWED_TOOLS = new Set(["read", "glob", "grep", "list", "skill", "todowrite", "todoread", "otter_flow", "bash"])
 const BOUNDARY_PHASES = new Set<Phase>(["planning", "reviewing", "pending_approval"])
 // While an approved plan executes, main may read, inspect with read-only bash, and resume the queue; writes go
 // through the workers only.
@@ -127,7 +127,7 @@ export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.ex
     const call = await admitOpenCodeToolCall(deps, input, output.args)
     if (!call) return
     await beforeOpenCodeSkillTool(deps, call, output.args)
-    if (!openCodeToolCallArgumentsMatch(deps, call, output.args)) throw new Error("lca: tool arguments or authority changed before dispatch")
+    if (!openCodeToolCallArgumentsMatch(deps, call, output.args)) throw new Error("otter: tool arguments or authority changed before dispatch")
     const observe = (status: ToolObservationStatus) => recordToolObservation(deps.worktree, {
       name: input.tool,
       callID: input.callID,
@@ -145,28 +145,28 @@ export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.ex
       const problem = reviewToolCapProblem(input.sessionID, deps.config.flow.review_max_tool_calls)
       if (problem) {
         deps.log("blocked tool in plan review session (tool-call cap)", { sessionID: input.sessionID, tool: input.tool })
-        deny(new Error(`lca: ${problem}`))
+        deny(new Error(`otter: ${problem}`))
       }
     }
 
     if (wikiRawOn && wikiRawTarget(deps, input.tool, output.args)) {
       deps.log("blocked write to knowledge/raw", { sessionID: input.sessionID, tool: input.tool })
-      deny(new Error("lca: raw wiki sources are immutable; use `bun scripts/lca-wiki.ts register`."))
+      deny(new Error("otter: raw wiki sources are immutable; use `bun scripts/otter-wiki.ts register`."))
     }
 
     const bound = policyForOpenCodeSession(deps, input.sessionID)
     if (!bound && effectiveHold(deps.worktree, input.sessionID)) {
-      deny(new Error("lca: session held; explicit owner Resume is required before tool dispatch"))
+      deny(new Error("otter: session held; explicit owner Resume is required before tool dispatch"))
     }
     if (!bound) {
       const epoch = admissionEpoch(deps.worktree, input.sessionID)
-      if (!epoch) deny(new Error("lca: live tool admission epoch is missing"))
+      if (!epoch) deny(new Error("otter: live tool admission epoch is missing"))
       captureToolEpoch(deps.worktree, input.sessionID, input.callID, epoch!)
     }
     if (bound) {
       const decision = bound.beforeTool({ type: "tool-before", sessionID: input.sessionID, callID: input.callID, toolID: input.callID, name: input.tool, input: output.args })
       if (!decision.allow) deny(new Error(decision.reason))
-      if (!openCodeToolCallArgumentsMatch(deps, call, output.args)) deny(new Error("lca: tool authority changed during policy admission"))
+      if (!openCodeToolCallArgumentsMatch(deps, call, output.args)) deny(new Error("otter: tool authority changed during policy admission"))
       if (input.tool === "bash") markOpenCodeProcessRiskForSession(deps, input.sessionID)
       observe("running")
       return
@@ -191,7 +191,7 @@ export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.ex
           if (wf?.sessionID === input.sessionID) {
             appendWorkflowEvent(deps, wf, "boundary_denied", { tool: input.tool, phase: wf.phase })
           }
-          deny(new Error("lca: interactive mode is read-only without an owned active plan workflow; /cancel does not enable direct edits."))
+          deny(new Error("otter: interactive mode is read-only without an owned active plan workflow; /cancel does not enable direct edits."))
         }
       }
     }
@@ -202,7 +202,7 @@ export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.ex
         const engineRefusal = workflowEngineRefusal(wf, getOpenCodeRuntime(deps).host.identity.engine)
         if (engineRefusal && input.tool === "delegate") {
           deps.log("blocked delegate without matching workflow engine identity", { sessionID: input.sessionID, workflowID: wf.id, reason: engineRefusal })
-          deny(new Error(`lca: ${engineRefusal}`))
+          deny(new Error(`otter: ${engineRefusal}`))
         }
         if (inPlanningBoundary(wf)) {
           const args = (output.args ?? {}) as Record<string, unknown>
@@ -213,25 +213,25 @@ export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.ex
           if (!ok) {
             deps.log("blocked tool in planning boundary", { sessionID: input.sessionID, tool: input.tool })
             appendWorkflowEvent(deps, wf, "boundary_denied", { tool: input.tool })
-            deny(new Error('lca: planning phase — read-only. Submit the plan with lca_flow op:"plan", or /cancel.'))
+            deny(new Error('otter: planning phase — read-only. Submit the plan with otter_flow op:"plan", or /cancel.'))
           }
         } else if (wf.phase === "executing") {
           const args = (output.args ?? {}) as Record<string, unknown>
           if (input.tool === "delegate") {
             if (args.resume !== true) {
               deps.log("blocked delegate in executing without forced resume", { sessionID: input.sessionID })
-              deny(new Error("lca: an approved plan is running; call delegate with resume:true only"))
+              deny(new Error("otter: an approved plan is running; call delegate with resume:true only"))
             }
             // The canonical call proof binds exact arguments; never silently rewrite them after admission.
             if (Array.isArray(args.tasks) && args.tasks.length > 0) {
               appendWorkflowEvent(deps, wf, "boundary_denied", { tool: "delegate", reason: "resume includes tasks" })
-              deny(new Error("lca: delegate resume must omit tasks; retry with the exact approved resume arguments"))
+              deny(new Error("otter: delegate resume must omit tasks; retry with the exact approved resume arguments"))
             }
           } else if (!EXECUTING_ALLOWED_TOOLS.has(input.tool) || (input.tool === "bash" && bashPolicyProblem(typeof args.command === "string" ? args.command : "") !== null)) {
             // The approved plan runs through the worker queue only; main must not implement it directly.
             deps.log("blocked tool while an approved plan is executing", { sessionID: input.sessionID, tool: input.tool })
             appendWorkflowEvent(deps, wf, "boundary_denied", { tool: input.tool, phase: "executing" })
-            deny(new Error("lca: an approved plan is running; call delegate with resume:true (workers implement it), or /cancel."))
+            deny(new Error("otter: an approved plan is running; call delegate with resume:true (workers implement it), or /cancel."))
           }
         }
       }
@@ -242,7 +242,7 @@ export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.ex
       const agent = info?.agent
       if (agent && agent !== MAIN_AGENT) {
         deps.log("blocked task from non-main agent", { sessionID: input.sessionID, agent })
-        deny(new Error(`lca: the task tool is only available to the ${MAIN_AGENT} agent (current agent: ${agent}). Do the work directly.`))
+        deny(new Error(`otter: the task tool is only available to the ${MAIN_AGENT} agent (current agent: ${agent}). Do the work directly.`))
       }
     }
 
@@ -253,7 +253,7 @@ export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.ex
         deny(new Error(repeatBlockMessage(input.tool, res.count, res.lastError)))
       }
     }
-    if (!openCodeToolCallArgumentsMatch(deps, call, output.args)) deny(new Error("lca: tool authority changed before effect"))
+    if (!openCodeToolCallArgumentsMatch(deps, call, output.args)) deny(new Error("otter: tool authority changed before effect"))
     observe("running")
   }
 }

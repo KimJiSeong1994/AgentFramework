@@ -26,10 +26,10 @@ const ANCHOR_NAME = "soak-manifest.anchor"
 const LOCK_NAME = "soak.lock"
 const BINDING_NAME = "soak-binding.json"
 const SNAPSHOTS_NAME = "snapshots"
-const MANIFEST_SCHEMA = "lca.soak-manifest.v2"
-const LEGACY_MANIFEST_SCHEMA = "lca.soak-manifest.v1"
-const FIXTURE_SCHEMA = "lca.soak-fixtures.v1"
-const BINDING_SCHEMA = "lca.soak-binding.v1"
+const MANIFEST_SCHEMA = "otter.soak-manifest.v2"
+const LEGACY_MANIFEST_SCHEMA = "otter.soak-manifest.v1"
+const FIXTURE_SCHEMA = "otter.soak-fixtures.v1"
+const BINDING_SCHEMA = "otter.soak-binding.v1"
 const ZERO_SHA256 = "0".repeat(64)
 const DEFAULT_TIMEOUT_MS = 30 * 60_000
 const MAX_TIMEOUT_MS = 60 * 60_000
@@ -214,11 +214,11 @@ function validateInvocationArgv(invocation: InvocationSpec, lineage: string, ind
   if (optionValue(invocation.argv, "--receipt") !== invocation.receiptPath) fail(`${label} argv must contain its exact --receipt path once`)
   if (optionValue(invocation.argv, "--verifier") !== "linux-production") fail(`${label} argv must select linux-production explicitly`)
   const sessionFlags = invocation.argv.filter(arg => arg === "--session").length
-  const sessionMarkers = invocation.argv.filter(arg => arg === "@lca-soak-parent-session").length
+  const sessionMarkers = invocation.argv.filter(arg => arg === "@otter-soak-parent-session").length
   if (invocation.scenario === "resume") {
-    if (sessionFlags !== 1 || sessionMarkers !== 1 || optionValue(invocation.argv, "--session") !== "@lca-soak-parent-session" ||
+    if (sessionFlags !== 1 || sessionMarkers !== 1 || optionValue(invocation.argv, "--session") !== "@otter-soak-parent-session" ||
       invocation.resumeSession?.fromInvocationIndex !== 1) {
-      fail(`${label} resume must use the validated @lca-soak-parent-session argv value and source invocation 1`)
+      fail(`${label} resume must use the validated @otter-soak-parent-session argv value and source invocation 1`)
     }
   } else if (sessionFlags !== 0 || sessionMarkers !== 0 || invocation.resumeSession !== undefined) {
     fail(`${label} only resume may declare a parent session argument`)
@@ -1152,8 +1152,8 @@ function parentSessionID(receipt: unknown): string | null {
 export function materializeArgv(invocation: InvocationSpec, sessionID: string | null): string[] {
   if (invocation.scenario !== "resume") return [...invocation.argv]
   if (!sessionID || !isSessionID(sessionID)) fail("resume requires a validated parentSessionID from the earlier immutable receipt snapshot")
-  const markerIndex = invocation.argv.indexOf("@lca-soak-parent-session")
-  if (markerIndex < 1 || invocation.argv[markerIndex - 1] !== "--session" || invocation.argv.lastIndexOf("@lca-soak-parent-session") !== markerIndex) {
+  const markerIndex = invocation.argv.indexOf("@otter-soak-parent-session")
+  if (markerIndex < 1 || invocation.argv[markerIndex - 1] !== "--session" || invocation.argv.lastIndexOf("@otter-soak-parent-session") !== markerIndex) {
     fail("resume session marker is not a single argv value after --session")
   }
   const argv = [...invocation.argv]
@@ -1481,7 +1481,7 @@ function parseArgs(argv: string[]): { evidenceRoot: string; vmC: string; fixture
   const vmC = values.get("--vm-c")
   const fixturesManifest = values.get("--fixtures-manifest")
   if (!evidenceRoot || !vmC || !fixturesManifest || !isAbsolute(evidenceRoot) || !isAbsolute(fixturesManifest)) {
-    fail("usage: bun scripts/lca-soak-supervisor.ts --evidence-root ABS --vm-c SSH_TARGET --fixtures-manifest ABS [--restart]")
+    fail("usage: bun scripts/otter-soak-supervisor.ts --evidence-root ABS --vm-c SSH_TARGET --fixtures-manifest ABS [--restart]")
   }
   return { evidenceRoot, vmC: validateSshTarget(vmC), fixturesManifest, restart }
 }
@@ -1597,14 +1597,14 @@ async function main(): Promise<void> {
   let args: ReturnType<typeof parseArgs>
   try { args = parseArgs(process.argv.slice(2)) }
   catch (error) {
-    console.error(`lca-soak-supervisor: ${error instanceof Error ? error.message : "invalid arguments"}`)
+    console.error(`otter-soak-supervisor: ${error instanceof Error ? error.message : "invalid arguments"}`)
     process.exitCode = 2
     return
   }
   let fixtures: FixtureManifest
   try { fixtures = readFixtureManifest(args.fixturesManifest) }
   catch (error) {
-    console.error(`lca-soak-supervisor: ${error instanceof Error ? error.message : "invalid fixtures manifest"}`)
+    console.error(`otter-soak-supervisor: ${error instanceof Error ? error.message : "invalid fixtures manifest"}`)
     process.exitCode = 2
     return
   }
@@ -1612,14 +1612,14 @@ async function main(): Promise<void> {
   let evidenceDir: string
   try { evidenceDir = args.restart ? restartEvidenceDirectory(args.evidenceRoot) : createEvidenceDirectory(args.evidenceRoot) }
   catch (error) {
-    console.error(`lca-soak-supervisor: ${error instanceof Error ? error.message : "evidence directory unavailable"}`)
+    console.error(`otter-soak-supervisor: ${error instanceof Error ? error.message : "evidence directory unavailable"}`)
     process.exitCode = 2
     return
   }
   if (args.restart) {
     try { preflightRestart(evidenceDir, binding, false) }
     catch (error) {
-      console.error(`lca-soak-supervisor: ${error instanceof Error ? error.message : "restart binding preflight failed"}`)
+      console.error(`otter-soak-supervisor: ${error instanceof Error ? error.message : "restart binding preflight failed"}`)
       process.exitCode = 2
       return
     }
@@ -1627,7 +1627,7 @@ async function main(): Promise<void> {
   let lock: SoakLock
   try { lock = acquireLock(evidenceDir) }
   catch (error) {
-    console.error(`lca-soak-supervisor: ${error instanceof Error ? error.message : "soak lock unavailable"}`)
+    console.error(`otter-soak-supervisor: ${error instanceof Error ? error.message : "soak lock unavailable"}`)
     process.exitCode = 2
     return
   }
@@ -1637,7 +1637,7 @@ async function main(): Promise<void> {
     const unexpected = await runSupervisor(evidenceDir, binding, restartState)
     process.exitCode = stopSignal ? 3 : unexpected > 0 ? 3 : 0
   } catch (error) {
-    console.error(`lca-soak-supervisor: ${error instanceof Error ? error.message : "supervisor failed; evidence preserved"}`)
+    console.error(`otter-soak-supervisor: ${error instanceof Error ? error.message : "supervisor failed; evidence preserved"}`)
     process.exitCode = 2
   } finally {
     releaseLock(evidenceDir, lock)

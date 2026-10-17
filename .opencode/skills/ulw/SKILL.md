@@ -7,7 +7,7 @@ compatibility: opencode
 # ulw (ultrawork) procedure
 
 Triggered by `ultrawork`, `ulw`, `울트라워크`, `끝까지 해`, `멈추지 말고`. The short form is appended to each
-user message as `<lca-mode name="ulw">`; this file is the long form. Read it once, then act.
+user message as `<otter-mode name="ulw">`; this file is the long form. Read it once, then act.
 
 You do not do the work yourself. The framework runs each task in its own worker session, runs the task's
 verify command, has a reviewer judge the diff, and gives you one report back.

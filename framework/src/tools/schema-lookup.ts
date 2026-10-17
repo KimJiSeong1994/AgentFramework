@@ -15,9 +15,9 @@ export function createSchemaLookupTool(deps: HookDeps): ToolDefinition {
     description: SCHEMA_LOOKUP_DESCRIPTION,
     args: { table: z.string().max(120).optional().describe("table name; omit for the list") },
     async execute(args, ctx) {
-      if (ctx.agent && !DATA_AGENTS.has(ctx.agent)) throw new Error(`lca: schema_lookup is only available to the data agents (current agent: ${ctx.agent}).`)
+      if (ctx.agent && !DATA_AGENTS.has(ctx.agent)) throw new Error(`otter: schema_lookup is only available to the data agents (current agent: ${ctx.agent}).`)
       const schema = loadSchema(deps.worktree, deps.config.data.schema_file)
-      if (!schema) throw new Error(`lca: schema file ${deps.config.data.schema_file} not found in the worktree; generate it with scripts/lca-schema-extract.py`)
+      if (!schema) throw new Error(`otter: schema file ${deps.config.data.schema_file} not found in the worktree; generate it with scripts/otter-schema-extract.py`)
       const text = args.table ? describeTable(schema, args.table.trim()) : tableList(schema)
       return { title: args.table ? `schema: ${args.table}` : "schema: tables", output: text }
     },

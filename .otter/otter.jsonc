@@ -1,5 +1,5 @@
 {
-  // lca project config, merged over ~/.config/lca/lca.jsonc (project wins per key).
+  // otter project config, merged over ~/.config/otter/otter.jsonc (project wins per key).
   // Every key defaults to framework/src/config.ts DEFAULT_CONFIG; list ONLY what this project overrides so that
   // default changes (budgets, delegate.*) are not shadowed by a stale copy here.
   "disabled_hooks": [],
@@ -9,7 +9,7 @@
   "skill_observation": {
     "enabled": false,
     "campaign_id": "skill-evaluation-p1-20261002",
-    "owner_root": "/Users/gimjiseong/orca/projects/AgentFramework",
+    "owner_root": ".",
     "owner_binding": "cd4d9d661baf48eb48fd0a20c6bdd015daba10b9389e6ed2d25c6ea8ef08948f"
   },
   // Arrays replace defaults; DEFAULT_CONFIG.skills is unchanged.

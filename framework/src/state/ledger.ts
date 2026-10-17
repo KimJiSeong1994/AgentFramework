@@ -1,6 +1,6 @@
 // Task ledger (stage 2): the single source of truth for delegated work.
 // Control plane = <state root>/sessions/<id>/ledger.json (outside the worktree, see store.ts; atomic writes, one
-// writer: this plugin). Data plane = <worktree>/.lca/handoffs/<id>/task-<n>.md (10-20 lines per finished task, read
+// writer: this plugin). Data plane = <worktree>/.otter/handoffs/<id>/task-<n>.md (10-20 lines per finished task, read
 // by humans; the next worker's prompt gets only a short status+files summary). Every orchestration decision reads
 // this file, never model text.
 import { createHash } from "node:crypto"
@@ -74,7 +74,7 @@ export function ledgerPath(worktree: string, sessionID: string): string {
 }
 
 export function handoffDir(worktree: string, sessionID: string): string {
-  return join(worktree, ".lca", "handoffs", sessionID)
+  return join(worktree, ".otter", "handoffs", sessionID)
 }
 
 export function emptyLedger(sessionID: string, now = Date.now()): Ledger {
@@ -372,15 +372,15 @@ export function writeHandoff(worktree: string, sessionID: string, task: LedgerTa
   }
   if (task.blocked) lines.push(`- worker reports: ${task.blocked}`)
   mkdirSync(dir, { recursive: true })
-  // never write through a symlink a worker may have planted at .lca or .lca/handoffs (second review S7)
+  // never write through a symlink a worker may have planted at .otter or .otter/handoffs (second review S7)
   const root = realpathSync.native(worktree)
   const real = realpathSync.native(dir)
   if (real !== root && !real.startsWith(root + "/")) throw new Error(`handoff dir escapes the worktree: ${dir}`)
-  for (const part of [join(worktree, ".lca"), join(worktree, ".lca", "handoffs"), dir]) {
+  for (const part of [join(worktree, ".otter"), join(worktree, ".otter", "handoffs"), dir]) {
     if (lstatSync(part).isSymbolicLink()) throw new Error(`handoff path is a symlink: ${part}`)
   }
-  // other repositories will not have .lca/handoffs in .gitignore: make the directory ignore itself
-  const ignore = join(worktree, ".lca", "handoffs", ".gitignore")
+  // other repositories will not have .otter/handoffs in .gitignore: make the directory ignore itself
+  const ignore = join(worktree, ".otter", "handoffs", ".gitignore")
   if (!existsSync(ignore)) writeFileSync(ignore, "*\n")
   const tmp = `${file}.${process.pid}.tmp`
   writeFileSync(tmp, lines.join("\n") + "\n")

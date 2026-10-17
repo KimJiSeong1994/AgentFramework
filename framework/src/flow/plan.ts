@@ -12,7 +12,7 @@ export type Plan = { goal: string; steps: PlanStep[]; risks: string[]; revision:
 export const PLAN_LIMITS = { minSteps: 3, maxSteps: 10, title: 120, goal: 300, detail: 1000, minRisks: 1, maxRisks: 5 }
 /** Ultragoal units are 1-10 steps; the only limits other than PLAN_LIMITS that validatePlan accepts. */
 export const UNIT_LIMITS = { minSteps: 1, maxSteps: 10 } as const
-const FORBIDDEN_ROOTS = [".git", ".lca", "knowledge/raw"]
+const FORBIDDEN_ROOTS = [".git", ".otter", "knowledge/raw"]
 
 function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : ""
@@ -106,7 +106,7 @@ export function renderPlanMd(wfId: string, plan: Plan, review?: ReviewView): str
   const lines = [
     `# Plan ${wfId} (revision ${plan.revision})`,
     "",
-    "> Rendered by lca from the canonical plan. Editing this file does not change the approved plan; an edited file blocks /approve.",
+    "> Rendered by otter from the canonical plan. Editing this file does not change the approved plan; an edited file blocks /approve.",
     "",
     `**Goal:** ${plan.goal}`,
     "",
@@ -129,7 +129,7 @@ export function renderPlanMd(wfId: string, plan: Plan, review?: ReviewView): str
 }
 
 export function planMdPath(wfId: string): string {
-  return `.lca/plans/${wfId}.md`
+  return `.otter/plans/${wfId}.md`
 }
 
 /** Plan steps -> delegate tasks, 1:1 in order; the step's files are carried in the task detail. */

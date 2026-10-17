@@ -13,8 +13,8 @@ function fixture() {
   const home = mkdtempSync(join(tmpdir(), "run-state-"))
   const worktree = join(home, "worktree")
   mkdirSync(worktree)
-  const envKeys = ["HOME", "XDG_STATE_HOME", "LCA_STATE_HOME"] as const
-  const prior = { HOME: process.env.HOME, XDG_STATE_HOME: process.env.XDG_STATE_HOME, LCA_STATE_HOME: process.env.LCA_STATE_HOME }
+  const envKeys = ["HOME", "XDG_STATE_HOME", "OTTER_STATE_HOME"] as const
+  const prior = { HOME: process.env.HOME, XDG_STATE_HOME: process.env.XDG_STATE_HOME, OTTER_STATE_HOME: process.env.OTTER_STATE_HOME }
   const restoreEnv = () => {
     for (const key of envKeys) {
       if (prior[key] === undefined) delete process.env[key]
@@ -23,7 +23,7 @@ function fixture() {
   }
   process.env.HOME = home
   process.env.XDG_STATE_HOME = home
-  process.env.LCA_STATE_HOME = home
+  process.env.OTTER_STATE_HOME = home
   let authority: ReturnType<typeof tempExecutionAuthority> | undefined
   let store: ReturnType<typeof createExecutionRunStore>
   try {
@@ -53,7 +53,7 @@ const baseIntent = (claim: ReturnType<ReturnType<typeof createExecutionRunStore>
 const intent = (claim: ReturnType<ReturnType<typeof createExecutionRunStore>["claim"]>, executionId: string) => ({ ...baseIntent(claim, executionId), kind: "host" as const, engine: "opencode", profile: "legacy-unowned" as const })
 const verifierInput = { inputSnapshotID: "snapshot-1", inputDigest: "a".repeat(64), deadlineAt: 100000, maxOutputChars: 4000 }
 const verifierIntent = (claim: ReturnType<ReturnType<typeof createExecutionRunStore>["claim"]>, executionId: string, profile: "legacy-unowned" | "linux-single-use" = "legacy-unowned") => ({ ...baseIntent(claim, executionId), kind: "verifier" as const, profile, ...verifierInput })
-const verifierRef = (executionID: string, profile: "legacy-unowned" | "linux-single-use"): VerificationReference => ({ kind: "verifier", executionID, profile, invocationID: `invocation-${executionID}`, ...verifierInput, ...(profile === "linux-single-use" ? { unit: "lca-verifier.service", bootID: "boot" } : {}) })
+const verifierRef = (executionID: string, profile: "legacy-unowned" | "linux-single-use"): VerificationReference => ({ kind: "verifier", executionID, profile, invocationID: `invocation-${executionID}`, ...verifierInput, ...(profile === "linux-single-use" ? { unit: "otter-verifier.service", bootID: "boot" } : {}) })
 const verification = (reference: VerificationReference): VerificationResult => ({ profile: reference.profile, parentExit: 0, timedOut: false, cancelled: false, isolationEstablished: reference.profile === "linux-single-use", domainState: reference.profile === "linux-single-use" ? "empty" : "unknown", integrity: "unchanged", output: "ok", proof: { reference, evidence: "boundary verified" } })
 
 test("run state rejects stale generations and ACK does not establish quiescence", () => {
@@ -1093,7 +1093,7 @@ store.registerIntent(claim, {
 });
 const reference = {
   kind: "verifier", executionID, profile: "linux-single-use", invocationID: "invocation-boot-change",
-  ...input, unit: "lca-verifier.service", bootID: "boot-A",
+  ...input, unit: "otter-verifier.service", bootID: "boot-A",
 };
 const result = {
   profile: "linux-single-use", parentExit: 0, timedOut: false, cancelled: false,
@@ -1135,7 +1135,7 @@ console.log(JSON.stringify({
 }));`
     const env = {
       PATH: process.env.PATH ?? "", HOME: join(f.home, "child-home"),
-      XDG_STATE_HOME: join(f.home, "child-xdg"), LCA_STATE_HOME: join(f.home, "child-lca"),
+      XDG_STATE_HOME: join(f.home, "child-xdg"), OTTER_STATE_HOME: join(f.home, "child-otter"),
       RUN_STATE_WORKTREE: f.worktree,
     }
     const child = Bun.spawn([process.execPath, "-e", script], {
@@ -1227,7 +1227,7 @@ catch { console.log("refused:" + process.pid); }`
         PATH: process.env.PATH ?? "",
         HOME: join(f.home, `child-home-${index}`),
         XDG_STATE_HOME: join(f.home, `child-xdg-${index}`),
-        LCA_STATE_HOME: join(f.home, `child-lca-${index}`),
+        OTTER_STATE_HOME: join(f.home, `child-otter-${index}`),
         RUN_STATE_WORKTREE: f.worktree,
       }
       return Bun.spawn([process.execPath, "-e", script], { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" })

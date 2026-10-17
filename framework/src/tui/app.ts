@@ -69,7 +69,7 @@ export class TuiApp implements Terminal {
   private pending?: Pending
   private choice?: Choice
   private control?: (action: TerminalControl) => void
-  private status = "LCA · selection"
+  private status = "Otter · selection"
   private workflow: string | undefined
   private viewIdentity?: ViewIdentity
   private viewFacts?: InteractiveViewFacts
@@ -369,7 +369,7 @@ export class TuiApp implements Terminal {
     const selection = this.viewFacts ? selectionLabel(this.viewFacts.selection) : undefined
     const keys = this.separator()
     return {
-      title: "LCA · local coding agent",
+      title: "Otter · local coding agent",
       left: ["", ...logo, "", "plan · approve · prove", "", selection ? `${ascii ? "*" : "⬢"} ${selection}` : "No model is selected."],
       sections: this.interactionContext === "unselected"
         ? [
@@ -402,7 +402,7 @@ export class TuiApp implements Terminal {
         lines: [
         "The retained history could not be read safely.",
         "New messages, queued input and approval decisions are blocked.",
-        "Ctrl+D exits. Inspect read-only lca status before reopening.",
+        "Ctrl+D exits. Inspect read-only otter status before reopening.",
         "Active work is not confirmed stopped.",
         ],
       }
@@ -847,7 +847,7 @@ export class TuiApp implements Terminal {
           this.editor.setText(selectionOrigin.text)
           this.editor.cursor = selectionOrigin.cursor
         }
-        this.status = text === undefined ? "Input closed" : "LCA · working · Escape cancels"
+        this.status = text === undefined ? "Input closed" : "Otter · working · Escape cancels"
         this.hostWorking = text !== undefined
         resolve(text)
         this.draw()
@@ -860,7 +860,7 @@ export class TuiApp implements Terminal {
   }
 
   readLine(prompt: string, signal = new AbortController().signal): Promise<string | undefined> {
-    return this.readInput({ title: "LCA", hint: "Enter select", prompt, kind: "selection" }, signal)
+    return this.readInput({ title: "Otter", hint: "Enter select", prompt, kind: "selection" }, signal)
   }
 
   choose(title: string, values: readonly string[], signal: AbortSignal, presentation: ChoicePresentation = { kind: "plain" }): Promise<number | undefined> {

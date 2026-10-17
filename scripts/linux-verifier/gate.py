@@ -35,18 +35,18 @@ from dataclasses import dataclass
 from typing import Any, Iterator
 
 
-PROTOCOL = "lca.linux-verifier.v1"
-PROFILE_SCHEMA = "lca.linux-verifier.profile.v2"
-RECORD_SCHEMA = "lca.linux-verifier.record.v1"
-RECEIPT_SCHEMA = "lca.linux-verifier.retirement.v1"
-UNIT = "lca-verifier.service"
-GATE_UNIT = "lca-verifier-gate.service"
-CONTROL_SOCKET = "/run/lca-verifier/control.sock"
-RUNNER_SOCKET = "/run/lca-verifier/runner.sock"
-PROFILE_PATH = "/etc/lca-verifier/profile.json"
-JOURNALD_DROPIN = "/etc/systemd/journald.conf.d/lca-verifier.conf"
-HELPER_DIR = "/usr/local/libexec/lca-verifier"
-STATE_DIR = "/var/lib/lca-verifier"
+PROTOCOL = "otter.linux-verifier.v1"
+PROFILE_SCHEMA = "otter.linux-verifier.profile.v2"
+RECORD_SCHEMA = "otter.linux-verifier.record.v1"
+RECEIPT_SCHEMA = "otter.linux-verifier.retirement.v1"
+UNIT = "otter-verifier.service"
+GATE_UNIT = "otter-verifier-gate.service"
+CONTROL_SOCKET = "/run/otter-verifier/control.sock"
+RUNNER_SOCKET = "/run/otter-verifier/runner.sock"
+PROFILE_PATH = "/etc/otter-verifier/profile.json"
+JOURNALD_DROPIN = "/etc/systemd/journald.conf.d/otter-verifier.conf"
+HELPER_DIR = "/usr/local/libexec/otter-verifier"
+STATE_DIR = "/var/lib/otter-verifier"
 RECORD_DIR = f"{STATE_DIR}/records"
 INPUT_DIR = f"{STATE_DIR}/inputs"
 PRIVATE_DIR = f"{STATE_DIR}/private"
@@ -61,7 +61,7 @@ JOURNALCTL = "/usr/bin/journalctl"
 SYSTEMD_ANALYZE = "/usr/bin/systemd-analyze"
 OPENSSL = "/usr/bin/openssl"
 GIT = "/usr/bin/git"
-CGROUP_PATH = "/lca.slice/lca-verifier.service"
+CGROUP_PATH = "/otter.slice/otter-verifier.service"
 STOP_MESSAGE_ID = "9d1aaa27d60140bd96365438aad20286"
 MAX_CONTROL_BYTES = 48 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
@@ -101,9 +101,9 @@ REQUIRED_PROFILE_FILES = {
     f"{HELPER_DIR}/client.py",
     f"/etc/systemd/system/{UNIT}",
     f"/etc/systemd/system/{GATE_UNIT}",
-    "/etc/systemd/system/lca.slice",
-    "/etc/polkit-1/rules.d/90-lca-verifier.rules",
-    "/etc/sudoers.d/00-lca-verifier-deny",
+    "/etc/systemd/system/otter.slice",
+    "/etc/polkit-1/rules.d/90-otter-verifier.rules",
+    "/etc/sudoers.d/00-otter-verifier-deny",
     JOURNALD_DROPIN,
 }
 _PROCESS_STATE_MUTEX = threading.RLock()
@@ -376,7 +376,7 @@ def _git(repo: str, args: list[str], *, data: bytes | None = None, timeout: int 
 
 def _new_git_repo(tree_id: str) -> str:
     object_format = "sha256" if len(tree_id) == 64 else "sha1"
-    repo = tempfile.mkdtemp(prefix="lca-git-tree-", dir=GIT_TMP_DIR)
+    repo = tempfile.mkdtemp(prefix="otter-git-tree-", dir=GIT_TMP_DIR)
     try:
         result = subprocess.run(
             [GIT, "init", "--bare", "--quiet", "--template=/dev/null", f"--object-format={object_format}", repo],
@@ -681,7 +681,7 @@ def _assert_fixed_unit(profile: dict[str, Any], *, check_hashes: bool = True) ->
         "NeedDaemonReload": "no",
         "User": verifier.pw_name,
         "Group": verifier.pw_name,
-        "Slice": "lca.slice",
+        "Slice": "otter.slice",
         "KillMode": "control-group",
         "Delegate": "no",
         "Restart": "no",
@@ -813,7 +813,7 @@ def _load_profile(*, check_hashes: bool = True) -> dict[str, Any]:
         raise GateError("root verifier role accounts are unavailable") from exc
     if (
         controller.pw_uid == 0
-        or verifier.pw_name != "lca-verifier"
+        or verifier.pw_name != "otter-verifier"
         or verifier.pw_uid == 0
         or verifier.pw_gid == 0
         or verifier.pw_shell not in {"/usr/sbin/nologin", "/bin/false"}
@@ -1235,7 +1235,7 @@ def _cleanup_orphan_directories(records: list[dict[str, Any]]) -> None:
         if stat.S_ISDIR(info.st_mode) and info.st_uid == 0:
             shutil.rmtree(path)
     for name in os.listdir(GIT_TMP_DIR):
-        if not name.startswith(("lca-git-", "receipt-sign-", "receipt-verify-")):
+        if not name.startswith(("otter-git-", "receipt-sign-", "receipt-verify-")):
             continue
         path = f"{GIT_TMP_DIR}/{name}"
         try:
@@ -1272,7 +1272,7 @@ def _cleanup_input_async(record: dict[str, Any]) -> None:
         with contextlib.suppress(OSError, GateError):
             _remove_input(cleanup_record)
 
-    threading.Thread(target=cleanup, name=f"lca-input-cleanup-{record['ticket']}", daemon=True).start()
+    threading.Thread(target=cleanup, name=f"otter-input-cleanup-{record['ticket']}", daemon=True).start()
 
 
 def _same_reference(left: Any, right: Any) -> bool:
@@ -1352,8 +1352,8 @@ def _open_bound_cgroup(path: str, expected_device: int | None = None, expected_i
     root_fd = slice_fd = directory_fd = events_fd = -1
     try:
         root_fd = os.open(CGROUP_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        slice_fd = os.open("lca.slice", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
-        directory_fd = os.open("lca-verifier.service", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=slice_fd)
+        slice_fd = os.open("otter.slice", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        directory_fd = os.open("otter-verifier.service", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=slice_fd)
         os.close(root_fd)
         os.close(slice_fd)
         root_fd = slice_fd = -1
@@ -1709,7 +1709,7 @@ def _quarantine_is_latched() -> bool:
 
 def _create_quarantine_latch(profile: dict[str, Any], boot_id: str | None, reasons: list[str]) -> None:
     content = _canonical_json({
-        "schema": "lca.linux-verifier.quarantine.v1",
+        "schema": "otter.linux-verifier.quarantine.v1",
         "bootEpoch": profile.get("bootEpoch"),
         "observedBootID": boot_id,
         "reasons": reasons,
@@ -1933,7 +1933,7 @@ class LinuxVerifierGate:
                 problems.append(f"Linux admission health reasons: {','.join(admission['reasons'])}")
             if _boot_id() == "":
                 raise GateError("boot identity is unavailable")
-            if not os.path.isfile("/sys/fs/cgroup/cgroup.controllers") or not os.path.isfile(f"{CGROUP_ROOT}/lca.slice/cgroup.kill"):
+            if not os.path.isfile("/sys/fs/cgroup/cgroup.controllers") or not os.path.isfile(f"{CGROUP_ROOT}/otter.slice/cgroup.kill"):
                 raise GateError("unified cgroup v2 cgroup.kill support is unavailable")
             if any(not os.path.isfile(path) or not os.access(path, os.X_OK) for path in (SYSTEMCTL, JOURNALCTL, OPENSSL, GIT)):
                 raise GateError("fixed host support tools are unavailable")
@@ -2277,7 +2277,7 @@ class LinuxVerifierGate:
             finished = threading.Event()
             with self._runtime_lock:
                 self._runtime[ticket] = (connection, handle, finished)
-            watcher = threading.Thread(target=self._watch_runner, args=(ticket,), name=f"lca-verifier-{ticket}", daemon=True)
+            watcher = threading.Thread(target=self._watch_runner, args=(ticket,), name=f"otter-verifier-{ticket}", daemon=True)
             watcher.start()
             with _exclusive_lock():
                 current = _load_record(ticket)
@@ -2470,7 +2470,7 @@ class LinuxVerifierGate:
                 return False
             finished = threading.Event()
             self._runtime[ticket] = (None, handle, finished)
-        watcher = threading.Thread(target=self._watch_retirement, args=(ticket,), name=f"lca-retire-{ticket}", daemon=True)
+        watcher = threading.Thread(target=self._watch_retirement, args=(ticket,), name=f"otter-retire-{ticket}", daemon=True)
         watcher.start()
         return True
 
@@ -3011,13 +3011,13 @@ class LinuxVerifierGate:
 
 def main() -> int:
     if not sys.platform.startswith("linux") or os.geteuid() != 0:
-        print("lca-verifier gate requires Linux root", file=sys.stderr)
+        print("otter-verifier gate requires Linux root", file=sys.stderr)
         return 1
     try:
         gate = LinuxVerifierGate()
         gate.serve_forever()
     except (GateError, OSError, UnknownState) as exc:
-        print(f"lca-verifier gate stopped: {str(exc)[:256]}", file=sys.stderr)
+        print(f"otter-verifier gate stopped: {str(exc)[:256]}", file=sys.stderr)
         return 1
     return 0
 

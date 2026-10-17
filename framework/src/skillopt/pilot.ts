@@ -155,7 +155,7 @@ export const EVIDENCE_FILES = [
   "knowledge/wiki/concepts/agent-operations-and-economics.md",
   "knowledge/wiki/concepts/agent-human-review-artifacts.md",
   PILOT_SKILL,
-  ".lca/lca.jsonc",
+  ".otter/otter.jsonc",
 ] as const
 
 export type SourceEntry = { path: string; sha256: string; bytes: number; kind: "raw" | "annotation" | "synthesis" | "contract" }
@@ -184,7 +184,7 @@ export function snapshotSources(worktree: string): SourceSnapshot {
   if (sha256(raw) !== RESEARCH_SOURCE || !annotation.includes("A13 정정") || !annotation.includes("ExitPlanTool")) {
     throw new SkillOptError("missing_source_correction")
   }
-  const config = parseJsonc<Record<string, unknown>>(contents.get(".lca/lca.jsonc")!.toString("utf8"))
+  const config = parseJsonc<Record<string, unknown>>(contents.get(".otter/otter.jsonc")!.toString("utf8"))
   const observation = config.skill_observation as Record<string, unknown> | undefined
   const router = config.skill_router as Record<string, unknown> | undefined
   const skills = config.skills as { allow?: unknown } | undefined

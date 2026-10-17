@@ -77,34 +77,34 @@ function linkedExecutionForSession(
     if (!record.vendorRef) continue
     let reference: unknown
     try { reference = JSON.parse(record.vendorRef) }
-    catch { throw new Error("lca: linked task execution reference is corrupt") }
+    catch { throw new Error("otter: linked task execution reference is corrupt") }
     if (reference && typeof reference === "object" && !Array.isArray(reference)
       && (reference as Record<string, unknown>).vendorSessionID === sessionID) {
       matches.push({ record, reference })
     }
   }
-  if (matches.length !== 1) throw new Error("lca: linked task has no unique execution owner")
+  if (matches.length !== 1) throw new Error("otter: linked task has no unique execution owner")
 
   const { record, reference } = matches[0]!
   if (!openCodeReference(reference, record.executionId)
     || record.kind !== "host" || record.engine !== "opencode" || record.profile !== "legacy-unowned") {
-    throw new Error("lca: linked task execution reference or profile is invalid")
+    throw new Error("otter: linked task execution reference or profile is invalid")
   }
   const boundary = record.boundaryRef
   if (!openCodeReference(boundary, record.executionId) || !sameOpenCodeReference(reference, boundary)) {
-    throw new Error("lca: linked task vendor reference does not match its execution identity")
+    throw new Error("otter: linked task vendor reference does not match its execution identity")
   }
   if (!state.claim || state.generation !== state.claim.generation
     || record.generation !== state.claim.generation || record.ownerSession !== state.claim.ownerSession
     || record.ownerSession !== owner.sessionID || state.claim.ownerSession !== owner.sessionID
     || record.taskId !== owner.taskId) {
-    throw new Error("lca: linked task execution owner, task, or generation does not match")
+    throw new Error("otter: linked task execution owner, task, or generation does not match")
   }
   if (!isAbsolute(record.cwd) || !sameCanonicalDirectory(record.cwd, childWorktree)) {
-    throw new Error("lca: linked task execution cwd does not match its child worktree")
+    throw new Error("otter: linked task execution cwd does not match its child worktree")
   }
   if (record.cancel || record.terminal || record.fence || record.reconciliation?.outcome === "terminal") {
-    throw new Error("lca: linked task execution is cancelled, fenced, or terminal")
+    throw new Error("otter: linked task execution is cancelled, fenced, or terminal")
   }
   return record
 }
@@ -133,15 +133,15 @@ function sameExecutionIdentity(left: ExecutionRecord, right: ExecutionRecord): b
 
 function fixedPolicyForExecution(runtime: ExecutionRuntime, execution: ExecutionRecord) {
   if (execution.kind !== "host" || execution.engine !== "opencode") {
-    throw new Error("lca: execution is not owned by the OpenCode engine")
+    throw new Error("otter: execution is not owned by the OpenCode engine")
   }
   if (!(EXECUTION_ROLES as readonly string[]).includes(execution.role)) {
-    throw new Error("lca: unrecognized execution role")
+    throw new Error("otter: unrecognized execution role")
   }
   const role = execution.role as ExecutionRole
   const policy = runtime.policy.resolve(role)
   if (execution.policyID !== policy.id) {
-    throw new Error("lca: remote execution policy differs from the fixed owner snapshot")
+    throw new Error("otter: remote execution policy differs from the fixed owner snapshot")
   }
   return { role, policy }
 }
@@ -165,7 +165,7 @@ export function markOpenCodeProcessRiskForSession(deps: HookDeps, sessionID: str
         } catch { return false }
       })
       if (matches.length !== 1 || matches[0]!.kind !== "host" || matches[0]!.engine !== "opencode") {
-        throw new Error("lca: shell tool has no unique OpenCode execution owner")
+        throw new Error("otter: shell tool has no unique OpenCode execution owner")
       }
       runtime.runs.markProcessRiskBySession(sessionID, runtime.host.identity.engine)
     } catch (error) {
@@ -181,13 +181,13 @@ export function markOpenCodeProcessRiskForSession(deps: HookDeps, sessionID: str
     const { role, policy } = fixedPolicyForExecution(runtime, before)
     const snapshot = runtime.policy.snapshotForSession(sessionID)
     if (!runtime.policy.handlersForSession(sessionID) || !snapshot || snapshot.role !== role || snapshot.id !== policy.id) {
-      throw new Error("lca: linked task policy is not bound to its OpenCode session")
+      throw new Error("otter: linked task policy is not bound to its OpenCode session")
     }
     source.runs.markProcessRiskBySession(sessionID, runtime.host.identity.engine)
     const after = linkedExecutionForSession(source.runs.status(), source.owner, deps.worktree, sessionID)
     fixedPolicyForExecution(runtime, after)
     if (!sameExecutionIdentity(before, after) || !after.processRisk) {
-      throw new Error("lca: linked task execution changed before Bash risk was recorded")
+      throw new Error("otter: linked task execution changed before Bash risk was recorded")
     }
   } catch (error) {
     runtime.policy.unbindSession(sessionID)
@@ -288,7 +288,7 @@ export function policyBindingForOpenCodeSession(deps: HookDeps, sessionID: strin
         }
         return true
       })
-      if (invalidReference || matches.length > 1) throw new Error("lca: execution session reference is invalid or ambiguous")
+      if (invalidReference || matches.length > 1) throw new Error("otter: execution session reference is invalid or ambiguous")
       const unique = matches.length === 1 ? matches[0] : undefined
       managed = unique?.kind === "host" && unique.engine === "opencode" ? unique : undefined
       execution = managed && state.claim?.generation === managed.generation
@@ -302,7 +302,7 @@ export function policyBindingForOpenCodeSession(deps: HookDeps, sessionID: strin
   }
   if (!execution) {
     runtime.policy.unbindSession(sessionID)
-    if (managed) throw new Error("lca: execution session is cancelled, fenced or terminal")
+    if (managed) throw new Error("otter: execution session is cancelled, fenced or terminal")
     return undefined
   }
   const supervisorWorktree = source.owner?.mainWorktree ?? deps.worktree
@@ -311,7 +311,7 @@ export function policyBindingForOpenCodeSession(deps: HookDeps, sessionID: strin
   if (!supervisor || supervisor.held || !attachment || attachment.state !== "attached" || attachment.identity !== "live" ||
       getOwnedSession(supervisorWorktree, execution.ownerSession) && effectiveHold(supervisorWorktree, execution.ownerSession)) {
     runtime.policy.unbindSession(sessionID)
-    throw new Error("lca: execution supervisor is held or has no proven live session attachment")
+    throw new Error("otter: execution supervisor is held or has no proven live session attachment")
   }
   let fixed: ReturnType<typeof fixedPolicyForExecution>
   try {
@@ -323,25 +323,25 @@ export function policyBindingForOpenCodeSession(deps: HookDeps, sessionID: strin
   const { role, policy } = fixed
   if (!enabled(deps.config, "config.agents") || !enabled(deps.config, "chat.params")) {
     runtime.policy.unbindSession(sessionID)
-    throw new Error("lca: required execution policy hooks are disabled")
+    throw new Error("otter: required execution policy hooks are disabled")
   }
   let canonicalOwnerWorktree: string
   try { canonicalOwnerWorktree = realpathSync.native(supervisorWorktree) }
   catch {
     runtime.policy.unbindSession(sessionID)
-    throw new Error("lca: OpenCode execution owner worktree is unavailable")
+    throw new Error("otter: OpenCode execution owner worktree is unavailable")
   }
   if (attachment.worktree !== canonicalOwnerWorktree || attachment.sessionID !== execution.ownerSession || !attachment.epoch ||
       !execution.executionId) {
     runtime.policy.unbindSession(sessionID)
-    throw new Error("lca: OpenCode execution binding identity is incomplete")
+    throw new Error("otter: OpenCode execution binding identity is incomplete")
   }
   const existing = runtime.policy.handlersForSession(sessionID)
   let handlers = existing
   if (handlers) {
     if (runtime.policy.snapshotForSession(sessionID) !== policy) {
       runtime.policy.unbindSession(sessionID)
-      throw new Error("lca: OpenCode execution policy snapshot changed")
+      throw new Error("otter: OpenCode execution policy snapshot changed")
     }
   } else {
     const request = {
@@ -354,7 +354,7 @@ export function policyBindingForOpenCodeSession(deps: HookDeps, sessionID: strin
   }
   if (!handlers) {
     runtime.policy.unbindSession(sessionID)
-    throw new Error("lca: OpenCode execution handlers are unavailable")
+    throw new Error("otter: OpenCode execution handlers are unavailable")
   }
   const finalAttachment = inspectCurrentSessionAttachment(supervisorWorktree, execution.ownerSession)
   const finalSupervisor = readSessionMetadata(supervisorWorktree, execution.ownerSession)
@@ -364,7 +364,7 @@ export function policyBindingForOpenCodeSession(deps: HookDeps, sessionID: strin
       (getOwnedSession(supervisorWorktree, execution.ownerSession) && effectiveHold(supervisorWorktree, execution.ownerSession)) ||
       runtime.policy.handlersForSession(sessionID) !== handlers || runtime.policy.snapshotForSession(sessionID) !== policy) {
     runtime.policy.unbindSession(sessionID)
-    throw new Error("lca: OpenCode execution binding changed during policy validation")
+    throw new Error("otter: OpenCode execution binding changed during policy validation")
   }
   return Object.freeze({
     sessionID,

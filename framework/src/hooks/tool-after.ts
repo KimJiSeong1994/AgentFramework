@@ -29,7 +29,7 @@ export function createToolAfterHook(deps: HookDeps): NonNullable<Hooks["tool.exe
   return async (input, output) => {
     const call = currentOpenCodeToolCall(deps, input)
     if (!call) return
-    if (!openCodeToolCallArgumentsMatch(deps, call, input.args)) throw new Error("lca: tool result arguments or authority changed")
+    if (!openCodeToolCallArgumentsMatch(deps, call, input.args)) throw new Error("otter: tool result arguments or authority changed")
     const finalize = await afterOpenCodeSkillTool(deps, call, input.args, output)
     const original = typeof output.output === "string" ? output.output : String(output.output ?? "")
     const ok = !isErrorOutput(original)
@@ -40,16 +40,16 @@ export function createToolAfterHook(deps: HookDeps): NonNullable<Hooks["tool.exe
     const firstTerminal = observation.disposition === "recorded" && observation.terminalStatus === status
     const bound = policyForOpenCodeSession(deps, input.sessionID)
     if (!bound && !isAdmissionCurrent(deps.worktree, input.sessionID, capturedToolEpoch(deps.worktree, input.sessionID, input.callID))) {
-      throw new Error("lca: tool result belongs to a held or stale session attachment; continuation refused")
+      throw new Error("otter: tool result belongs to a held or stale session attachment; continuation refused")
     }
     if (bound && firstTerminal) {
       const shaped = bound.toolResult({ type: "tool-result", sessionID: input.sessionID, callID: input.callID, toolID: input.callID, name: input.tool, result: output.output })
       if (typeof shaped.error === "string") output.output = shaped.error
       else if (typeof shaped.result === "string") output.output = shaped.result
       const meta = output.metadata && typeof output.metadata === "object" ? output.metadata : {}
-      output.metadata = { ...meta, lca: { trimmed: shaped.trimmed ?? false, hinted: shaped.hinted ?? false } }
+      output.metadata = { ...meta, otter: { trimmed: shaped.trimmed ?? false, hinted: shaped.hinted ?? false } }
       finalize()
-      if (!completeOpenCodeToolCall(deps, call)) throw new Error("lca: tool completion is no longer current")
+      if (!completeOpenCodeToolCall(deps, call)) throw new Error("otter: tool completion is no longer current")
       return
     }
 
@@ -79,9 +79,9 @@ export function createToolAfterHook(deps: HookDeps): NonNullable<Hooks["tool.exe
 
     output.output = text
     const meta = output.metadata && typeof output.metadata === "object" ? output.metadata : {}
-    output.metadata = { ...meta, lca: { trimmed, hinted } }
+    output.metadata = { ...meta, otter: { trimmed, hinted } }
     finalize()
-    if (!completeOpenCodeToolCall(deps, call)) throw new Error("lca: tool completion is no longer current")
+    if (!completeOpenCodeToolCall(deps, call)) throw new Error("otter: tool completion is no longer current")
 
     // §5.5/§5.2: a delegate call returning in the owning session settles the workflow (T15/T16, or the T18
     // pendingCancel completion once the queue has wound down).

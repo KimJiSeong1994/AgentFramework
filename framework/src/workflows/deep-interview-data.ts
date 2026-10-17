@@ -3,7 +3,7 @@
 import type { DeepInterviewWorkflow } from "./types.ts"
 
 export const DI_THRESHOLD = 0.05
-export const DI_THRESHOLD_SOURCE = "lca-default"
+export const DI_THRESHOLD_SOURCE = "otter-default"
 export const DI_MAX_ROUNDS = 100
 export const DI_EARLY_EXIT_ROUND = 3
 export const DI_MAX_ANSWER_CHARS = 10_000

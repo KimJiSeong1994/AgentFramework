@@ -1,4 +1,4 @@
-// Panel persona prompt (contrarian). It sees only the shared panel input, never another persona's output. LCA-authored; see ../ATTRIBUTION.
+// Panel persona prompt (contrarian). It sees only the shared panel input, never another persona's output. Otter-authored; see ../ATTRIBUTION.
 import { definePrompt } from "./prompt.ts"
 import { DI_CONTEXT_MARKER, DI_READ_ONLY_RULES } from "./deep-interview.rules.ts"
 

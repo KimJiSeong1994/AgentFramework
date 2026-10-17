@@ -228,9 +228,9 @@ describe("common CLI controlled workflow", () => {
     expect(readSessionMetadata(fixture.root, fixture.sessionID)?.routes).toEqual(routes)
     expect(await detachAdmission(fixture.runtime, fixture.sessionID, fixture.session.epoch, "test-combo-recovery")).toBe(true)
     // Current config now holds a different combo; recovery must ignore it and use the pinned routes.
-    const configDir = join(wt!.stateHome, "config", "lca")
+    const configDir = join(wt!.stateHome, "config", "otter")
     mkdirSync(configDir, { recursive: true })
-    writeFileSync(join(configDir, "lca.jsonc"), JSON.stringify({ chat: { combo: { planner: { engine: "codex", model: "gpt-5.6-sol" } } } }))
+    writeFileSync(join(configDir, "otter.jsonc"), JSON.stringify({ chat: { combo: { planner: { engine: "codex", model: "gpt-5.6-sol" } } } }))
     const seen: unknown[] = []
     const factory: typeof createCliRuntime = options => { seen.push(options.routes); return fixture.runtime }
     const approval = await withTerminalLine(`APPROVE ${fixture.workflow.id} ${fixture.planSha}`, () => runCli(parseCliArgs([

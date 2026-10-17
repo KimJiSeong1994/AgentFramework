@@ -27,7 +27,7 @@ describe("trimToolOutput", () => {
     expect(r.trimmed).toBe(true)
     const out = r.output.split("\n")
     expect(out.slice(0, 10)).toEqual(lines(10).split("\n"))
-    expect(out[10]).toMatch(/^\[lca: trimmed 20 lines \/ \d+ bytes — re-read with offset\/limit if needed\]$/)
+    expect(out[10]).toMatch(/^\[otter: trimmed 20 lines \/ \d+ bytes — re-read with offset\/limit if needed\]$/)
     expect(out.length).toBe(11)
   })
 
@@ -47,7 +47,7 @@ describe("trimToolOutput", () => {
     const r = trimToolOutput("bash", big, { read_max_lines: 100, read_max_bytes: 2500 })
     expect(r.trimmed).toBe(true)
     expect(Buffer.byteLength(r.output)).toBeLessThan(2500 + 120)
-    expect(r.output).toContain("[lca: trimmed")
+    expect(r.output).toContain("[otter: trimmed")
     expect(r.output.startsWith("0:xxx")).toBe(true)
   })
 
@@ -63,7 +63,7 @@ describe("trimToolOutput", () => {
     const output = Array.from({ length: 130 }, (_, i) => line + i).join("\n") // ~19.5 KB, ~8-10K est. tokens
     const r = trimToolOutput("glob", output, { read_max_lines: 200, read_max_bytes: 20000, read_max_tokens: 2500 })
     expect(r.trimmed).toBe(true)
-    expect(r.output).toContain("[lca: trimmed")
+    expect(r.output).toContain("[otter: trimmed")
     expect(estimateTokens(r.output)).toBeLessThanOrEqual(2500)
   })
 

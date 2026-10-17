@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""lca stage 4: headless ontology evolution round(s) for the EvoOntology workspace of the data fixture.
+"""otter stage 4: headless ontology evolution round(s) for the EvoOntology workspace of the data fixture.
 
-    python3 scripts/lca-evo-evolve.py                 # evaluate the active version, propose + evaluate candidates
-    python3 scripts/lca-evo-evolve.py --rounds 2 --tier 2 --force
-    python3 scripts/lca-evo-evolve.py --dry-run       # parent evaluation + evolver prompt only (no proposal call)
-    python3 scripts/lca-evo-evolve.py --activate ontology_v1     # the human approval step (flips active.json)
-    python3 scripts/lca-evo-evolve.py --self-test     # patch validation unit checks (no model, no GPU)
-    python3 scripts/lca-evo-evolve.py --questions q.jsonl --protocol llm_judge   # questions without `expected`:
+    python3 scripts/otter-evo-evolve.py                 # evaluate the active version, propose + evaluate candidates
+    python3 scripts/otter-evo-evolve.py --rounds 2 --tier 2 --force
+    python3 scripts/otter-evo-evolve.py --dry-run       # parent evaluation + evolver prompt only (no proposal call)
+    python3 scripts/otter-evo-evolve.py --activate ontology_v1     # the human approval step (flips active.json)
+    python3 scripts/otter-evo-evolve.py --self-test     # patch validation unit checks (no model, no GPU)
+    python3 scripts/otter-evo-evolve.py --questions q.jsonl --protocol llm_judge   # questions without `expected`:
         # the `answer-judge` agent compares anonymized parent/candidate answers per case (EvoOntology llm_judge gate)
-    python3 scripts/lca-evo-evolve.py --no-ground-truth   # same, using the fixture questions with `expected` stripped
+    python3 scripts/otter-evo-evolve.py --no-ground-truth   # same, using the fixture questions with `expected` stripped
 
 One run = one EvoOntology evolution run (`<workspace>/evolution/run_N/`):
-  1. parent evaluation: `scripts/lca-e2e-data.sh` on the active version (the harness re-executes the model's SQL and
+  1. parent evaluation: `scripts/otter-e2e-data.sh` on the active version (the harness re-executes the model's SQL and
      compares with the expected result) -> per-case scores 1/0, trajectories appended to `<workspace>/trajectories/`
   2. per round: the `ontology-evolver` agent (Gemma, no tools) gets the current terms/constraints + the failed cases
      and returns a JSON patch (aliases on existing terms, new terms, new constraints). The patch is validated in
@@ -52,7 +52,7 @@ sys.path.insert(0, str(VENDOR))
 from evoontology import EvaluationGate, EvolutionSession, SemanticStore, TrajectoryStore  # noqa: E402
 from evoontology.validate import validate  # noqa: E402
 
-E2E = ROOT / "scripts" / "lca-e2e-data.sh"
+E2E = ROOT / "scripts" / "otter-e2e-data.sh"
 EVOLVER = "ontology-evolver"
 JUDGE = "answer-judge"
 TERM_ID_RE = re.compile(r"^t-[a-z0-9][a-z0-9-]{0,40}$")
@@ -286,10 +286,10 @@ def parse_judgment(text: str) -> dict:
 # ------------------------------------------------------------------ e2e evaluation
 
 def run_e2e(workspace: Path, tier: int, scratch: Path, extra: list[str] | None = None, qfile: Path | None = None) -> tuple[dict, Path]:
-    """Run scripts/lca-e2e-data.sh on `workspace`; return ({qid: case}, results tsv path). match: 1/0, or -1 without ground truth."""
+    """Run scripts/otter-e2e-data.sh on `workspace`; return ({qid: case}, results tsv path). match: 1/0, or -1 without ground truth."""
     cmd = ["bash", str(E2E), "--tier", str(tier), "--evo-workspace", str(workspace), "--scratch", str(scratch), "--min-pass", "0", *(["--questions", str(qfile)] if qfile else []), *(extra or [])]
     log("e2e: " + " ".join(cmd[1:]))
-    p = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, "LCA_DEBUG": os.environ.get("LCA_DEBUG", "")})
+    p = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, "OTTER_DEBUG": os.environ.get("OTTER_DEBUG", "")})
     m = re.search(r"^results: (.+)$", p.stdout, re.M)
     if not m:
         sys.stderr.write(p.stdout[-2000:] + p.stderr[-2000:])
@@ -358,22 +358,22 @@ def record_trajectories(workspace: Path, version: str, cases: dict, qs: dict, st
 # ------------------------------------------------------------------ evolver call (isolated OpenCode like the e2e)
 
 def call_agent(agent: str, prompt: str, scratch: Path, fixture: Path, timeout: int) -> str:
-    e2e = scratch / "lca-e2e"
+    e2e = scratch / "otter-e2e"
     cfg_home, data_home, state_home = e2e / "config", e2e / "data", e2e / "state"
     if not (cfg_home / "opencode" / "opencode.json").is_file():
-        raise SystemExit("isolated OpenCode config missing; run scripts/lca-e2e-data.sh --check first")
+        raise SystemExit("isolated OpenCode config missing; run scripts/otter-e2e-data.sh --check first")
     work = e2e / "work" / f"evo-{int(time.time())}"
     (work / ".opencode" / "plugins").mkdir(parents=True)
-    (work / ".lca").mkdir()
-    (work / ".opencode" / "plugins" / "lca.ts").write_text(f'export {{ LcaPlugin }} from "{ROOT}/framework/src/index.ts"\n')
-    (work / ".lca" / "lca.jsonc").write_text(json.dumps({"data": {"backend": "sqlite", "sqlite_path": str(fixture / "data" / "vehicle_visit.sqlite"), "schema_file": str(fixture / "data" / "schema.json"), "evo": {"enabled": False}}}))
+    (work / ".otter").mkdir()
+    (work / ".opencode" / "plugins" / "otter.ts").write_text(f'export {{ OtterPlugin }} from "{ROOT}/framework/src/index.ts"\n')
+    (work / ".otter" / "otter.jsonc").write_text(json.dumps({"data": {"backend": "sqlite", "sqlite_path": str(fixture / "data" / "vehicle_visit.sqlite"), "schema_file": str(fixture / "data" / "schema.json"), "evo": {"enabled": False}}}))
     env = {k: v for k, v in os.environ.items() if k not in ("OPENCODE_CONFIG_DIR", "ORCA_OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT")}
-    # OpenCode takes the project from $PWD (not the process cwd) and the plugin reads .lca/lca.jsonc from the git
+    # OpenCode takes the project from $PWD (not the process cwd) and the plugin reads .otter/otter.jsonc from the git
     # worktree: set both, as the e2e script's `cd` does implicitly
     env.update({"XDG_CONFIG_HOME": str(cfg_home), "XDG_DATA_HOME": str(data_home), "XDG_STATE_HOME": str(state_home), "PWD": str(work)})
     subprocess.run(["git", "init", "-q"], cwd=work, check=True, capture_output=True)
-    subprocess.run(["git", "-c", "user.name=lca-evo", "-c", "user.email=lca-evo@localhost", "-c", "commit.gpgsign=false", "add", "-A"], cwd=work, check=True, capture_output=True)
-    subprocess.run(["git", "-c", "user.name=lca-evo", "-c", "user.email=lca-evo@localhost", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "evolver work dir"], cwd=work, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.name=otter-evo", "-c", "user.email=otter-evo@localhost", "-c", "commit.gpgsign=false", "add", "-A"], cwd=work, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.name=otter-evo", "-c", "user.email=otter-evo@localhost", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "evolver work dir"], cwd=work, check=True, capture_output=True)
     t0 = int(time.time() * 1000)
     log(f"{agent}: opencode run ({len(prompt)} chars)")
     p = subprocess.run(["opencode", "run", "--format", "json", "--agent", agent, "--auto", prompt], cwd=work, env=env, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
@@ -399,7 +399,7 @@ def evolve(args) -> int:
     scratch = Path(args.scratch).expanduser().resolve()
     qfile = Path(args.questions).resolve() if args.questions else fixture / "queries.jsonl"
     if args.no_ground_truth:
-        stripped = scratch / "lca-e2e" / "questions-nogt.jsonl"
+        stripped = scratch / "otter-e2e" / "questions-nogt.jsonl"
         stripped.parent.mkdir(parents=True, exist_ok=True)
         with stripped.open("w", encoding="utf-8") as f:
             for q in questions(qfile).values():
@@ -440,9 +440,9 @@ def evolve(args) -> int:
         log(f"resuming {latest['run_id']} (still running)")
         session.resume()
     else:
-        session.start_run(parent, adapter="lca-e2e-data", max_rounds=args.rounds, acceptance={"protocol": protocol, "judge": "code: result match on the question file" if protocol == "ground_truth" else f"{JUDGE} agent, anonymized A/B per case"})
+        session.start_run(parent, adapter="otter-e2e-data", max_rounds=args.rounds, acceptance={"protocol": protocol, "judge": "code: result match on the question file" if protocol == "ground_truth" else f"{JUDGE} agent, anonymized A/B per case"})
     session.confirm_trajectory_sources([{"path": str(workspace / "trajectories"), "scope": f"e2e-{stamp}-*", "purpose": "parent evaluation of this run"}])
-    session.record_evaluation(parent, {"metrics": {"matched": sum(p_scores), "cases": len(ids), "mean": sum(p_scores) / len(ids)}, "cases": [{"id": i, "score": parent_cases[i]["match"]} for i in ids], "artifact_paths": [str(parent_tsv)], "provenance": "scripts/lca-e2e-data.sh"}, role="parent")
+    session.record_evaluation(parent, {"metrics": {"matched": sum(p_scores), "cases": len(ids), "mean": sum(p_scores) / len(ids)}, "cases": [{"id": i, "score": parent_cases[i]["match"]} for i in ids], "artifact_paths": [str(parent_tsv)], "provenance": "scripts/otter-e2e-data.sh"}, role="parent")
     run_dir = Path(session.run_dir)
     previous = None
     for rnd in range(1, args.rounds + 1):
@@ -473,7 +473,7 @@ def evolve(args) -> int:
         log(f"round {rnd}: patch: aliases={summary['aliases']} terms={summary['terms']} constraints={summary['constraints']}")
 
         # 3. candidate evaluation on a temp workspace copy with the candidate active
-        with tempfile.TemporaryDirectory(prefix="lca-evo-cand-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="otter-evo-cand-") as tmp:
             cand_ws = Path(tmp) / ".evoontology"
             shutil.copytree(workspace, cand_ws, ignore=shutil.ignore_patterns("trajectories", "evolution", "tasks", "visualizations"))
             SemanticStore.set_active(str(cand_ws), candidate)
@@ -507,7 +507,7 @@ def evolve(args) -> int:
             "metrics": {"matched": sum(c_scores), "cases": len(ids), "mean": sum(c_scores) / len(ids)},
             "cases": case_rows,
             "artifact_paths": [str(cand_tsv)],
-            "provenance": "scripts/lca-e2e-data.sh, same questions as the parent evaluation" + ("" if protocol == "ground_truth" else f"; {JUDGE} verdicts"),
+            "provenance": "scripts/otter-e2e-data.sh, same questions as the parent evaluation" + ("" if protocol == "ground_truth" else f"; {JUDGE} verdicts"),
             "gate_input": gate_input,
         }, role="candidate")
         if accept:
@@ -517,7 +517,7 @@ def evolve(args) -> int:
             proposal = run_dir / "proposal.md"
             proposal.write_text(proposal_text(session.run_id, parent, new_version, candidate, summary, ids, p_scores, c_scores, qs), encoding="utf-8")
             log(f"ACCEPTED: published {new_version} (active stays {parent}); proposal: {proposal}")
-            log(f"approve with: python3 scripts/lca-evo-evolve.py --workspace {workspace} --activate {new_version}")
+            log(f"approve with: python3 scripts/otter-evo-evolve.py --workspace {workspace} --activate {new_version}")
             return 0
         session.record_round(decision="reject", metrics={"parent": sum(p_scores), "candidate": sum(c_scores)}, notes=why)
         log(f"round {rnd}: REJECT ({why})")
@@ -533,7 +533,7 @@ def evolve(args) -> int:
 
 def proposal_text(run_id, parent, new_version, candidate, summary, ids, p_scores, c_scores, qs) -> str:
     lines = [f"# Ontology evolution proposal — {run_id}", "", f"- parent: `{parent}` ({sum(p_scores)}/{len(ids)})", f"- candidate: `{candidate}` -> published as `{new_version}` ({sum(c_scores)}/{len(ids)})",
-             f"- hypothesis: {summary['hypothesis']}", "- active.json unchanged; approve with `python3 scripts/lca-evo-evolve.py --activate " + new_version + "`", "", "## Patch", ""]
+             f"- hypothesis: {summary['hypothesis']}", "- active.json unchanged; approve with `python3 scripts/otter-evo-evolve.py --activate " + new_version + "`", "", "## Patch", ""]
     for tid, al in summary["aliases"].items():
         lines.append(f"- aliases on `{tid}`: {', '.join(al)}")
     for tid in summary["terms"]:
@@ -612,7 +612,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--fixture", default=str(ROOT / "scripts" / "fixtures" / "data-vv"))
     ap.add_argument("--workspace", default="", help="EvoOntology workspace (default <fixture>/.evoontology)")
-    ap.add_argument("--scratch", default=os.environ.get("LCA_E2E_SCRATCH", "~/.cache/lca/e2e"))
+    ap.add_argument("--scratch", default=os.environ.get("OTTER_E2E_SCRATCH", "~/.cache/otter/e2e"))
     ap.add_argument("--questions", default="", help="question file (jsonl); default <fixture>/queries.jsonl")
     ap.add_argument("--protocol", choices=["ground_truth", "llm_judge"], default="", help="default: ground_truth when every question has `expected`, else llm_judge")
     ap.add_argument("--no-ground-truth", action="store_true", help="strip `expected` from the questions (exercise the llm_judge path on the fixture)")

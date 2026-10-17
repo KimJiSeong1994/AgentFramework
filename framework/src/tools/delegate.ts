@@ -58,25 +58,25 @@ export function createDelegateTool(deps: HookDeps): ToolDefinition {
     args: delegateArgs,
     async execute(args, ctx) {
       if (ctx.agent && ctx.agent !== MAIN_AGENT) {
-        throw new Error(`lca: delegate is only available to the ${MAIN_AGENT} agent (current agent: ${ctx.agent}). Do the work directly.`)
+        throw new Error(`otter: delegate is only available to the ${MAIN_AGENT} agent (current agent: ${ctx.agent}). Do the work directly.`)
       }
       runtime.linuxAdmission?.assertBootEpoch()
       const sessionID = ctx.sessionID
-      if (ctx.abort.aborted) throw new Error("lca: aborted before the task queue started")
+      if (ctx.abort.aborted) throw new Error("otter: aborted before the task queue started")
       if (queue.isRunning(sessionID)) {
-        throw new Error("lca: a task queue is already running for this session. Wait for its report; do not call delegate again.")
+        throw new Error("otter: a task queue is already running for this session. Wait for its report; do not call delegate again.")
       }
       // A user's /stop stays in force until the user sends a new message (chat.message clears it); a model reacting
       // to the /stop text must not restart the queue.
       if (readAbort(deps.worktree, sessionID)?.reason === "user_stop") {
-        throw new Error("lca: the user stopped the task queue (/stop). Do not call delegate again until the user asks for more work.")
+        throw new Error("otter: the user stopped the task queue (/stop). Do not call delegate again until the user asks for more work.")
       }
       const active = activeWorkflow(deps.worktree)
       if (active?.sessionID === sessionID) {
         const refusal = workflowEngineRefusal(active, runtime.host.identity.engine)
-        if (refusal) throw new Error(`lca: ${refusal}`)
+        if (refusal) throw new Error(`otter: ${refusal}`)
         if (active.stopIntent || active.phase === "paused") {
-          throw new Error(`lca: the workflow is ${active.stopIntent ? `${active.stopIntent.kind} pending` : "paused"}; do not call delegate.`)
+          throw new Error(`otter: the workflow is ${active.stopIntent ? `${active.stopIntent.kind} pending` : "paused"}; do not call delegate.`)
         }
       }
 
@@ -87,7 +87,7 @@ export function createDelegateTool(deps: HookDeps): ToolDefinition {
       const ledgerNow = readLedger(deps.worktree, sessionID)
       const open = openTasks(ledgerNow)
       const workflowRefusal = taggedWorkflowRefusal(deps, runtime.host.identity.engine, open)
-      if (workflowRefusal) throw new Error(`lca: ${workflowRefusal}`)
+      if (workflowRefusal) throw new Error(`otter: ${workflowRefusal}`)
       if (clearAbort(deps.worktree, sessionID, { keepUserStop: true })) deps.log("delegate: cleared stale abort marker", { sessionID })
       let resume = !!args.resume
       const norm = (s: string) => s.trim().toLowerCase()
@@ -97,11 +97,11 @@ export function createDelegateTool(deps: HookDeps): ToolDefinition {
         notes.push(`The task list matched the ${open.length} unfinished task(s) of the interrupted run, so they were resumed instead of restarted.`)
       }
       if (resume) {
-        if (open.length === 0) throw new Error("lca: nothing to resume — the ledger has no unfinished tasks. Call delegate with tasks instead.")
+        if (open.length === 0) throw new Error("otter: nothing to resume — the ledger has no unfinished tasks. Call delegate with tasks instead.")
         if (args.resume && tasks.length) notes.push(`${tasks.length} new task(s) were ignored because resume was requested; call delegate again with them afterwards.`)
         taskIds = open.map((t) => t.id)
       } else {
-        if (tasks.length === 0) throw new Error("lca: give at least one task, or resume: true.")
+        if (tasks.length === 0) throw new Error("otter: give at least one task, or resume: true.")
         const dataOn = deps.config.data.backend !== "none"
         const problems = tasks.map((t) => {
           if (t.kind === "data") {
@@ -112,14 +112,14 @@ export function createDelegateTool(deps: HookDeps): ToolDefinition {
         })
         if (problems.some(Boolean)) {
           const lines = tasks.flatMap((t, i) => (problems[i] ? [`- task ${i + 1} "${t.title.slice(0, 40)}": ${problems[i]}`] : []))
-          throw new Error(`lca: tasks refused (verify commands run without confirmation, so only test/check runners are allowed; data tasks need a configured database):\n${lines.join("\n")}\nFix them and call delegate again with the whole list.`)
+          throw new Error(`otter: tasks refused (verify commands run without confirmation, so only test/check runners are allowed; data tasks need a configured database):\n${lines.join("\n")}\nFix them and call delegate again with the whole list.`)
         }
         // Tasks that instruct the worker to edit tests or fake results are refused (the hack in the negative e2e was
         // authored by main and passed down as task detail).
         const gaming = tasks.map((t) => (t.kind === "data" ? null : taskTextProblem(t.title, t.detail, protectedFiles(t))))
         if (gaming.some(Boolean)) {
           const lines = tasks.flatMap((t, i) => (gaming[i] ? [`- task ${i + 1} "${t.title.slice(0, 40)}": ${gaming[i]}`] : []))
-          throw new Error(`lca: tasks refused:\n${lines.join("\n")}\nWorkers implement code honestly and never edit tests. If a test looks impossible, delegate the honest implementation and let its verify fail; the report will say so.`)
+          throw new Error(`otter: tasks refused:\n${lines.join("\n")}\nWorkers implement code honestly and never edit tests. If a test looks impossible, delegate the honest implementation and let its verify fail; the report will say so.`)
         }
         // Open tasks from an earlier, interrupted run would otherwise be executed silently before the new ones.
         const stale = queue.cancelOpen(sessionID, "superseded by a new delegate call")

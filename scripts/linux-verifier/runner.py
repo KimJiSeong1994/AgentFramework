@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Unprivileged one-shot runner for the fixed lca-verifier.service."""
+"""Unprivileged one-shot runner for the fixed otter-verifier.service."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ import time
 from typing import Any
 
 
-PROTOCOL = "lca.linux-verifier.v1"
-RUNNER_SOCKET = "/run/lca-verifier/runner.sock"
+PROTOCOL = "otter.linux-verifier.v1"
+RUNNER_SOCKET = "/run/otter-verifier/runner.sock"
 WORKSPACE = "/workspace"
 MAX_FRAME_BYTES = 1_048_576
 MAX_OUTPUT_CHARS = 65_536

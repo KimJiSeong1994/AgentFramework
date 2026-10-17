@@ -1,7 +1,7 @@
-# plan3 fixture (lca M1 plan-workflow acceptance)
+# plan3 fixture (otter M1 plan-workflow acceptance)
 
 `stack.py`, `queue_.py` and `lru_cache.py` are intentionally absent. This fixture is used with
-`scripts/lca-e2e.sh --flow plan --fixture plan3` (or `--entry keyword`): the request describes three
+`scripts/otter-e2e.sh --flow plan --fixture plan3` (or `--entry keyword`): the request describes three
 small, independent data-structure features; a correct plan has exactly one step per feature, each
 step naming its own file and its own verify command.
 

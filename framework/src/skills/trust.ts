@@ -1,6 +1,6 @@
-// Operator-configured skill trust: `skill_trust` in the *user* config (~/.config/lca/lca.jsonc) only.
+// Operator-configured skill trust: `skill_trust` in the *user* config (~/.config/otter/otter.jsonc) only.
 // A trusted skill is used without the per-session "Allow this content" prompt. Trust is by skill name or by
-// folder and deliberately ignores content changes. A project's `.lca/lca.jsonc` can never supply it, so a cloned
+// folder and deliberately ignores content changes. A project's `.otter/otter.jsonc` can never supply it, so a cloned
 // repository cannot approve its own (or the operator's home) skills. Trust grants nothing beyond that prompt:
 // tool permissions, execution approval and path restrictions are unchanged.
 import { readFileSync, realpathSync } from "node:fs"

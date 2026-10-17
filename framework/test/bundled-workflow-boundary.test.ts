@@ -1,4 +1,4 @@
-// P6a S5: the bundled-workflow boundary. LCA owns its workflows end to end: no GJC process, path, import or executable
+// P6a S5: the bundled-workflow boundary. Otter owns its workflows end to end: no GJC process, path, import or executable
 // instruction at runtime; protected names resolve only to the builtin descriptors; small descriptors are discovery-only.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
@@ -20,7 +20,7 @@ import { tempGitWorktree } from "./guards-helpers.ts"
 import { fullScript, scriptedRuntime } from "./workflow-fixture.ts"
 
 const FRAMEWORK = realpathSync(join(import.meta.dir, ".."))
-const FORBIDDEN = /\bgjc\b|\.gjc\/|\/skill:|--stage_n|GJC_RALPLAN_ARTIFACT|lca_flow/i
+const FORBIDDEN = /\bgjc\b|\.gjc\/|\/skill:|--stage_n|GJC_RALPLAN_ARTIFACT|otter_flow/i
 
 let wt: ReturnType<typeof tempGitWorktree>
 let stores: SessionStore[] = []
@@ -65,8 +65,8 @@ function sourceFiles(directory: string): string[] {
 
 describe("no GJC at runtime", () => {
   test("a full DI -> ralplan run starts no gjc process, creates no .gjc state and touches no home directory", async () => {
-    const home = mkdtempSync(join(tmpdir(), "lca-bw-home-"))
-    const bin = mkdtempSync(join(tmpdir(), "lca-bw-bin-"))
+    const home = mkdtempSync(join(tmpdir(), "otter-bw-home-"))
+    const bin = mkdtempSync(join(tmpdir(), "otter-bw-bin-"))
     const marker = join(bin, "gjc-was-run")
     writeFileSync(join(bin, "gjc"), `#!/bin/sh\necho run >> '${marker}'\nexit 97\n`)
     chmodSync(join(bin, "gjc"), 0o755)
@@ -142,7 +142,7 @@ describe("prompts and descriptors carry no executable GJC instructions", () => {
     }
   })
 
-  test("ATTRIBUTION names every exported prompt id and states LCA authorship", () => {
+  test("ATTRIBUTION names every exported prompt id and states Otter authorship", () => {
     const attribution = readFileSync(join(FRAMEWORK, "src/workflows/ATTRIBUTION"), "utf8")
     for (const prompt of exportedPrompts()) expect(attribution, prompt.id).toContain(`\`${prompt.id}\``)
     expect(attribution).toContain("no GJC bytes")

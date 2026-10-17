@@ -177,7 +177,7 @@ async function createLinkedFixture(options: LinkedFixtureOptions = {}) {
       releaseFixtureSession(main.worktree, ownerStore)
       await linked.remove()
       main.cleanup()
-      process.env.LCA_STATE_HOME = wt.stateHome
+      process.env.OTTER_STATE_HOME = wt.stateHome
     },
   }
 }
@@ -378,7 +378,7 @@ describe("tool.execute.before", () => {
     ["wrong cwd", { cwd: "/" }],
     ["wrong task", { taskId: "another-task" }],
     ["wrong owner", { claimOwnerSession: "another-owner" }],
-    ["wrong fixed policy", { policyID: "lca:worker:wrong" }],
+    ["wrong fixed policy", { policyID: "otter:worker:wrong" }],
     ["wrong execution profile", { profile: "linux-single-use" }],
     ["fenced execution", { fenced: true }],
     ["non-exact vendor reference", { extraVendorReferenceField: true }],
@@ -445,7 +445,7 @@ describe("tool.execute.before", () => {
     await hookEvent(toolErrorEvent(c2, "Error: File already exists: /x/a.ts"))
     const c3 = child.native.primeCall({ tool: "write", args, callID: "c3" })
     await expect(hookBefore(c3.input as any, c3.output as any)).rejects.toThrow(
-      /^lca: blocked repeated call to write with identical arguments \(3x\)\. The previous attempts failed with: Error: File already exists: \/x\/a\.ts Change the approach/,
+      /^otter: blocked repeated call to write with identical arguments \(3x\)\. The previous attempts failed with: Error: File already exists: \/x\/a\.ts Change the approach/,
     )
     expect(readToolObservations(wt.worktree, child.native.sessionID).filter(item => item.callID === "c3")).toEqual([
       { name: "write", callID: "c3", sessionID: child.native.sessionID, status: "denied" },
@@ -508,7 +508,7 @@ describe("tool.execute.before", () => {
     const hook = createToolBeforeHook(deps)
     const abs = join(wt.worktree, "knowledge", "raw", "documents", "x.md")
     await expect(runBeforeWithFixture(child.native, hook, before("write", { filePath: abs, content: "x" }, "c1", child.native.sessionID)))
-      .rejects.toThrow(/lca: raw wiki sources are immutable; use `bun scripts\/lca-wiki\.ts register`\./)
+      .rejects.toThrow(/otter: raw wiki sources are immutable; use `bun scripts\/otter-wiki\.ts register`\./)
     await expect(runBeforeWithFixture(child.native, hook, before("edit", { filePath: "knowledge/raw/x.md", oldString: "a", newString: "b" }, "c2", child.native.sessionID)))
       .rejects.toThrow(/raw wiki sources are immutable/)
     await expect(runBeforeWithFixture(child.native, hook, before("write", { filePath: "knowledge/wiki/../raw/x.md", content: "x" }, "c3", child.native.sessionID)))
@@ -619,8 +619,8 @@ describe("tool.execute.after", () => {
     await hookBefore(read.input as any, read.output as any)
     const result = after("read", read.output.args, "read-1", "a\nb\nc\nd", {}, child.native.sessionID)
     await hookAfter(read.input as any, result.output as any)
-    expect(result.output.output).toContain("[lca: trimmed")
-    expect(result.output.metadata.lca.trimmed).toBe(true)
+    expect(result.output.output).toContain("[otter: trimmed")
+    expect(result.output.metadata.otter.trimmed).toBe(true)
     const observationsAfterRead = readToolObservations(wt.worktree, child.native.sessionID)
     read.part.state = {
       status: "completed", input: read.output.args, output: result.output.output, title: "read",
@@ -671,7 +671,7 @@ describe("tool.execute.after", () => {
     const ledgerBeforeCallback = readLedger(wt.worktree, sessionID)
     const runsBeforeCallback = runtime.runs.status()
     const result = { title: "delegate", output: "completed", metadata: {} }
-    await expect(afterHook(toolCall.input as any, result as any)).rejects.toThrow("lca: OpenCode tool call refused (stale-turn)")
+    await expect(afterHook(toolCall.input as any, result as any)).rejects.toThrow("otter: OpenCode tool call refused (stale-turn)")
 
     expect(readToolObservations(wt.worktree, sessionID)).toEqual([
       { name: "delegate", callID, sessionID, status: "running" },
@@ -693,13 +693,13 @@ describe("tool.execute.after", () => {
     expect(isErrorOutput("all good")).toBe(false)
   })
 
-  test("trims read output and sets metadata.lca", async () => {
+  test("trims read output and sets metadata.otter", async () => {
     const deps = makeDeps(client, wt.worktree, { guards: { ...makeDeps(client, wt.worktree).config.guards, read_max_lines: 5 } })
     const a = after("read", { filePath: "f" }, "c1", Array.from({ length: 50 }, (_, i) => `${i}`).join("\n"), { preview: "x" })
     await runAfterHook(deps, a)
     expect(a.output.output.split("\n").length).toBe(6)
-    expect(a.output.output).toContain("[lca: trimmed 45 lines")
-    expect(a.output.metadata).toEqual({ preview: "x", lca: { trimmed: true, hinted: false } })
+    expect(a.output.output).toContain("[otter: trimmed 45 lines")
+    expect(a.output.metadata).toEqual({ preview: "x", otter: { trimmed: true, hinted: false } })
   })
 
   test("appends the recovery hint after trimming so it is never cut", async () => {
@@ -707,9 +707,9 @@ describe("tool.execute.after", () => {
     const body = "zsh: command not found: foo\n" + Array.from({ length: 30 }, (_, i) => `l${i}`).join("\n")
     const a = after("bash", { command: "foo" }, "c1", body)
     await runAfterHook(deps, a)
-    expect(a.output.output.endsWith("\n\n[lca hint] Check the tool exists with `which`; do not retry the same command.")).toBe(true)
-    expect(a.output.output).toContain("[lca: trimmed")
-    expect(a.output.metadata.lca).toEqual({ trimmed: true, hinted: true })
+    expect(a.output.output.endsWith("\n\n[otter hint] Check the tool exists with `which`; do not retry the same command.")).toBe(true)
+    expect(a.output.output).toContain("[otter: trimmed")
+    expect(a.output.metadata.otter).toEqual({ trimmed: true, hinted: true })
   })
 
   test("edit/write outputs are hinted but never trimmed", async () => {
@@ -723,8 +723,8 @@ describe("tool.execute.after", () => {
     const primed = child.native.primeCall({ tool: "write", args: a.input.args, callID: a.input.callID })
     await createToolBeforeHook(deps)(primed.input as any, primed.output as any)
     await createToolAfterHook(deps)(primed.input as any, a.output as any)
-    expect(a.output.output).toBe("Error: File already exists: f\n\n[lca hint] Use the edit tool with oldString/newString, or read the file first.")
-    expect(a.output.metadata.lca).toEqual({ trimmed: false, hinted: true })
+    expect(a.output.output).toBe("Error: File already exists: f\n\n[otter hint] Use the edit tool with oldString/newString, or read the file first.")
+    expect(a.output.metadata.otter).toEqual({ trimmed: false, hinted: true })
   })
 
   test("error-looking output counts as a failure for the repeat guard", async () => {
@@ -763,7 +763,7 @@ describe("tool.execute.after", () => {
     await createToolBeforeHook(deps)(primed.input as any, primed.output as any)
     await createToolAfterHook(deps)(primed.input as any, a.output as any)
     expect(a.output.output).toBe(body)
-    expect(a.output.metadata.lca).toEqual({ trimmed: false, hinted: false })
+    expect(a.output.metadata.otter).toEqual({ trimmed: false, hinted: false })
   })
 
   test("relativizePaths strips worktree and directory prefixes, longest first", async () => {

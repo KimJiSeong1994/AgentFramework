@@ -19,7 +19,7 @@ import {
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { canonicalPlanSha, coercePlan, planToTasks, validatePlan, type Plan } from "../framework/src/flow/plan.ts"
-import { loadConfig, type LcaConfig } from "../framework/src/config.ts"
+import { loadConfig, type OtterConfig } from "../framework/src/config.ts"
 import { authenticateLinuxVerification } from "../framework/src/hosts/linux-domain.ts"
 import { createLinuxAdmission } from "../framework/src/hosts/runtime.ts"
 import { getOpenCodeRuntime } from "../framework/src/hosts/opencode-runtime.ts"
@@ -47,7 +47,7 @@ import {
   verificationRecords,
   waitForAuthenticatedTerminal,
   waitUntil,
-} from "./lca-linux-verifier-queue.ts"
+} from "./otter-linux-verifier-queue.ts"
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const FRAMEWORK_PACKAGE = resolve(SCRIPT_DIR, "../framework/package.json")
@@ -159,7 +159,7 @@ export function assertReceiptSchemaForResume(schemaVersion: unknown, modelAborts
 }
 
 export function selectVerifierRuntime(
-  config: LcaConfig,
+  config: OtterConfig,
   baseRuntime: ExecutionRuntime,
   mode: VerifierMode,
 ): ExecutionRuntime {
@@ -218,7 +218,7 @@ function parseArgs(argv: string[]): Args {
   const receipt = fields.get("--receipt")
   const verifier = parseVerifierMode(fields.get("--verifier"))
   if (!worktreeArg || !serverArg || !scenario || !receipt) {
-    fail("usage: bun scripts/lca-live-core-queue.ts --worktree ABSOLUTE_GIT_ROOT --server http://127.0.0.1:PORT --scenario success|retry|reject|cancel|verifier-cancel|interrupt|checkpoint|active-verifier|resume --receipt ABSOLUTE_JSON_PATH [--verifier legacy|linux-qualification|linux-production] [--session ID]")
+    fail("usage: bun scripts/otter-live-core-queue.ts --worktree ABSOLUTE_GIT_ROOT --server http://127.0.0.1:PORT --scenario success|retry|reject|cancel|verifier-cancel|interrupt|checkpoint|active-verifier|resume --receipt ABSOLUTE_JSON_PATH [--verifier legacy|linux-qualification|linux-production] [--session ID]")
   }
   if (!(scenario === "success" || scenario === "retry" || scenario === "reject" || scenario === "cancel" ||
     scenario === "verifier-cancel" || scenario === "interrupt" || scenario === "checkpoint" ||
@@ -274,8 +274,8 @@ function validateWorktree(worktree: string): void {
   if (realpathSync(gitRoot) !== worktree) fail("--worktree must be the canonical Git root, not a subdirectory")
   for (const path of [
     resolve(worktree, "plan.json"),
-    resolve(worktree, ".opencode/plugins/lca.ts"),
-    resolve(worktree, ".lca/lca.jsonc"),
+    resolve(worktree, ".opencode/plugins/otter.ts"),
+    resolve(worktree, ".otter/otter.jsonc"),
   ]) {
     if (!existsSync(path) || !lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) {
       fail(`required fixture file is absent or not a regular file: ${relative(worktree, path)}`)
@@ -283,7 +283,7 @@ function validateWorktree(worktree: string): void {
   }
 }
 
-function readFixturePlan(worktree: string, config: LcaConfig): Plan {
+function readFixturePlan(worktree: string, config: OtterConfig): Plan {
   const path = resolve(worktree, "plan.json")
   const source = readFileSync(path, "utf8")
   const raw = JSON.parse(source) as { revision?: unknown }
@@ -312,13 +312,13 @@ async function connect(client: any, worktree: string): Promise<void> {
   if (path.error || !path.data?.worktree || realpathSync(path.data.worktree) !== worktree) {
     fail("OpenCode server worktree does not match the canonical fixture root")
   }
-  const plugin = pathToFileURL(resolve(worktree, ".opencode/plugins/lca.ts")).href
+  const plugin = pathToFileURL(resolve(worktree, ".opencode/plugins/otter.ts")).href
   if (config.error || !Array.isArray(config.data?.plugin) || config.data.plugin.length !== 1 || config.data.plugin[0] !== plugin) {
-    fail("OpenCode server must load only the fixture's LCA plugin")
+    fail("OpenCode server must load only the fixture's Otter plugin")
   }
   if (agents.error || !Array.isArray(agents.data)
     || !["main", "worker", "reviewer"].every((name) => agents.data.some((agent: any) => agent.name === name))) {
-    fail("OpenCode server lacks the real LCA main, worker, or reviewer agent")
+    fail("OpenCode server lacks the real Otter main, worker, or reviewer agent")
   }
   if (agents.data.find((agent: any) => agent.name === "worker")?.mode !== "subagent"
     || agents.data.find((agent: any) => agent.name === "reviewer")?.mode !== "subagent") {
@@ -335,7 +335,7 @@ async function parentSession(client: any, worktree: string, sessionID?: string):
     return sessionID
   }
   const result = await client.session.create({
-    body: { title: "lca live core queue fault driver" },
+    body: { title: "otter live core queue fault driver" },
     query: { directory: worktree },
   })
   if (result.error || typeof result.data?.id !== "string" || !result.data.id) fail("OpenCode did not create an inert parent session")
@@ -1157,7 +1157,7 @@ export async function preserveVerifierCancellationFailure(options: {
   throw options.originalError
 }
 
-export function queueLifecycleWaitMs(config: Pick<LcaConfig["delegate"], "queue_ttl_ms" | "task_ttl_ms" | "review_ttl_ms" | "verify_timeout_ms">): number {
+export function queueLifecycleWaitMs(config: Pick<OtterConfig["delegate"], "queue_ttl_ms" | "task_ttl_ms" | "review_ttl_ms" | "verify_timeout_ms">): number {
   const { queue_ttl_ms, task_ttl_ms, review_ttl_ms, verify_timeout_ms } = config
   const attemptLifecycle = task_ttl_ms + review_ttl_ms + verify_timeout_ms
   const wait = queue_ttl_ms + attemptLifecycle + BUSY_POLL_MS
@@ -1173,7 +1173,7 @@ function createRuntime(worktree: string, client: any, scenario: Scenario, verifi
   const attempts = scenario === "retry" ? 2 : 1
   if (!config.delegate.review || !config.delegate.review_strict ||
     config.delegate.max_attempts !== attempts) {
-    fail(`fixture .lca/lca.jsonc must set review=true, review_strict=true, max_attempts=${attempts}; local overrides would conflict with the server's fixed policy`)
+    fail(`fixture .otter/otter.jsonc must set review=true, review_strict=true, max_attempts=${attempts}; local overrides would conflict with the server's fixed policy`)
   }
   if (verifierMode === "linux-production" && config.delegate.verifier !== "linux-single-use") {
     fail("linux-production requires fixture config delegate.verifier=linux-single-use")
@@ -2095,7 +2095,7 @@ async function main(): Promise<void> {
   let args: Args
   try { args = parseArgs(process.argv.slice(2)) }
   catch (error) {
-    console.error(`lca-live-core-queue: ${error instanceof Error ? error.message : String(error)}`)
+    console.error(`otter-live-core-queue: ${error instanceof Error ? error.message : String(error)}`)
     process.exitCode = 2
     return
   }
@@ -2103,7 +2103,7 @@ async function main(): Promise<void> {
   let receipt: Receipt
   try { receipt = beginReceipt(args) }
   catch (error) {
-    console.error(`lca-live-core-queue: ${error instanceof Error ? error.message : String(error)}`)
+    console.error(`otter-live-core-queue: ${error instanceof Error ? error.message : String(error)}`)
     process.stdout.write(`${JSON.stringify({ receipt: args.receipt })}\n`)
     process.exitCode = 1
     return

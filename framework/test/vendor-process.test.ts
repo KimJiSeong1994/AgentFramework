@@ -48,10 +48,10 @@ function executionFixture(engine: CLIReferenceEngine, executionID: string, seedR
   claim: ReturnType<ExecutionRunStore["claim"]>
   cleanup(): void
 } {
-  const previousStateHome = process.env.LCA_STATE_HOME
+  const previousStateHome = process.env.OTTER_STATE_HOME
   const previousXdgStateHome = process.env.XDG_STATE_HOME
   const worktree = tempGitWorktree()
-  process.env.LCA_STATE_HOME = worktree.stateHome
+  process.env.OTTER_STATE_HOME = worktree.stateHome
   const runs = createExecutionRunStore(worktree.worktree)
   const claim = runs.claim("reference-stream-test", "vendor-process-test", process.pid)
   if (seedReferenceCollision) {
@@ -97,8 +97,8 @@ function executionFixture(engine: CLIReferenceEngine, executionID: string, seedR
     try {
       worktree.cleanup()
     } finally {
-      if (previousStateHome === undefined) delete process.env.LCA_STATE_HOME
-      else process.env.LCA_STATE_HOME = previousStateHome
+      if (previousStateHome === undefined) delete process.env.OTTER_STATE_HOME
+      else process.env.OTTER_STATE_HOME = previousStateHome
       if (previousXdgStateHome === undefined) delete process.env.XDG_STATE_HOME
       else process.env.XDG_STATE_HOME = previousXdgStateHome
     }

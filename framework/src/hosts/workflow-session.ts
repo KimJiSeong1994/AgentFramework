@@ -1,4 +1,4 @@
-// Interactive host for the LCA-owned planning workflows (P6a S4): `/skill:deep-interview` and `/skill:ralplan`.
+// Interactive host for the Otter-owned planning workflows (P6a S4): `/skill:deep-interview` and `/skill:ralplan`.
 //
 // The kind comes ONLY from the matched builtin PROTECTED_WORKFLOWS entry: user text, project files and model output never
 // decide it, and invoking a name is not consent to anything (these kinds are read-only planning; nothing here can approve,

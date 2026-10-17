@@ -109,7 +109,7 @@ export function createPlanConversation(
       }
       busy = true
       try {
-        const title = "LCA planning conversation"
+        const title = "Otter planning conversation"
         const owned = workflow?.sessionID === sessionID ? workflow : null
         let store: ReturnType<typeof getOwnedSession>
         try { store = getOwnedSession(runtime.worktree, sessionID) } catch { store = undefined }

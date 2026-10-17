@@ -17,7 +17,7 @@ const RETIREMENT_GRACE_MS = 45_000
 const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
 const TREE_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 const SHA256 = /^[0-9a-f]{64}$/
-const UNIT = "lca-verifier.service"
+const UNIT = "otter-verifier.service"
 
 function unknownResult(): VerificationResult {
   return {

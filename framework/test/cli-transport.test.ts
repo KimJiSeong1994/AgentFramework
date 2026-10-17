@@ -467,7 +467,7 @@ test("Codex uses the owned restricted-read profile and requires completed native
   expect(invocation.argv.some(argument => forbiddenOptions.has(argument))).toBe(false)
   const codexOverrides = invocation.argv.flatMap((argument, index) => argument === "-c" ? [invocation.argv[index + 1] ?? ""] : [])
   expect(codexOverrides.some(value => /^(sandbox_mode|sandbox_permissions|approval_policy)=/.test(value))).toBe(false)
-  const permissionProfileIndex = invocation.argv.indexOf('default_permissions="lca_text_only"')
+  const permissionProfileIndex = invocation.argv.indexOf('default_permissions="otter_text_only"')
   const catalogIndex = invocation.argv.findIndex(argument => argument.startsWith("model_catalog_json="))
   expect(permissionProfileIndex).toBeGreaterThanOrEqual(0)
   expect(catalogIndex).toBeGreaterThan(permissionProfileIndex)

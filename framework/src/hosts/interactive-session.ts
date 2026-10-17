@@ -614,13 +614,13 @@ function skillCatalogLines(catalog: SkillCatalog): string[] {
     lines.push(`  Refused ${refusal.source}${name} · ${refusal.reason}`)
   }
   if (!catalog.entries.length && !catalog.refusals.length) lines.push("  No skills or protected workflows were discovered.")
-  if (catalog.entries.some(entry => entry.trusted)) lines.push("Trusted skills (skill_trust in the user lca.jsonc) skip the consent prompt; tool and execution approvals are unchanged.")
-  lines.push("Only a submitted /skill:<name> command invokes a skill. deep-interview, ralplan, ultragoal and autoresearch start LCA-owned workflows; invoking a name is not execution consent, and unit/experiment work still needs typed approval.")
+  if (catalog.entries.some(entry => entry.trusted)) lines.push("Trusted skills (skill_trust in the user otter.jsonc) skip the consent prompt; tool and execution approvals are unchanged.")
+  lines.push("Only a submitted /skill:<name> command invokes a skill. deep-interview, ralplan, ultragoal and autoresearch start Otter-owned workflows; invoking a name is not execution consent, and unit/experiment work still needs typed approval.")
   return lines
 }
 
 function defaultSessionID(uuid: string): string {
-  return `lca-${uuid}`
+  return `otter-${uuid}`
 }
 
 function planForImport(value: unknown, worktree: string): unknown {
@@ -643,7 +643,7 @@ function planValidationFeedback(error: unknown): string | undefined {
     .trim()
   const limit = 240
   const bounded = detail.length > limit ? `${detail.slice(0, limit - 3)}...` : detail
-  return `Plan rejected by LCA validation${bounded ? `: ${bounded}` : ""}. Revise the plan or enter /quit.\n`
+  return `Plan rejected by Otter validation${bounded ? `: ${bounded}` : ""}. Revise the plan or enter /quit.\n`
 }
 
 export async function runInteractiveSession(
@@ -887,7 +887,7 @@ export async function runInteractiveSession(
           const effective = deps.defaultModel.read(worktree)
           const overridden = effective.state === "configured" && effective.source === "project" &&
             (effective.value.engine !== value.engine || effective.value.model !== value.model)
-          write(`Saved default model ${value.engine} / ${value.model} to ${path}.${overridden ? ` This project's .lca/lca.jsonc still selects ${effective.value.engine} / ${effective.value.model}.` : ""}`)
+          write(`Saved default model ${value.engine} / ${value.model} to ${path}.${overridden ? ` This project's .otter/otter.jsonc still selects ${effective.value.engine} / ${effective.value.model}.` : ""}`)
           return true
         } catch (error) {
           write(`Default model not saved: ${boundedTerminalDiagnostic(String(error))}`)
@@ -975,7 +975,7 @@ export async function runInteractiveSession(
           const winner = effective.state === "configured" ? effective.routes[role] : undefined
           const overridden = effective.state === "configured" && effective.sources[role] === "project" && winner &&
             (winner.engine !== route.engine || winner.model !== route.model)
-          write(`Saved combo route ${role} -> ${route.engine} / ${route.model} to ${path}.${overridden ? ` This project's .lca/lca.jsonc still routes ${role} to ${winner.engine} / ${winner.model}.` : ""} The current session is unchanged; /model combo apply starts a new session with it.`)
+          write(`Saved combo route ${role} -> ${route.engine} / ${route.model} to ${path}.${overridden ? ` This project's .otter/otter.jsonc still routes ${role} to ${winner.engine} / ${winner.model}.` : ""} The current session is unchanged; /model combo apply starts a new session with it.`)
         } catch (error) { write(`Combo route not saved: ${boundedTerminalDiagnostic(String(error))}`) }
         return undefined
       }
@@ -1602,7 +1602,7 @@ export async function runInteractiveSession(
       try {
         const metadata = readSessionMetadata(worktree, sessionID)
         if (!metadata || metadata.engine !== "opencode") {
-          terminal.write("Session restore refused: no retained SDK LCA history exists for that session.\n")
+          terminal.write("Session restore refused: no retained SDK Otter history exists for that session.\n")
           return true
         }
         replay = replaySession(worktree, sessionID, { limit: 1 })
@@ -1841,7 +1841,7 @@ export async function runInteractiveSession(
           continue
         }
         if (command === "/skills" && commandArgs.length === 0) {
-          visibleWrite("Skill catalog is unavailable in retained read-only SDK history; no LCA writer or SDK runtime was created.\n")
+          visibleWrite("Skill catalog is unavailable in retained read-only SDK history; no Otter writer or SDK runtime was created.\n")
           continue
         }
         if (command === "/search") {

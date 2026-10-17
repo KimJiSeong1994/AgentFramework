@@ -43,18 +43,18 @@ function proofKey(sessionID: string, callID: string): string {
 }
 
 async function appendEvidence(value: Record<string, unknown>) {
-  const path = process.env.LCA_SKILL_CONTRACT_TOOL_EVIDENCE
+  const path = process.env.OTTER_SKILL_CONTRACT_TOOL_EVIDENCE
   if (!path) throw new Error("skill contract tool evidence path is not configured")
   await appendFile(path, `${JSON.stringify(value)}\n`, "utf8")
 }
 
 export default async function skillContractPlugin(pluginInput: PluginInput): Promise<Hooks> {
-  const outputPath = process.env.LCA_SKILL_CONTRACT_OUTPUT
-  const expectedHash = process.env.LCA_SKILL_CONTRACT_OUTPUT_SHA256
-  const expectedSystemHash = process.env.LCA_SKILL_CONTRACT_SYSTEM_SHA256
-  const expectedPrompt = process.env.LCA_SKILL_CONTRACT_PROMPT
-  const uncheckedBodyMarker = process.env.LCA_SKILL_CONTRACT_UNCHECKED_BODY_MARKER
-  const uncheckedDescriptionMarker = process.env.LCA_SKILL_CONTRACT_UNCHECKED_DESCRIPTION_MARKER
+  const outputPath = process.env.OTTER_SKILL_CONTRACT_OUTPUT
+  const expectedHash = process.env.OTTER_SKILL_CONTRACT_OUTPUT_SHA256
+  const expectedSystemHash = process.env.OTTER_SKILL_CONTRACT_SYSTEM_SHA256
+  const expectedPrompt = process.env.OTTER_SKILL_CONTRACT_PROMPT
+  const uncheckedBodyMarker = process.env.OTTER_SKILL_CONTRACT_UNCHECKED_BODY_MARKER
+  const uncheckedDescriptionMarker = process.env.OTTER_SKILL_CONTRACT_UNCHECKED_DESCRIPTION_MARKER
   if (!outputPath || !expectedHash || !expectedSystemHash || !expectedPrompt || !uncheckedBodyMarker || !uncheckedDescriptionMarker) {
     throw new Error("runtime-owned skill contract fixtures are not configured")
   }

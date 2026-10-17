@@ -1,4 +1,4 @@
-"""Required macOS native-model smoke for the production LCA TUI."""
+"""Required macOS native-model smoke for the production Otter TUI."""
 from __future__ import annotations
 import argparse, fcntl, hashlib, json, os, pty, re, select, struct, subprocess, sys, tempfile, termios, time
 from pathlib import Path
@@ -62,7 +62,7 @@ def main() -> int:
     source_digest = hashlib.sha256(source_diff).hexdigest()
     started = time.monotonic()
     output = bytearray()
-    with tempfile.TemporaryDirectory(prefix="lca-native-ux-") as directory:
+    with tempfile.TemporaryDirectory(prefix="otter-native-ux-") as directory:
         root = Path(os.path.realpath(directory))
         worktree = root / "worktree"
         worktree.mkdir()
@@ -85,10 +85,10 @@ def main() -> int:
         try:
             wait_for(master, output, "You>", time.monotonic() + 60)
             response_start = len(output)
-            os.write(master, b"Reply with the exact text LCA_UX_NATIVE_READY and do not propose a plan.\r")
+            os.write(master, b"Reply with the exact text OTTER_UX_NATIVE_READY and do not propose a plan.\r")
             wait_for(master, output, "[Assistant]", time.monotonic() + 900, response_start)
             response_text = plain(output[response_start:])
-            if "LCA_UX_NATIVE_READY" not in response_text[response_text.rfind("[Assistant]"):]:
+            if "OTTER_UX_NATIVE_READY" not in response_text[response_text.rfind("[Assistant]"):]:
                 raise AssertionError("native response did not contain the required marker")
             prompt_start = len(output)
             wait_for(master, output, "You>", time.monotonic() + 60, prompt_start)

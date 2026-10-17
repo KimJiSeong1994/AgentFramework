@@ -143,7 +143,7 @@ export async function submitAdmittedImportedPlan(
   admission: PlanSubmissionAdmission,
   signal?: AbortSignal,
 ): Promise<PlanSubmission> {
-  if (!runtime.linuxAdmission) throw new TypeError("lca: plan-submission admission is unavailable")
+  if (!runtime.linuxAdmission) throw new TypeError("otter: plan-submission admission is unavailable")
   const beforeAdmission = currentSnapshot(runtime, wf)
   if ("result" in beforeAdmission) return { result: beforeAdmission.result, planSha: canonicalPlanSha(plan) }
   if (wf.phase !== "planning") throw new Error("workflow is not awaiting an imported plan")

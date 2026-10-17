@@ -81,8 +81,8 @@ export function panelRequirement(input: {
 export const sha256Text = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex")
 
 export const roundFileRelative = (sessionID: string, workflowID: string, n: number, part: "question" | "answer"): string =>
-  `.lca/workflows/${sessionID}/${workflowID}/rounds/${n}-${part}.md`
-export const specRelative = (sessionID: string, workflowID: string): string => `.lca/workflows/${sessionID}/${workflowID}/spec.md`
+  `.otter/workflows/${sessionID}/${workflowID}/rounds/${n}-${part}.md`
+export const specRelative = (sessionID: string, workflowID: string): string => `.otter/workflows/${sessionID}/${workflowID}/spec.md`
 
 const lastScored = (d: DeepInterviewData): RoundRecord | undefined => [...d.rounds].reverse().find(r => r.ambiguity !== undefined)
 

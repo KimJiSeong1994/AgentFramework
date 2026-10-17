@@ -17,7 +17,7 @@ export function checkpointPath(worktree: string, sessionID: string): string {
 }
 
 export function buildCheckpoint(state: ModeState, incomplete: Todo[], ledger?: Ledger): string {
-  let head = `[lca checkpoint] mode=${state.mode}${state.active ? " (active)" : ""} iterations=${state.iterations}`
+  let head = `[otter checkpoint] mode=${state.mode}${state.active ? " (active)" : ""} iterations=${state.iterations}`
   if (ledger && ledger.tasks.length > 0) {
     const open = openTasks(ledger)
     const cur = ledger.tasks.find((t) => t.status === "running") ?? open[0]
@@ -53,7 +53,7 @@ export function createCompactingHook(deps: HookDeps): NonNullable<Hooks["experim
       if (agent && agent !== "main") return // worker/reviewer compaction: nothing of ours to preserve
       const epoch = admissionEpoch(deps.worktree, input.sessionID)
       if (!epoch || effectiveHold(deps.worktree, input.sessionID)) {
-        output.context.push("LCA session is held. Retained history is not permission to resume work.")
+        output.context.push("Otter session is held. Retained history is not permission to resume work.")
         return
       }
       const state = readModeState(deps.worktree, input.sessionID)

@@ -152,7 +152,7 @@ const twoAnswers = () => [answer("a1"), answer("a2")]
 function seed(patch: (d: DeepInterviewData) => DeepInterviewData, stage: DeepInterviewWorkflow["stage"], phase: DeepInterviewWorkflow["phase"] = "planning", rounds: Array<{ n: number; ambiguity?: number; band?: string }> = []): DeepInterviewWorkflow {
   const fresh = newDeepInterview(SID, currentOwner(Date.now(), store!.epoch), "fixture", "seeded request")
   const records = rounds.map(r => {
-    const dir = join(wt.worktree, ".lca", "workflows", SID, fresh.id, "rounds")
+    const dir = join(wt.worktree, ".otter", "workflows", SID, fresh.id, "rounds")
     mkdirSync(dir, { recursive: true })
     const questionText = `seed question ${r.n}`
     const answerText = `seed answer ${r.n}`
@@ -267,7 +267,7 @@ describe("registry and prompts", () => {
       expect(Object.isFrozen(prompt)).toBe(true)
       expect(promptIntact(prompt)).toBe(true)
       expect(kindAllowsRole(prompt.kind, prompt.role)).toBe(true)
-      expect(prompt.text).not.toMatch(/\bgjc\b|\.gjc\/|\/skill:|lca_flow|GJC_RALPLAN/i)
+      expect(prompt.text).not.toMatch(/\bgjc\b|\.gjc\/|\/skill:|otter_flow|GJC_RALPLAN/i)
     }
     expect(DI_SCORER_PROMPT.role).toBe("interviewer")
     expect(new Set(DEEP_INTERVIEW_PROMPTS.map(prompt => prompt.sha256)).size).toBe(DEEP_INTERVIEW_PROMPTS.length)
@@ -655,7 +655,7 @@ describe("done requires a verified spec.md", () => {
     const text = bytes.toString("utf8")
     expect(text).toContain(`Spec path: ${ref.path}`)
     expect(text).toContain("Final Ambiguity Score: 0.0%")
-    expect(text).toContain("Threshold: 0.05 (lca-default)")
+    expect(text).toContain("Threshold: 0.05 (otter-default)")
     expect(text).toContain("Status: PASSED")
     expect(text).toContain("Early Exit: none")
     expect(text).toContain("Build it.")
@@ -681,7 +681,7 @@ describe("done requires a verified spec.md", () => {
     writeFileSync(abs, "# spec\n")
     const ctx = { worktree: wt.worktree }
     expect(reduce(at, { type: "spec_written", path: rel, sha256: "f".repeat(64) }, ctx)).toMatchObject({ ok: false, text: expect.stringContaining("hash mismatch") })
-    expect(reduce(at, { type: "spec_written", path: ".lca/workflows/other/spec.md", sha256: sha256(Buffer.from("# spec\n")) }, ctx)).toMatchObject({ ok: false, text: expect.stringContaining("own spec.md") })
+    expect(reduce(at, { type: "spec_written", path: ".otter/workflows/other/spec.md", sha256: sha256(Buffer.from("# spec\n")) }, ctx)).toMatchObject({ ok: false, text: expect.stringContaining("own spec.md") })
     rmSync(abs)
     expect(reduce(at, { type: "spec_written", path: rel, sha256: sha256(Buffer.from("# spec\n")) }, ctx)).toMatchObject({ ok: false, text: expect.stringContaining("missing") })
     // edit after the engine verified it but before the commit transaction: the in-transaction check refuses
@@ -809,7 +809,7 @@ describe("start and exclusivity", () => {
   test("starts one deep-interview with the fixed threshold and source; a second start is refused naming the occupant", () => {
     const h = harness({})
     const wf = begin(h)
-    expect(dataOf(wf)).toMatchObject({ threshold: 0.05, thresholdSource: "lca-default", round: 0 })
+    expect(dataOf(wf)).toMatchObject({ threshold: 0.05, thresholdSource: "otter-default", round: 0 })
     expect(wf).toMatchObject({ kind: "deep-interview", stage: "topology", phase: "planning" })
     expect(startDeepInterview(h.runtime, SID, "again")).toMatchObject({ ok: false, text: expect.stringContaining(`deep-interview workflow ${wf.id} is active`) })
     expect(startDeepInterview(h.runtime, SID, "  ")).toMatchObject({ ok: false })
@@ -971,7 +971,7 @@ describe("completion re-checks every panel and choice record (W1/W7)", () => {
     expect(deepInterviewView(finished, wt.worktree)).toMatchObject({ evidenceOk: true })
     const okStatus = statusJson(h.runtime, SID).workflow
     expect(okStatus?.review).toContain("spec verified")
-    expect(okStatus?.review).toContain("threshold 0.05 (lca-default)")
+    expect(okStatus?.review).toContain("threshold 0.05 (otter-default)")
     expect(okStatus?.review).toContain("records verified")
     const file = join(receiptsDirectory(wt.worktree, SID, wf.id), receiptFiles(wf.id).find(name => name.includes("panel-r2-simplifier"))!)
     writeFileSync(file, readFileSync(file, "utf8").replace("SENTINEL-simplifier", "TAMPERED"))
