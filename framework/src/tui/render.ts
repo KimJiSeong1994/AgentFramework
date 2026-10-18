@@ -37,6 +37,9 @@ export type FramePanel = {
   readonly placement?: "below" | "body"
   /** Option rows are `label  description`: the description after the first two-space gap is muted. */
   readonly columns?: boolean
+  /** Body panels only: indexes into `lines` painted as the highlighted row / dimmed text. */
+  readonly accentLines?: readonly number[]
+  readonly mutedLines?: readonly number[]
 }
 
 /** `selection` is the authoritative engine/model fact; `screen` names the active surface. */
@@ -943,10 +946,16 @@ export function renderFrame(input: {
   if (bodyPanel) {
     const title = clipToWidth(oneLineText(`${bodyPanel.title}${separator}${bodyPanel.focus} focus`), Math.max(1, columns - 6))
     const contentRows = Math.max(1, bodyRows - panelBorderRows)
-    const content = bodyPanel.lines.flatMap(line => wrapText(line, innerWidth)).slice(0, contentRows)
+    const wrappedLines = bodyPanel.lines.flatMap((line, lineIndex) => wrapText(line, innerWidth).map(text => ({
+      text,
+      token: bodyPanel.accentLines?.includes(lineIndex) ? "accent" as const : bodyPanel.mutedLines?.includes(lineIndex) ? "muted" as const : undefined,
+    }))).slice(0, contentRows)
+    const content = wrappedLines.map(line => line.text)
     frameLines[0] = `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(title, "focus")}${paint(` ${horizontal(columns - 5 - displayWidth(title))}${glyph.tr}`, "border")}`
     content.forEach((line, index) => {
-      frameLines[index + 1] = `${paint(`${glyph.v} `, "border")}${padToWidth(line, innerWidth)}${paint(` ${glyph.v}`, "border")}`
+      const token = wrappedLines[index]!.token
+      const padded = padToWidth(line, innerWidth)
+      frameLines[index + 1] = `${paint(`${glyph.v} `, "border")}${token ? paint(padded, token) : padded}${paint(` ${glyph.v}`, "border")}`
     })
     frameLines[content.length + 1] = paint(`${glyph.bl}${horizontal(columns - 2)}${glyph.br}`, "border")
   } else if (input.home && input.transcript.length === 0 && bodyRows >= 6) {

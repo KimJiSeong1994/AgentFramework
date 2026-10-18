@@ -39,7 +39,7 @@ import { ModelRequestError } from "../workflows/turn.ts"
 import { beginExecutionActivity } from "./runtime.ts"
 import { settled, type ExecutionRunStatus } from "./run-state.ts"
 import { EXECUTION_ROLES, LinuxAdmissionRefused, type ComboRoutes, type ExecutionRole, type ExecutionRuntime, type VerifyRunObservation } from "./types.ts"
-import type { ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
+import type { AskPrompt, ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
 import { commandInsertion, interactiveActions, interactiveHelp, type InteractiveContext } from "./interactive-actions.ts"
 import { fileComboStore, fileDefaultModelStore, validateComboRoutes, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
 import { runOperatorShell, type ShellResult, type ShellSnapshot } from "./operator-shell.ts"
@@ -59,6 +59,8 @@ export type Terminal = {
   setDraft?: (draft: string) => void
   readInput?: (input: { title: string; hint: string; prompt: string; kind: "chat" | "selection" }, signal: AbortSignal) => Promise<string | undefined>
   choose?: (title: string, choices: readonly string[], signal: AbortSignal, presentation?: ChoicePresentation) => Promise<number | undefined>
+  /** GJC-style question with options (HITL). Returns the chosen option index, the typed custom answer, or undefined (dismissed/aborted). */
+  ask?: (prompt: AskPrompt, signal: AbortSignal) => Promise<{ kind: "option"; index: number } | { kind: "custom"; text: string } | undefined>
   controls?: (handler: (action: TerminalControl) => void) => void
   queueAdmission?: (allowed: boolean) => void
   activity?: (activity: CliHostActivity) => void

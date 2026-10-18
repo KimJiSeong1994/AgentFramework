@@ -48,6 +48,19 @@ export type ChoicePresentation =
   | { readonly kind: "generic-list"; readonly rows: readonly string[]; readonly initialIndex?: number; readonly origin: ViewIdentity }
   | { readonly kind: "picker"; readonly purpose: "selection" | "command"; readonly rows: readonly string[]; readonly hint?: string; readonly initialIndex?: number }
 
+/** GJC-style question with selectable answers. Presentation only; the caller owns what an answer means. */
+export type AskPrompt = {
+  readonly question: string
+  readonly options: readonly { readonly label: string; readonly detail?: string }[]
+  /** Index into `options`; only pre-highlights the row, never auto-selects. */
+  readonly recommended?: number
+  /** Adds the automatic final "Other (type your own)" row that opens an inline text editor. */
+  readonly allowCustom?: boolean
+  readonly customLabel?: string
+}
+
+export type AskAnswer = { readonly kind: "option"; readonly index: number } | { readonly kind: "custom"; readonly text: string }
+
 export type SessionCandidate = {
   readonly sessionID: string
   readonly engine: string

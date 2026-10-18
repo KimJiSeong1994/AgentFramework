@@ -11,6 +11,7 @@ import { STOP_LABEL } from "../flow/status.ts"
 import { admissionFence, effectiveHold } from "../sessions/admission.ts"
 import type { TranscriptKind } from "../sessions/store.ts"
 import type { ProtectedWorkflowDescriptor } from "../skills/types.ts"
+import { DI_MAX_ANSWER_CHARS } from "../workflows/deep-interview.ts"
 import { dataOf as diDataOf } from "../workflows/deep-interview-data.ts"
 import {
   deepInterviewView, retryDeepInterview, runDeepInterview, startDeepInterview, verifiedSpec, type DiAnswer, type DiIo,
@@ -55,6 +56,7 @@ export type WorkflowHostContext = {
   /** The session's controller status text for `/status`. */
   statusText(): string
 }
+
 
 export type WorkflowOutcome = { quit: boolean }
 
@@ -197,9 +199,33 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
       async readAnswer(open, signal) {
         if (pending) { const answer = pending; pending = undefined; return answer }
         const active = signal ?? ctx.processSignal
-        if (shown !== open.round) {
+        const options = open.options
+        const fresh = shown !== open.round
+        if (fresh) {
           shown = open.round
-          write(`Question ${open.round}:\n${open.question}`)
+          const ask = terminal.ask
+          if (options && options.length > 0 && ask) {
+            const picked = await ask.call(terminal, {
+              question: terminalSafeText(`Question ${open.round}: ${open.question}`),
+              options: options.map(label => ({ label: terminalSafeText(label) })),
+              ...(open.recommended === undefined ? {} : { recommended: open.recommended }),
+              allowCustom: true,
+            }, active)
+            if (active.aborted) return undefined
+            let text: string | undefined
+            if (picked?.kind === "option") text = options[picked.index]
+            else if (picked?.kind === "custom") text = picked.text.trim().slice(0, DI_MAX_ANSWER_CHARS)
+            if (text) {
+              ctx.persist("user", { text })
+              return { kind: "answer", text }
+            }
+            write(`Question ${open.round}:\n${open.question}`)
+          } else {
+            write(`Question ${open.round}:\n${open.question}`)
+          }
+          if (options && options.length > 0) {
+            write(`${options.map((label, i) => `  ${i + 1}) ${label}${open.recommended === i ? " (Recommended)" : ""}`).join("\n")}\nType a number or your own answer; /finish ends early.`)
+          }
         }
         for (;;) {
           const line = await ctx.readInput({ title: `deep-interview · round ${open.round}`, hint: ANSWER_HINT, prompt: "You> " }, active)
@@ -217,6 +243,13 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
           if (COMMANDS_BLOCKED_WHILE_ANSWERING.test(text)) {
             write("That command is unavailable while an interview awaits an answer: answer, /finish, /pause, /cancel, /status or /quit.")
             continue
+          }
+          if (options && /^[0-9]+$/u.test(text)) {
+            const picked = Number(text)
+            if (picked >= 1 && picked <= options.length) {
+              ctx.persist("user", { text: options[picked - 1]! })
+              return { kind: "answer", text: options[picked - 1]! }
+            }
           }
           ctx.persist("user", { text: line })
           return { kind: "answer", text: line }

@@ -84,3 +84,16 @@ describe("priority status layout", () => {
     expect(narrow).not.toContain("+2 roles")
   })
 })
+
+describe("live status row", () => {
+  test("replaces the generic request and activity text and keeps safety facts", () => {
+    const rows = statusLines({
+      facts: { ...facts, request: { state: "in-progress", operationID: "op" }, hold: { state: "known", value: { held: true } } },
+      live: "⠧ Bash: bun test · 12s ⟦esc⟧", activity: "Otter · working · Escape cancels", queued: 0, columns: 120,
+    }).join(" ")
+    expect(rows).toContain("⠧ Bash: bun test · 12s ⟦esc⟧")
+    expect(rows).not.toContain("Model request running")
+    expect(rows).not.toContain("Otter · working")
+    expect(rows).toContain("safety[")
+  })
+})

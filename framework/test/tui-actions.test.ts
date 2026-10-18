@@ -135,7 +135,8 @@ describe("exclusive application input ownership", () => {
     await Bun.sleep(1100)
     expect(frames.length).toBeGreaterThan(before)
     const status = frames.at(-1)!.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
-    expect(status).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Model request running · [01]s/u)
+    expect(status).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Model request · (?:\d+ms|\d+\.\ds) ⟦esc⟧/u)
+    expect(status).not.toContain("Model request running")
     app.viewSnapshot({ ...facts, request: { state: "completed", operationID: "op-1" } })
     expect(internal.spinnerTimer).toBeUndefined()
     expect(frames.at(-1)!).not.toContain("Model request running")
@@ -161,9 +162,11 @@ describe("exclusive application input ownership", () => {
     await Bun.sleep(400)
     // The clock redraws on its own; successive frames show different spinner glyphs.
     expect(frames.length).toBeGreaterThan(before + 1)
-    const glyphs = new Set(frames.slice(before).map(frame => /([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]) Otter · working/u.exec(plain(frame))?.[1]).filter(Boolean))
+    const glyphs = new Set(frames.slice(before).map(frame => /([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]) Working · /u.exec(plain(frame))?.[1]).filter(Boolean))
     expect(glyphs.size).toBeGreaterThan(1)
-    expect(plain(frames.at(-1))).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Otter · working · Escape cancels · 0s/u)
+    expect(plain(frames.at(-1))).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working · \d+ms ⟦esc⟧/u)
+    expect(plain(frames.at(-1))).not.toContain("Otter · working")
+    expect(plain(frames.at(-1))).not.toContain("Escape cancels")
 
     // A choice waits on the user: no spinner, no redraw clock.
     const choice = app.choose("Decide", ["Yes", "No"], new AbortController().signal)

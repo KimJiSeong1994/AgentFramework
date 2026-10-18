@@ -1137,11 +1137,11 @@ def run_restore(temp_root: Path):
         assert_no_additional_dispatch(session, turns=0, runs=0)
         session.send_text("/continue\r")
         session.wait_screen("Resume residual approved work after recovery checks?")
-        session.wait_screen("> Keep held")
+        session.wait_screen("❯ 1. Keep held")
         session.send(b"\r")
         session._wait(
             lambda: "Resume residual approved work after recovery checks?: Keep held" in session.screen.current_text() and
-            "> Keep held" not in session.screen.current_text(),
+            "❯ 1. Keep held" not in session.screen.current_text(),
             "default Keep held choice to resolve without unholding the saved session",
         )
         session.mode_proof["continueKeepPreservedHold"] = True
@@ -1336,7 +1336,7 @@ def submit_explicit_skill(session: PtySession, command: str):
 
 def wait_source_choice(session: PtySession, name: str):
     session.wait_screen(f"Skill: {name}")
-    session.wait_screen("> Allow this content in this session")
+    session.wait_screen("❯ 1. Allow this content in this session")
     if not session.raw_mode():
         raise AssertionError("skill source consent was not displayed in raw PTY mode")
     session.mode_proof["rawAtSkillChoice"] = True
@@ -1440,7 +1440,7 @@ def run_skills(temp_root: Path):
         session.send(b"\r")
         wait_source_choice(session, "pty-inspect")
         session.send(b"\x1b[B")
-        session.wait_screen("> Deny")
+        session.wait_screen("❯ 2. Deny")
         session.send(b"\r")
         session.wait_screen("Skill invocation refused; source instructions were not dispatched.")
         session._wait(lambda: session.screen.composer_line().startswith("You>"), "composer after source consent denial")
@@ -1707,7 +1707,7 @@ def wait_skill_source_consent(session: PtySession, name: str):
         f"explicit source consent for {name}",
     )
     session.wait_screen(f"Skill: {name}")
-    session.wait_screen("> Allow this content in this session")
+    session.wait_screen("❯ 1. Allow this content in this session")
     if not session.raw_mode():
         raise AssertionError("source consent was not presented by the attached foreground TUI")
     session.send(b"\r")
@@ -1722,7 +1722,7 @@ def wait_skill_tool_permission(session: PtySession, name: str, tool: str, occurr
             f"foreground {tool} scope choice {occurrence}",
         )
     session.wait_screen(f"Skill permission: {name} (custom)")
-    session.wait_screen("> Allow once")
+    session.wait_screen("❯ 1. Allow once")
     if not session.raw_mode():
         raise AssertionError("skill tool permission was not presented by the foreground raw TUI")
     latest = [event for event in session.events() if event.get("type") == "skill.toolPermission.started"][-1]
@@ -1787,7 +1787,7 @@ def run_skill_tool_scope(temp_root: Path):
             raise AssertionError(f"allow-once grep execution or repeated-call scope was not observed exactly: {observed}")
         session.mode_proof["oneGrepExecutedAndSameNextCallRequiresChoice"] = True
         session.send(b"\x1b[B")
-        session.wait_screen("> Deny")
+        session.wait_screen("❯ 2. Deny")
         session.send(b"\r")
         session.wait_events(
             lambda event: event.get("type") == "skill.toolPermission.completed" and event.get("answer") == 1,
@@ -1950,7 +1950,7 @@ def wait_workflow_status(session: PtySession, text: str, timeout=15.0):
 
 def pick_workflow_choice(session: PtySession, first: str, downs: int = 0):
     """Inline chooser: wait for the highlighted first entry, move, and select with Enter."""
-    session.wait_screen(f"> {first}")
+    session.wait_screen(f"❯ 1. {first}")
     for _ in range(downs):
         session.send(b"\x1b[B")
     session.send(b"\r")
@@ -2084,7 +2084,7 @@ def wait_nth_source_choice(session: PtySession, name: str, count: int):
     )
     if len(source_choice_started(session)) != count:
         raise AssertionError(f"expected exactly {count} source consent prompts: {source_choice_started(session)}")
-    session.wait_screen("> Allow this content in this session")
+    session.wait_screen("❯ 1. Allow this content in this session")
     if not session.raw_mode():
         raise AssertionError("skill source consent was not displayed in raw PTY mode")
     return source_choice_started(session)[count - 1]
@@ -2157,7 +2157,7 @@ def run_skill_grants(temp_root: Path):
         submit_explicit_skill(session, "/skill:pty-inspect after revoke")
         reprompt = wait_nth_source_choice(session, "pty-inspect", 2)
         session.send(b"\x1b[B")
-        session.wait_screen("> Deny")
+        session.wait_screen("❯ 2. Deny")
         session.send(b"\r")
         session.wait_screen("Skill invocation refused; source instructions were not dispatched.")
         assert_skill_turn_count(session, 1, "revoked skill must not dispatch without fresh consent")
@@ -2243,9 +2243,9 @@ def run_skill_restore(temp_root: Path, mode: str):
             raise AssertionError("held restored session honored a skill invocation without explicit Resume")
         second.send_text("/continue\r")
         second.wait_screen("Resume residual approved work after recovery checks?")
-        second.wait_screen("> Keep held")
+        second.wait_screen("❯ 1. Keep held")
         second.send(b"\x1b[B")
-        second.wait_screen("> Resume")
+        second.wait_screen("❯ 2. Resume")
         second.send(b"\r")
         second.wait_screen("Session admitted by explicit Resume; no work was automatically dispatched.")
         if source_choice_started(second) or skill_turn_events(second):
@@ -2254,7 +2254,7 @@ def run_skill_restore(temp_root: Path, mode: str):
         submit_explicit_skill(second, "/skill:pty-inspect after resume")
         reprompt = wait_nth_source_choice(second, "pty-inspect", 1)
         second.send(b"\x1b[B")
-        second.wait_screen("> Deny")
+        second.wait_screen("❯ 2. Deny")
         second.send(b"\r")
         second.wait_screen("Skill invocation refused; source instructions were not dispatched.")
         if skill_turn_events(second):
@@ -2452,7 +2452,7 @@ def run_pause_resume(temp_root: Path):
         prompts = plain_text(session.output).count("Resume the residual approved work?")
         session.send_text("/continue\r")
         session._wait(lambda: plain_text(session.output).count("Resume the residual approved work?") > prompts, "second Keep/Resume chooser")
-        session.wait_screen("> Keep held")
+        session.wait_screen("❯ 1. Keep held")
         choose_item(session, 1)
         session._wait(lambda: "Resumed workflow" in plain_text(session.output) or "Resume refused" in plain_text(session.output), "resume outcome", 30.0)
         session.wait_screen("Enter send")

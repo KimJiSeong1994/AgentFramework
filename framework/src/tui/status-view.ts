@@ -13,11 +13,13 @@ export type StatusInput = {
   readonly selectionInHeader?: boolean
   /** Spinner frame and elapsed time for an in-progress request the host reported. */
   readonly request?: { readonly frame: string; readonly elapsedSeconds: number }
+  /** One live row (`<spinner> <step> · <elapsed> ⟦esc⟧`) that replaces the generic request/activity text. */
+  readonly live?: string
 }
 
 type Segment = { text: string; priority: number }
 
-function factSegments(facts: InteractiveViewFacts | undefined, selectionInHeader: boolean, request?: StatusInput["request"]): Segment[] {
+function factSegments(facts: InteractiveViewFacts | undefined, selectionInHeader: boolean, request?: StatusInput["request"], live = false): Segment[] {
   if (!facts) return []
   const safety: string[] = []
   if (facts.identity.mode === "retained-read-only") safety.push("read-only")
@@ -34,7 +36,7 @@ function factSegments(facts: InteractiveViewFacts | undefined, selectionInHeader
   if (facts.request.state === "cancellation-unconfirmed") safety.push("request-cancel:?")
   const segments: Segment[] = safety.length ? [{ text: `safety[${safety.join(" ")}]`, priority: 200 }] : []
   if (!selectionInHeader) segments.push({ text: selectionLabel(facts.selection), priority: 50 })
-  if (facts.request.state === "in-progress") {
+  if (facts.request.state === "in-progress" && !live) {
     const elapsed = request ? ` · ${request.elapsedSeconds}s` : ""
     segments.push({ text: `${request ? `${request.frame} ` : ""}Model request running${elapsed}`, priority: 90 })
   }
@@ -71,11 +73,12 @@ function pack(segments: readonly Segment[], columns: number, separator: string):
 
 export function statusLines(input: StatusInput): string[] {
   const segments: Segment[] = [
-    ...factSegments(input.facts, input.selectionInHeader === true, input.request),
+    ...factSegments(input.facts, input.selectionInHeader === true, input.request, input.live !== undefined),
+    ...(input.live !== undefined ? [{ text: input.live, priority: 90 }] : []),
     ...(input.search ? [{ text: `search: ${input.search}`, priority: 70 }] : []),
     ...(input.queued ? [{ text: `queued ${input.queued}`, priority: 75 }] : []),
     ...(input.workflow ? [{ text: input.workflow, priority: 80 }] : []),
-    { text: input.activity, priority: 70 },
+    ...(input.live === undefined ? [{ text: input.activity, priority: 70 }] : []),
     ...(input.notice ? [{ text: input.notice, priority: 110 }] : []),
   ]
   return pack(segments, Math.max(1, Math.floor(input.columns)), input.ascii ? " | " : " · ")

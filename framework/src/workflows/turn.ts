@@ -409,7 +409,7 @@ export async function runWorkflowTurn(runtime: ExecutionRuntime, binding: TurnBi
 // ---------------------------------------------------------------------------------------------- typed stage events
 export type StageEvent =
   | { type: "message"; text: string }
-  | { type: "question"; text: string }
+  | { type: "question"; text: string; options?: string[]; recommended?: number }
   | { type: "decision"; id: string; text: string }
   | { type: "artifact_ref"; key: string; path: string; sha256?: string }
   | { type: "verdict"; verdict: "okay" | "iterate"; findings: string[] }
@@ -441,7 +441,7 @@ const FORBIDDEN_FIELDS = new Set([
 type Shape = { required: readonly string[]; optional: readonly string[] }
 const SHAPES: Readonly<Record<StageEventType, Shape>> = {
   message: { required: ["text"], optional: [] },
-  question: { required: ["text"], optional: [] },
+  question: { required: ["text"], optional: ["options", "recommended"] },
   decision: { required: ["id", "text"], optional: [] },
   artifact_ref: { required: ["key", "path"], optional: ["sha256"] },
   verdict: { required: ["verdict", "findings"], optional: [] },
@@ -512,8 +512,15 @@ const upper = <T extends string>(allowed: readonly T[], value: unknown): value i
 
 function buildEvent(type: StageEventType, r: Record<string, unknown>): StageEvent | string {
   switch (type) {
-    case "message": case "question":
+    case "message":
       return isText(r.text) ? { type, text: r.text } : `stage event ${type} text is invalid`
+    case "question": {
+      if (!isText(r.text)) return "stage event question text is invalid"
+      if (r.options === undefined) return r.recommended === undefined ? { type, text: r.text } : "stage event question recommended requires options"
+      if (!Array.isArray(r.options) || r.options.length < 1 || !isTextList(r.options, 5, 200)) return "stage event question options are invalid"
+      if (r.recommended !== undefined && (!Number.isInteger(r.recommended) || (r.recommended as number) < 0 || (r.recommended as number) >= r.options.length)) return "stage event question recommended is invalid"
+      return { type, text: r.text, options: r.options, ...(r.recommended === undefined ? {} : { recommended: r.recommended as number }) }
+    }
     case "decision":
       return isText(r.id, 128) && isText(r.text) ? { type, id: r.id, text: r.text } : "stage event decision is invalid"
     case "artifact_ref":

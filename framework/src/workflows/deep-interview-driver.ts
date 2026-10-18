@@ -138,7 +138,7 @@ export type DiIo = {
   /** Inline terminal chooser: the selected index. */
   choose(title: string, choices: readonly string[], signal?: AbortSignal): Promise<number | undefined>
   /** The next chat line is the answer to the open question; `/finish` is the early-exit request. */
-  readAnswer(open: { round: number; question: string }, signal?: AbortSignal): Promise<DiAnswer | undefined>
+  readAnswer(open: { round: number; question: string; options?: string[]; recommended?: number }, signal?: AbortSignal): Promise<DiAnswer | undefined>
   /** Free-text operator note for an Adjust choice. */
   readNote(title: string, signal?: AbortSignal): Promise<string | undefined>
   notice?(text: string): void
@@ -149,6 +149,25 @@ function writeText(worktree: string, relative: string, text: string): string {
   const absolute = resolve(worktree, relative)
   durableWriteBytes(absolute, Buffer.from(text, "utf8"))
   return sha256(Buffer.from(text, "utf8"))
+}
+
+const QUESTION_OPTIONS_MAX_BYTES = 8 * 1024
+const questionOptionsRelative = (sessionID: string, workflowID: string, n: number): string =>
+  roundFileRelative(sessionID, workflowID, n, "question").replace(/\.md$/u, ".options.json")
+
+/** Optional answer options stored beside the question. Absent, oversized or malformed means no options; never an error. */
+function readQuestionOptions(worktree: string, wf: DeepInterviewWorkflow, n: number): { options?: string[]; recommended?: number } {
+  try {
+    const read = readArtifactBytes(resolve(worktree, questionOptionsRelative(wf.sessionID, wf.id, n)), QUESTION_OPTIONS_MAX_BYTES)
+    if (!read.ok) return {}
+    const parsed: unknown = JSON.parse(read.bytes.toString("utf8"))
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {}
+    const { options, recommended } = parsed as { options?: unknown; recommended?: unknown }
+    if (!Array.isArray(options) || options.length < 1 || options.length > 5) return {}
+    if (!options.every(item => typeof item === "string" && item.length >= 1 && item.length <= 200)) return {}
+    const valid = typeof recommended === "number" && Number.isInteger(recommended) && recommended >= 0 && recommended < options.length
+    return { options: options as string[], ...(valid ? { recommended } : {}) }
+  } catch { return {} }
 }
 
 function readRound(worktree: string, wf: DeepInterviewWorkflow, n: number, part: "question" | "answer", expected: string | undefined): string {
@@ -294,7 +313,7 @@ export async function runDeepInterview(runtime: ExecutionRuntime, sessionID: str
     }
     if (step.kind === "await_answer") {
       const question = readRound(worktree, current, step.round, "question", d.rounds.find(r => r.n === step.round)?.questionSha)
-      const answer = await io.readAnswer({ round: step.round, question }, options.signal)
+      const answer = await io.readAnswer({ round: step.round, question, ...readQuestionOptions(worktree, current, step.round) }, options.signal)
       if (answer === undefined) return { status: "awaiting", wf: current }
       if (answer.kind === "finish") {
         const refusal = earlyExitRefusal(current)
@@ -443,6 +462,9 @@ export async function runDeepInterview(runtime: ExecutionRuntime, sessionID: str
         if (!one.ok) return { kind: "attempt", reason: one.reason }
         const round = step.round
         const questionSha = writeText(worktree, roundFileRelative(wf.sessionID, wf.id, round, "question"), one.value.text)
+        if (one.value.options) {
+          writeText(worktree, questionOptionsRelative(wf.sessionID, wf.id, round), JSON.stringify({ options: one.value.options, ...(one.value.recommended === undefined ? {} : { recommended: one.value.recommended }) }))
+        }
         return done(commit(wf, { type: "question_asked", round, questionSha }))
       }
       case "scoring": {

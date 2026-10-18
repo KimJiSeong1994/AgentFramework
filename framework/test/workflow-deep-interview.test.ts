@@ -107,10 +107,10 @@ function makeIo(options: IoOptions = {}) {
   const choices = [...(options.choices ?? [])]
   const answers = [...(options.answers ?? [])]
   const notes = [...(options.notes ?? [])]
-  const log = { chooses: [] as Array<{ title: string; choices: readonly string[] }>, notices: [] as string[], questions: [] as string[] }
+  const log = { chooses: [] as Array<{ title: string; choices: readonly string[] }>, notices: [] as string[], questions: [] as string[], opens: [] as Array<{ round: number; question: string; options?: string[]; recommended?: number }> }
   const io: DiIo = {
     async choose(title, list) { log.chooses.push({ title, choices: list }); options.onChoose?.(title, list); return choices.shift() ?? 0 },
-    async readAnswer(open) { log.questions.push(open.question); return answers.shift() },
+    async readAnswer(open) { log.questions.push(open.question); log.opens.push(open); return answers.shift() },
     async readNote() { return notes.shift() },
     notice(text) { log.notices.push(text) },
   }
@@ -339,6 +339,46 @@ describe("one question per round", () => {
     const wf = begin(h)
     const result = await run(h, wf, makeIo({ answers: twoAnswers() }).io)
     expect(result.status).toBe("done")
+  })
+})
+
+describe("question options", () => {
+  const withOptions = (): Script => happy({
+    "di.interviewer.question": [
+      j({ type: "question", text: "Which store?", options: ["SQLite", "Postgres"], recommended: 1 }),
+      q("Q2"),
+    ],
+  })
+
+  test("options are stored beside the question, the question text and sha are unchanged, and readAnswer receives them", async () => {
+    const h = harness(withOptions())
+    const wf = begin(h)
+    const io = makeIo({ answers: twoAnswers() })
+    expect((await run(h, wf, io.io)).status).toBe("done")
+    expect(io.log.opens[0]).toEqual({ round: 1, question: "Which store?", options: ["SQLite", "Postgres"], recommended: 1 })
+    expect(io.log.opens[1]).toEqual({ round: 2, question: "Q2" })
+    const questionPath = join(wt.worktree, roundFileRelative(SID, wf.id, 1, "question"))
+    expect(readFileSync(questionPath, "utf8")).toBe("Which store?")
+    expect(dataNow().rounds[0]!.questionSha).toBe(sha256Text("Which store?"))
+    expect(JSON.parse(readFileSync(questionPath.replace(/\.md$/u, ".options.json"), "utf8"))).toEqual({ options: ["SQLite", "Postgres"], recommended: 1 })
+    expect(existsSync(join(wt.worktree, roundFileRelative(SID, wf.id, 2, "question")).replace(/\.md$/u, ".options.json"))).toBe(false)
+  })
+
+  test("a corrupt, oversized or out-of-range options file means no options and never fails the round", async () => {
+    const h = harness(withOptions())
+    const wf = begin(h)
+    await run(h, wf, makeIo({ answers: [] }).io)
+    const file = join(wt.worktree, roundFileRelative(SID, wf.id, 1, "question")).replace(/\.md$/u, ".options.json")
+    for (const bad of ["{not json", JSON.stringify({ options: [] }), JSON.stringify({ options: ["a", 3] }), JSON.stringify({ options: ["a".repeat(201)] }), "x".repeat(20_000), "[]"]) {
+      writeFileSync(file, bad)
+      const again = makeIo({ answers: [] })
+      await run(h, committed(), again.io)
+      expect(again.log.opens[0]).toEqual({ round: 1, question: "Which store?" })
+    }
+    writeFileSync(file, JSON.stringify({ options: ["A", "B"], recommended: 9 }))
+    const again = makeIo({ answers: [] })
+    await run(h, committed(), again.io)
+    expect(again.log.opens[0]).toEqual({ round: 1, question: "Which store?", options: ["A", "B"] })
   })
 })
 
