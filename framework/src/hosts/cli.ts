@@ -24,6 +24,7 @@ import { getOwnedSession, readSessionMetadata } from "../sessions/store.ts"
 import { assertSDKSessionQuiescent, readSDKResumeIdentity } from "../sessions/sdk-quiescence.ts"
 import { captureSDKSessionLifetime } from "../sessions/sdk-transcript.ts"
 import { assertNever, isCancelPending, stopDisplay } from "../workflows/types.ts"
+import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, logoutArgv, runVendorAuth, type AuthEngine, type LoginMethod } from "./engine-auth.ts"
 
 const COMMANDS = new Set(["status", "import", "approve", "reject", "run", "resume", "pause", "cancel"])
 const COMMON_RECOVERY_COMMANDS = new Set(["approve", "reject", "resume", "pause", "cancel", "run"])
@@ -76,6 +77,12 @@ Supported terminals default to a full-screen transcript, status line and compose
 OTTER_TUI=0 forces readline; unsupported terminals fall back with a notice. NO_COLOR disables styling.
 Enter sends, enhanced Shift+Enter/Ctrl+J inserts a newline, Escape cancels, and a second Ctrl+C
 strictly within 500ms requests shutdown. Busy turns can be queued with macOS Alt+Q / Linux Alt+Enter.
+
+Engine sign-in (the vendor CLI keeps the credential; otter never reads or stores one):
+  auth     [status]                                  show codex/claude sign-in status
+  login    <codex|claude> [browser|device|console|api-key]   run the vendor's own sign-in
+  logout   <codex|claude>                            run the vendor's own sign-out
+  In chat: /auth, /login [engine], /logout [engine]; a failed model request names a signed-out engine.
 
 Commands:
   status   --worktree PATH [--session ID] [--json] [--detail] [--watch [--interval 1..60]]
@@ -728,7 +735,7 @@ function failCli(error: unknown, command?: string): void {
   }
   if (error instanceof AdmissionRefusal) {
     const route = error.comboRoutes ? ` Combo route unavailable: ${error.comboRoutes}.` : ""
-    console.error(`otter: host admission refused; required host control evidence is unavailable.${route} Use a host that can provide all required execution controls before proceeding.`)
+    console.error(`otter: host admission refused; required host control evidence is unavailable.${route} Use a host that can provide all required execution controls before proceeding. Check engine sign-in with \`otter auth\`; sign in with \`otter login codex\` or \`otter login claude\`.`)
     process.exitCode = 1
     return
   }
@@ -760,6 +767,10 @@ function main(argv: string[]): void {
     console.log(CLI_USAGE)
     return
   }
+  if (argv[0] === "auth" || argv[0] === "login" || argv[0] === "logout") {
+    authCli(argv).then(code => { process.exitCode = code }).catch(failCli)
+    return
+  }
   if (interactiveRequested) {
     try {
       const args = parseInteractiveArgs(argv[0] === "chat" ? argv.slice(1) : argv)
@@ -776,6 +787,39 @@ function main(argv: string[]): void {
     command = args.command
     runCli(args).then(text => { if (text) console.log(text) }).catch(error => failCli(error, command))
   } catch (error) { failCli(error, command) }
+}
+
+/**
+ * `otter auth [status]`, `otter login <codex|claude> [browser|device|console|api-key]`, `otter logout <codex|claude>`.
+ * Delegates to the vendor CLI; otter never reads or stores a credential. Exit 0 = signed in (status/login) or signed
+ * out (logout); 1 = not; 2 = usage.
+ */
+async function authCli(argv: readonly string[]): Promise<number> {
+  const usage = "Usage: otter auth [status] | otter login <codex|claude> [browser|device|console|api-key] | otter logout <codex|claude>"
+  const cwd = process.cwd()
+  const [command, engineArg, methodArg, ...extra] = argv
+  if (command === "auth" && (engineArg === undefined || engineArg === "status") && methodArg === undefined) {
+    const states = await Promise.all(AUTH_ENGINES.map(engine => authStatus(engine, cwd)))
+    for (const state of states) console.log(describeAuth(state).replace(/\/login (\w+)/u, "otter login $1"))
+    console.log("local: no sign-in (Ollama on this machine)")
+    return states.every(state => state.state === "signed-in") ? 0 : 1
+  }
+  if ((command !== "login" && command !== "logout") || extra.length || !(AUTH_ENGINES as readonly string[]).includes(engineArg ?? "") ||
+      (command === "logout" && methodArg !== undefined)) {
+    console.error(engineArg === "local" ? "The local engine (Ollama) needs no sign-in." : usage)
+    return 2
+  }
+  const engine = engineArg as AuthEngine
+  let argvFor: string[]
+  try { argvFor = command === "login" ? loginArgv(engine, (methodArg ?? "browser") as LoginMethod) : logoutArgv(engine) }
+  catch (error) { console.error(`${(error as Error).message}. ${usage}`); return 2 }
+  if (methodArg !== undefined && !["browser", "device", "console", "api-key"].includes(methodArg)) { console.error(usage); return 2 }
+  console.error(`$ ${engine} ${argvFor.join(" ")}`)
+  try { await runVendorAuth(engine, argvFor, cwd) }
+  catch { console.error(`${engine} CLI not found on PATH.`); return 1 }
+  const after = await authStatus(engine, cwd)
+  console.log(describeAuth(after).replace(/\/login (\w+)/u, "otter login $1"))
+  return command === "login" ? (after.state === "signed-in" ? 0 : 1) : (after.state === "signed-out" ? 0 : 1)
 }
 
 if (import.meta.main) main(process.argv.slice(2))

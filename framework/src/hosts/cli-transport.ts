@@ -137,7 +137,8 @@ function executableName(engine: CliEngine): string {
   }
 }
 
-function findExecutable(engine: CliEngine): string {
+/** Absolute real path of the engine CLI on PATH (the same lookup a transport run uses); throws when absent. */
+export function findExecutable(engine: CliEngine): string {
   const pathValue = process.env.PATH
   if (typeof pathValue !== "string" || pathValue.length === 0 || pathValue.includes("\0")) {
     throw new Error(SAFE_ERRORS.executable)

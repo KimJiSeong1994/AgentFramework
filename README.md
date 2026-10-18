@@ -22,6 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/KimJiSeong1994/AgentFramework/maste
 ```
 
 macOS/Linux, `git` 필요(`bun`은 없으면 자동 설치). 엔진(`ollama`/`codex`/`claude`) 중 하나 이상이 PATH에 있어야 합니다.
+codex·claude는 각 CLI의 공식 로그인을 그대로 씁니다: `otter login codex` / `otter login claude`(대화 중 `/login`), 상태 `otter auth`(대화 중 `/auth`), 로그아웃 `/logout`. otter는 인증 정보를 읽거나 저장하지 않습니다.
 다시 실행하면 업데이트, `~/.local/share/otter/AgentFramework/install.sh --uninstall`로 제거합니다.
 
 ## 사용
@@ -32,7 +33,7 @@ otter chat --engine codex --model gpt-5.6-sol
 bun scripts/otter-wiki.ts capture            # 실행 이력 → 지식 위키
 ```
 
-대화 중: `/plan` · `/approve` · `/sessions` · `/resume <sid>` · `/model` · `/help`
+대화 중: `/plan` · `/approve` · `/sessions` · `/resume <sid>` · `/model` · `/login` · `/auth` · `/help`
 
 의도 라우팅: 모호하거나 설계 수준인 요청은 전송 전에 [채팅 계속 | deep-interview | ralplan | 취소]를 제안하고, 질문은 답변만 받습니다(계획 JSON이 와도 `/plan` 전에는 승인 대기가 되지 않음). `force:` 접두사로 건너뛰고, `chat.intent: "off"`로 끕니다.
 

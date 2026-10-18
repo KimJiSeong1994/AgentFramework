@@ -1,0 +1,102 @@
+// Vendor CLI sign-in for the codex and claude engines. Otter never reads, stores, forwards or prints a credential:
+// status runs the vendor's own read-only status command and keeps only "signed in / not / unknown" plus the sign-in
+// method label, and login/logout hand the real terminal to the vendor's own interactive command.
+import { spawn } from "node:child_process"
+import { findExecutable, type CliEngine } from "./cli-transport.ts"
+
+export type AuthEngine = Extract<CliEngine, "codex" | "claude">
+export const AUTH_ENGINES: readonly AuthEngine[] = ["codex", "claude"]
+
+export type AuthState =
+  | { engine: AuthEngine; state: "signed-in"; method?: string }
+  | { engine: AuthEngine; state: "signed-out" }
+  | { engine: AuthEngine; state: "unknown"; reason: string }
+
+export type LoginMethod = "browser" | "device" | "console" | "api-key"
+
+export type AuthRun = { exitCode: number | null; signal: string | null }
+
+const STATUS_TIMEOUT_MS = 15_000
+const STATUS_OUTPUT_BYTES = 64 * 1024
+const METHOD_LABEL = /^[A-Za-z0-9 ._()-]{1,40}$/u
+
+/** The vendor's own sign-in commands. `api-key` reads the key from stdin inside the vendor CLI, never from otter. */
+export function loginArgv(engine: AuthEngine, method: LoginMethod = "browser"): string[] {
+  if (engine === "codex") {
+    if (method === "device") return ["login", "--device-auth"]
+    if (method === "api-key") return ["login", "--with-api-key"]
+    if (method === "console") throw new TypeError("codex has no Anthropic Console sign-in")
+    return ["login"]
+  }
+  if (method === "console") return ["auth", "login", "--console"]
+  if (method === "device" || method === "api-key") throw new TypeError(`claude does not offer ${method} sign-in through auth login`)
+  return ["auth", "login"]
+}
+
+export function logoutArgv(engine: AuthEngine): string[] {
+  return engine === "codex" ? ["logout"] : ["auth", "logout"]
+}
+
+function statusArgv(engine: AuthEngine): string[] {
+  return engine === "codex" ? ["login", "status"] : ["auth", "status", "--json"]
+}
+
+/** Read only the sign-in verdict (and the method label) from the vendor status output. */
+export function parseAuthStatus(engine: AuthEngine, exitCode: number | null, output: string): AuthState {
+  if (engine === "claude") {
+    try {
+      const value: unknown = JSON.parse(output)
+      if (value && typeof value === "object" && typeof (value as { loggedIn?: unknown }).loggedIn === "boolean") {
+        const record = value as { loggedIn: boolean; authMethod?: unknown }
+        if (!record.loggedIn) return { engine, state: "signed-out" }
+        const method = typeof record.authMethod === "string" && METHOD_LABEL.test(record.authMethod) ? record.authMethod : undefined
+        return { engine, state: "signed-in", ...(method ? { method } : {}) }
+      }
+    } catch { /* fall through */ }
+    return { engine, state: "unknown", reason: "claude auth status returned unrecognized output" }
+  }
+  const text = output.trim()
+  if (exitCode === 0) {
+    const using = /^Logged in using (.{1,40})$/mu.exec(text)?.[1]?.trim()
+    return { engine, state: "signed-in", ...(using && METHOD_LABEL.test(using) ? { method: using } : {}) }
+  }
+  if (/^Not logged in$/mu.test(text)) return { engine, state: "signed-out" }
+  return { engine, state: "unknown", reason: `codex login status exited ${exitCode ?? "without a code"}` }
+}
+
+/** Run the vendor status command without a terminal; bounded time and output. */
+export async function authStatus(engine: AuthEngine, cwd: string): Promise<AuthState> {
+  let executable: string
+  try { executable = findExecutable(engine) } catch { return { engine, state: "unknown", reason: `${engine} CLI not found on PATH` } }
+  return await new Promise<AuthState>(settle => {
+    let output = ""
+    let done = false
+    const child = spawn(executable, statusArgv(engine), { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] })
+    const finish = (value: AuthState) => { if (!done) { done = true; clearTimeout(timer); settle(value) } }
+    const timer = setTimeout(() => { try { child.kill("SIGKILL") } catch {} finish({ engine, state: "unknown", reason: "status check timed out" }) }, STATUS_TIMEOUT_MS)
+    const take = (chunk: Buffer) => { if (output.length < STATUS_OUTPUT_BYTES) output += chunk.toString("utf8").slice(0, STATUS_OUTPUT_BYTES - output.length) }
+    child.stdout.on("data", take)
+    child.stderr.on("data", take)
+    child.on("error", () => finish({ engine, state: "unknown", reason: `${engine} status command could not start` }))
+    child.on("close", code => finish(parseAuthStatus(engine, code, output)))
+  })
+}
+
+/**
+ * Hand the real terminal to the vendor's interactive command (browser/device sign-in, or sign-out). The caller must
+ * release raw input first. Output goes straight to the terminal; otter captures nothing.
+ */
+export async function runVendorAuth(engine: AuthEngine, argv: readonly string[], cwd: string): Promise<AuthRun> {
+  const executable = findExecutable(engine)
+  return await new Promise<AuthRun>((settle, fail) => {
+    const child = spawn(executable, [...argv], { cwd, env: process.env, stdio: "inherit" })
+    child.on("error", fail)
+    child.on("close", (exitCode, signal) => settle({ exitCode, signal }))
+  })
+}
+
+export function describeAuth(state: AuthState): string {
+  if (state.state === "signed-in") return `${state.engine}: signed in${state.method ? ` (${state.method})` : ""}`
+  if (state.state === "signed-out") return `${state.engine}: not signed in · /login ${state.engine}`
+  return `${state.engine}: unknown (${state.reason})`
+}
