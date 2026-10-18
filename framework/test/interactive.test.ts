@@ -26,6 +26,7 @@ import { tempGitWorktree } from "./guards-helpers.ts"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { interactiveActions } from "../src/hosts/interactive-actions.ts"
 import type { ComboLookup, DefaultModelLookup } from "../src/hosts/default-model.ts"
+import type { AuthState } from "../src/hosts/engine-auth.ts"
 import { getOwnedSession, inspectSessionAttachment, openSession, replaySession, readSessionMetadata, type ReplayOptions, type ReplayResult } from "../src/sessions/store.ts"
 import { sessionDir } from "../src/state/store.ts"
 import type { ConversationMessage, SkillConversationInvocation } from "../src/hosts/plan-conversation.ts"
@@ -74,6 +75,8 @@ type HarnessOptions = {
   combo?: ComboLookup
   /** chat.intent for the fixture runtime. The legacy tests exercise the plan path with vague lines, so the harness defaults to "off". */
   intent?: "offer" | "off"
+  /** Vendor sign-in fixture: status per engine (default signed in), and what the vendor login/logout run changes. */
+  auth?: { codex?: AuthState["state"]; claude?: AuthState["state"]; afterRun?: AuthState["state"]; runThrows?: boolean }
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -117,7 +120,9 @@ function harness(options: HarnessOptions = {}) {
     defaultModelWrites: Array<{ engine: string; model: string } | null>
     combo: ComboLookup
     comboWrites: Array<{ role: string; route: { engine: string; model: string } | null }>
-  } = { prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [], defaultModel: options.defaultModel ?? { state: "unset" }, defaultModelWrites: [], combo: options.combo ?? { state: "unset" }, comboWrites: [] }
+    authRuns: Array<{ engine: string; argv: readonly string[] }>
+    authStatusChecks: string[]
+  } = { authRuns: [], authStatusChecks: [], prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [], defaultModel: options.defaultModel ?? { state: "unset" }, defaultModelWrites: [], combo: options.combo ?? { state: "unset" }, comboWrites: [] }
   let boundSessionID: string | undefined
 
   let releaseRun: (() => void) | undefined
@@ -267,6 +272,18 @@ function harness(options: HarnessOptions = {}) {
       }
     },
     createController: () => { calls.controllerCreations++; return controller },
+    auth: {
+      status: async engine => {
+        calls.authStatusChecks.push(engine)
+        const state = (calls.authRuns.some(run => run.engine === engine) && options.auth?.afterRun) || options.auth?.[engine] || "signed-in"
+        return state === "signed-in" ? { engine, state, method: "fixture" } : state === "signed-out" ? { engine, state } : { engine, state: "unknown", reason: "fixture" }
+      },
+      run: async (engine, argv) => {
+        calls.authRuns.push({ engine, argv })
+        if (options.auth?.runThrows) throw new Error("fixture vendor CLI missing")
+        return { exitCode: 0, signal: null }
+      },
+    },
     humanDecision: async (action, binding) => {
       calls.events.push("humanDecision")
       calls.approvalRequest = { action, workflowID: binding.workflowID, planSha: binding.subject.sha256 }
@@ -843,7 +860,7 @@ describe("interactive terminal", () => {
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     const commands = h.calls.choices.find(choice => choice.title === "Commands")!.values
       .map(value => value.split(" ")[0])
-    expect(commands).toEqual(["/help", "/model", "/memory", "/theme", "/ascii", "!", "/quit"])
+    expect(commands).toEqual(["/help", "/model", "/memory", "/login", "/theme", "/ascii", "!", "/quit"])
     expect(h.calls.runtimes).toEqual([])
     expect(h.calls.discoveries).toEqual([])
     expect(h.calls.turns).toEqual([])
@@ -1438,6 +1455,74 @@ describe("interactive terminal", () => {
     expect(output).toContain("It applies when a model is selected.")
     expect(output).not.toContain("Apply to a new session")
     expect(h.calls.runtimes).toEqual([])
+  })
+
+  test("/auth shows each vendor CLI's sign-in status without running a login", async () => {
+    const h = harness({ lines: ["/auth", "/quit"], auth: { codex: "signed-out" } })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    const output = h.calls.output.join("")
+    expect(output).toContain("codex: not signed in · /login codex")
+    expect(output).toContain("claude: signed in (fixture)")
+    expect(output).toContain("local: no sign-in")
+    expect(h.calls.authRuns).toEqual([])
+  })
+
+  test("/login asks for the engine and method, hands the terminal to the vendor CLI and reports the new status", async () => {
+    const h = harness({ lines: ["/login", "1", "2", "/quit"], auth: { codex: "signed-out", afterRun: "signed-in" } })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.authRuns).toEqual([{ engine: "codex", argv: ["login", "--device-auth"] }])
+    const output = h.calls.output.join("")
+    expect(output).toContain("Sign in to which engine?")
+    expect(output).not.toContain("Sign in to which engine?:")
+    expect(output).toContain("device — one-time code for a remote or headless machine")
+    expect(output).toContain("codex login --device-auth exited 0. Now signed in (fixture).")
+  })
+
+  test("typed /login claude console and /logout with confirmation; Keep does nothing", async () => {
+    const h = harness({ lines: ["/login claude console", "/logout claude", "1", "/logout claude", "2", "/quit"], auth: { afterRun: "signed-out" } })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.authRuns).toEqual([
+      { engine: "claude", argv: ["auth", "login", "--console"] },
+      { engine: "claude", argv: ["auth", "logout"] },
+    ])
+    expect(h.calls.output.join("")).toContain("Still signed in to claude.")
+  })
+
+  test("/login refuses local, unknown methods and engines; it works before a model is selected", async () => {
+    const h = harness({ lines: ["/login local", "/login codex console", "/login gemini", "/login codex", "1", "/quit"] })
+    expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
+    const output = h.calls.output.join("")
+    expect(output).toContain("The local engine (Ollama) needs no sign-in.")
+    expect(output).toContain("codex sign-in methods: browser, device, api-key.")
+    expect(output).toContain("Usage: /auth · /login [codex|claude]")
+    expect(h.calls.authRuns).toEqual([{ engine: "codex", argv: ["login"] }])
+    expect(h.calls.runtimes).toEqual([])
+  })
+
+  test("Ctrl+C during the vendor sign-in is not the session's SIGINT; a missing vendor CLI is reported", async () => {
+    let interruptListeners = -1
+    const h = harness({ lines: ["/login codex", "1", "/quit"], auth: { runThrows: true } })
+    const auth = h.deps.auth!
+    const run = auth.run
+    auth.run = async (engine, argv, cwd) => {
+      interruptListeners = h.calls.signalListeners.get("SIGINT")?.size ?? 0
+      for (const listener of h.calls.signalListeners.get("SIGINT") ?? []) listener()
+      return run(engine, argv, cwd)
+    }
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).toEqual({ code: 0 })
+    expect(interruptListeners).toBe(1)
+    expect(h.calls.output.join("")).toContain("codex login could not run: fixture vendor CLI missing")
+  })
+
+  test("a failed model request names a signed-out engine and how to sign in", async () => {
+    const h = harness({ lines: ["hello", "/quit"], auth: { codex: "signed-out" } })
+    h.deps.createConversation = () => ({ turn: async () => { throw new ModelRequestError("model_failed", "fixture") } })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.output.join("")).toContain("codex is not signed in; run /login codex.")
+    const local = harness({ lines: ["hello", "/quit"] })
+    local.deps.createConversation = () => ({ turn: async () => { throw new ModelRequestError("model_failed", "fixture") } })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, local.deps)
+    expect(local.calls.authStatusChecks).toEqual([])
   })
 
   test("there is no top-level /combo command; combo lives under /model", async () => {

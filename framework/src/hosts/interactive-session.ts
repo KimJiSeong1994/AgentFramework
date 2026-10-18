@@ -13,6 +13,7 @@ import { savedPlan } from "../flow/actions.ts"
 import { ledgerPath } from "../state/ledger.ts"
 import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
 import { inputColorSupported, inputLine, renderInput, type InputPresentation } from "./cli-input.ts"
+import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
 import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus, type CliToolDisplay } from "./cli-progress.ts"
 import { formatDuration, type WorkflowProgress } from "../tui/progress.ts"
 import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
@@ -120,6 +121,8 @@ export type InteractiveDependencies = {
   combo: ComboStore
   /** Persisted `memory.engine`/`memory.model` for `/memory`; recall reads it per call. Defaults to the user config. */
   memory?: MemoryCommandStore
+  /** Vendor sign-in for codex/claude: read-only status, and the vendor's own interactive login/logout. */
+  auth: EngineAuth
   humanDecision: typeof humanDecision
   randomUUID: () => string
   signals: SignalSource
@@ -348,6 +351,13 @@ export function createReadlineTerminal(): Terminal {
   return terminal
 }
 
+/** The vendor CLIs own credentials; otter only asks their status and hands them the terminal to sign in or out. */
+export type EngineAuth = {
+  status: (engine: AuthEngine, cwd: string) => Promise<AuthState>
+  run: (engine: AuthEngine, argv: readonly string[], cwd: string) => Promise<AuthRun>
+}
+const vendorAuth: EngineAuth = { status: authStatus, run: runVendorAuth }
+
 export function defaultDependencies(): InteractiveDependencies {
   return {
     cwd: process.cwd(),
@@ -362,6 +372,7 @@ export function defaultDependencies(): InteractiveDependencies {
     discoverModels: discoverModelCatalog,
     defaultModel: fileDefaultModelStore,
     combo: fileComboStore,
+    auth: vendorAuth,
     humanDecision,
     randomUUID,
     signals: {
@@ -450,7 +461,7 @@ async function chooseFrom(
     return selected === undefined ? null : selected
   }
   const presentation = terminal.presentation?.()
-  terminal.write([`${title}:`, ...labels.map((label, index) => `  ${index + 1}) ${terminalSafeText(label)}`), "Enter /cancel, Escape or empty input to return."]
+  terminal.write([/[?:]$/u.test(title) ? title : `${title}:`, ...labels.map((label, index) => `  ${index + 1}) ${terminalSafeText(label)}`), "Enter /cancel, Escape or empty input to return."]
     .map(line => inputLine(line, presentation)).join("\n") + "\n")
   while (!signal.aborted) {
     const answer = await readInput(terminal, title, hint, `Choice [1-${labels.length}]: `, signal)
@@ -1189,6 +1200,98 @@ export async function runInteractiveSession(
       }
       return "aborted"
     }
+    /**
+     * `/auth` (status), `/login [codex|claude] [browser|device|console|api-key]`, `/logout [codex|claude]`. The vendor
+     * CLI owns every credential: status is its read-only status command; login/logout get the real terminal.
+     */
+    const authUsage = "Usage: /auth · /login [codex|claude] [browser|device|console|api-key] · /logout [codex|claude]"
+    /** After a failure, name engines the vendor CLI reports as signed out (status is read-only and bounded). */
+    const signInHint = async (engines: Iterable<CliEngine>): Promise<string | undefined> => {
+      const wanted = [...new Set(engines)].filter((engine): engine is AuthEngine => (AUTH_ENGINES as readonly string[]).includes(engine))
+      if (!wanted.length) return undefined
+      let states: AuthState[]
+      try { states = await Promise.all(wanted.map(engine => deps.auth.status(engine, worktree))) } catch { return undefined }
+      const out = states.filter(state => state.state === "signed-out").map(state => state.engine)
+      return out.length ? `${out.join(" and ")} ${out.length === 1 ? "is" : "are"} not signed in; run ${out.map(engine => `/login ${engine}`).join(" or ")}.` : undefined
+    }
+    const engineSet = (anchor: CliEngine, routes: ComboRoutes): CliEngine[] => [anchor, ...Object.values(routes).map(route => route!.engine)]
+    const authCommand = async (command: "/auth" | "/login" | "/logout", rest: readonly string[]): Promise<"aborted" | undefined> => {
+      const write = (text: string) => visibleWrite(terminalSafeText(`${text}\n`))
+      const signal = abort.signal
+      if (command === "/auth") {
+        if (rest.length) { write(authUsage); return undefined }
+        const states = await Promise.all(AUTH_ENGINES.map(engine => deps.auth.status(engine, worktree)))
+        write(["Engine sign-in (checked with each vendor CLI; otter stores no credentials):", ...states.map(state => `  ${describeAuth(state)}`),
+          "  local: no sign-in (Ollama on this machine)"].join("\n"))
+        return undefined
+      }
+      if (rest.length > (command === "/login" ? 2 : 1) || (rest[0] !== undefined && !(AUTH_ENGINES as readonly string[]).includes(rest[0]))) {
+        write(rest[0] === "local" ? "The local engine (Ollama) needs no sign-in." : authUsage)
+        return undefined
+      }
+      let engine = rest[0] as AuthEngine | undefined
+      if (engine === undefined) {
+        const states = await Promise.all(AUTH_ENGINES.map(candidate => deps.auth.status(candidate, worktree)))
+        const picked = await chooseFrom(terminal, command === "/login" ? "Sign in to which engine?" : "Sign out of which engine?",
+          states.map(state => describeAuth(state)), AUTH_ENGINES.map(candidate => candidate === "codex" ? "OpenAI Codex CLI" : "Anthropic Claude CLI"),
+          "The vendor CLI opens its own sign-in; otter stores no credentials.", signal)
+        if (picked === undefined) return "aborted"
+        if (picked === null) return undefined
+        engine = AUTH_ENGINES[picked]!
+      }
+      let argv: string[]
+      if (command === "/login") {
+        const methods: readonly LoginMethod[] = engine === "codex" ? ["browser", "device", "api-key"] : ["browser", "console"]
+        let method = rest[1] as LoginMethod | undefined
+        if (method !== undefined && !methods.includes(method)) { write(`${engine} sign-in methods: ${methods.join(", ")}.`); return undefined }
+        if (method === undefined) {
+          const labels: Record<LoginMethod, string> = {
+            browser: engine === "codex" ? "browser — ChatGPT account (opens a browser)" : "browser — Claude subscription (opens a browser)",
+            device: "device — one-time code for a remote or headless machine",
+            console: "console — Anthropic Console (API billing)",
+            "api-key": "api-key — paste an OpenAI API key into the codex prompt",
+          }
+          const picked = await chooseFrom(terminal, `Sign in to ${engine}`, methods.map(candidate => labels[candidate]),
+            methods.map(() => "Runs the vendor's own sign-in command in this terminal."), "Escape returns without signing in.", signal)
+          if (picked === undefined) return "aborted"
+          if (picked === null) return undefined
+          method = methods[picked]!
+        }
+        argv = loginArgv(engine, method)
+      } else {
+        const confirm = await chooseFrom(terminal, `Sign out of ${engine}? This removes the ${engine} CLI's saved sign-in for every program that uses it.`,
+          ["Keep signed in", `Sign out of ${engine}`], ["Nothing changes.", `Runs ${engine} ${logoutArgv(engine).join(" ")}.`], "Escape keeps you signed in.", signal)
+        if (confirm === undefined) return "aborted"
+        if (confirm !== 1) { write(`Still signed in to ${engine}.`); return undefined }
+        argv = logoutArgv(engine)
+      }
+      // Give the vendor CLI the real terminal: no raw mode, no progress redraws. Ctrl+C reaches the vendor's process
+      // group; otter ignores SIGINT meanwhile so it only stops the sign-in, never this session.
+      progress.suspend()
+      terminal.suspend?.()
+      const ignoreInterrupt = () => {}
+      if (sigintRegistered) deps.signals.off("SIGINT", onSigint)
+      deps.signals.on("SIGINT", ignoreInterrupt)
+      let run: AuthRun | undefined
+      let failure: string | undefined
+      try {
+        process.stderr.write(`\n$ ${engine} ${argv.join(" ")}\n`)
+        run = await deps.auth.run(engine, argv, worktree)
+      } catch (error) {
+        failure = boundedTerminalDiagnostic(error instanceof Error ? error.message : String(error))
+      } finally {
+        deps.signals.off("SIGINT", ignoreInterrupt)
+        if (sigintRegistered) deps.signals.on("SIGINT", onSigint)
+        terminal.resume?.()
+        progress.resume()
+      }
+      if (failure !== undefined) { write(`${engine} ${argv.join(" ")} could not run: ${failure}`); return undefined }
+      const after = await deps.auth.status(engine, worktree)
+      const outcome = run!.signal ? `stopped by ${run!.signal}` : `exited ${run!.exitCode ?? "?"}`
+      write(`${engine} ${argv.join(" ")} ${outcome}. Now ${describeAuth(after).replace(/^\w+: /u, "")}.`)
+      persist("notice", { text: `Engine sign-in: ${engine} ${command === "/login" ? "login" : "logout"} ${outcome}; ${after.state}` })
+      return undefined
+    }
     let engine: CliEngine | undefined
     let model: string | undefined
     let startupDiscovery: InteractiveViewFacts["discovery"] = "not-observed"
@@ -1258,6 +1361,10 @@ export async function runInteractiveSession(
             model = chosen.model
             break
           }
+          continue
+        }
+        if ((command === "/auth" || command === "/login" || command === "/logout") && hasInteractiveAction("unselected", "auth")) {
+          if (await withProgressSuspended(() => authCommand(command, commandArgs)) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
           continue
         }
         if (command === "/model" && commandArgs[0] === "combo" && hasInteractiveAction("unselected", "model")) {
@@ -1889,7 +1996,8 @@ export async function runInteractiveSession(
         if (!(error instanceof AdmissionRefusal) && !(error instanceof TypeError)) throw error
         if (abort.signal.aborted) return false
         const route = error instanceof AdmissionRefusal && error.comboRoutes ? ` Combo route unavailable: ${error.comboRoutes}.` : ""
-        terminal.write(terminalSafeText(`Model switch failed; the current selection and conversation are unchanged.${route}\n`))
+        const hint = await signInHint(engineSet(nextEngine, nextRoutes))
+        terminal.write(terminalSafeText(`Model switch failed; the current selection and conversation are unchanged.${route}${hint ? ` ${hint}` : ""}\n`))
       } finally {
         guard.release()
       }
@@ -2346,6 +2454,11 @@ export async function runInteractiveSession(
         if (!await runCombo(commandArgs.slice(1))) return signalExit(receivedSignal)
         continue
       }
+      // Sign-in only touches the vendor CLI's own credential store; it works while held, never while a turn runs.
+      if ((command === "/auth" || command === "/login" || command === "/logout") && hasInteractiveAction(actionContext, "auth")) {
+        if (await withProgressSuspended(() => authCommand(command, commandArgs)) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
+        continue
+      }
       if (command === "/model" && !hasInteractiveAction(actionContext, "model")) {
         terminal.write("Model selection is unavailable while this session is held; resolve the active workflow first or recover execution ownership. No discovery or switch was attempted.\n")
         continue
@@ -2619,9 +2732,11 @@ export async function runInteractiveSession(
           publishView()
           if (modelFailureMayReturnToComposer()) {
             progress.responseReceived()
-            persist("notice", { text: error.diagnostic, provenance: "error" })
-            if (terminal.writeText) terminal.writeText({ provenance: "error", text: error.diagnostic })
-            else visibleWrite(`[error] ${error.diagnostic}\n`)
+            const hint = error.category === "model_failed" ? await signInHint(engineSet(turnSelection.engine, turnSelection.routes)) : undefined
+            const shown = hint ? `${error.diagnostic} ${hint}` : error.diagnostic
+            persist("notice", { text: shown, provenance: "error" })
+            if (terminal.writeText) terminal.writeText({ provenance: "error", text: shown })
+            else visibleWrite(`[error] ${shown}\n`)
             if (terminal.draftSnapshot?.().draft === "") terminal.setDraft?.(message)
             continue
           }

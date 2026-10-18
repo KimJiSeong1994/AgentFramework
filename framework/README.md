@@ -106,6 +106,27 @@ refuses to overwrite invalid JSONC, and never switches an active session. An inv
 default is reported and ignored, leaving the composer unselected; a project default that
 still overrides a saved user default is reported. Explicit flags always win.
 
+### Engine sign-in (codex, claude)
+
+Otter delegates sign-in to each vendor CLI and never reads, stores, forwards or prints a credential.
+
+- `otter auth` (in chat `/auth`) runs each vendor's read-only status command (`codex login status`,
+  `claude auth status --json`) and shows only signed in / not signed in / unknown plus the sign-in method label;
+  account email and organization are not kept. Exit 0 when both are signed in.
+- `otter login <codex|claude> [method]` (in chat `/login`, which asks for the engine and method) hands the real
+  terminal to the vendor's own command: codex `browser` (`codex login`), `device` (`codex login --device-auth`, a
+  one-time code for remote/headless machines) or `api-key` (`codex login --with-api-key`, the key is typed into the
+  codex prompt); claude `browser` (`claude auth login`, subscription) or `console` (`claude auth login --console`,
+  API billing). Raw input and progress redraws are released first; Ctrl+C stops only the vendor command. The new
+  status is shown afterwards and a notice records the outcome (no credential data).
+- `otter logout <codex|claude>` (in chat `/logout`, with a confirmation) runs the vendor's sign-out. It removes that
+  CLI's saved sign-in for every program that uses it.
+- `local` (Ollama) has no sign-in. `/login`, `/auth` and `/logout` work before a model is selected and while a session
+  is held, never during a running turn.
+- When a codex/claude model request fails or a model switch is refused, otter checks the status of the engines
+  involved (anchor and combo routes) and names a signed-out engine with the command to sign in; a refused startup
+  admission points at `otter auth` / `otter login`.
+
 ### Role combo
 
 The `models` key above is OpenCode-only. In the native chat, `chat.combo` assigns a different
