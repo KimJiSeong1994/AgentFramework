@@ -517,6 +517,13 @@ describe("kind-scoped stage events (P6a S1)", () => {
     expect(ok("deep-interview", "topology", { type: "topology", project: "greenfield", components: [] })).toMatchObject({ ok: false })
     expect(ok("deep-interview", "question", { type: "question", text: "Why?" })).toMatchObject({ ok: true })
     expect(ok("deep-interview", "scoring", { type: "question", text: "Why?" })).toMatchObject({ ok: false })
+    expect(ok("deep-interview", "question", { type: "question", text: "Why?", options: ["a", "b"], recommended: 1 })).toEqual({ ok: true, events: [{ type: "question", text: "Why?", options: ["a", "b"], recommended: 1 }] })
+    expect(ok("deep-interview", "question", { type: "question", text: "Why?", options: ["a"] })).toMatchObject({ ok: true })
+    for (const bad of [
+      { options: [] }, { options: ["a", "b", "c", "d", "e", "f"] }, { options: ["a", ""] }, { options: ["a".repeat(201)] }, { options: "a" }, { options: ["a", 1] },
+      { options: ["a", "b"], recommended: 2 }, { options: ["a", "b"], recommended: -1 }, { options: ["a", "b"], recommended: 0.5 }, { options: ["a"], recommended: "0" },
+      { recommended: 0 }, { options: ["a"], extra: 1 },
+    ]) expect(ok("deep-interview", "question", { type: "question", text: "Why?", ...bad })).toMatchObject({ ok: false })
     const score = { type: "score", goal: 0.9, constraints: 0.8, criteria: 0.7, context: 0.6, weakest: "criteria", shape_change: true, evidence: ["e"] }
     expect(ok("deep-interview", "scoring", score)).toMatchObject({ ok: true })
     for (const bad of [{ goal: 1.2 }, { goal: Number.NaN }, { goal: "0.5" }, { ambiguity: 0.1 }, { context: -0.1 }, { shape_change: "yes" }]) {

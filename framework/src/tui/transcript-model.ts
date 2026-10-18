@@ -52,6 +52,33 @@ export class TranscriptModel {
     for (const item of this.calls.values()) if (item.outcome === "running" && !this.historicalCalls.has(item.id)) return true
     return false
   }
+  /**
+   * Most specific live step: a running shell/verify command, else the newest running tool call (live only).
+   * `startedAt` is the step's own start so the row can show how long it has run.
+   */
+  get liveStep(): { label: string; startedAt: number } | undefined {
+    const clip = (value: string): string => {
+      const flat = value.replace(/\s+/gu, " ").trim()
+      return flat.length > 60 ? `${flat.slice(0, 59)}…` : flat
+    }
+    let shell: ShellItem | undefined
+    for (const item of this.shells.values()) if (item.status === "running") shell = item
+    if (shell) return { label: `Bash: ${clip(shell.command)}`, startedAt: shell.startedAt }
+    let call: Extract<TranscriptItem, { kind: "tool" }> | undefined
+    for (const item of this.calls.values()) if (item.outcome === "running" && !this.historicalCalls.has(item.id)) call = item
+    if (!call) return undefined
+    const target = toolTarget(call.name, call.detail)
+    const name = call.name.charAt(0).toUpperCase() + call.name.slice(1)
+    return { label: clip(target ? `${name} ${target}` : name), startedAt: call.startedAt ?? this.now() }
+  }
+  /** The running task (observed in this process) as `Task t2: Title`. */
+  get liveTask(): string | undefined {
+    for (const [id, task] of this.tasks) if (task.status === "running" && !this.historicalTasks.has(id)) {
+      const text = `Task ${id}${task.title ? `: ${task.title}` : ""}`.replace(/\s+/gu, " ")
+      return text.length > 60 ? `${text.slice(0, 59)}…` : text
+    }
+    return undefined
+  }
   get items(): readonly TranscriptItem[] { return this.entries }
   /** Counts over tasks observed in this process (restored, last-recorded tasks are excluded). */
   taskCounts(): { done: number; failed: number; cancelled: number; running: number; total: number } {

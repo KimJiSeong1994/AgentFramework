@@ -23,6 +23,7 @@ export const DI_QUESTION_PROMPT = definePrompt({
     "If panel findings are listed, fold the concrete ones into this single question as two or three ranked answer options or one recommended draft; never add a second question. " +
     "If closure gaps are listed, address the highest-impact gap. Do not repeat a settled decision.\n" +
     DI_READ_ONLY_RULES + "\n" +
-    "Schema: {\"type\":\"question\",\"text\":\"the single question\"}" +
+    "Put two to four short ranked answer options (most likely first, each under 200 characters) in `options`, and set `recommended` to the index of one option when the panel findings or context support it; omit `recommended` otherwise. Free-text answers stay allowed, so options are suggestions, not a closed list; keep the question text itself free of an inline option list.\n" +
+    "Schema: {\"type\":\"question\",\"text\":\"the single question\",\"options\":[\"likeliest answer\",\"alternative\"],\"recommended\":0}" +
     DI_CONTEXT_MARKER,
 })

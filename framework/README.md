@@ -240,9 +240,19 @@ and tool calls show an outcome icon (`✔` succeeded, `✘` failed/denied, `⟳`
 before the unchanged truthful summary, so provenance never depends on color. Assistant
 and plan text is laid out as Markdown — headings, `•` lists, fenced code blocks, `▏`
 quotes, rules, bold/italic, inline code and `label (url)` links — without interpreting
-terminal controls in model output. While the host reports an in-progress request, the
-status shows a spinner and elapsed seconds (`⠋ Model request running · 12s`); it never
-infers progress. Beneath it sit up to two status rows, a rule
+terminal controls in model output. While work is live, one status row names the most specific
+current step with a spinner, its elapsed time and the cancel key: `⠧ Bash: bun test · 12s ⟦esc⟧`,
+`⠧ Read src/math.ts:1-40 · 2.1s ⟦esc⟧`, `⠧ Task t2: Add multiply · 3.4s ⟦esc⟧`, `⠧ ralplan · critic · 1.2s ⟦esc⟧`,
+else `Model request` / `Working` (ASCII `[esc]`). It only reports observed state and never infers progress.
+
+Choices follow GJC: numbered rows with a `❯` cursor, `↑↓` to move, `1-9` to jump, Enter to select, Esc to dismiss
+(`↑↓ move · Enter select · 1-9 jump · Esc cancel`); the status row shows `Waiting for your choice`. Deep-interview
+questions may carry 2-4 ranked answer options from the interviewer (`options`, optional `recommended`): they appear as
+a question with numbered options, `(Recommended)` on the suggested one, and a final `Other (type your own)` row that
+opens an inline editor. The chosen label or typed text is recorded as the answer; dismissing returns to the chat
+prompt (where `/finish`, `/pause`, `/cancel` still work). Options are stored next to the question
+(`rounds/<n>-question.options.json`); the question text and its hash are unchanged. Readline prints the numbered
+options and accepts a bare number or free text. Beneath it sit up to two status rows, a rule
 carrying the `⬢ engine / model` badge and scroll position, and a bordered composer.
 
 Tool calls read like GJC: `✔ Read framework/test/cli-progress.test.ts:120-140 · 42ms`, `✔ Edit calc.py ⟦+2 / -1⟧ · 8ms`,

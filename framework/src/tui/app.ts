@@ -13,9 +13,9 @@ import type { SkillCatalog } from "../skills/session.ts"
 import { restoreTranscript } from "./session-transcript.ts"
 import { commandInsertion, interactiveActions, type InteractiveContext } from "../hosts/interactive-actions.ts"
 import { formatPaletteRow, palette, paletteInsertion, paletteLabelColumns, paletteWindow } from "./skill-completion.ts"
-import { sameViewIdentity, selectionLabel, type ChoicePresentation, type InteractiveViewFacts, type TranscriptText, type ViewIdentity } from "../hosts/interactive-view.ts"
+import { sameViewIdentity, selectionLabel, type AskAnswer, type AskPrompt, type ChoicePresentation, type InteractiveViewFacts, type TranscriptText, type ViewIdentity } from "../hosts/interactive-view.ts"
 import { statusLines } from "./status-view.ts"
-import { progressState, renderProgress, type WorkflowProgress } from "./progress.ts"
+import { formatDuration, progressState, renderProgress, type WorkflowProgress } from "./progress.ts"
 import { resolveTheme, type ThemeName } from "./theme.ts"
 
 const SPINNER_INTERVAL_MS = 120
@@ -36,6 +36,16 @@ type Choice = {
   filterEditor?: Editor
   finish: (index: number | undefined) => void
 }
+
+type AskState = {
+  prompt: AskPrompt
+  /** Row index; `prompt.options.length` is the automatic custom row. */
+  selected: number
+  custom?: Editor
+  finish: (answer: AskAnswer | undefined) => void
+}
+
+const CUSTOM_ANSWER_LIMIT = 2000
 
 function documentRows(document: string, columns: number): Array<{ text: string; sourceLine: number; sourceOffset: number }> {
   return document.split("\n").flatMap((line, sourceLine) => {
@@ -69,6 +79,7 @@ export class TuiApp implements Terminal {
   private readonly queue: string[] = []
   private pending?: Pending
   private choice?: Choice
+  private askState?: AskState
   private control?: (action: TerminalControl) => void
   private status = "Otter · selection"
   private workflow: string | undefined
@@ -145,7 +156,7 @@ export class TuiApp implements Terminal {
   private busy(): boolean {
     if (this.closed || this.readFailure) return false
     if (this.requestStarted || this.transcript.liveActivity) return true
-    return this.hostWorking && !this.pending && !this.choice
+    return this.hostWorking && !this.pending && !this.choice && !this.askState
   }
   private syncSpinner(): void {
     if (this.busy() && !this.suspended) {
@@ -296,7 +307,7 @@ export class TuiApp implements Terminal {
   private completionDismissed = false
   /** The `/` palette for the current draft: commands and invocable skills, fuzzy-matched. */
   private palette() {
-    if (this.readFailure || this.choice || this.editor.searchState || this.completionDismissed || this.pending?.kind === "selection") return undefined
+    if (this.readFailure || this.choice || this.askState || this.editor.searchState || this.completionDismissed || this.pending?.kind === "selection") return undefined
     return palette(this.catalog, this.editor.text, this.interactionContext)
   }
 
@@ -355,23 +366,48 @@ export class TuiApp implements Terminal {
     const overlayHint = this.choice?.presentation.kind === "picker"
       ? ["Up/Down move", `Enter ${this.choice.presentation.purpose === "command" ? "inserts" : "selects"}`, "Esc back", "Ctrl+D quit"].join(this.separator())
       : this.detailsVisible ? ["Details", "Up/Down move", "Enter expands", "Esc closes", "Ctrl+D quits"].join(this.separator()) : undefined
-    const activity = overlayHint ?? (this.transcript.runningShell ? "Shell running" : undefined) ?? this.transcript.currentTask ?? this.status
-    // A model request carries its own spinner segment; any other live work spins on the activity line.
-    const spinActivity = frame !== undefined && !this.requestStarted && overlayHint === undefined
+    const live = overlayHint === undefined ? this.liveRow(frame) : undefined
+    // A choice or ask owns the input: its hint replaces the stale "working" text from the turn that opened it.
+    const awaitingAnswer = this.askState !== undefined || (this.choice !== undefined && this.choice.presentation.kind !== "picker")
+    const activity = overlayHint ?? (awaitingAnswer ? "Waiting for your choice" : this.status)
+    // The live row already names the workflow stage; repeat the workflow line only when the row does not.
+    const liveNamesStage = live !== undefined && this.workflowProgress !== undefined && live.includes(`${this.workflowProgress.kind}${this.separator()}${this.workflowProgress.stage}`)
     return statusLines({
       facts: this.viewFacts,
       selectionInHeader: true,
-      workflow: this.workflow,
-      activity: spinActivity ? `${frame} ${activity} · ${Math.floor((Date.now() - this.busySince!) / 1000)}s` : activity,
+      ...(liveNamesStage ? {} : { workflow: this.workflow }),
+      activity,
+      ...(live !== undefined ? { live } : {}),
       search: this.transcriptQuery,
-      ...(this.requestStarted && frame !== undefined ? {
-        request: { frame, elapsedSeconds: Math.floor((Date.now() - this.requestStarted.at) / 1000) },
-      } : {}),
       queued: this.queue.length,
       columns,
       ...(!this.usable() ? { notice: `Resize terminal to at least ${MIN_SIZE_LABEL}. Cancellation remains available.` } : {}),
       ascii: this.asciiChrome,
     })
+  }
+
+  private cursorGlyph(): string { return this.asciiChrome ? ">" : "❯" }
+  private selectHint(): string {
+    return (this.asciiChrome ? ["Up/Down move", "Enter select", "1-9 jump", "Esc cancel"] : ["↑↓ move", "Enter select", "1-9 jump", "Esc cancel"]).join(this.separator())
+  }
+  private askRows(ask: AskState): string[] {
+    const labels = ask.prompt.options.map((option, index) => `${option.label}${ask.prompt.recommended === index ? " (Recommended)" : ""}`)
+    if (ask.prompt.allowCustom) labels.push(ask.prompt.customLabel ?? "Other (type your own)")
+    return labels.map((label, index) => `${index === ask.selected ? this.cursorGlyph() : " "} ${index + 1}. ${label}`)
+  }
+  private askRowCount(ask: AskState): number { return ask.prompt.options.length + (ask.prompt.allowCustom ? 1 : 0) }
+
+  /** `<spinner> <most specific step> · <elapsed> ⟦esc⟧` while work is live; undefined when nothing is running. */
+  private liveRow(frame: string | undefined): string | undefined {
+    if (frame === undefined || this.busySince === undefined) return undefined
+    const step = this.transcript.liveStep
+    const progress = this.workflowProgress
+    const label = step?.label ?? this.transcript.liveTask ??
+      (progress ? `${progress.kind}${this.separator()}${progress.stage}` : undefined) ??
+      (this.requestStarted ? "Model request" : "Working")
+    const since = step?.startedAt ?? this.requestStarted?.at ?? this.busySince
+    const esc = this.asciiChrome ? "[esc]" : "⟦esc⟧"
+    return `${frame} ${label}${this.separator()}${formatDuration(Date.now() - since)} ${esc}`
   }
 
   private pickerMatches(choice: Choice): number[] {
@@ -512,16 +548,44 @@ export class TuiApp implements Terminal {
       prompt = "Filter> "
     } else if (this.choice) {
       screen = this.choice.title
+      const rows = this.choice.values.map((value, i) => `${i === this.choice!.selected ? this.cursorGlyph() : " "} ${i + 1}. ${value}`)
       panel = {
         title: this.choice.title,
         focus: "choice selection",
         placement: "body",
-        lines: [
-          ...this.choice.values.map((value, i) => `${i === this.choice!.selected ? ">" : " "} ${value}`),
-          "Up/Down move · Enter selects · Escape cancels",
-        ],
+        lines: [...rows, "", this.selectHint()],
+        accentLines: [this.choice.selected],
+        mutedLines: [rows.length + 1],
       }
       composerVisible = false
+    } else if (this.askState) {
+      const ask = this.askState
+      screen = "Question"
+      if (ask.custom) {
+        panel = {
+          title: "Question",
+          focus: "custom answer",
+          placement: "below",
+          lines: [...ask.prompt.question.split("\n"), ["Enter submit", "Esc back to options"].join(this.separator())],
+        }
+        draft = ask.custom.text
+        cursor = ask.custom.cursor
+        prompt = "Answer> "
+      } else {
+        const rows = this.askRows(ask)
+        const detail = ask.prompt.options[ask.selected]?.detail
+        const question = ask.prompt.question.split("\n")
+        panel = {
+          title: "Question",
+          focus: "answer selection",
+          placement: "body",
+          lines: [...question, "", ...rows, ...(detail ? ["", ...detail.split("\n").map(line => `  ${line}`)] : []), "", this.selectHint()],
+          accentLines: [question.length + 1 + ask.selected],
+          mutedLines: [...(detail ? Array.from({ length: detail.split("\n").length }, (_, i) => question.length + 1 + rows.length + 1 + i) : []),
+            question.length + 1 + rows.length + (detail ? detail.split("\n").length + 1 : 0) + 1],
+        }
+        composerVisible = false
+      }
     }
     const search = this.readFailure ? undefined : this.editor.searchState
     if (search && !panel) {
@@ -555,7 +619,7 @@ export class TuiApp implements Terminal {
       panel = { title: suggestions.skillsOnly ? "Skills" : "Commands", focus: "composer", placement: "below", columns: true, lines: panelLines }
       screen = suggestions.skillsOnly ? "Skill suggestions" : "Command suggestions"
     }
-    if (this.detailsVisible && !this.choice && !panel) {
+    if (this.detailsVisible && !this.choice && !this.askState && !panel) {
       const details = this.transcript.details()
       this.detailsIndex = Math.max(0, Math.min(Math.max(0, details.length - 1), this.detailsIndex))
       const selected = details[this.detailsIndex]
@@ -610,6 +674,43 @@ export class TuiApp implements Terminal {
     }))
   }
 
+  private askInput(ask: AskState, event: InputEvent): void {
+    if (event.type === "key" && event.key === "ctrl+d") { this.control?.("quit"); return }
+    if (event.type === "key" && event.key === "ctrl+c") {
+      if (this.overlayControls.handle(event) === "shutdown") this.control?.("shutdown")
+      return
+    }
+    if (ask.custom) {
+      if (event.type === "text" || event.type === "paste") {
+        const remaining = Math.max(0, CUSTOM_ANSWER_LIMIT - ask.custom.text.length)
+        ask.custom.handle({ type: event.type, text: event.text.replace(/[\r\n\t]/gu, " ").slice(0, remaining) })
+      } else if (event.key === "escape") ask.custom = undefined
+      else if (event.key === "enter") {
+        const text = ask.custom.text.trim()
+        if (!text) return
+        ask.finish({ kind: "custom", text: text.slice(0, CUSTOM_ANSWER_LIMIT) })
+        return
+      } else if (["backspace", "delete", "left", "right", "home", "end", "ctrl+a", "ctrl+e"].includes(event.key)) ask.custom.handle(event)
+      this.draw()
+      return
+    }
+    const count = this.askRowCount(ask)
+    const activate = (row: number): void => {
+      if (row < ask.prompt.options.length) ask.finish({ kind: "option", index: row })
+      else { ask.selected = row; ask.custom = new Editor({ platform: process.platform }); this.draw() }
+    }
+    if (event.type === "text" && /^[1-9]$/u.test(event.text)) {
+      if (Number(event.text) - 1 < count) activate(Number(event.text) - 1)
+      return
+    }
+    if (event.type !== "key") return
+    if (event.key === "escape") { ask.finish(undefined); return }
+    if (event.key === "up") ask.selected = (ask.selected + count - 1) % count
+    else if (event.key === "down" || event.key === "tab") ask.selected = (ask.selected + 1) % count
+    else if (event.key === "enter") { activate(ask.selected); return }
+    this.draw()
+  }
+
   private input(event: InputEvent): void {
     if (this.readFailure) {
       if (event.type === "key" && event.key === "ctrl+d") this.control?.("quit")
@@ -622,7 +723,7 @@ export class TuiApp implements Terminal {
       return
     }
     const suggestions = this.palette()
-    const overlayVisible = !!this.choice || !!this.editor.searchState || !!suggestions || this.detailsVisible
+    const overlayVisible = !!this.choice || !!this.askState || !!this.editor.searchState || !!suggestions || this.detailsVisible
     if (!overlayVisible && this.usable() && event.type === "key" && (event.key === "pageUp" || event.key === "pageDown" || event.key === "pageup" || event.key === "pagedown")) {
       const { pageRows, maximumOffset } = this.transcriptScrollBounds()
       this.scrollOffset = Math.min(this.scrollOffset, maximumOffset)
@@ -643,6 +744,10 @@ export class TuiApp implements Terminal {
     }
     if (event.type === "key" && event.key === "ctrl+z") { this.control?.("suspend"); return }
     if (!this.usable() && !(event.type === "key" && ["ctrl+c", "ctrl+d", "escape"].includes(event.key))) return
+    if (this.askState) {
+      this.askInput(this.askState, event)
+      return
+    }
     if (this.choice) {
       if (event.type === "key" && event.key === "escape") { this.choice.finish(undefined); return }
       if (event.type === "key" && event.key === "ctrl+d") { this.control?.("quit"); return }
@@ -686,7 +791,13 @@ export class TuiApp implements Terminal {
         this.draw()
         return
       }
-      // Paste/text can never answer a choice, much less mint an execution receipt.
+      // Paste and multi-character text can never answer a choice, much less mint an execution receipt.
+      // A single typed digit jumps only in plain lists; approvals and generic lists ignore it.
+      if (event.type === "text" && this.choice.presentation.kind === "plain" && /^[1-9]$/u.test(event.text)) {
+        const jump = Number(event.text) - 1
+        if (jump < this.choice.values.length) this.choice.finish(jump)
+        return
+      }
       if (event.type !== "key") return
       if (this.choice.presentation.kind === "approval") {
         const columns = panelInnerColumns(this.dimensions().columns)
@@ -848,7 +959,7 @@ export class TuiApp implements Terminal {
 
   readInput(input: { title: string; hint: string; prompt: string; kind: "chat" | "selection" }, signal: AbortSignal): Promise<string | undefined> {
     if (this.closed || signal.aborted) return Promise.resolve(undefined)
-    if (this.pending || this.choice) throw new Error("terminal input already has an owner")
+    if (this.pending || this.choice || this.askState) throw new Error("terminal input already has an owner")
     const selectionOrigin = input.kind === "selection" ? { text: this.editor.text, cursor: this.editor.cursor } : undefined
     if (selectionOrigin) this.editor.setText("")
     this.lastSubmittedDraft = undefined
@@ -892,7 +1003,7 @@ export class TuiApp implements Terminal {
 
   choose(title: string, values: readonly string[], signal: AbortSignal, presentation: ChoicePresentation = { kind: "plain" }): Promise<number | undefined> {
     if (this.closed || signal.aborted) return Promise.resolve(undefined)
-    if (this.pending || this.choice || !values.length) throw new Error("invalid terminal choice ownership")
+    if (this.pending || this.choice || this.askState || !values.length) throw new Error("invalid terminal choice ownership")
     if (this.editor.searchState) this.editor.handle({ type: "key", key: "escape" })
     this.choiceSettled = false
     this.hostWorking = false
@@ -938,6 +1049,34 @@ export class TuiApp implements Terminal {
         ...(presentation.kind === "picker" ? { filterEditor: new Editor({ platform: process.platform }) } : {}),
         finish,
       }
+      signal.addEventListener("abort", abort, { once: true })
+      this.draw()
+    })
+  }
+
+  ask(prompt: AskPrompt, signal: AbortSignal): Promise<AskAnswer | undefined> {
+    if (this.closed || signal.aborted) return Promise.resolve(undefined)
+    if (this.pending || this.choice || this.askState || !(prompt.options.length || prompt.allowCustom)) throw new Error("invalid terminal ask ownership")
+    if (this.editor.searchState) this.editor.handle({ type: "key", key: "escape" })
+    this.choiceSettled = false
+    this.hostWorking = false
+    this.lastSubmittedDraft = undefined
+    this.lastSubmittedCursor = undefined
+    const initial = prompt.recommended !== undefined && prompt.recommended >= 0 && prompt.recommended < prompt.options.length ? prompt.recommended : 0
+    return new Promise(resolve => {
+      const abort = () => finish(undefined)
+      const finish = (answer: AskAnswer | undefined) => {
+        if (this.askState?.finish !== finish) return
+        this.choiceSettled = true
+        this.askState = undefined
+        signal.removeEventListener("abort", abort)
+        const shown = answer === undefined ? "No decision (dismissed)" : answer.kind === "custom" ? answer.text : prompt.options[answer.index]?.label ?? ""
+        this.transcript.append(`${prompt.question}: ${shown}`)
+        this.hostWorking = answer !== undefined
+        resolve(answer)
+        this.draw()
+      }
+      this.askState = { prompt, selected: initial, finish }
       signal.addEventListener("abort", abort, { once: true })
       this.draw()
     })
@@ -1003,6 +1142,7 @@ export class TuiApp implements Terminal {
     this.queue.length = 0
     this.pending?.finish(undefined)
     this.choice?.finish(undefined)
+    this.askState?.finish(undefined)
     this.driver.stop()
   }
 }

@@ -17,13 +17,14 @@ let wt: ReturnType<typeof tempGitWorktree>
 beforeEach(() => { wt = tempGitWorktree(); wt.worktree = realpathSync(wt.worktree) })
 afterEach(() => { stopHeartbeat(); wt.cleanup() })
 
-type Options = { lines: Array<string | undefined>; choices?: number[]; script?: Record<string, string[]>; plainReadline?: boolean }
+type Options = { lines: Array<string | undefined>; choices?: number[]; script?: Record<string, string[]>; plainReadline?: boolean; ask?: (prompt: any) => unknown }
 
 async function session(options: Options) {
   const lines = [...options.lines]
   const choices = [...(options.choices ?? [])]
   const output: string[] = []
   const statuses: Array<string | undefined> = []
+  const asks: unknown[] = []
   const chooses: Array<{ title: string; values: readonly string[] }> = []
   const fixture = scriptedRuntime(wt.worktree, options.script ?? fullScript())
   const conversationTurns: string[] = []
@@ -34,9 +35,10 @@ async function session(options: Options) {
       choose: async (title: string, values: readonly string[]) => { chooses.push({ title, values }); return choices.shift() ?? 0 },
       workflowStatus: (line: string | undefined) => { statuses.push(line) },
     }),
+    ...(options.ask ? { ask: async (prompt: unknown) => { asks.push(prompt); return options.ask!(prompt) } } : {}),
     write: text => { output.push(text) },
     close() {},
-  }
+  } as Terminal
   let uuid = 0
   const deps: Partial<InteractiveDependencies> = {
     cwd: wt.worktree, terminal, gitTopLevel: () => wt.worktree,
@@ -47,7 +49,7 @@ async function session(options: Options) {
     randomUUID: () => `fixture${uuid++}`,
   }
   const exit = await runInteractiveSession({ worktree: wt.worktree, engine: "local", model: "fixture-model" }, deps)
-  return { exit, output: output.join(""), statuses, chooses, conversationTurns, ...fixture, remaining: lines }
+  return { exit, output: output.join(""), statuses, chooses, asks, conversationTurns, ...fixture, remaining: lines }
 }
 
 const answers = ["first answer", "second answer"]
@@ -122,6 +124,59 @@ describe("deep-interview then ralplan through the interactive session", () => {
     expect(s.output).toContain("Workflow: deep-interview · topology · planning")
     expect(s.output).toContain("Workflow: ralplan · planner")
     expect(committed()).toMatchObject({ kind: "ralplan", stage: "pending_execution" })
+  })
+
+  function optionScript() {
+    const script = fullScript()
+    script["di.interviewer.question"] = [
+      JSON.stringify({ type: "question", text: "Which store?", options: ["SQLite", "Postgres", "Files"], recommended: 1 }),
+      JSON.stringify({ type: "question", text: "Which UI?", options: ["CLI", "Web"] }),
+    ]
+    return script
+  }
+  const roundAnswers = () => {
+    const root = join(wt.worktree, ".otter", "workflows")
+    const out: string[] = []
+    for (const sid of readdirSync(root)) for (const wid of readdirSync(join(root, sid))) {
+      for (const n of [1, 2]) {
+        try { out.push(readFileSync(join(root, sid, wid, "rounds", `${n}-answer.md`), "utf8")) } catch { /* absent */ }
+      }
+    }
+    return out
+  }
+
+  test("readline: options are printed numbered; a bare number picks the option, anything else is the answer", async () => {
+    const s = await session({
+      lines: ["/skill:deep-interview build the widget", "1", "2", "my own words", "1", "3", "/quit"],
+      plainReadline: true, script: optionScript(),
+    })
+    expect(s.output).toContain("  1) SQLite\n  2) Postgres (Recommended)\n  3) Files\nType a number or your own answer; /finish ends early.")
+    expect(roundAnswers()).toEqual(["Postgres", "my own words"])
+  })
+
+  test("terminal.ask: option and custom answers are recorded; dismissal falls back to the chat prompt", async () => {
+    const replies = [{ kind: "option", index: 2 }, undefined]
+    const s = await session({
+      lines: ["/skill:deep-interview build the widget", "typed fallback", "/quit"],
+      script: optionScript(), choices: [0, 0, 2],
+      ask: () => replies.shift(),
+    })
+    expect(s.asks[0]).toEqual({
+      question: "Question 1: Which store?", options: [{ label: "SQLite" }, { label: "Postgres" }, { label: "Files" }], recommended: 1, allowCustom: true,
+    })
+    expect(s.asks).toHaveLength(2)
+    expect(roundAnswers()).toEqual(["Files", "typed fallback"])
+    expect(s.output).toContain("Question 2:\nWhich UI?")
+  })
+
+  test("terminal.ask: a custom answer is used as typed", async () => {
+    const replies = [{ kind: "custom", text: "  bespoke  " }, { kind: "option", index: 0 }]
+    const s = await session({
+      lines: ["/skill:deep-interview build the widget", "/quit"],
+      script: optionScript(), choices: [0, 0, 2], ask: () => replies.shift(),
+    })
+    expect(roundAnswers()).toEqual(["bespoke", "CLI"])
+    expect(s.exit.code).toBe(0)
   })
 
   test("/skill:ralplan alone starts exactly one ralplan; typed confirmation of execution refuses without ultragoal", async () => {
