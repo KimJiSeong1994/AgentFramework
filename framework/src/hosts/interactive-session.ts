@@ -51,7 +51,8 @@ import { fileMemoryStore, memoryCommand, type MemoryCommandStore } from "./memor
 export type CliEngine = CliRuntimeOptions["engine"]
 export type InteractiveArgs = { worktree: string; engine?: CliEngine; model?: string }
 export type InteractiveExit = { code: number }
-export type TerminalControl = "cancel" | "pause" | "shutdown" | "quit" | "disconnect" | "suspend"
+/** `interrupt` is Escape: it stops running work only; `cancel` is the explicit /cancel that may also stop a workflow. */
+export type TerminalControl = "cancel" | "interrupt" | "pause" | "shutdown" | "quit" | "disconnect" | "suspend"
 
 export type Terminal = {
   stdinIsTTY: boolean
@@ -911,6 +912,7 @@ export async function runInteractiveSession(
   const onSigterm = () => signalCancel("SIGTERM")
   const onSighup = () => signalCancel("SIGHUP")
   let requestCancel = () => { progress.cancelRequested(); abort.abort() }
+  let requestInterrupt = () => requestCancel()
   let requestPause = () => { terminal.write("Pause unavailable: no live workflow.\n") }
   let requestSuspend = () => { terminal.write("Suspension refused: execution quiescence has not been established.\n") }
   const onSigtstp = () => requestSuspend()
@@ -992,7 +994,8 @@ export async function runInteractiveSession(
   }
   terminal.controls?.(action => {
     // Esc / Ctrl+C / /cancel stop a running operator shell before they reach the session.
-    if (shellAbort && (action === "cancel" || action === "shutdown")) shellAbort.abort()
+    if (shellAbort && (action === "cancel" || action === "interrupt" || action === "shutdown")) shellAbort.abort()
+    else if (action === "interrupt") requestInterrupt()
     else if (action === "shutdown") onSigint()
     else if (action === "quit") signalCancel()
     else if (action === "disconnect") onSighup()
@@ -1642,6 +1645,23 @@ export async function runInteractiveSession(
         terminal.write(`Cancellation unconfirmed: ${boundedTerminalDiagnostic(String(error))}\n`)
       }
     }
+    /**
+     * Escape stops only work that is running now (a model turn or step, a queue execution, an unconfirmed cancel). With
+     * nothing running it never stops a workflow: an idle Escape must not discard an interview or an approved plan.
+     */
+    requestInterrupt = () => {
+      if (retainedSDKSessionID) return
+      let live = operationAbort !== undefined
+      try {
+        const state = selection.runtime.runs.status()
+        live ||= !!state.claim || state.executions.some(execution => !settled(execution))
+      } catch { live = true }
+      if (live) { requestCancel(); return }
+      try {
+        const current = activeAnyWorkflow(worktree)
+        if (current?.sessionID === selection.sessionID) terminal.write(`Nothing is running; Escape does not stop the ${current.kind} workflow. Use /cancel to stop it or /pause to keep it.\n`)
+      } catch { /* display only */ }
+    }
     /** Pause is a request: the label stays "pausing — termination unconfirmed" until the owner proves quiescence. */
     requestPause = () => {
       if (retainedSDKSessionID) {
@@ -1907,7 +1927,9 @@ export async function runInteractiveSession(
           release()
           return { refusal: "Model switch refused: workflow state is corrupt and must be inspected first.\n" }
         }
-        if (activeAnyWorkflow(worktree) && !allowHeldWorkflow) {
+        const occupant = activeAnyWorkflow(worktree)
+        // Another session's workflow is untouched by this session's model choice; only this session's own workflow blocks it.
+        if (occupant && occupant.sessionID === selection.sessionID && !allowHeldWorkflow) {
           release()
           return { refusal: "Model switch refused: resolve the active workflow first.\n" }
         }
@@ -1925,6 +1947,16 @@ export async function runInteractiveSession(
         release()
         return { refusal: "Model switch refused: workflow or execution ownership state could not be verified.\n" }
       }
+    }
+
+    /** Chat is held only because another session owns the active workflow; this session itself is clean. */
+    function foreignWorkflowOnly(): boolean {
+      try {
+        if (retainedSDKSessionID || effectiveHold(worktree, selection.sessionID) || readAnyWorkflowChecked(worktree).corrupt) return false
+        const occupant = activeAnyWorkflow(worktree)
+        const state = selection.runtime.runs.status()
+        return !!occupant && occupant.sessionID !== selection.sessionID && !state.claim && state.executions.every(settled)
+      } catch { return false }
     }
 
     /** The live workflow owned by this session whose model may be changed in place (not held, stopped or foreign). */
@@ -2328,7 +2360,7 @@ export async function runInteractiveSession(
       if (readAnyWorkflowChecked(worktree).corrupt) return "Workflow state is corrupt · /status inspects it · /quit exit"
       const occupant = activeAnyWorkflow(worktree)
       if (occupant && occupant.sessionID !== selection.sessionID) {
-        return `Observer · /status · /resume ${occupant.sessionID} opens the owner · /quit exit`
+        return `Observer · /model switch · /status · /resume ${occupant.sessionID} opens the owner · /quit exit`
       }
       if (occupant) return `${occupant.kind} workflow ${occupant.phase} at ${occupant.stage} · /status · /pause · /cancel`
       return "Session held · /status · /help commands · /quit exit"
@@ -2347,7 +2379,7 @@ export async function runInteractiveSession(
         const queueAllowed = !effectiveHold(worktree, selection.sessionID) && !readAnyWorkflowChecked(worktree).corrupt &&
           !activeAnyWorkflow(worktree) && !queueState.claim && queueState.executions.every(settled)
         terminal.queueAdmission?.(queueAllowed && requestObservation.state !== "failed")
-        actionContext = queueAllowed ? "chat" : "held"
+        actionContext = queueAllowed ? "chat" : foreignWorkflowOnly() ? "observer" : "held"
       }
       terminal.actionContext?.(actionContext)
       publishView()
@@ -2358,7 +2390,7 @@ export async function runInteractiveSession(
       const text = deferredCommand ?? await withProgressSuspended(() => readInput(
         terminal, promptTitle,
         retainedSDKSessionID ? "Read-only history · /resume or /new to switch · /quit exit"
-          : actionContext === "held" ? heldInputHint() : "Enter send · /help commands · /model switch · /quit exit",
+          : actionContext === "held" || actionContext === "observer" ? heldInputHint() : "Enter send · /help commands · /model switch · /quit exit",
         retainedSDKSessionID ? "History> " : "You> ", abort.signal,
       ))
       if (abort.signal.aborted) return signalExit(receivedSignal)
@@ -2608,7 +2640,7 @@ export async function runInteractiveSession(
         }
         return true
       }
-      if (command === "/model" && commandArgs[0] === "combo" && (actionContext === "chat" || actionContext === "held")) {
+      if (command === "/model" && commandArgs[0] === "combo" && (actionContext === "chat" || actionContext === "held" || actionContext === "observer")) {
         if (!await runCombo(commandArgs.slice(1))) return signalExit(receivedSignal)
         continue
       }

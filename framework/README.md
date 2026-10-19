@@ -275,7 +275,7 @@ hint naming only what works in the current context (`Type a message · / command
 /status explains …` while held); it is never part of the draft and is omitted under `NO_COLOR`, where it would read
 as typed text. While chat is held the status row says why in words (`deep-interview workflow owned by another
 session`, beside the `safety[…]` markers), the hint row names the way out in the same order Enter checks it
-(`Observer · /status · /resume <owner> opens the owner`, `Session held · /continue reviews and resumes`, …), and
+(`Observer · /model switch · /status · /resume <owner> opens the owner`, `Session held · /continue reviews and resumes`, …), and
 the home panel replaces "Get started" with "Session held". The `/` palette uses GJC rows: a `❯` cursor, aligned
 names, descriptions clipped with `…`, and a `(n/N) · ↑↓ move · Tab/Enter insert · Esc dismiss` footer.
 
@@ -327,7 +327,13 @@ history at editor boundaries, and Ctrl+R searches submitted input. In the compos
 first Ctrl+C clears the draft; a second strictly less than 500ms later requests shutdown.
 Details and pickers own their input without editing the underlying draft; Ctrl+D
 and the double-Ctrl+C shutdown control remain available in these overlays.
-Escape dismisses transient input UI or requests cancellation. While busy,
+Escape dismisses transient input UI or interrupts running work (a model turn or workflow step, a queue execution,
+an unconfirmed cancel). With nothing running it never stops a workflow: an idle Escape on a restored interview or
+approved plan only says `Nothing is running; Escape does not stop the <kind> workflow`; `/cancel` stops it and
+`/pause` keeps it. When chat is held only because another session owns the active workflow, the session is an
+`observer`: held commands plus `/model` (the palette and `/help` list it). Switching the model there never touches
+the other session's workflow; chat stays blocked until that workflow is resolved (`/resume <owner>`). A hold on this
+session itself, unresolved execution ownership or corrupt workflow state still refuse `/model`. While busy,
 Alt+Q on macOS / Alt+Enter on Linux queues text for later serial turns; queued
 text never answers choices or supplies execution approval.
 

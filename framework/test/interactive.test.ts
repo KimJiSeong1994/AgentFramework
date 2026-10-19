@@ -1576,15 +1576,12 @@ describe("interactive terminal", () => {
     expect(h.calls.viewFacts.at(-1)?.selection.routes).toEqual(comboRoutes)
   })
 
-  test("/model combo apply is refused while a workflow is active and with an invalid combo", async () => {
-    withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow("another-session",
-      { instance: "fixture", pid: process.pid }, "command", "active plan", "codex")))
-    const active = harness({ lines: ["/model combo apply", "/quit"], combo: configuredCombo })
+  test("/model combo apply is refused while execution ownership is unresolved and with an invalid combo", async () => {
+    const active = harness({ lines: ["/model combo apply", "/quit"], combo: configuredCombo, executionStatus: { generation: 1, claim: { ownerSession: "another-session", instance: "other-instance", pid: 1, generation: 1 }, executions: [] } })
     active.calls.combo = { state: "configured", routes: { reviewer: { engine: "claude", model: "sonnet" } }, sources: { reviewer: "user" } }
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, active.deps)
     expect(active.calls.runtimes).toHaveLength(1)
-    expect(active.calls.output.join("")).toContain("resolve the active workflow first")
-    rmSync(workflowPath(wt.worktree), { force: true })
+    expect(active.calls.output.join("")).toContain("Combo not applied: model selection is unavailable while this session is held")
     const bad = harness({ lines: ["/model combo apply", "/quit"], combo: { state: "invalid", reason: "chat.combo.main is not a routable role" } })
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, bad.deps)
     expect(bad.calls.runtimes).toHaveLength(1)
@@ -1648,9 +1645,7 @@ describe("interactive terminal", () => {
   })
 
   test("combo show, set and clear work while the session is held; only apply is refused", async () => {
-    withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow("another-session",
-      { instance: "fixture", pid: process.pid }, "command", "active plan", "codex")))
-    const h = harness({ lines: ["/model combo show", "/model combo architect codex gpt-5.6-sol", "/model combo clear architect", "/model combo apply", "/quit"], combo: configuredCombo })
+    const h = harness({ lines: ["/model combo show", "/model combo architect codex gpt-5.6-sol", "/model combo clear architect", "/model combo apply", "/quit"], combo: configuredCombo, executionStatus: { generation: 1, claim: { ownerSession: "another-session", instance: "other-instance", pid: 1, generation: 1 }, executions: [] } })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
     const output = h.calls.output.join("")
     expect(h.calls.actionContexts).toContain("held")
@@ -2038,17 +2033,18 @@ describe("interactive terminal", () => {
     expect([...h.calls.signalListeners.values()].every(listeners => listeners.size === 0)).toBe(true)
   })
 
-  test("active workflow and corrupt workflow state refuse model switching", async () => {
+  test("another session's workflow allows a model switch but no new chat; corrupt workflow state refuses switching", async () => {
     const path = workflowPath(wt.worktree)
     withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow("another-session",
       { instance: "fixture", pid: process.pid }, "command", "active plan", "codex")))
-    const active = harness({ lines: ["/model local qwen3:8b", "hello", "/quit"] })
+    const active = harness({ lines: ["/help", "/model local qwen3:8b", "hello", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, active.deps)
-    expect(active.calls.runtimes).toHaveLength(1)
-    expect(active.calls.runtimes[0]?.engine).toBe("codex")
+    expect(active.calls.actionContexts).toContain("observer")
+    expect(active.calls.output.find(text => text.includes("Commands (observer):")) ?? "").toContain("/model")
+    expect(active.calls.runtimes).toHaveLength(2)
+    expect(active.calls.runtimes[1]).toMatchObject({ engine: "local", model: "qwen3:8b" })
     expect(active.calls.turnBindings).toEqual([])
-    expect(active.calls.imported).toBeUndefined()
-    expect(active.calls.output.join("")).toContain("resolve the active workflow first")
+    expect(active.calls.output.join("")).not.toContain("resolve the active workflow first")
     expect(active.calls.output.join("")).toContain("workflow belongs to another-session")
     expect(active.calls.output.join("")).toContain("No new workflow can start here")
 
@@ -2062,8 +2058,10 @@ describe("interactive terminal", () => {
 
   test("held workflow and claim contexts hide /model and refuse typed switches before discovery", async () => {
     expect(interactiveActions("held").some(action => action.id === "model")).toBe(false)
+    expect(interactiveActions("observer").some(action => action.id === "model")).toBe(true)
 
-    withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow("another-session",
+    // This session's own held workflow (not another session's) keeps /model refused.
+    withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow("otter-fixture-session",
       { instance: "fixture", pid: process.pid }, "command", "active plan", "codex")))
     const workflow = harness({ lines: ["/help", "/model local qwen3:8b", "hello", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, workflow.deps)
