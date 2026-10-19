@@ -1,0 +1,381 @@
+{
+  "schema": "otter-skill-route-eval.v1",
+  "recordedAt": "2026-10-19T08:37:01.190Z",
+  "gateTarget": {
+    "precision": 0.95,
+    "noneFalsePositive": 0.02,
+    "p95Ms": 15000
+  },
+  "gate": {
+    "precision": true,
+    "noneFalsePositive": true,
+    "p95Ms": true,
+    "nonTrivial": true,
+    "transportHealthy": true
+  },
+  "passed": true,
+  "metrics": {
+    "cases": 132,
+    "candidates": [
+      "computer-use",
+      "find-skills",
+      "llm-wiki",
+      "orca-cli",
+      "orchestration",
+      "plan",
+      "typesafe-ai",
+      "ulw"
+    ],
+    "picked": 9,
+    "precision": 1,
+    "noneAnswered": 68,
+    "noneFalsePositive": 0,
+    "adversarialFalsePositive": 0,
+    "recall": 0.140625,
+    "p50Ms": 3587,
+    "p95Ms": 4938,
+    "reasons": {
+      "abstained": 123,
+      "recommended": 9
+    },
+    "thresholds": {
+      "minProbability": 0.95,
+      "minMargin": 0.2,
+      "timeoutMs": 15000
+    },
+    "engine": "claude",
+    "measurementTimeoutMs": null
+  },
+  "errors": [
+    {
+      "text": "이 문서들 위키에 등록해줘",
+      "expect": "llm-wiki",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "pending 소스들 위키 컴파일 돌려줘",
+      "expect": "llm-wiki",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Lint the knowledge wiki for broken citations",
+      "expect": "llm-wiki",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "위키에서 OpenJev 관련 페이지 찾아서 요약해줘",
+      "expect": "llm-wiki",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Query the wiki for what we know about the delegate queue",
+      "expect": "llm-wiki",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "지식 위키 lint 돌리고 깨진 링크 고쳐줘",
+      "expect": "llm-wiki",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "위키 컴파일 후 index.md 갱신해줘",
+      "expect": "llm-wiki",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Turn these meeting notes into wiki pages with citations",
+      "expect": "llm-wiki",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Capture the routing logs into the wiki and compile them",
+      "expect": "llm-wiki",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Investigate the session store and give me a numbered implementation plan without editing",
+      "expect": "plan",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Read the router code and produce a verifiable step-by-step plan",
+      "expect": "plan",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "코드 수정하지 말고 계획만 세워줘: 메모리 prefetch 개선",
+      "expect": "plan",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Plan how to add retries to the verifier queue; do not change files yet",
+      "expect": "plan",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "먼저 조사만 하고 단계별 실행 계획을 작성해줘",
+      "expect": "plan",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Give me an implementation plan with verification commands for adding a /export command",
+      "expect": "plan",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "read-only investigation first, then a numbered plan for the TUI theme switch",
+      "expect": "plan",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "계획 모드로 이 버그 원인 분석하고 수정 계획 짜줘",
+      "expect": "plan",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Draft a plan with files and test commands before we touch the controller",
+      "expect": "plan",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "리팩터링 들어가기 전에 영향 범위 조사하고 계획 세워줘",
+      "expect": "plan",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "이 큰 작업을 검증 가능한 태스크로 쪼개서 위임해줘",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Split this big refactor into verifiable tasks and delegate them all",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Break the migration into tasks, hand them to workers, and report the result",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "여러 파일 수정 작업을 태스크 목록으로 나눠 delegate로 한 번에 넘겨줘",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Fan this out into independent worker tasks and give me the final report",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "전체 테스트 실패들을 태스크로 나눠서 워커들에게 맡겨줘",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Decompose implementing the five new commands into delegated tasks",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "울트라워크로 처리해: 로그 포맷 전면 교체",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Split adding i18n across all screens into tasks and delegate them",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Jev로 사용자 입력을 typed judgment로 분류하는 기능 만들고 싶어",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Build a feature that turns app state into probabilities with Jev",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "TypeSafe로 자연어를 타입 있는 판단으로 바꾸는 유닛 작성해줘",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "How should I structure a Jev choice question for routing tickets?",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Add an AI primitive that classifies log lines into severity with calibrated probabilities",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "System One 모델로 리뷰 코멘트 감정 분류기 만들어줘",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Jev 확률로 스팸 여부를 판단하는 타입 안전한 함수 만들어줘",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Orca 워크트리 하나 새로 만들어서 codex 띄워줘",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Spawn claude in a child Orca worktree for this task",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Read the output of the Orca terminal in the other worktree",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "이 작업 다른 에이전트한테 Orca로 핸드오프해줘",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Wait for the Orca terminal to finish and send it the next command",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "orca worktree 목록 보여줘",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Leave a worktree comment in Orca with the status",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Coordinate three Orca workers with a task DAG and decision gates",
+      "expect": "orchestration",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "워커들에게 태스크 디스패치하고 worker_done 기다려줘",
+      "expect": "orchestration",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "여러 에이전트에 작업 분배하고 escalation 처리하는 루프 짜줘",
+      "expect": "orchestration",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Dispatch these subtasks to supervised workers and block on their answers",
+      "expect": "orchestration",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "열려 있는 Safari 창에서 설정 버튼 눌러줘",
+      "expect": "computer-use",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Click the OK button in the native dialog on screen",
+      "expect": "computer-use",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Take a screenshot of the visible app window and read the menu",
+      "expect": "computer-use",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Chrome 창에서 로그인 폼에 입력해줘 (GUI로)",
+      "expect": "computer-use",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Use the accessibility tree to open the File menu in the app window",
+      "expect": "computer-use",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "is there a skill that can convert PDFs to slides?",
+      "expect": "find-skills",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "find a skill for generating changelogs",
+      "expect": "find-skills",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "PDF 처리하는 스킬 있어? 설치하고 싶어",
+      "expect": "find-skills",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "How do I extend my agent with new skills from the ecosystem?",
+      "expect": "find-skills",
+      "skill": null,
+      "reason": "abstained"
+    }
+  ]
+}

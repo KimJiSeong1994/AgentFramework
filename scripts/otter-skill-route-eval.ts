@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // Held-out routing evaluation for automatic skill selection (docs/lca-auto-skill-2026-10-18.md, phase 0).
-// Runs the production selector (lexical prefilter + one OpenJev choice call + thresholds) over a labeled fixture
-// against the live loopback OpenJev server. Candidates are the real discovered skills (name + description only) of
+// Runs the production selector (lexical prefilter + one choice judgment + thresholds) over a labeled fixture with the
+// live judging engine: `--engine auto|claude|codex` (default auto, the same Claude/Codex CLI classifier as memory
+// recall) or `jev` (the loopback OpenJev server at --endpoint). Candidates are the real discovered skills (name + description only) of
 // this repository and the operator home, minus Codex/Claude import-tier skills unless --include names them. Routing
 // telemetry goes to a scratch state root, never the operator's. Exit 0 = gate met, 1 = gate missed, 2 = usage/setup.
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
@@ -9,13 +10,15 @@ import { homedir, tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { DEFAULT_CONFIG } from "../framework/src/config.ts"
-import { AUTO_MIN_MARGIN, AUTO_MIN_PROBABILITY, AUTO_SELECT_BACKOFF_MS, createAutoSkillSelector } from "../framework/src/routing/router.ts"
+import { AUTO_MIN_MARGIN, AUTO_MIN_PROBABILITY, AUTO_SELECT_BACKOFF_MS, AUTO_SELECT_TIMEOUT_MS, createAutoSkillSelector } from "../framework/src/routing/router.ts"
 import { discoverSkills, resolveSkillRoots, skillRootTier } from "../framework/src/skills/roots.ts"
 
 const ROOT = resolve(import.meta.dir, "..")
 const { values } = parseArgs({
   options: {
     fixture: { type: "string", default: join(ROOT, "scripts/fixtures/skill-route/labeled.jsonl") },
+    engine: { type: "string", default: "auto" },
+    model: { type: "string" },
     endpoint: { type: "string", default: DEFAULT_CONFIG.skill_router.endpoint },
     "timeout-ms": { type: "string", default: String(DEFAULT_CONFIG.skill_router.timeout_ms) },
     // Accuracy can be measured on a slow server by waiting longer; the latency gate still uses --timeout-ms.
@@ -28,7 +31,8 @@ const { values } = parseArgs({
 })
 
 type Case = { text: string; expect: string; category: string }
-const GATE = { precision: 0.95, noneFalsePositive: 0.02, p95Ms: 1000 }
+// Latency gate = the selector's own timeout: a CLI judgment (a few seconds) only ranks the intent offer.
+const GATE = { precision: 0.95, noneFalsePositive: 0.02, p95Ms: AUTO_SELECT_TIMEOUT_MS }
 
 function percentile(sorted: number[], p: number): number {
   if (!sorted.length) return 0
@@ -59,6 +63,11 @@ async function main(): Promise<number> {
     const config = structuredClone(DEFAULT_CONFIG)
     config.skill_router = {
       ...config.skill_router, endpoint: values.endpoint!, timeout_ms: Number(values["timeout-ms"]),
+    }
+    if (!["auto", "claude", "codex", "jev"].includes(values.engine!)) { process.stderr.write("--engine must be auto, claude, codex or jev\n"); return 2 }
+    config.memory = {
+      ...config.memory, engine: values.engine as typeof config.memory.engine,
+      ...(values.model ? { model: values.model } : {}),
     }
     // A clock that jumps past every cooldown disables the runtime failure backoff: every case must reach the server.
     let clock = 0
@@ -108,7 +117,8 @@ async function main(): Promise<number> {
       p50Ms: percentile(latencies, 0.5),
       p95Ms: percentile(latencies, 0.95),
       reasons,
-      thresholds: { minProbability: AUTO_MIN_PROBABILITY, minMargin: AUTO_MIN_MARGIN, timeoutMs: config.skill_router.timeout_ms },
+      thresholds: { minProbability: AUTO_MIN_PROBABILITY, minMargin: AUTO_MIN_MARGIN, timeoutMs: AUTO_SELECT_TIMEOUT_MS },
+      engine: values.engine, ...(values.model ? { model: values.model } : {}),
       measurementTimeoutMs: measurementTimeoutMs ?? null,
     }
     const gate = {

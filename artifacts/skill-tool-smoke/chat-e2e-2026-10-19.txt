@@ -22,3 +22,15 @@ RELEASE-NOTES-v2
 Conversation:
 Skills used: sql-style (force: skips skills for one message; /skills auto off for this session)
 Conversation:
+### claude claude-haiku-5-5
+{"engine":"claude","model":"claude-haiku-5-5","exit":{"code":0},"ms":29434,"choicePrompts":1}
+Conversation:
+[CHOICE PROMPTED] This looks under-specified. How should I proceed? :: Continue in chat | Start deep-interview | Cancel
+Skills used: release-notes (force: skips skills for one message; /skills auto off for this session)
+Conversation:
+RELEASE-NOTES-v2
+## What changed
+-- otter
+Conversation:
+Skills used: sql-style (force: skips skills for one message; /skills auto off for this session)
+Conversation:

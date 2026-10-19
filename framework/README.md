@@ -560,14 +560,20 @@ Configured in the **user** config only:
   `skill` tool. An invalid `skill_auto` block turns it off and is reported once per session.
 - **Workflows** (`deep-interview`, `ralplan`, `ultragoal`, `autoresearch`) are never started automatically; the intent
   offer below remains the only non-explicit path to them. In `auto` mode, when the offer lists more than one workflow,
-  the OpenJev selector's pick is moved first and marked `(suggested)`; a failure or abstention keeps the fixed order.
+  the selector's pick is moved first and marked `(suggested)`; a failure or abstention keeps the fixed order. The
+  selector judges with the same engine as memory recall (`memory.engine`, default `auto`: the Claude CLI, else Codex,
+  run tool-free; claude-haiku-5-5 / gpt-5.6-luna unless `memory.model` is set), at most 15 s; OpenJev only when
+  `memory.engine` is `jev`.
 - **Live check**: `bun scripts/otter-skill-tool-smoke.ts local gemma4-26b-mtp:latest "<turn 1>" "<turn 2>"` runs the
   real host and engine in a scratch worktree with a fixed two-skill catalog. On 2026-10-19 (`artifacts/skill-tool-smoke/`
   plus five more runs) a context-only follow-up ("그거 정리해서 배포용 문서로 써줘") loaded the release-notes skill in
   5/5 conversations and the unrelated turns loaded nothing (10/10). One of 15 turns failed with a malformed JSON
   envelope (an unescaped code block in the final text), a local-model formatting failure rather than a skill call.
-- **Router evaluation** (`bun scripts/otter-skill-route-eval.ts`) measures the OpenJev selector that ranks the intent
-  offer. 2026-10-18 (`artifacts/skill-route-eval/`): after restarting a hung MLX server, 24 of 132 cases were answered
+- **Router evaluation** (`bun scripts/otter-skill-route-eval.ts --engine auto|claude|codex|jev`) measures that selector.
+  2026-10-19, 132 labeled cases (`artifacts/skill-route-eval/report-2026-10-19-{claude,codex}.json`): claude-haiku-5-5
+  passed the gate (9 picks, all correct; 0/68 `none` false positives, 0 adversarial; p95 4.9 s) but is conservative
+  (recall 14%). gpt-5.6-luna recalls 92% but failed the false-positive gate (3/68 `none` cases picked: a question about
+  a skill, two OMX requests mapped to look-alike skills; p95 6.6 s). `auto` prefers Claude. Earlier OpenJev measurement: 2026-10-18 (`artifacts/skill-route-eval/`): after restarting a hung MLX server, 24 of 132 cases were answered
   (all positives: 22 correct, 2 abstained, 0 wrong); every `none`/adversarial case timed out, so its false-positive
   rate is unmeasured; answered latency was 63-90 s under memory pressure. It no longer decides which ordinary skill
   applies.
@@ -1348,10 +1354,15 @@ from the `plugin` array in `~/.config/opencode/opencode.jsonc` (and from `$OPENC
 if set) before using otter. `otter-doctor.sh` reports this as `D05c WARN`. With OMO loaded, worker/reviewer also see OMO's
 tools (`call_omo_agent`, `session_*`, …) in their prefix — another reason not to run both.
 
-## Optional OpenJev skill recommendations
+## Optional skill recommendations (OpenCode plugin)
 
 This section covers the OpenCode plugin. In `otter chat` the model loads skills itself (`skill_auto`, see
-"Model-loaded skills" above); OpenJev there only ranks the intent offer.
+"Model-loaded skills" above).
+
+The judging engine is `memory.engine`, shared with memory recall: by default (`auto`) a tool-free Claude CLI run
+(else Codex), with up to `min(memory.timeout_ms, 15 s)` per message; the local OpenJev server at `skill_router.endpoint`
+only when `memory.engine` is `jev`, then within `skill_router.timeout_ms`. A CLI engine sends the message text and skill
+names/descriptions to that vendor. The OpenJev-specific notes below apply to the `jev` engine.
 
 `skill_router` is a per-turn recommendation layer, not a replacement for mode detection
 or permission checks. Library defaults are **off**; this repository explicitly opts into
