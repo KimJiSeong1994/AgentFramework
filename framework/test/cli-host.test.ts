@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createCliHost } from "../src/hosts/cli-host.ts"
+import { SKILL_CATALOG_LIMIT, SKILL_DROPPED_RESULT, createCliHost, fitHistory } from "../src/hosts/cli-host.ts"
 import type { CliTransportHandle, CliTransportOptions } from "../src/hosts/cli-transport.ts"
 import type { ComboRoutes, ExecutionPolicy, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole, SkillToolProvider } from "../src/hosts/types.ts"
 import type { ExecutionRunStore, ExecutionRunStatus } from "../src/hosts/run-state.ts"
@@ -1001,6 +1001,101 @@ describe("host-provided skill tool", () => {
     expect(subject.prompts[1]).toContain("do not fit in the remaining input budget")
     expect(subject.prompts[1]).not.toContain("word word word word")
     expect(delivered).toEqual([])
+  })
+
+  test("a later large tool result never truncates loaded instructions; if they must go they are withdrawn whole", async () => {
+    writeFileSync(join(root, "big.txt"), "filler line of ordinary text\n".repeat(2_200))
+    const delivered: string[] = []
+    const withdrawn: string[] = []
+    const body = "RULE-START " + "keep this whole. ".repeat(900) + " RULE-END"
+    const skillTool: SkillToolProvider = {
+      catalog: [{ name: "wiki-helper", description: "Compile wiki pages" }],
+      load: async () => ({ ok: true, text: body }),
+      delivered(name) { delivered.push(name) },
+      withdrawn(name) { withdrawn.push(name) },
+    }
+    const subject = harness({ role: "main", responses: [call("wiki-helper"), JSON.stringify({ type: "tool", name: "read", input: { path: "big.txt", startLine: 1, maxLines: 2000 } }), JSON.stringify({ type: "tool", name: "read", input: { path: "big.txt", startLine: 1101, maxLines: 2000 } }), JSON.stringify({ type: "final", text: "done" })] })
+    const handle = await subject.host.prepare({ ...subject.request, skillTool })
+    expect(await handle.run()).toEqual({ status: "completed", text: "done" })
+    expect(delivered).toEqual(["wiki-helper"])
+    const last = subject.prompts.at(-1)!
+    // Either the instructions are all there, or they are gone with an explicit notice and reported as withdrawn.
+    if (last.includes("RULE-START")) {
+      expect(last).toContain("RULE-END")
+      expect(withdrawn).toEqual([])
+    } else {
+      expect(last).toContain("no longer apply")
+      expect(withdrawn).toEqual(["wiki-helper"])
+    }
+    // The skill's own result is whole: no truncation marker between its start and end.
+    const skillResult = last.slice(last.indexOf("RULE-START"), last.indexOf("RULE-END"))
+    if (last.includes("RULE-START")) expect(skillResult).not.toContain("older tool output truncated")
+  })
+
+  test("history fitting never truncates loaded instructions: others shrink first, then the skill goes whole", () => {
+    const skill = { assistant: call("wiki-helper"), ok: true, result: "RULE-START " + "keep. ".repeat(400) + "RULE-END", skill: "wiki-helper" }
+    const file = { assistant: "{}", ok: true, result: "filler ".repeat(2_000) }
+    const base = "base prompt"
+    const roomy = fitHistory(base, [skill, file], 2_000)!
+    expect(roomy[0]).toEqual(skill)
+    expect(roomy[1]!.result).toContain("older tool output truncated")
+    // Too small for the instructions themselves: they are replaced by an explicit notice, never cut.
+    const tight = fitHistory(base, [skill, file], 600)!
+    expect(tight.some(entry => entry.result.includes("RULE-START"))).toBe(false)
+    expect(tight.some(entry => entry.result === SKILL_DROPPED_RESULT)).toBe(true)
+    expect(tight.every(entry => entry.skill === undefined)).toBe(true)
+  })
+
+  test("pinned instructions are kept and the file result is shrunk when only one has to give", async () => {
+    writeFileSync(join(root, "big.txt"), "filler line of ordinary text\n".repeat(2_200))
+    const withdrawn: string[] = []
+    const skillTool: SkillToolProvider = {
+      catalog: [{ name: "wiki-helper", description: "Compile wiki pages" }],
+      load: async () => ({ ok: true, text: "RULE-START short rule RULE-END" }),
+      withdrawn(name) { withdrawn.push(name) },
+    }
+    const subject = harness({ role: "main", responses: [call("wiki-helper"), JSON.stringify({ type: "tool", name: "read", input: { path: "big.txt", startLine: 1, maxLines: 2000 } }), JSON.stringify({ type: "tool", name: "read", input: { path: "big.txt", startLine: 1101, maxLines: 2000 } }), JSON.stringify({ type: "final", text: "done" })] })
+    const handle = await subject.host.prepare({ ...subject.request, skillTool })
+    expect(await handle.run()).toEqual({ status: "completed", text: "done" })
+    expect(subject.prompts.at(-1)).toContain("RULE-START short rule RULE-END")
+    expect(subject.prompts.at(-1)).toContain("older tool output truncated")
+    expect(withdrawn).toEqual([])
+  })
+
+  test("a large catalog is capped and ranked, and a catalog that would overflow is dropped instead of failing the turn", async () => {
+    const many: SkillToolProvider = {
+      catalog: Array.from({ length: 40 }, (_, i) => ({ name: `skill-${String(i).padStart(2, "0")}`, description: `Generic helper number ${i} ` + "with a long description ".repeat(30) })),
+      load: async () => ({ ok: true, text: "x" }),
+    }
+    // Ranked against the provider's query (the latest message), not the whole task text.
+    const ranked = harness({ role: "main", taskText: "earlier conversation mentions skill 05 a lot: skill 05 skill 05", responses: [JSON.stringify({ type: "final", text: "ok" })] })
+    expect(await (await ranked.host.prepare({ ...ranked.request, skillTool: { ...many, query: "please use skill 37 for this" } })).run()).toEqual({ status: "completed", text: "ok" })
+    const listed = ranked.prompts[0]!.split("\n").filter(line => /^- skill-\d\d: /u.test(line))
+    expect(listed).toHaveLength(SKILL_CATALOG_LIMIT)
+    expect(listed[0]).toStartWith("- skill-37: ")
+    expect(listed.every(line => line.length <= "- skill-00: ".length + 160)).toBe(true)
+
+    // A long Korean task that fits on its own but not with the catalog: the turn runs without skills.
+    const longText = "가나다라 ".repeat(2_050)
+    const plain = harness({ role: "main", taskText: longText, responses: [JSON.stringify({ type: "final", text: "ok" })] })
+    expect(await (await plain.host.prepare(plain.request)).run()).toEqual({ status: "completed", text: "ok" })
+    const crowded = harness({ role: "main", taskText: longText, responses: [JSON.stringify({ type: "final", text: "ok" })] })
+    expect(await (await crowded.host.prepare({ ...crowded.request, skillTool: many })).run()).toEqual({ status: "completed", text: "ok" })
+    expect(estimateTokens(plain.prompts[0]!)).toBeLessThanOrEqual(8192)
+    expect(crowded.prompts[0]).not.toContain("Available skills")
+    expect(crowded.prompts[0]).not.toContain("- skill: allowed")
+  })
+
+  test("a refused load is answered from the turn's record when repeated, without loading again", async () => {
+    let loads = 0
+    const skillTool: SkillToolProvider = {
+      catalog: [{ name: "wiki-helper", description: "Compile wiki pages" }],
+      load: async () => { loads++; return { ok: false, error: "Tool refused: not usable now." } },
+    }
+    const subject = harness({ role: "main", responses: [call("wiki-helper"), call("wiki-helper"), JSON.stringify({ type: "final", text: "done" })] })
+    expect(await (await subject.host.prepare({ ...subject.request, skillTool })).run()).toEqual({ status: "completed", text: "done" })
+    expect(loads).toBe(1)
+    expect(subject.prompts[2]).toContain("not usable now")
   })
 
   test("other roles, an empty catalog and no provider offer no skill tool, and a skill call fails closed", async () => {

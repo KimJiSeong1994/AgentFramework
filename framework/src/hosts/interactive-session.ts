@@ -2806,6 +2806,7 @@ export async function runInteractiveSession(
           const pendingHashes = new Map<string, string>()
           skillTool = catalog.length === 0 ? undefined : Object.freeze({
             catalog: Object.freeze(catalog.map(candidate => Object.freeze({ name: candidate.name, description: candidate.description }))),
+            query: outbound,
             async load(name: string, signal: AbortSignal) {
               if (selection !== turnSelection || sessionStore !== turnStore || skillSession !== turnSkills || retainedSDKSessionID) {
                 recordSkillToolLoad(runtime, sessionID, turnID, name, "superseded")
@@ -2823,10 +2824,15 @@ export async function runInteractiveSession(
             },
             delivered(name: string) {
               const contentHash = pendingHashes.get(name)
-              if (contentHash === undefined) return
-              pendingHashes.delete(name)
+              if (contentHash === undefined || loadedSkills.some(skill => skill.name === name)) return
               recordSkillToolLoad(runtime, sessionID, turnID, name, "loaded")
               loadedSkills.push({ name, contentHash })
+            },
+            withdrawn(name: string) {
+              const index = loadedSkills.findIndex(skill => skill.name === name)
+              if (index < 0) return
+              loadedSkills.splice(index, 1)
+              recordSkillToolLoad(runtime, sessionID, turnID, name, "withdrawn")
             },
           })
         }
