@@ -10,7 +10,7 @@ import type { SessionStore } from "../src/sessions/store.ts"
 import { pendingSkillPermissionActivityCount } from "../src/skills/activity.ts"
 import { resolveSkillRoots } from "../src/skills/roots.ts"
 import { claimPreparedSkillInvocation, SkillSession } from "../src/skills/session.ts"
-import { NO_SKILL_TRUST, parseSkillTrust, readSkillTrust, type SkillTrust } from "../src/skills/trust.ts"
+import { DEFAULT_SKILL_AUTO, NO_SKILL_TRUST, parseSkillAuto, parseSkillTrust, readSkillTrust, type SkillAutoPolicy, type SkillTrust } from "../src/skills/trust.ts"
 import { tempWorktree } from "./guards-helpers.ts"
 
 const SID = "skill_source_session"
@@ -157,7 +157,7 @@ test("skill trust parses only names and absolute/~ folders and is read from the 
     expect(parseSkillTrust(undefined, home)).toBe(NO_SKILL_TRUST)
 
     const config = join(home, "otter.jsonc")
-    expect(readSkillTrust(config, home)).toEqual({ trust: NO_SKILL_TRUST, source: config })
+    expect(readSkillTrust(config, home)).toEqual({ trust: NO_SKILL_TRUST, auto: DEFAULT_SKILL_AUTO, source: config })
     writeFileSync(config, `{\n  // trusted by the operator\n  "skill_trust": ["code-review"],\n}\n`)
     expect([...readSkillTrust(config, home).trust.names]).toEqual(["code-review"])
     writeFileSync(config, `{ "skill_trust": ["bad path"] }`)
@@ -166,6 +166,118 @@ test("skill trust parses only names and absolute/~ folders and is read from the 
     expect(invalid.problem).toContain("neither a skill name")
     writeFileSync(config, "{ not jsonc")
     expect(readSkillTrust(config, home).problem).toContain("not valid JSONC")
+    expect(readSkillTrust(config, home).auto.mode).toBe("off")
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+test("skill_auto parses mode/include/exclude from the user config and fails closed to off", () => {
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "otter-auto-home-")))
+  try {
+    expect(parseSkillAuto(undefined)).toBe(DEFAULT_SKILL_AUTO)
+    expect(DEFAULT_SKILL_AUTO.mode).toBe("auto")
+    expect(parseSkillAuto({ mode: "shadow" })).toContain("mode must be off or auto")
+    const parsed = parseSkillAuto({ mode: "auto", include: ["code-review"], exclude: ["orca-cli"] }) as SkillAutoPolicy
+    expect(parsed.mode).toBe("auto")
+    expect([...parsed.include]).toEqual(["code-review"])
+    expect([...parsed.exclude]).toEqual(["orca-cli"])
+    expect(parseSkillAuto({ mode: "on" })).toContain("mode must be")
+    expect(parseSkillAuto({ include: ["~/x"] })).toContain("include must be")
+    expect(parseSkillAuto({ modes: "auto" })).toContain("unknown key")
+    expect(parseSkillAuto(["auto"])).toContain("must be an object")
+
+    const config = join(home, "otter.jsonc")
+    writeFileSync(config, `{ "skill_trust": ["a"], "skill_auto": { "mode": "auto", "exclude": ["b"] } }`)
+    const read = readSkillTrust(config, home)
+    expect(read.problem).toBeUndefined()
+    expect(read.auto.mode).toBe("auto")
+    expect([...read.trust.names]).toEqual(["a"])
+    // An invalid skill_auto disables selection but keeps valid trust; the problem is reported.
+    writeFileSync(config, `{ "skill_trust": ["a"], "skill_auto": { "mode": "yes" } }`)
+    const invalid = readSkillTrust(config, home)
+    expect(invalid.auto.mode).toBe("off")
+    expect([...invalid.trust.names]).toEqual(["a"])
+    expect(invalid.problem).toContain("skill_auto.mode")
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+test("auto candidates are consent-free, policy-filtered and size-bounded; consent never refuses instead of prompting", async () => {
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "otter-auto-cands-")))
+  try {
+    const homeSkill = (base: string, name: string, description: string) => {
+      const directory = join(home, base, name)
+      mkdirSync(directory, { recursive: true })
+      writeFileSync(join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\nBody.\n`)
+    }
+    put("common")
+    put("large", "x".repeat(4000))
+    commit()
+    put("uncommitted")
+    homeSkill(".agents/skills", "native-home", "Native home skill")
+    homeSkill(".agents/skills", "untrusted-home", "Not trusted")
+    homeSkill(".codex/skills", "imported", "Codex convention skill")
+    const trust = parseSkillTrust(["native-home", "imported"], home) as SkillTrust
+    const roots = await resolveSkillRoots({ projectRoot: fixture.worktree, homeDirectory: home })
+    const session = await SkillSession.create({
+      roots, store, trust,
+      terminal: { stdinIsTTY: true, stderrIsTTY: true, choose: async (title: string) => { choices.push(title); return 0 } },
+    }, signal())
+    sessions.push(session)
+    const names = async (policy: SkillAutoPolicy, max = 1000, tools: string[] = ["read"]) => (await session.autoCandidates(policy, max, tools, signal())).map(c => c.name)
+
+    expect(await names(DEFAULT_SKILL_AUTO)).toEqual(["common", "native-home"])
+    expect(await names(DEFAULT_SKILL_AUTO, 10_000)).toEqual(["common", "large", "native-home"])
+    expect(await names({ ...DEFAULT_SKILL_AUTO, include: new Set(["imported"]) })).toEqual(["common", "imported", "native-home"])
+    expect(await names({ ...DEFAULT_SKILL_AUTO, exclude: new Set(["common"]) })).toEqual(["native-home"])
+    expect(await names({ ...DEFAULT_SKILL_AUTO, mode: "off" })).toEqual([])
+    // A session grant from an explicit prompt does not make a skill automatically eligible.
+    await session.prepare("uncommitted", signal())
+    expect(choices).toHaveLength(1)
+    expect(await names(DEFAULT_SKILL_AUTO)).not.toContain("uncommitted")
+    expect((await session.autoCandidates(DEFAULT_SKILL_AUTO, 1000, ["read"], signal()))[0]).toEqual({ name: "common", description: "Inspect this project", bytes: expect.any(Number) })
+
+    // consent "never": authorized skills prepare silently; anything needing a prompt refuses without one.
+    choices = []
+    claimPreparedSkillInvocation(await session.prepare("common", signal(), { consent: "never", requiredTools: ["read"] }))
+    claimPreparedSkillInvocation(await session.prepare("native-home", signal(), { consent: "never", requiredTools: ["read"] }))
+    await expect(session.prepare("untrusted-home", signal(), { consent: "never", requiredTools: ["read"] })).rejects.toThrow("never prompts")
+    expect(choices).toEqual([])
+    expect(session.listGrants().map(grant => grant.name)).not.toContain("untrusted-home")
+    // An explicit session grant (prompted earlier) still does not authorize automatic use.
+    await expect(session.prepare("uncommitted", signal(), { consent: "never", requiredTools: ["read"] })).rejects.toThrow("not usable without consent")
+    // A skill whose declared tool scope is narrower than the role's tools is never a candidate.
+    expect(await names(DEFAULT_SKILL_AUTO, 1000, ["read", "grep"])).toEqual(["native-home"])
+    // A trusted skill that gains a narrower scope after listing is refused at prepare time, without a prompt.
+    writeFileSync(join(home, ".agents/skills", "native-home", "SKILL.md"), "---\nname: native-home\ndescription: Native home skill\nallowed-tools: [read]\n---\nBody.\n")
+    await expect(session.prepare("native-home", signal(), { consent: "never", requiredTools: ["read", "grep"] })).rejects.toThrow("not usable without consent")
+    claimPreparedSkillInvocation(await session.prepare("native-home", signal(), { consent: "never", requiredTools: ["read"] }))
+    expect(choices).toEqual([])
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+test("a project skill shadowing a name-trusted home skill is never automatic, while folder trust still applies", async () => {
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "otter-auto-shadow-")))
+  try {
+    const homeDirectory = join(home, ".agents", "skills", "orca-cli")
+    mkdirSync(homeDirectory, { recursive: true })
+    writeFileSync(join(homeDirectory, "SKILL.md"), "---\nname: orca-cli\ndescription: Home skill\n---\nHOME\n")
+    const roots = await resolveSkillRoots({ projectRoot: fixture.worktree, homeDirectory: home })
+    const create = async (trust: SkillTrust) => {
+      const session = await SkillSession.create({ roots, store, trust }, signal())
+      sessions.push(session)
+      return session
+    }
+    let session = await create(parseSkillTrust(["orca-cli"], home) as SkillTrust)
+    expect((await session.autoCandidates(DEFAULT_SKILL_AUTO, 1000, [], signal())).map(c => c.name)).toEqual(["orca-cli"])
+    // A cloned repository adds an untracked project skill with the trusted name: project wins discovery.
+    put("orca-cli", "REPO BYTES\n")
+    expect(await session.autoCandidates(DEFAULT_SKILL_AUTO, 1000, ["read"], signal())).toEqual([])
+    await expect(session.prepare("orca-cli", signal(), { consent: "never", requiredTools: ["read"] })).rejects.toThrow("not usable without consent")
+    // Explicit name trust is unchanged for explicit invocation.
+    expect(claimPreparedSkillInvocation(await session.prepare("orca-cli", signal())).text).toContain("REPO BYTES")
+    // Folder trust that contains the project skill directory is an operator decision about that path.
+    session.close()
+    session = await create(parseSkillTrust([join(fixture.worktree, ".agents", "skills")], home) as SkillTrust)
+    expect((await session.autoCandidates(DEFAULT_SKILL_AUTO, 1000, ["read"], signal())).map(c => c.name)).toEqual(["orca-cli"])
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 

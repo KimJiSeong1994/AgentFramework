@@ -1,0 +1,304 @@
+{
+  "schema": "otter-skill-route-eval.v1",
+  "recordedAt": "2026-10-18T16:33:41.960Z",
+  "gateTarget": {
+    "precision": 0.95,
+    "noneFalsePositive": 0.02,
+    "p95Ms": 1000
+  },
+  "gate": {
+    "precision": true,
+    "noneFalsePositive": false,
+    "p95Ms": false,
+    "nonTrivial": true,
+    "transportHealthy": false
+  },
+  "passed": false,
+  "metrics": {
+    "cases": 132,
+    "candidates": [
+      "computer-use",
+      "find-skills",
+      "llm-wiki",
+      "orca-cli",
+      "orchestration",
+      "plan",
+      "typesafe-ai",
+      "ulw"
+    ],
+    "picked": 22,
+    "precision": 1,
+    "noneFalsePositive": 0.0,
+    "adversarialFalsePositive": 0,
+    "recall": 0.34375,
+    "p50Ms": 90003,
+    "p95Ms": 90009,
+    "reasons": {
+      "recommended": 22,
+      "aborted": 108,
+      "abstained": 2
+    },
+    "thresholds": {
+      "minProbability": 0.95,
+      "minMargin": 0.2,
+      "timeoutMs": 1000
+    },
+    "measurementTimeoutMs": 90000,
+    "noneAnswered": 0
+  },
+  "errors": [
+    {
+      "text": "Compile the pending wiki sources into concept pages",
+      "expect": "llm-wiki",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Lint the knowledge wiki for broken citations",
+      "expect": "llm-wiki",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "\uc704\ud0a4\uc5d0\uc11c OpenJev \uad00\ub828 \ud398\uc774\uc9c0 \ucc3e\uc544\uc11c \uc694\uc57d\ud574\uc918",
+      "expect": "llm-wiki",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "\uc778\uc99d \ubaa8\ub4c8\uc744 \uc77d\uae30 \uc804\uc6a9\uc73c\ub85c \uc870\uc0ac\ud558\uace0 \ubc88\ud638 \ub9e4\uae34 \uad6c\ud604 \uacc4\ud68d \uc138\uc6cc\uc918",
+      "expect": "plan",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Give me an implementation plan with verification commands for adding a /export command",
+      "expect": "plan",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "read-only investigation first, then a numbered plan for the TUI theme switch",
+      "expect": "plan",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "\uacc4\ud68d \ubaa8\ub4dc\ub85c \uc774 \ubc84\uadf8 \uc6d0\uc778 \ubd84\uc11d\ud558\uace0 \uc218\uc815 \uacc4\ud68d \uc9dc\uc918",
+      "expect": "plan",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Fan this out into independent worker tasks and give me the final report",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "\uc804\uccb4 \ud14c\uc2a4\ud2b8 \uc2e4\ud328\ub4e4\uc744 \ud0dc\uc2a4\ud06c\ub85c \ub098\ub220\uc11c \uc6cc\ucee4\ub4e4\uc5d0\uac8c \ub9e1\uaca8\uc918",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Decompose implementing the five new commands into delegated tasks",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "\uc6b8\ud2b8\ub77c\uc6cc\ud06c\ub85c \ucc98\ub9ac\ud574: \ub85c\uadf8 \ud3ec\ub9f7 \uc804\uba74 \uad50\uccb4",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Split adding i18n across all screens into tasks and delegate them",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Jev\ub85c \uc0ac\uc6a9\uc790 \uc785\ub825\uc744 typed judgment\ub85c \ubd84\ub958\ud558\ub294 \uae30\ub2a5 \ub9cc\ub4e4\uace0 \uc2f6\uc5b4",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Use TypeSafe System One to score whether a message is a question",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Build a feature that turns app state into probabilities with Jev",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "TypeSafe\ub85c \uc790\uc5f0\uc5b4\ub97c \ud0c0\uc785 \uc788\ub294 \ud310\ub2e8\uc73c\ub85c \ubc14\uafb8\ub294 \uc720\ub2db \uc791\uc131\ud574\uc918",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "How should I structure a Jev choice question for routing tickets?",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Add an AI primitive that classifies log lines into severity with calibrated probabilities",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "System One \ubaa8\ub378\ub85c \ub9ac\ubdf0 \ucf54\uba58\ud2b8 \uac10\uc815 \ubd84\ub958\uae30 \ub9cc\ub4e4\uc5b4\uc918",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Jev \ud655\ub960\ub85c \uc2a4\ud338 \uc5ec\ubd80\ub97c \ud310\ub2e8\ud558\ub294 \ud0c0\uc785 \uc548\uc804\ud55c \ud568\uc218 \ub9cc\ub4e4\uc5b4\uc918",
+      "expect": "typesafe-ai",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Orca \uc6cc\ud06c\ud2b8\ub9ac \ud558\ub098 \uc0c8\ub85c \ub9cc\ub4e4\uc5b4\uc11c codex \ub744\uc6cc\uc918",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Spawn claude in a child Orca worktree for this task",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Read the output of the Orca terminal in the other worktree",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "\uc774 \uc791\uc5c5 \ub2e4\ub978 \uc5d0\uc774\uc804\ud2b8\ud55c\ud14c Orca\ub85c \ud578\ub4dc\uc624\ud504\ud574\uc918",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Wait for the Orca terminal to finish and send it the next command",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "orca worktree \ubaa9\ub85d \ubcf4\uc5ec\uc918",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Leave a worktree comment in Orca with the status",
+      "expect": "orca-cli",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Coordinate three Orca workers with a task DAG and decision gates",
+      "expect": "orchestration",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "\uc6cc\ucee4\ub4e4\uc5d0\uac8c \ud0dc\uc2a4\ud06c \ub514\uc2a4\ud328\uce58\ud558\uace0 worker_done \uae30\ub2e4\ub824\uc918",
+      "expect": "orchestration",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Set up a coordinator loop that asks workers and waits for replies",
+      "expect": "orchestration",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "\uc5ec\ub7ec \uc5d0\uc774\uc804\ud2b8\uc5d0 \uc791\uc5c5 \ubd84\ubc30\ud558\uace0 escalation \ucc98\ub9ac\ud558\ub294 \ub8e8\ud504 \uc9dc\uc918",
+      "expect": "orchestration",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Dispatch these subtasks to supervised workers and block on their answers",
+      "expect": "orchestration",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "\uc5f4\ub824 \uc788\ub294 Safari \ucc3d\uc5d0\uc11c \uc124\uc815 \ubc84\ud2bc \ub20c\ub7ec\uc918",
+      "expect": "computer-use",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Click the OK button in the native dialog on screen",
+      "expect": "computer-use",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Take a screenshot of the visible app window and read the menu",
+      "expect": "computer-use",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Chrome \ucc3d\uc5d0\uc11c \ub85c\uadf8\uc778 \ud3fc\uc5d0 \uc785\ub825\ud574\uc918 (GUI\ub85c)",
+      "expect": "computer-use",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Use the accessibility tree to open the File menu in the app window",
+      "expect": "computer-use",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "is there a skill that can convert PDFs to slides?",
+      "expect": "find-skills",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "find a skill for generating changelogs",
+      "expect": "find-skills",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "PDF \ucc98\ub9ac\ud558\ub294 \uc2a4\ud0ac \uc788\uc5b4? \uc124\uce58\ud558\uace0 \uc2f6\uc5b4",
+      "expect": "find-skills",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "How do I extend my agent with new skills from the ecosystem?",
+      "expect": "find-skills",
+      "skill": null,
+      "reason": "aborted"
+    },
+    {
+      "text": "Search for an installable skill that does Figma exports",
+      "expect": "find-skills",
+      "skill": null,
+      "reason": "aborted"
+    }
+  ],
+  "note": "noneFalsePositive gate recomputed from the journal with the answered-only rule (scripts/otter-skill-route-eval.ts); a 0/0 denominator fails."
+}

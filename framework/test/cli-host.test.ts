@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createCliHost } from "../src/hosts/cli-host.ts"
 import type { CliTransportHandle, CliTransportOptions } from "../src/hosts/cli-transport.ts"
-import type { ComboRoutes, ExecutionPolicy, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole } from "../src/hosts/types.ts"
+import type { ComboRoutes, ExecutionPolicy, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole, SkillToolProvider } from "../src/hosts/types.ts"
 import type { ExecutionRunStore, ExecutionRunStatus } from "../src/hosts/run-state.ts"
 import type { CliHostActivity } from "../src/hosts/cli-progress.ts"
 import { estimateTokens } from "../src/tokens.ts"
@@ -961,5 +961,56 @@ describe("route-aware common CLI host", () => {
     expect(bad({ planner: { engine: "x", model: "opus" } })).toThrow("invalid CLI host options")
     expect(bad({ planner: { engine: "codex", model: "unknown-slug" } })).toThrow("unsupported Codex model profile")
     expect(subject.host.identity.engine).toBe("local")
+  })
+})
+
+describe("host-provided skill tool", () => {
+  const provider = (loads: string[], delivered: string[] = [], body = "SKILL_BODY_BYTES"): SkillToolProvider => ({
+    catalog: [{ name: "wiki-helper", description: "Compile\nwiki pages" }],
+    async load(name) {
+      loads.push(name)
+      return name === "wiki-helper" ? { ok: true, text: body } : { ok: false, error: "refused" }
+    },
+    delivered(name) { delivered.push(name) },
+  })
+  const call = (name: string) => JSON.stringify({ type: "tool", name: "skill", input: { name } })
+
+  test("main sees the catalog, loads a listed skill mid-turn and gets its instructions in the next prompt", async () => {
+    const loads: string[] = []
+    const delivered: string[] = []
+    const subject = harness({ role: "main", responses: [call("wiki-helper"), call("wiki-helper"), call("orca-cli"), JSON.stringify({ type: "final", text: "done" })] })
+    const handle = await subject.host.prepare({ ...subject.request, skillTool: provider(loads, delivered) })
+    expect(await handle.run()).toEqual({ status: "completed", text: "done" })
+    expect(subject.prompts[0]).toContain("- skill: allowed")
+    expect(subject.prompts[0]).toContain("Available skills")
+    expect(subject.prompts[0]).toContain("- wiki-helper: Compile wiki pages")
+    expect(subject.prompts[1]).toContain("SKILL_BODY_BYTES")
+    expect(subject.prompts[2]).toContain("Skill already loaded in this turn")
+    expect(subject.prompts[3]).toContain("not in the Available skills list")
+    // The provider is called once; the role policy hook is not consulted for skill loads.
+    expect(loads).toEqual(["wiki-helper"])
+    expect(delivered).toEqual(["wiki-helper"])
+    expect(subject.observed.before).toBe(0)
+  })
+
+  test("instructions that would not fit whole are refused as a tool error and never reported as delivered", async () => {
+    const delivered: string[] = []
+    const subject = harness({ role: "main", responses: [call("wiki-helper"), JSON.stringify({ type: "final", text: "done" })] })
+    const handle = await subject.host.prepare({ ...subject.request, skillTool: provider([], delivered, "word ".repeat(40_000)) })
+    expect(await handle.run()).toEqual({ status: "completed", text: "done" })
+    expect(subject.prompts[1]).toContain("do not fit in the remaining input budget")
+    expect(subject.prompts[1]).not.toContain("word word word word")
+    expect(delivered).toEqual([])
+  })
+
+  test("other roles, an empty catalog and no provider offer no skill tool, and a skill call fails closed", async () => {
+    for (const [role, skillTool] of [["worker", provider([])], ["main", { catalog: [], load: async () => ({ ok: true as const, text: "x" }) }], ["main", undefined]] as const) {
+      const subject = harness({ role, responses: [call("wiki-helper")] })
+      const handle = await subject.host.prepare({ ...subject.request, ...(skillTool ? { skillTool } : {}) })
+      const outcome = await handle.run()
+      expect(subject.prompts[0]).not.toContain("- skill:")
+      expect(subject.prompts[0]).not.toContain("Available skills")
+      expect(outcome).toEqual({ status: "failed", error: "Otter tool denied by role policy before effects" })
+    }
   })
 })

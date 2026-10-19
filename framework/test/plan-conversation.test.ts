@@ -338,4 +338,17 @@ describe("common planning conversation", () => {
     )) as ConversationMessage[]
     expect(messages).toEqual([{ role: "user", text: "next input" }])
   })
+
+  test("a skill tool provider reaches the main host request; an explicit skill or empty catalog withholds it", async () => {
+    const f = fixture({ text: "Acknowledged." })
+    const conversation = createPlanConversation(f.runtime, "chat-skill-tool")
+    const skillTool = { catalog: [{ name: "wiki-helper", description: "Compile wiki pages" }], load: async () => ({ ok: true as const, text: "x" }) }
+    await conversation.turn("compile the wiki", undefined, undefined, skillTool)
+    expect(f.requests.at(-1)?.skillTool).toBe(skillTool)
+    expect(f.requests.at(-1)?.role).toBe("main")
+    await conversation.turn("plain turn")
+    expect(f.requests.at(-1)?.skillTool).toBeUndefined()
+    await conversation.turn("empty catalog", undefined, undefined, { catalog: [], load: skillTool.load })
+    expect(f.requests.at(-1)?.skillTool).toBeUndefined()
+  })
 })

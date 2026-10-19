@@ -17,7 +17,7 @@ import { FdTree, fdStatKind, type FdDirectory, type FdEntry } from "../skills/fd
 import type { OtterConfig } from "../config.ts"
 import { memoryToolText } from "../wiki/recall.ts"
 
-export const CLI_TOOL_NAMES = ["read", "list", "glob", "grep", "memory", "write", "edit"] as const
+export const CLI_TOOL_NAMES = ["read", "list", "glob", "grep", "memory", "skill", "write", "edit"] as const
 export type CliToolName = (typeof CLI_TOOL_NAMES)[number]
 
 export type CliToolOutput = { ok: true; text: string } | { ok: false; error: string }
@@ -35,6 +35,8 @@ export type CliToolsOptions = {
   allowed: readonly string[]
   denied: readonly string[]
   beforeEffect?: () => void
+  /** Offer the host-provided `skill` tool (only when the request carries a skill provider). */
+  skillTool?: boolean
 }
 
 export type CliTools = {
@@ -112,6 +114,9 @@ export function validateCliToolInput(name: string, input: unknown): asserts inpu
     case "memory":
       if (!hasExactKeys(input, ["query"]) || typeof input.query !== "string" || input.query.includes("\0") ||
           !input.query.trim() || input.query.length > 2000) throw new CliToolInputError()
+      return
+    case "skill":
+      if (!hasExactKeys(input, ["name"]) || typeof input.name !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/u.test(input.name)) throw new CliToolInputError()
       return
     case "write":
       if (!hasExactKeys(input, ["path", "content"]) || !path(input.path) || !boundedString(input.content, MAX_WRITE_BYTES)) throw new CliToolInputError()
@@ -736,6 +741,7 @@ function executeFileTool(
       return publicFailure(new Error("type"))
     }
     case "memory": return { ok: false, error: "Tool refused: memory recall is asynchronous." }
+    case "skill": return { ok: false, error: "Tool refused: skill loading is host-provided." }
     case "write": return writeTarget(root, normalizeToolPath(input.path as string), identity, input.content as string, undefined, beforeEffect)
     case "edit": return writeTarget(root, normalizeToolPath(input.path as string), identity, input.newText as string, input.oldText as string, beforeEffect)
   }
@@ -764,8 +770,9 @@ export function createCliTools(options: CliToolsOptions): CliTools {
     throw new Error("CLI tool worktree is unavailable")
   }
   const readOnly = !roleAllowsCliWrites(options.role)
-  const available = CLI_TOOL_NAMES.filter(name => options.allowed.includes(name) && !options.denied.includes(name) &&
-    !(readOnly && (name === "write" || name === "edit")))
+  // `skill` is not a role-policy tool: the host offers it only with a request-scoped skill provider (main role).
+  const available = CLI_TOOL_NAMES.filter(name => name === "skill" ? options.skillTool === true
+    : options.allowed.includes(name) && !options.denied.includes(name) && !(readOnly && (name === "write" || name === "edit")))
   const availableSet = new Set<string>(available)
   return {
     available: Object.freeze(available),
@@ -774,7 +781,7 @@ export function createCliTools(options: CliToolsOptions): CliTools {
       try {
         validateCliToolInput(name, input)
         assertRootIdentity(root, rootIdentity)
-        if (name === "memory") return true
+        if (name === "memory" || name === "skill") return true
         if (name === "glob") normalizeToolPath(input.pattern as string)
         const relativePath = normalizeToolPath(name === "glob" ? "." : (input.path as string | undefined) ?? ".")
         let fd: number

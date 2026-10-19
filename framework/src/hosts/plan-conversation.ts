@@ -2,7 +2,7 @@ import { activeWorkflow, workflowEngineRefusal } from "../flow/state.ts"
 import { getOwnedSession } from "../sessions/store.ts"
 import { PLAN_MAIN_PROMPT } from "../workflows/prompts/index.ts"
 import { runWorkflowTurn, type TurnBinding } from "../workflows/turn.ts"
-import type { ExecutionRuntime } from "./types.ts"
+import type { ExecutionRuntime, SkillToolProvider } from "./types.ts"
 import type { Terminal } from "./interactive-session.ts"
 import type { PreparedSkillInvocation } from "../skills/session.ts"
 import { bindSkillInvocation, finishSkillInvocation, skillInvocationAudit } from "../skills/context.ts"
@@ -37,6 +37,15 @@ function promptPrefix(verifyAllow: unknown, skillInstructions?: string): string 
   const skill = skillInstructions === undefined ? "" :
     `\nActive skill instructions (captured bytes; base role and execution approval restrictions still apply):\n${skillInstructions}\n`
   return `${PLAN_MAIN_PROMPT.text}\nAllowed verification patterns: ${JSON.stringify(verifyAllow)}${skill}\nConversation:\n`
+}
+
+/**
+ * Characters left for skill instructions when `message` is sent with no prior history. Automatic selection skips a
+ * skill larger than this so an oversized skill never fails the turn; explicit `/skill:` invocations still refuse.
+ */
+export function skillInstructionBudget(verifyAllow: unknown, message = ""): number {
+  const base = `${promptPrefix(verifyAllow, "")}${JSON.stringify([{ role: "user", text: message }])}`
+  return Math.max(0, MAX_PLAN_CONVERSATION_CHARS - PLAN_RESPONSE_RESERVE_CHARS - base.length)
 }
 
 function fitsConversationBudget(requestText: string): boolean {
@@ -92,7 +101,11 @@ export function createPlanConversation(
   let busy = false
 
   return {
-    async turn(text: string, signal?: AbortSignal, skill?: SkillConversationInvocation): Promise<ConversationTurn> {
+    /**
+     * `skill` binds an explicit `/skill:` invocation. `skillTool` lets the model load listed consent-free skills on its
+     * own during the turn; it is ignored when an explicit skill is bound.
+     */
+    async turn(text: string, signal?: AbortSignal, skill?: SkillConversationInvocation, skillTool?: SkillToolProvider): Promise<ConversationTurn> {
       if (typeof text !== "string" || !text.trim() || text.length > MAX_PLAN_CONVERSATION_CHARS) {
         throw new Error("conversation message is empty or too large")
       }
@@ -127,7 +140,7 @@ export function createPlanConversation(
           budget: { maxChars: MAX_PLAN_CONVERSATION_CHARS, reserveChars: PLAN_RESPONSE_RESERVE_CHARS },
           bind(request) {
             const bound = skill ? bindSkillInvocation(skill.prepared, request, runtime.policy, skill.terminal) : undefined
-            if (!bound) return { handlers: runtime.policy.handlers(request) }
+            if (!bound) return { handlers: runtime.policy.handlers(request), ...(skillTool && skillTool.catalog.length ? { skillTool } : {}) }
             window = selectWindow(history, pending, promptPrefix(runtime.config.delegate.verify_allow, bound.instructions))
             if (!window) { finishSkillInvocation(bound.context); throw new Error("skill instructions exceed the reserved conversation context budget") }
             audit = skillInvocationAudit(bound.context)

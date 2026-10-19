@@ -80,6 +80,8 @@ export type ExecutionRequest = {
   handlers: ExecutionPolicyHandlers
   /** Runtime-owned invocation authority, outside policy snapshots and serialized native inputs. */
   skillContext?: SkillInvocationContext
+  /** Model-callable skill loading for this request (main role only), outside policy snapshots. */
+  skillTool?: SkillToolProvider
   /**
    * Persist one canonical recovery reference synchronously. During prepare, call before policy binding
    * or returning; during run, emit immediately once the adapter learns a stable engine recovery ID and
@@ -88,6 +90,17 @@ export type ExecutionRequest = {
    */
   onReference?: (reference: ExecutionReference) => undefined
 }
+
+/**
+ * Skills the model may load on its own during a turn, each already usable without a prompt. `load` returns the
+ * captured instructions as reference text; it never prompts, changes tools or grants authority.
+ */
+export type SkillToolProvider = Readonly<{
+  catalog: readonly Readonly<{ name: string; description: string }>[]
+  load(name: string, signal: AbortSignal): Promise<{ ok: true; text: string } | { ok: false; error: string }>
+  /** Called once the loaded instructions were actually placed in the model's input (not when refused for budget). */
+  delivered?(name: string): void
+}>
 
 export type ExecutionReference = {
   executionID: string

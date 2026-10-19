@@ -20,6 +20,9 @@ import type { CliProgressSink } from "../src/hosts/cli-progress.ts"
 import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
 import { bindSkillInvocation, finishSkillInvocation, skillInvocationAudit } from "../src/skills/context.ts"
 import { SkillSession, type SkillCatalog } from "../src/skills/session.ts"
+import { DEFAULT_SKILL_AUTO, NO_SKILL_TRUST, parseSkillTrust, type SkillTrust, type SkillTrustLookup } from "../src/skills/trust.ts"
+import type { AutoSkillSelection } from "../src/routing/router.ts"
+import type { AutoSkillSelectInput } from "../src/hosts/interactive-session.ts"
 import { humanDecision, type OperatorDecision } from "../src/hosts/operator.ts"
 import { planBinding, withTerminalLine } from "./operator-helpers.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
@@ -30,6 +33,7 @@ import type { AuthState } from "../src/hosts/engine-auth.ts"
 import { getOwnedSession, inspectSessionAttachment, openSession, replaySession, readSessionMetadata, type ReplayOptions, type ReplayResult } from "../src/sessions/store.ts"
 import { sessionDir } from "../src/state/store.ts"
 import type { ConversationMessage, SkillConversationInvocation } from "../src/hosts/plan-conversation.ts"
+import type { SkillToolProvider } from "../src/hosts/types.ts"
 
 let wt: ReturnType<typeof tempGitWorktree>
 let harnessSequence = 0
@@ -77,6 +81,9 @@ type HarnessOptions = {
   intent?: "offer" | "off"
   /** Vendor sign-in fixture: status per engine (default signed in), and what the vendor login/logout run changes. */
   auth?: { codex?: AuthState["state"]; claude?: AuthState["state"]; afterRun?: AuthState["state"]; runThrows?: boolean }
+  /** User skill policy (default: no trust, automatic selection off) and the automatic selector (default: abstain). */
+  skillPolicy?: SkillTrustLookup
+  selectSkill?: (input: AutoSkillSelectInput) => Promise<AutoSkillSelection> | AutoSkillSelection
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -122,7 +129,8 @@ function harness(options: HarnessOptions = {}) {
     comboWrites: Array<{ role: string; route: { engine: string; model: string } | null }>
     authRuns: Array<{ engine: string; argv: readonly string[] }>
     authStatusChecks: string[]
-  } = { authRuns: [], authStatusChecks: [], prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [], defaultModel: options.defaultModel ?? { state: "unset" }, defaultModelWrites: [], combo: options.combo ?? { state: "unset" }, comboWrites: [] }
+    autoSelections: Array<{ text: string; mode: string; candidates: string[] }>
+  } = { autoSelections: [], authRuns: [], authStatusChecks: [], prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [], defaultModel: options.defaultModel ?? { state: "unset" }, defaultModelWrites: [], combo: options.combo ?? { state: "unset" }, comboWrites: [] }
   let boundSessionID: string | undefined
 
   let releaseRun: (() => void) | undefined
@@ -272,6 +280,11 @@ function harness(options: HarnessOptions = {}) {
       }
     },
     createController: () => { calls.controllerCreations++; return controller },
+    skillPolicy: () => options.skillPolicy ?? { trust: NO_SKILL_TRUST, auto: { ...DEFAULT_SKILL_AUTO, mode: "off" }, source: "/fixture/otter.jsonc" },
+    selectSkill: async (_runtime, input) => {
+      calls.autoSelections.push({ text: input.text, mode: input.mode, candidates: input.candidates.map(candidate => candidate.name) })
+      return options.selectSkill ? options.selectSkill(input) : { skill: null, reason: "abstained", decisionID: "d-fixture", candidates: [] }
+    },
     auth: {
       status: async engine => {
         calls.authStatusChecks.push(engine)
@@ -348,8 +361,9 @@ function harness(options: HarnessOptions = {}) {
   }
 }
 
-function useRealSkillCoordinator(h: ReturnType<typeof harness>) {
-  const handoffs: Array<{ text: string; sessionID: string; invocation?: SkillConversationInvocation }> = []
+/** `modelLoads` simulates the main model calling the `skill` tool for these names during the turn. */
+function useRealSkillCoordinator(h: ReturnType<typeof harness>, modelLoads: string[] = []) {
+  const handoffs: Array<{ text: string; sessionID: string; invocation?: SkillConversationInvocation; skillTool?: SkillToolProvider; loads?: Array<{ name: string; ok: boolean; text?: string; error?: string }> }> = []
   const requestedRoot = realpathSync.native(wt.worktree)
   const gitRoot = h.deps.gitTopLevel?.(requestedRoot)
   if (!gitRoot) throw new Error("skill coordinator fixture requires a real Git worktree root")
@@ -361,11 +375,21 @@ function useRealSkillCoordinator(h: ReturnType<typeof harness>) {
   // Keep host preflight independent of installed external CLIs; admission itself remains the coordinator's real attachAdmission path.
   h.deps.admitRuntime = async () => {}
   h.deps.createConversation = (runtime, sessionID) => ({
-    turn: async (text, signal, invocation) => {
+    turn: async (text, signal, invocation, skillTool) => {
       if (signal?.aborted) throw new Error("test turn cancelled")
       h.calls.events.push("turn")
       h.calls.turns.push(text)
-      handoffs.push({ text, sessionID, ...(invocation ? { invocation } : {}) })
+      const handoff: (typeof handoffs)[number] = { text, sessionID, ...(invocation ? { invocation } : {}), ...(skillTool ? { skillTool } : {}) }
+      handoffs.push(handoff)
+      if (!invocation && skillTool && modelLoads.length) {
+        handoff.loads = []
+        for (const name of modelLoads) {
+          const loaded = await skillTool.load(name, new AbortController().signal)
+          // The real host reports delivery once the instructions are placed in the model input.
+          if (loaded.ok) skillTool.delivered?.(name)
+          handoff.loads.push({ name, ...loaded })
+        }
+      }
       if (!invocation) return { text: "Acknowledged." }
       const binding = bindSkillInvocation(invocation.prepared, {
         executionID: randomUUID(), supervisorSessionID: sessionID, taskID: randomUUID(), attemptID: randomUUID(),
@@ -2720,5 +2744,140 @@ describe("plan worktree chooser (interactive)", () => {
     await launch(cancelled)
     expect(cancelled.calls.events).not.toContain("run-in-place")
     expect(replaySession(wt.worktree, cancelled.calls.sessionIDs[0]!, { order: "asc" }).records.some(record => record.kind === "workflow-choice" && record.data.planIsolation === "cancelled")).toBe(true)
+  })
+})
+
+describe("model-loaded skills in otter chat", () => {
+  function projectSkill(base: string, name: string, body = "AUTO_SKILL_BYTES\n") {
+    const directory = join(wt.worktree, base, "skills", name)
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} helper for wiki pages\n---\n${body}`)
+  }
+  function commitAll() {
+    Bun.spawnSync(["git", "-C", wt.worktree, "add", "-A"])
+    Bun.spawnSync(["git", "-C", wt.worktree, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "skills"])
+  }
+  const policy = (mode: "off" | "auto", trust: string[] = [], include: string[] = []): SkillTrustLookup => ({
+    trust: parseSkillTrust(trust) as SkillTrust,
+    auto: { mode, include: new Set(include), exclude: new Set() },
+    source: "/fixture/otter.jsonc",
+  })
+
+  test("the main model gets the consent-free catalog and loads a skill mid-turn without a prompt", async () => {
+    projectSkill(".agents", "wiki-helper")
+    commitAll()
+    const h = harness({ lines: ["compile the wiki", "/quit"], choose: async () => 0, skillPolicy: policy("auto") })
+    const handoffs = useRealSkillCoordinator(h, ["wiki-helper"])
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+    expect(handoffs).toHaveLength(1)
+    expect(handoffs[0]?.invocation).toBeUndefined()
+    expect(handoffs[0]?.skillTool?.catalog).toEqual([{ name: "wiki-helper", description: "wiki-helper helper for wiki pages" }])
+    expect(handoffs[0]?.loads?.[0]).toMatchObject({ name: "wiki-helper", ok: true })
+    expect(handoffs[0]?.loads?.[0]?.text).toContain("AUTO_SKILL_BYTES")
+    // No router call decides for the model, and nothing prompted.
+    expect(h.calls.autoSelections).toEqual([])
+    expect(h.calls.choices).toEqual([])
+    expect(h.calls.output.join("")).toContain("Skills used: wiki-helper")
+    const replay = replaySession(wt.worktree, "otter-fixture-session", { order: "asc" })
+    expect(replay.records.some(record => record.kind === "notice" && String(record.data.text).startsWith("Skill tool load "))).toBe(true)
+    expect(JSON.stringify(replay.records)).not.toContain("AUTO_SKILL_BYTES")
+  })
+
+  test("a load the model attempts outside the consent-free set is refused as a tool error, never a prompt", async () => {
+    projectSkill(".agents", "wiki-helper")
+    commitAll()
+    // Changed after the catalog was built: the content is no longer the committed baseline.
+    const h = harness({ lines: ["compile the wiki", "/quit"], choose: async () => 0, skillPolicy: policy("auto") })
+    const handoffs = useRealSkillCoordinator(h, ["wiki-helper"])
+    h.deps.createConversation = ((original) => (runtime, sessionID, prior) => {
+      const conversation = original!(runtime, sessionID, prior)
+      return { turn: async (text, signal, invocation, skillTool) => {
+        writeFileSync(join(wt.worktree, ".agents", "skills", "wiki-helper", "SKILL.md"), "---\nname: wiki-helper\ndescription: changed\n---\nTAMPERED\n")
+        return conversation.turn(text, signal, invocation, skillTool)
+      } }
+    })(h.deps.createConversation)
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+    expect(handoffs[0]?.loads?.[0]).toMatchObject({ name: "wiki-helper", ok: false })
+    expect(h.calls.choices).toEqual([])
+    expect(h.calls.output.join("")).not.toContain("Skills used:")
+  })
+
+  test("off, force:, /skills auto off, slash lines and explicit /skill: offer no skill tool", async () => {
+    projectSkill(".agents", "wiki-helper")
+    commitAll()
+    const off = harness({ lines: ["compile the wiki", "/quit"], skillPolicy: policy("off") })
+    const offHandoffs = useRealSkillCoordinator(off)
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, off.deps)
+    expect(offHandoffs[0]?.skillTool).toBeUndefined()
+
+    const h = harness({
+      lines: ["force: compile the wiki", "/skills auto off", "compile the wiki", "/skills auto on", "/skills auto", "/plan compile again", "/skill:wiki-helper explicit", "compile again", "/quit"],
+      choose: async () => 0, skillPolicy: policy("auto"),
+    })
+    const handoffs = useRealSkillCoordinator(h)
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+    expect(handoffs.map(handoff => [handoff.text, handoff.skillTool !== undefined, handoff.invocation !== undefined])).toEqual([
+      ["compile the wiki", false, false],
+      ["compile the wiki", false, false],
+      ["/plan compile again", false, false],
+      ["/skill:wiki-helper explicit", false, true],
+      ["compile again", true, false],
+    ])
+    expect(h.calls.output.join("")).toContain("Automatic skills: off for this session")
+    expect(h.calls.output.join("")).toContain("Automatic skills: on for this session · skill_auto.mode auto · candidates: wiki-helper")
+  })
+
+  test("only consent-free, policy-eligible skills within the budget and role tools are listed", async () => {
+    projectSkill(".agents", "committed")
+    projectSkill(".agents", "huge", "x".repeat(20_000) + "\n")
+    projectSkill(".codex", "imported")
+    projectSkill(".agents", "read-only")
+    writeFileSync(join(wt.worktree, ".agents", "skills", "read-only", "SKILL.md"), "---\nname: read-only\ndescription: narrow\nallowed-tools: [read]\n---\nBody\n")
+    commitAll()
+    projectSkill(".agents", "uncommitted")
+    const h = harness({ lines: ["do work", "/quit"], choose: async () => 0, skillPolicy: policy("auto") })
+    const handoffs = useRealSkillCoordinator(h, ["uncommitted"])
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+    const names = handoffs[0]?.skillTool?.catalog.map(skill => skill.name) ?? []
+    expect(names).toContain("committed")
+    for (const excluded of ["huge", "imported", "read-only", "uncommitted"]) expect(names).not.toContain(excluded)
+    expect(handoffs[0]?.loads?.[0]).toMatchObject({ name: "uncommitted", ok: false })
+    expect(h.calls.choices).toEqual([])
+
+    const included = harness({ lines: ["do work", "/quit"], skillPolicy: policy("auto", ["imported"], ["imported"]) })
+    const includedHandoffs = useRealSkillCoordinator(included)
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, included.deps)
+    expect(includedHandoffs[0]?.skillTool?.catalog.map(skill => skill.name)).toContain("imported")
+  })
+})
+
+describe("intent offer ranking by the automatic selector", () => {
+  test("in auto mode the predicted workflow is listed first and marked, but nothing starts without a choice", async () => {
+    const h = harness({
+      lines: ["refactor the whole session store architecture", "/quit"], intent: "offer", choose: async () => undefined,
+      skillPolicy: { trust: NO_SKILL_TRUST, auto: { ...DEFAULT_SKILL_AUTO, mode: "auto" }, source: "/fixture/otter.jsonc" },
+      selectSkill: async () => ({ skill: "deep-interview", reason: "recommended", decisionID: "d-offer", candidates: [] }),
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+    const offer = h.calls.choices.find(choice => choice.title.includes("design-level"))
+    expect(offer?.values).toEqual(["Continue in chat", "Start deep-interview first (suggested)", "Start ralplan", "Cancel"])
+    expect(h.calls.autoSelections[0]?.candidates).toEqual(["ralplan", "deep-interview"])
+    expect(h.calls.turns).toEqual([])
+  })
+
+  test("off mode and selector failure keep the fixed offer order", async () => {
+    for (const setup of [
+      { mode: "off" as const, select: async () => ({ skill: "deep-interview", reason: "recommended", decisionID: "d", candidates: [] }) },
+      { mode: "auto" as const, select: async (): Promise<AutoSkillSelection> => { throw new Error("down") } },
+    ]) {
+      const h = harness({
+        lines: ["refactor the whole session store architecture", "/quit"], intent: "offer", choose: async () => undefined,
+        skillPolicy: { trust: NO_SKILL_TRUST, auto: { ...DEFAULT_SKILL_AUTO, mode: setup.mode }, source: "/fixture/otter.jsonc" },
+        selectSkill: setup.select,
+      })
+      await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+      expect(h.calls.choices.find(choice => choice.title.includes("design-level"))?.values)
+        .toEqual(["Continue in chat", "Start ralplan", "Start deep-interview first", "Cancel"])
+    }
   })
 })

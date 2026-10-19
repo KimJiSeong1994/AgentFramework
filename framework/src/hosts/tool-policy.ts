@@ -59,10 +59,10 @@ function freezeNativeContext(supplied: unknown): Readonly<{ identity: string; in
 export function createExecutionPolicy(config: Readonly<OtterConfig>, options: ExecutionPolicyOptions = {}): ExecutionPolicy {
   const planningOnlyMain = options.planningOnlyMain === true
   const nativeContext = options.nativeContext === undefined ? undefined : freezeNativeContext(options.nativeContext)
-  // `chat` (launch model), `skill_trust` (user-config consent prompt skip) and `memory` (recall engine, re-read per
-  // `memory` call and switched live by /memory) never shape a role's prompt, tools or limits, so they stay out of
-  // role identity.
-  const { chat: _chat, skill_trust: _trust, memory: _memory, ...identityConfig } = config as typeof config & { skill_trust?: unknown }
+  // `chat` (launch model), `skill_trust` (user-config consent prompt skip), `skill_auto` (user-config per-turn skill
+  // selection, which only chooses an already consent-free skill) and `memory` (recall engine, re-read per `memory` call
+  // and switched live by /memory) never shape a role's prompt, tools or limits, so they stay out of role identity.
+  const { chat: _chat, skill_trust: _trust, skill_auto: _auto, memory: _memory, ...identityConfig } = config as typeof config & { skill_trust?: unknown; skill_auto?: unknown }
   const snapshots = new Map<ExecutionRole, ExecutionPolicySnapshot>()
   const sessions = new Map<string, ExecutionPolicyHandlers>()
   const sessionSnapshots = new Map<string, ExecutionPolicySnapshot>()
