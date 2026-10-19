@@ -1,4 +1,5 @@
-export type InteractiveContext = "chat" | "busy" | "held" | "read-only" | "selection" | "choice" | "unselected"
+/** `observer`: chat is held only because another session owns the active workflow; held actions plus /model. */
+export type InteractiveContext = "chat" | "busy" | "held" | "observer" | "read-only" | "selection" | "choice" | "unselected"
 
 export type InteractiveAction = Readonly<{
   id: string
@@ -34,6 +35,7 @@ const all: readonly InteractiveAction[] = [
 ]
 
 export function interactiveActions(context?: InteractiveContext): readonly InteractiveAction[] {
+  if (context === "observer") return all.filter(action => action.contexts.includes("held") || action.id === "model")
   return context ? all.filter(action => action.contexts.includes(context)) : all
 }
 
@@ -56,5 +58,5 @@ export function commandInsertions(prefix: string, context: InteractiveContext = 
 
 export function interactiveHelp(context: InteractiveContext = "chat"): string {
   const actions = interactiveActions(context).map(action => `${action.syntax} — ${action.summary}${action.local ? " (local)" : ""}`)
-  return [`Commands (${context}):`, ...actions, "Keys: Enter send/select · Ctrl+R history · PageUp/PageDown transcript or active document · Escape cancel/dismiss · Ctrl+C clear then shutdown on second press · Ctrl+D quit · Ctrl+Z proof-guarded suspend."].join("\n") + "\n"
+  return [`Commands (${context}):`, ...actions, "Keys: Enter send/select · Ctrl+R history · PageUp/PageDown transcript or active document · Escape interrupts running work or dismisses (/cancel stops a workflow) · Ctrl+C clear then shutdown on second press · Ctrl+D quit · Ctrl+Z proof-guarded suspend."].join("\n") + "\n"
 }

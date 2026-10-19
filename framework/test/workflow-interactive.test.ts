@@ -22,7 +22,7 @@ let wt: ReturnType<typeof tempGitWorktree>
 beforeEach(() => { wt = tempGitWorktree(); wt.worktree = realpathSync(wt.worktree) })
 afterEach(() => { stopHeartbeat(); wt.cleanup() })
 
-type Options = { lines: Array<string | undefined>; choices?: number[]; script?: Record<string, string[]>; plainReadline?: boolean; ask?: (prompt: any) => unknown }
+type Options = { lines: Array<string | undefined>; choices?: number[]; script?: Record<string, string[]>; plainReadline?: boolean; ask?: (prompt: any) => unknown; controls?: Record<string, "interrupt" | "cancel">; uuidBase?: number }
 
 async function session(options: Options) {
   const lines = [...options.lines]
@@ -33,9 +33,16 @@ async function session(options: Options) {
   const chooses: Array<{ title: string; values: readonly string[] }> = []
   const fixture = scriptedRuntime(wt.worktree, options.script ?? fullScript())
   const conversationTurns: string[] = []
+  let control: ((action: "interrupt" | "cancel") => void) | undefined
   const terminal: Terminal = {
     stdinIsTTY: true, stderrIsTTY: true,
-    readLine: async () => lines.shift(),
+    // A `controls` key is a sentinel line: it delivers that key control (Escape = interrupt) and then reads on.
+    readLine: async () => {
+      let line = lines.shift()
+      while (line !== undefined && options.controls?.[line]) { control?.(options.controls[line]!); line = lines.shift() }
+      return line
+    },
+    controls: (handler: (action: any) => void) => { control = handler },
     ...(options.plainReadline ? {} : {
       choose: async (title: string, values: readonly string[]) => { chooses.push({ title, values }); return choices.shift() ?? 0 },
       workflowStatus: (line: string | undefined) => { statuses.push(line) },
@@ -44,7 +51,7 @@ async function session(options: Options) {
     write: text => { output.push(text) },
     close() {},
   } as Terminal
-  let uuid = 0
+  let uuid = options.uuidBase ?? 0
   const deps: Partial<InteractiveDependencies> = {
     cwd: wt.worktree, terminal, gitTopLevel: () => wt.worktree,
     createRuntime: () => fixture.runtime,
@@ -97,6 +104,30 @@ describe("deep-interview then ralplan through the interactive session", () => {
     expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
     const roles = new Set(s.seen.map(item => item.role))
     expect([...roles].every(role => ["interviewer", "researcher", "contrarian", "simplifier", "planner", "architect", "critic"].includes(role))).toBe(true)
+  })
+
+  test("an idle Escape keeps the interview; only an explicit /cancel stops it", async () => {
+    const kept = await session({ lines: ["/skill:deep-interview build the widget", "<esc>", "/quit"], choices: [0], controls: { "<esc>": "interrupt" } })
+    expect(kept.exit.code).toBe(0)
+    expect(activeAnyWorkflow(wt.worktree)).toMatchObject({ kind: "deep-interview", phase: "planning" })
+    expect(readEvents(wt.worktree).some(event => event.type === "cancelled")).toBe(false)
+
+    const stopped = await session({ lines: ["/cancel", "/quit"], choices: [] })
+    expect(stopped.exit.code).toBe(0)
+    expect(readEvents(wt.worktree).some(event => event.type === "cancelled")).toBe(true)
+  })
+
+  test("another session's workflow holds chat but not /model; the workflow is untouched", async () => {
+    await session({ lines: ["/skill:deep-interview build the widget", "/quit"], choices: [0] })
+    const owner = activeAnyWorkflow(wt.worktree)!
+    const observer = await session({ lines: ["hello", "/model local model-b", "/quit"], uuidBase: 100 })
+    expect(observer.exit.code).toBe(0)
+    expect(observer.output).toContain("Read-only observer")
+    expect(observer.output).not.toContain("Model selection is unavailable")
+    expect(observer.output).not.toContain("Model switch refused")
+    expect(observer.output).toContain("── local · model-b")
+    expect(observer.conversationTurns).toEqual([])
+    expect(activeAnyWorkflow(wt.worktree)).toMatchObject({ id: owner.id, sessionID: owner.sessionID, phase: "planning" })
   })
 
   test("/finish is wired: from round 3 above the threshold it warns, records the early exit and still runs closure and the restatement", async () => {

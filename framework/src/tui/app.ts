@@ -396,6 +396,7 @@ export class TuiApp implements Terminal {
       case "chat": return ["Type a message", "/ commands", "! shell", "Ctrl+R history", "Ctrl+J newline", "Ctrl+C clear"].join(keys)
       case "unselected": return ["Choose a model with /model", "/ commands", "! shell", "/quit exit"].join(keys)
       case "held": return ["Session held", "/status explains", "/ commands", "! shell"].join(keys)
+      case "observer": return ["Another session owns the active workflow", "/model switch", "/status", "! shell"].join(keys)
       case "read-only": return ["Read-only history", "/resume or /new to switch", "/ commands"].join(keys)
       default: return undefined
     }
@@ -445,7 +446,12 @@ export class TuiApp implements Terminal {
     return {
       title: "Otter · local coding agent",
       left: ["", ...logo, "", "plan · approve · prove", "", selection ? `${ascii ? "*" : "⬢"} ${selection}` : "No model is selected."],
-      sections: this.interactionContext === "held"
+      sections: this.interactionContext === "observer"
+        ? [
+          { heading: "Observing", lines: ["Another session owns the active workflow;", "new chat waits until it is resolved.", "/resume <owner>  open it to continue or /cancel", "/model  switch model"] },
+          { heading: "Flow keys", lines: [["/ commands", "! shell"].join(keys), ["Ctrl+R history", "PgUp/PgDn scroll"].join(keys)] },
+        ]
+        : this.interactionContext === "held"
         ? [
           { heading: "Session held", lines: ["New chat waits until the active work is resolved.", "/status  why, and what to do", "/sessions  open another session"] },
           { heading: "Flow keys", lines: [["/ commands", "! shell"].join(keys), ["Ctrl+R history", "PgUp/PgDn scroll"].join(keys)] },
@@ -906,7 +912,7 @@ export class TuiApp implements Terminal {
     const action = this.editor.handle(event)
     if (this.editor.text !== previousDraft) { this.completionDismissed = false; this.completionIndex = 0 }
     if (action === "shutdown") { this.control?.(event.type === "key" && event.key === "ctrl+c" ? "shutdown" : "quit"); return }
-    if (action === "cancel") { this.control?.("cancel"); this.draw(); return }
+    if (action === "cancel") { this.control?.("interrupt"); this.draw(); return }
     if (action === "queue" && this.pending?.kind === "selection") return
     if (action === "submit" || action === "queue") {
       const command = this.editor.text.trim()
