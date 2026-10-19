@@ -13,7 +13,7 @@ import { createTaskWorktree, hasPlanWorktreeState, planIsolationAvailability, pl
 import { readLedger, OPEN_STATUSES } from "../state/ledger.ts"
 import { sessionDir, stateRoot } from "../state/store.ts"
 import { admissionEpoch, admissionFence, effectiveHold, isAdmissionCurrent } from "../sessions/admission.ts"
-import { getOwnedSession, inspectSessionAttachment, readSessionMetadata } from "../sessions/store.ts"
+import { getOwnedSession, inspectSessionAttachment, readSessionMetadata, sessionWasRebound } from "../sessions/store.ts"
 import { EXECUTION_ROLES, LinuxAdmissionRefused, type ExecutionHandle, type ExecutionReconciliation, type ExecutionRole, type ExecutionRuntime, type FlowRuntime } from "./types.ts"
 import { persistedHostReference, settled } from "./run-state.ts"
 import type { VerificationReference } from "../orchestration/verifier.ts"
@@ -268,13 +268,15 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
     if (!COMMON_ENGINES.has(runtime.host.identity.engine)) return wf
     const status = runtime.runs.status()
     const hostExecutions = status.executions.filter(execution => execution.ownerSession === sessionID && execution.kind === "host")
+    const rebound = sessionWasRebound(runtime.worktree, sessionID)
     if (hostExecutions.length === 0) throw new Error(HOST_POLICY_MISMATCH)
     for (const execution of hostExecutions) {
       if (execution.engine !== runtime.host.identity.engine) throw new Error(HOST_ENGINE_MISMATCH)
       const role = EXECUTION_ROLES.find(candidate => candidate === execution.role) as ExecutionRole | undefined
       if (!role || !execution.policyID) throw new Error(HOST_POLICY_MISMATCH)
       // Stop requests (the only anyUnitKind caller) dispatch no model, so they must not depend on pinned-route policy IDs.
-      if (!anyUnitKind && execution.policyID !== runtime.policy.resolve(role).id) throw new Error(HOST_POLICY_MISMATCH)
+      // After an in-place model rebind, settled executions keep the policy they ran under; unsettled ones must match.
+      if (!anyUnitKind && !(rebound && settled(execution)) && execution.policyID !== runtime.policy.resolve(role).id) throw new Error(HOST_POLICY_MISMATCH)
     }
     const localActivity = allowLocalActivity && (queue.isRunning(sessionID) || !!sessionActivityBlocker(root, sessionID))
     if (allowLocalActivity) {

@@ -10,8 +10,13 @@ import { readEvents } from "../src/flow/state.ts"
 import { readLedger } from "../src/state/ledger.ts"
 import { readCommitted } from "../src/workflows/commit.ts"
 import { DEFAULT_CONFIG } from "../src/config.ts"
+import { createExecutionRuntime } from "../src/hosts/runtime.ts"
+import { readSessionMetadata, replaySession } from "../src/sessions/store.ts"
+import { activeAnyWorkflow } from "../src/flow/state.ts"
+import { resumeAdmission } from "../src/sessions/admission.ts"
+import type { ExecutionRuntime } from "../src/hosts/types.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
-import { fullScript, scriptedRuntime } from "./workflow-fixture.ts"
+import { fullScript, scriptedHost, scriptedRuntime } from "./workflow-fixture.ts"
 
 let wt: ReturnType<typeof tempGitWorktree>
 beforeEach(() => { wt = tempGitWorktree(); wt.worktree = realpathSync(wt.worktree) })
@@ -169,6 +174,33 @@ describe("deep-interview then ralplan through the interactive session", () => {
     expect(s.output).toContain("Question 2:\nWhich UI?")
   })
 
+  test("terminal.ask: a /command typed into the Other editor runs as a command and is never recorded as an answer", async () => {
+    // /status in the editor writes status and falls back to the chat prompt; /model there rebinds in place, and the
+    // next plain line answers round 1 on the new model. A slash text that is no command is the answer as typed.
+    const replies = [{ kind: "custom", text: "/status" }, { kind: "custom", text: "/usr/bin is fine" }]
+    const s = await session({
+      lines: ["/skill:deep-interview build the widget", "/model local other-model", "after switch", "/quit"],
+      script: optionScript(), choices: [0, 0, 2],
+      ask: () => replies.shift(),
+    })
+    expect(s.output).toContain("Same session and workflow")
+    expect(roundAnswers()).toEqual(["after switch", "/usr/bin is fine"])
+    expect(roundAnswers()).not.toContain("/status")
+  })
+
+  test("terminal.ask: /finish typed into the Other editor ends the interview early instead of being an answer", async () => {
+    const script = optionScript()
+    script["di.interviewer.question"] = ["Q1", "Q2", "Q3", "Q4"].map(text => JSON.stringify({ type: "question", text, options: ["x", "y"] }))
+    script["di.scorer"] = [0.5, 0.65, 0.8].map(v => JSON.stringify({ type: "score", goal: v, constraints: v, criteria: v, context: v, weakest: "goal", evidence: ["e"] }))
+    const replies = [{ kind: "option", index: 0 }, { kind: "option", index: 0 }, { kind: "option", index: 0 }, { kind: "custom", text: "/finish" }]
+    const s = await session({
+      lines: ["/skill:deep-interview build the widget", "/quit"],
+      script, choices: [0, 0, 0, 2], ask: () => replies.shift(),
+    })
+    expect(s.chooses.some(item => item.values[0] === "Finish early")).toBe(true)
+    expect(roundAnswers()).not.toContain("/finish")
+  })
+
   test("terminal.ask: a custom answer is used as typed", async () => {
     const replies = [{ kind: "custom", text: "  bespoke  " }, { kind: "option", index: 0 }]
     const s = await session({
@@ -284,5 +316,119 @@ describe("intent offers start the same protected workflows", () => {
     expect(again.chooses).toEqual([])
     expect(again.conversationTurns).toEqual([])
     expect(committed()).toMatchObject({ kind: "deep-interview" })
+  })
+})
+
+describe("model change during a workflow (same session, same workflow)", () => {
+  /** Each createRuntime call builds a scripted runtime whose policy is bound to that selection's model; the script state carries over. */
+  async function rebinding(lines: Array<string | undefined>, choices: number[] = [], uuidStart = 0, unsettledOnModel = false) {
+    const engineFor = (engine: string) => engine
+    const queue = [...lines]
+    const choiceQueue = [...choices]
+    const output: string[] = []
+    const fixtures: Array<{ engine: string; model: string; runtime: ExecutionRuntime; seen: ReturnType<typeof scriptedHost>["seen"]; queues: Record<string, string[]> }> = []
+    const turns: string[] = []
+    const terminal = {
+      stdinIsTTY: true, stderrIsTTY: true,
+      readLine: async () => {
+        const line = queue.shift()
+        if (unsettledOnModel && line?.startsWith("/model")) {
+          const runtime = fixtures[0]!.runtime
+          const real = runtime.runs.status.bind(runtime.runs)
+          runtime.runs.status = () => ({ ...real(), executions: [{ executionId: "stuck", ownerSession: "another-session", generation: 1, kind: "host", role: "interviewer" }] }) as never
+        }
+        return line
+      },
+      choose: async () => choiceQueue.shift() ?? 0,
+      workflowStatus() {},
+      write: (text: string) => { output.push(text) },
+      close() {},
+    } as unknown as Terminal
+    let uuid = uuidStart
+    const deps: Partial<InteractiveDependencies> = {
+      cwd: wt.worktree, terminal, gitTopLevel: () => wt.worktree,
+      createRuntime: options => {
+        const script = fixtures.at(-1)?.queues ?? fullScript()
+        const scripted = scriptedHost(script, engineFor(options.engine))
+        const config = structuredClone(DEFAULT_CONFIG) as typeof DEFAULT_CONFIG
+        config.models = { ...config.models, main: `${options.engine}/${options.model}`, worker: `${options.engine}/${options.model}` }
+        const runtime = createExecutionRuntime({ directory: wt.worktree, worktree: wt.worktree, config, log() {} }, () => scripted.host, { planningOnlyMain: true })
+        fixtures.push({ engine: options.engine, model: options.model, runtime, seen: scripted.seen, queues: scripted.queues })
+        return runtime
+      },
+      admitRuntime: async () => {},
+      createConversation: () => ({ turn: async text => { turns.push(text); return { text: "Acknowledged." } } }),
+      discoverModels: async () => { throw new Error("no model discovery") },
+      randomUUID: () => `fixture${uuid++}`,
+    }
+    const exit = await runInteractiveSession({ worktree: wt.worktree, engine: "local", model: "model-a" }, deps)
+    return { exit, output: output.join(""), fixtures, remaining: queue, turns }
+  }
+
+  test("deep-interview awaiting an answer: /model rebinds in place and the next step runs on the new model", async () => {
+    const s = await rebinding(["/skill:deep-interview build the widget", "/model local model-b", "first answer", "second answer", "/quit"], [0, 0, 2])
+    expect(s.exit.code).toBe(0)
+    expect(s.remaining).toEqual([])
+    expect(s.output).toContain("Now using local / model-b. Same session and workflow")
+    expect(s.output).not.toContain("unavailable while an interview awaits")
+    expect(s.fixtures.map(item => item.model)).toEqual(["model-a", "model-b"])
+    // same session ID throughout; metadata carries the new model; only the first session was ever created
+    expect(readSessionMetadata(wt.worktree, "otter-fixture0")).toMatchObject({ engine: "local", model: "model-b" })
+    expect(readSessionMetadata(wt.worktree, "otter-fixture1")).toBeNull()
+    const wf = readEvents(wt.worktree).filter(event => event.type === "created")
+    expect(wf.map(event => event.data?.kind)).toEqual(["deep-interview", "ralplan"])
+    // steps before the switch ran on model-a, the steps after it on model-b (distinct policy IDs)
+    expect(s.fixtures[0]!.seen.length).toBeGreaterThan(0)
+    expect(s.fixtures[1]!.seen.length).toBeGreaterThan(0)
+    const policyOf = (fixture: typeof s.fixtures[number]) => fixture.runtime.policy.resolve("interviewer").id
+    expect(policyOf(s.fixtures[0]!)).not.toBe(policyOf(s.fixtures[1]!))
+    const records = replaySession(wt.worktree, "otter-fixture0", { order: "asc" }).records
+    const rebind = records.find(record => record.kind === "model-rebind")
+    expect(rebind?.data).toMatchObject({ from: { engine: "local", model: "model-a" }, to: { engine: "local", model: "model-b" }, workflowID: expect.any(String) })
+    expect(records.some(record => record.kind === "carried-context")).toBe(false)
+    expect(committed()).toMatchObject({ kind: "ralplan", sessionID: "otter-fixture0" })
+  })
+
+  test("a later /resume of the same session attaches on the rebound model without a policy mismatch for settled history", async () => {
+    await rebinding(["/skill:deep-interview build the widget", "/model local model-b", "/quit"], [0])
+    expect(readSessionMetadata(wt.worktree, "otter-fixture0")).toMatchObject({ model: "model-b" })
+    const resumed = await rebinding(["/resume otter-fixture0", "/quit"], [], 10)
+    expect(resumed.output).toContain("Restored session held")
+    expect(resumed.output).not.toContain("policy identity")
+    expect(resumed.output).not.toContain("Session switch failed")
+    expect(resumed.fixtures.some(item => item.model === "model-b")).toBe(true)
+  })
+
+  test("an engine change during a workflow is refused with the workflow named", async () => {
+    const s = await rebinding(["/skill:deep-interview build the widget", "/model codex gpt-5-codex", "/quit"], [0])
+    const wf = activeAnyWorkflow(wt.worktree)!
+    expect(s.output).toContain(`Model switch refused: the active workflow ${wf.id} runs on local; pick another local model, or finish/cancel the workflow to switch engines.`)
+    expect(s.fixtures).toHaveLength(1)
+    expect(readSessionMetadata(wt.worktree, "otter-fixture0")).toMatchObject({ engine: "local", model: "model-a" })
+    expect(replaySession(wt.worktree, "otter-fixture0", { order: "asc" }).records.some(record => record.kind === "model-rebind")).toBe(false)
+  })
+
+  test("ralplan pending approval keeps its workflow across /model", async () => {
+    const s = await rebinding(["/skill:deep-interview build the widget", "first answer", "second answer", "/model local model-b", "/quit"], [0, 0, 2])
+    expect(s.output).toContain("Now using local / model-b. Same session and workflow")
+    expect(committed()).toMatchObject({ kind: "ralplan", phase: "pending_approval", sessionID: "otter-fixture0" })
+    expect(readSessionMetadata(wt.worktree, "otter-fixture0")).toMatchObject({ model: "model-b" })
+    expect(s.fixtures.map(item => item.model)).toEqual(["model-a", "model-b"])
+  })
+
+  test("a rebind is refused while an execution is unsettled and nothing changes", async () => {
+    const s = await rebinding(["/skill:deep-interview build the widget", "/model local model-b", "/quit"], [0], 0, true)
+    expect(s.output).toContain("Model switch refused: execution ownership is unresolved")
+    expect(s.output).not.toContain("Same session and workflow")
+    expect(s.fixtures).toHaveLength(1)
+    expect(readSessionMetadata(wt.worktree, "otter-fixture0")).toMatchObject({ model: "model-a" })
+    expect(replaySession(wt.worktree, "otter-fixture0", { order: "asc" }).records.some(record => record.kind === "model-rebind")).toBe(false)
+  })
+
+  test("plain chat switch still starts a new session and carries context", async () => {
+    const s = await rebinding(["hello", "/model local model-b", "/quit"])
+    expect(s.output).not.toContain("Same session and workflow")
+    expect(readSessionMetadata(wt.worktree, "otter-fixture1")).toMatchObject({ model: "model-b" })
+    expect(replaySession(wt.worktree, "otter-fixture1", { order: "asc" }).records.some(record => record.kind === "carried-context")).toBe(true)
   })
 })

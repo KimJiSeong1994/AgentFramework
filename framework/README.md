@@ -217,9 +217,25 @@ the context survives `/resume`. Carried text is sent to whichever engine you pic
 including a remote one. `/new` starts without earlier turns; if the current conversation
 cannot be read in full, the switch is refused rather than dropping context. No approval
 is ever reused. Selecting the same engine/model keeps
-the current session. Switching is refused while a workflow is active, workflow
-state is corrupt, or execution ownership is unresolved; recover with the original
-engine/model/session instead. Cancelling the picker or a failed selection leaves
+the current session. Switching is refused while workflow state is corrupt or execution
+ownership is unresolved; recover with the original engine/model/session instead.
+
+**Model change during a workflow (same-session rebind).** While a workflow this session
+owns is active (a deep-interview awaiting an answer, ralplan or plan pending approval,
+ultragoal/autoresearch between steps), `/model <engine> <id>` and `/model combo apply`
+do not start a new session. They rebind the current session in place at a step
+boundary: the session ID, history and workflow stay the same, the session metadata
+(`model`, `routes`) is rewritten durably under the attachment epoch, a `model-rebind`
+transcript record `{from, to, workflowID}` is appended and replayed, and the next
+workflow step runs with the new model's policy. The rebind is refused while any model
+turn, queue run, activity or unsettled execution exists, when the session is held or not
+epoch-current, or when the engine would change: the workflow records its engine, so the
+refusal reads "the active workflow <id> runs on <engine>; pick another <engine> model, or
+finish/cancel the workflow to switch engines." Settled executions keep the policy ID they
+ran under; recovery compares only unsettled executions after a rebind, so a later
+`/resume` attaches on the new model. During an interview answer prompt `/model` is
+accepted too; type the answer afterwards. Without a workflow, an engine change still uses
+the new-session-plus-carried-context path above. Cancelling the picker or a failed selection leaves
 the current selection intact. Native host preflight must pass before a candidate
 replaces the current selection. Held contexts omit `/model` from contextual help;
 typing it explicitly is refused before discovery or switching, while the switch
