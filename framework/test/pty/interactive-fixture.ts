@@ -24,6 +24,7 @@ import type { ExecutionRuntime } from "../../src/hosts/types.ts"
 import { DEFAULT_CONFIG } from "../../src/config.ts"
 import { inspectSessionAttachment, openSession, readSessionMetadata, replaySession } from "../../src/sessions/store.ts"
 import { claimPreparedSkillInvocation } from "../../src/skills/session.ts"
+import { readSkillTrust } from "../../src/skills/trust.ts"
 import { sessionDir } from "../../src/state/store.ts"
 import { readCommitted } from "../../src/workflows/commit.ts"
 import { DEEP_INTERVIEW_PROMPTS, RALPLAN_PROMPTS } from "../../src/workflows/prompts/index.ts"
@@ -836,6 +837,10 @@ async function main(): Promise<void> {
       },
     }
     },
+    // Automatic skill selection is covered by interactive.test.ts; here it must not depend on the host's skills or a
+    // live OpenJev server, so the fixture keeps it off.
+    skillPolicy: () => ({ ...readSkillTrust(), auto: { mode: "off", include: new Set(), exclude: new Set() } }),
+    selectSkill: async () => ({ skill: null, reason: "off", decisionID: "pty-fixture", candidates: [] }),
     discoverModels: async engine => {
       report.modelCatalogCallCount = Number(report.modelCatalogCallCount) + 1
       record("model.catalog.discovered", { engine })

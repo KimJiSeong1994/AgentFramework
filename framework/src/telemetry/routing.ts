@@ -10,7 +10,7 @@ export type RoutingDecision = {
   decisionID: string
   sessionID: string
   messageID: string
-  mode: "off" | "shadow" | "suggest" | "invalid"
+  mode: "off" | "shadow" | "suggest" | "auto" | "offer" | "invalid"
   skill: string | null
   reason: string
   elapsedMs: number
@@ -66,6 +66,17 @@ export function recordRoutingDecision(deps: CoreDeps, decision: RoutingDecision)
       thresholds: d.thresholds && { minProbability: d.thresholds.minProbability, minMargin: d.thresholds.minMargin, timeoutMs: d.thresholds.timeoutMs }, scores,
     })
   })
+}
+
+/**
+ * `otter chat` model-driven skill load through the `skill` tool: `loaded` when the instructions were returned to the
+ * model, otherwise why not (`refused`, `superseded`). Content-free: names and outcome only.
+ */
+export function recordSkillToolLoad(deps: CoreDeps, sessionID: string, turnID: string, skill: string, outcome: string): void {
+  bestEffort(deps, () => append(deps, sessionID, {
+    event: "skill_tool_load", sessionID: identifier(sessionID), turnID: identifier(turnID),
+    skill: identifier(skill), outcome: identifier(outcome),
+  }))
 }
 
 /** Emitted only after the hook actually inserts advice; recommendation is not evidence of skill execution. */

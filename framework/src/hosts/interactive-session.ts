@@ -16,12 +16,14 @@ import { inputColorSupported, inputLine, renderInput, type InputPresentation } f
 import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
 import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus, type CliToolDisplay } from "./cli-progress.ts"
 import { formatDuration, type WorkflowProgress } from "../tui/progress.ts"
-import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
+import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, skillInstructionBudget, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
 import { PROTECTED_WORKFLOWS, resolveSkillRoots } from "../skills/roots.ts"
 import { chatIntentMode, chatWorktreeMode } from "../config.ts"
-import { classifyIntent, INTENT_CLASSIFIER, type IntentClass } from "../modes/detect.ts"
-import { SkillSession, type PreparedSkillInvocation, type SkillCatalog } from "../skills/session.ts"
-import { readSkillTrust } from "../skills/trust.ts"
+import { classifyIntent, hasIntentForcePrefix, INTENT_CLASSIFIER, type IntentClass } from "../modes/detect.ts"
+import { claimPreparedSkillInvocation, SkillSession, type AutoSkillCandidate, type PreparedSkillInvocation, type SkillCatalog } from "../skills/session.ts"
+import { readSkillTrust, type SkillTrustLookup } from "../skills/trust.ts"
+import { createAutoSkillSelector, type AutoSkillSelection } from "../routing/router.ts"
+import { recordSkillToolLoad } from "../telemetry/routing.ts"
 import { attachAdmission, detachAdmission, effectiveHold, holdAdmission, resumeAdmission } from "../sessions/admission.ts"
 import { canonicalRoutes, inspectSessions, MAX_CARRIED_MESSAGES, routesKey, MAX_SHELL_COMMAND_BYTES, MAX_SHELL_LINES, MAX_SHELL_OUTPUT_BYTES, readSessionMetadata, replaySession, type SessionStore, type ReplayOptions, type ReplayResult, type TranscriptKind } from "../sessions/store.ts"
 import { persistToolActivity } from "../tui/session-transcript.ts"
@@ -38,7 +40,7 @@ import { startRefusal } from "../workflows/registry.ts"
 import { ModelRequestError } from "../workflows/turn.ts"
 import { beginExecutionActivity } from "./runtime.ts"
 import { settled, type ExecutionRunStatus } from "./run-state.ts"
-import { EXECUTION_ROLES, LinuxAdmissionRefused, type ComboRoutes, type ExecutionRole, type ExecutionRuntime, type VerifyRunObservation } from "./types.ts"
+import { EXECUTION_ROLES, LinuxAdmissionRefused, type ComboRoutes, type ExecutionRole, type ExecutionRuntime, type SkillToolProvider, type VerifyRunObservation } from "./types.ts"
 import type { AskPrompt, ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
 import { commandInsertion, interactiveActions, interactiveHelp, type InteractiveContext } from "./interactive-actions.ts"
 import { fileComboStore, fileDefaultModelStore, validateComboRoutes, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
@@ -97,7 +99,7 @@ export type ShellView = {
 }
 
 type PlanConversation = {
-  turn: (text: string, signal?: AbortSignal, skill?: SkillConversationInvocation) => Promise<ConversationTurn>
+  turn: (text: string, signal?: AbortSignal, skill?: SkillConversationInvocation, skillTool?: SkillToolProvider) => Promise<ConversationTurn>
 }
 
 type SignalName = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGTSTP" | "SIGCONT"
@@ -125,9 +127,30 @@ export type InteractiveDependencies = {
   memory?: MemoryCommandStore
   /** Vendor sign-in for codex/claude: read-only status, and the vendor's own interactive login/logout. */
   auth: EngineAuth
+  /** User-config skill trust and `skill_auto` policy, read once per skill session. */
+  skillPolicy: () => SkillTrustLookup
+  /** Per-turn automatic skill choice over consent-free candidates; never loads, prompts or authorizes anything. */
+  selectSkill: (runtime: ExecutionRuntime, input: AutoSkillSelectInput) => Promise<AutoSkillSelection>
   humanDecision: typeof humanDecision
   randomUUID: () => string
   signals: SignalSource
+}
+
+export type AutoSkillSelectInput = Readonly<{
+  sessionID: string
+  messageID: string
+  text: string
+  /** Intent-offer ranking only; ordinary skills are loaded by the model through the `skill` tool. */
+  mode: "offer"
+  candidates: readonly AutoSkillCandidate[]
+  signal: AbortSignal
+}>
+
+const autoSkillSelectors = new WeakMap<ExecutionRuntime, ReturnType<typeof createAutoSkillSelector>>()
+function selectSkillWithRuntime(runtime: ExecutionRuntime, input: AutoSkillSelectInput): Promise<AutoSkillSelection> {
+  let selector = autoSkillSelectors.get(runtime)
+  if (!selector) autoSkillSelectors.set(runtime, selector = createAutoSkillSelector(runtime))
+  return selector.select(input)
 }
 
 function approvedTaskIDs(value: unknown): { ids: string[]; total: number } {
@@ -372,6 +395,8 @@ export function defaultDependencies(): InteractiveDependencies {
     createConversation: (runtime, sessionID, prior) => createPlanConversation(runtime, sessionID, prior),
     createController: runtime => createForegroundController(runtime, { planWorktree: chatWorktreeMode(runtime.config) === "plan" }),
     discoverModels: discoverModelCatalog,
+    skillPolicy: () => readSkillTrust(),
+    selectSkill: selectSkillWithRuntime,
     defaultModel: fileDefaultModelStore,
     combo: fileComboStore,
     auth: vendorAuth,
@@ -754,7 +779,7 @@ function skillCatalogLines(catalog: SkillCatalog): string[] {
   }
   if (!catalog.entries.length && !catalog.refusals.length) lines.push("  No skills or protected workflows were discovered.")
   if (catalog.entries.some(entry => entry.trusted)) lines.push("Trusted skills (skill_trust in the user otter.jsonc) skip the consent prompt; tool and execution approvals are unchanged.")
-  lines.push("Only a submitted /skill:<name> command invokes a skill. deep-interview, ralplan, ultragoal and autoresearch start Otter-owned workflows; invoking a name is not execution consent, and unit/experiment work still needs typed approval.")
+  lines.push("A submitted /skill:<name> invokes any listed skill. With skill_auto.mode auto (the default; user otter.jsonc), the model may also load consent-free skills on its own when the conversation calls for them and the reply says which; /skills auto shows candidates. deep-interview, ralplan, ultragoal and autoresearch are never started automatically; invoking a name is not execution consent, and unit/experiment work still needs typed approval.")
   return lines
 }
 
@@ -994,14 +1019,25 @@ export async function runInteractiveSession(
     const worktree = canonicalWorktree(args.worktree, deps)
     signalWorktree = worktree
     let latestSkillCatalog: SkillCatalog | undefined
+    // Automatic skill selection: the user-config policy, the session toggle (`/skills auto on|off`) and the cached
+    // consent-free candidate list (refreshed with the catalog). Candidates are re-prepared per use, so a stale entry
+    // can only be refused, never applied with changed content.
+    let skillPolicy: SkillTrustLookup | undefined
+    let autoSkillEnabled = true
+    let autoSkillCandidates: readonly AutoSkillCandidate[] = []
+    let autoSkillRequiredTools: readonly string[] = []
+    let autoCandidateGeneration = 0
+    let autoCandidateWork: Promise<void> = Promise.resolve()
     async function bindSkillSession(store: SessionStore): Promise<void> {
       skillSession?.close()
       skillSession = undefined
       latestSkillCatalog = undefined
+      autoSkillCandidates = []
       try {
         const roots = await resolveSkillRoots({ projectRoot: worktree, homeDirectory: homedir() })
-        const trust = readSkillTrust()
-        if (trust.problem) visibleWrite(terminalSafeText(`Skill trust ignored: ${boundedTerminalDiagnostic(trust.problem)}. Skills still ask for consent.\n`))
+        const trust = deps.skillPolicy()
+        skillPolicy = trust
+        if (trust.problem) visibleWrite(terminalSafeText(`Skill config ignored: ${boundedTerminalDiagnostic(trust.problem)}. Skills still ask for consent and automatic selection is off.\n`))
         const candidate = await SkillSession.create({ roots, store, terminal: skillTerminal, trust: trust.trust }, abort.signal)
         if (abort.signal.aborted || sessionStore !== store || retainedSDKSessionID) {
           candidate.close()
@@ -1029,7 +1065,23 @@ export async function runInteractiveSession(
         terminal.skillCatalog?.({ entries: [], refusals: [] })
         latestSkillCatalog = undefined
         visibleWrite("Skill catalog unavailable; source invocation is disabled for this session.\n")
+        return
       }
+      // Optional and off the startup path: the composer never waits for candidate capture, and a failure only disables
+      // automatic selection, never explicit /skill: invocation. A newer refresh supersedes an older one.
+      autoSkillCandidates = []
+      const generation = ++autoCandidateGeneration
+      const policy = skillPolicy
+      const runtime = attachedRuntime
+      if (!policy || policy.auto.mode === "off" || !runtime) return
+      const main = runtime.policy.resolve("main").tools
+      const required = main.allowed.filter(tool => !main.denied.includes(tool))
+      autoSkillRequiredTools = required
+      const current = () => generation === autoCandidateGeneration && target === skillSession && target.store === sessionStore && !abort.signal.aborted
+      autoCandidateWork = target.autoCandidates(policy.auto, skillInstructionBudget(runtime.config.delegate.verify_allow), required, abort.signal)
+        .then(candidates => { if (current()) autoSkillCandidates = candidates }, () => {
+          if (current()) visibleWrite("Automatic skill candidates unavailable; explicit /skill: invocation still works.\n")
+        })
     }
     const describeDefault = (lookup: DefaultModelLookup): string => lookup.state === "configured"
       ? `Default model: ${lookup.value.engine} / ${lookup.value.model} (${lookup.source} config).`
@@ -2222,6 +2274,9 @@ export async function runInteractiveSession(
       if (text === undefined) return { code: 0 }
       const message = text.trim()
       if (!message) continue
+      // Candidate capture registers skill permission activity, which execution admission treats as busy; let the
+      // background capture settle before any submitted line can start a turn, workflow or shell.
+      await autoCandidateWork
 
       if (message.startsWith("!")) {
         const command = message.slice(1).trim()
@@ -2320,8 +2375,16 @@ export async function runInteractiveSession(
           }
           continue
         }
+        if (commandArgs[0] === "auto" && commandArgs.length <= 2 && (commandArgs[1] === undefined || commandArgs[1] === "on" || commandArgs[1] === "off")) {
+          if (commandArgs[1]) autoSkillEnabled = commandArgs[1] === "on"
+          await autoCandidateWork
+          const mode = skillPolicy?.auto.mode ?? "off"
+          const names = autoSkillCandidates.map(candidate => terminalSafeText(candidate.name)).join(", ") || "none"
+          terminal.write(`Automatic skills: ${autoSkillEnabled ? "on" : "off"} for this session · skill_auto.mode ${mode} · candidates: ${names}\n`)
+          continue
+        }
         if (commandArgs.length) {
-          visibleWrite("Usage: /skills | /skills grants | /skills revoke <name>\n")
+          visibleWrite("Usage: /skills | /skills grants | /skills revoke <name> | /skills auto [on|off]\n")
           continue
         }
         await refreshSkillCatalog()
@@ -2609,8 +2672,29 @@ export async function runInteractiveSession(
         intentClass = intent.class
         if (intent.force) outbound = intent.body
         const options = intent.force ? [] : intentOptions(intent.class)
-        const offered = options.filter(option => option.kind === "chat" || option.kind === "cancel" ||
+        let offered = options.filter(option => option.kind === "chat" || option.kind === "cancel" ||
           startRefusal(option.descriptor.workflow) === undefined)
+        const workflows = offered.flatMap(option => option.kind === "workflow" ? [option] : [])
+        if (workflows.length > 1 && autoSkillEnabled && skillPolicy?.auto.mode === "auto" && sessionStore) {
+          // Ranking only: the selector's pick moves first among the workflow choices and is marked. Nothing starts
+          // without the operator choosing it; a failure keeps the fixed order.
+          let ranked: AutoSkillSelection | undefined
+          try {
+            ranked = await deps.selectSkill(selection.runtime, {
+              sessionID: sessionStore.sessionID, messageID: `offer-${requestSequence + 1}`, text: intent.body, mode: "offer",
+              candidates: workflows.map(option => ({ name: option.descriptor.name, description: option.descriptor.description, bytes: 0 })),
+              signal: abort.signal,
+            })
+          } catch { ranked = undefined }
+          if (abort.signal.aborted) return signalExit(receivedSignal)
+          const first = workflows.find(option => option.descriptor.name === ranked?.skill)
+          if (first) {
+            const rest = workflows.filter(option => option !== first)
+            const chat = offered.filter(option => option.kind === "chat")
+            const cancel = offered.filter(option => option.kind === "cancel")
+            offered = [...chat, { ...first, label: `${first.label} (suggested)` }, ...rest, ...cancel]
+          }
+        }
         const record = (choice: string | null, route: string) => persist("notice", {
           text: `Intent route ${JSON.stringify({ classifier: INTENT_CLASSIFIER, class: intent.class, signals: intent.signals,
             offered: offered.map(option => option.label), choice, route })}`,
@@ -2654,6 +2738,8 @@ export async function runInteractiveSession(
       let turn: Awaited<ReturnType<PlanConversation["turn"]>>
       let skillInvocation: SkillConversationInvocation | undefined
       let preparedSkill: PreparedSkillInvocation | undefined
+      let skillTool: SkillToolProvider | undefined
+      const loadedSkills: Array<{ name: string; contentHash: string }> = []
       let dispatched = false
       const modelFailureMayReturnToComposer = (): boolean => {
         try {
@@ -2705,6 +2791,44 @@ export async function runInteractiveSession(
             progress.responseReceived()
             continue
           }
+        } else if (turnSkills && turnStore && turnSkills.store === turnStore && autoSkillEnabled && !retainedSDKSessionID &&
+            !message.startsWith("/") && !hasIntentForcePrefix(message) && skillPolicy?.auto.mode === "auto" &&
+            activeAnyWorkflow(worktree) === null && (await autoCandidateWork, autoSkillCandidates.length > 0)) {
+          // Model-chosen skills: the main model sees the consent-free catalog and may load entries with the `skill` tool
+          // as the conversation calls for them. A load never prompts (consent "never") and is re-checked against the
+          // current content and the role's tools; protected workflows are never in the catalog.
+          const budget = skillInstructionBudget(turnSelection.runtime.config.delegate.verify_allow, outbound)
+          const catalog = autoSkillCandidates.filter(candidate => candidate.bytes <= budget)
+          const runtime = turnSelection.runtime
+          const sessionID = turnStore.sessionID
+          const turnID = `turn-${requestSequence}`
+          const requiredTools = autoSkillRequiredTools
+          const pendingHashes = new Map<string, string>()
+          skillTool = catalog.length === 0 ? undefined : Object.freeze({
+            catalog: Object.freeze(catalog.map(candidate => Object.freeze({ name: candidate.name, description: candidate.description }))),
+            async load(name: string, signal: AbortSignal) {
+              if (selection !== turnSelection || sessionStore !== turnStore || skillSession !== turnSkills || retainedSDKSessionID) {
+                recordSkillToolLoad(runtime, sessionID, turnID, name, "superseded")
+                return { ok: false as const, error: "Tool refused: the session changed during this turn." }
+              }
+              try {
+                const prepared = await turnSkills.prepare(name, signal, { consent: "never", requiredTools })
+                const text = claimPreparedSkillInvocation(prepared).text
+                pendingHashes.set(name, prepared.contentHash)
+                return { ok: true as const, text }
+              } catch {
+                recordSkillToolLoad(runtime, sessionID, turnID, name, "refused")
+                return { ok: false as const, error: "Tool refused: this skill is not usable without consent right now." }
+              }
+            },
+            delivered(name: string) {
+              const contentHash = pendingHashes.get(name)
+              if (contentHash === undefined) return
+              pendingHashes.delete(name)
+              recordSkillToolLoad(runtime, sessionID, turnID, name, "loaded")
+              loadedSkills.push({ name, contentHash })
+            },
+          })
         }
         if (operationAbort.signal.aborted || abort.signal.aborted) {
           if (!abort.signal.aborted) reportSkillCancellation()
@@ -2716,7 +2840,9 @@ export async function runInteractiveSession(
         publishView()
         turn = skillInvocation
           ? await turnSelection.conversation.turn(outbound, operationAbort.signal, skillInvocation)
-          : await turnSelection.conversation.turn(outbound, operationAbort.signal)
+          : skillTool
+            ? await turnSelection.conversation.turn(outbound, operationAbort.signal, undefined, skillTool)
+            : await turnSelection.conversation.turn(outbound, operationAbort.signal)
         if (operationAbort.signal.aborted && !abort.signal.aborted) {
           requestObservation = { state: "cancellation-unconfirmed", operationID: requestID }
           publishView()
@@ -2766,6 +2892,10 @@ export async function runInteractiveSession(
       progress.responseReceived()
       if (abort.signal.aborted) return signalExit(receivedSignal)
       let assistantFact: ReturnType<SessionStore["append"]> | undefined
+      if (loadedSkills.length) {
+        // terminal.write persists the notice, so a full-screen transcript reload keeps it.
+        terminal.write(`Skills used: ${loadedSkills.map(skill => terminalSafeText(skill.name)).join(", ")} (force: skips skills for one message; /skills auto off for this session)\n`)
+      }
       if (turn.text) {
         assistantFact = persist("assistant", { text: turn.text })
         const assistantText = terminalSafeText(turn.text)
@@ -2780,6 +2910,9 @@ export async function runInteractiveSession(
         if (audit) {
           persist("notice", { text: `Skill invocation audit ${JSON.stringify({ userSeq: userFact?.seq ?? null, assistantSeq: assistantFact?.seq ?? null, ...audit })}` })
         }
+      }
+      for (const skill of loadedSkills) {
+        persist("notice", { text: `Skill tool load ${JSON.stringify({ userSeq: userFact?.seq ?? null, assistantSeq: assistantFact?.seq ?? null, name: skill.name, contentHash: skill.contentHash })}` })
       }
       if (turn.plan === undefined) continue
       if (intentClass === "question") {

@@ -1,0 +1,267 @@
+{
+  "schema": "skill-auto-redteam.v1",
+  "kind": "package-test-report",
+  "commands": [
+    "cd framework && bun test /tmp/rt/redteam.test.ts  (33 pass, 0 fail; copy: artifacts/skill-auto-qa/redteam.test.ts.txt)",
+    "cd framework && bun test test/skill-router.test.ts test/skill-session.test.ts test/skill-router-redteam.test.ts  (66 pass, 0 fail)",
+    "cd framework && bun test test/interactive.test.ts -t \"automatic skill|intent offer ranking\"  (7 pass, 0 fail)"
+  ],
+  "cases": [
+    {
+      "id": "hostile-1",
+      "scenario": "Server picks skill not in candidates (high prob, and not in distribution)",
+      "expected": "skill null",
+      "observed": "null in all 3 variants (invalid_distribution/abstained)",
+      "verdict": "pass"
+    },
+    {
+      "id": "hostile-2",
+      "scenario": "Server picks protected workflow names (ralplan/ultragoal/deep-interview/autoresearch)",
+      "expected": "skill null",
+      "observed": "null",
+      "verdict": "pass"
+    },
+    {
+      "id": "hostile-3",
+      "scenario": "choice none @0.99; choice plan with none@0.99",
+      "expected": "skill null",
+      "observed": "abstained / null",
+      "verdict": "pass"
+    },
+    {
+      "id": "hostile-4",
+      "scenario": "Prototype keys (__proto__, constructor, toString) as choice/probabilities; candidate named constructor",
+      "expected": "no crash, never a non-candidate",
+      "observed": "null / candidate only",
+      "verdict": "pass"
+    },
+    {
+      "id": "hostile-5",
+      "scenario": "Malformed JSON, empty, null, [], NaN, out-of-range, bad sum, extra label, 200KB, 70KB, HTTP 500",
+      "expected": "skill null",
+      "observed": "null in all 13",
+      "verdict": "pass"
+    },
+    {
+      "id": "hostile-6",
+      "scenario": "302/307 redirect to a second loopback server",
+      "expected": "skill null, redirect not followed",
+      "observed": "unavailable, null; second server not reached",
+      "verdict": "pass"
+    },
+    {
+      "id": "hostile-7",
+      "scenario": "Response/body slower than timeout_ms (headers delay and slow-drip body)",
+      "expected": "skill null within ~timeout",
+      "observed": "null in <450ms with 100ms timeout",
+      "verdict": "pass"
+    },
+    {
+      "id": "hostile-8",
+      "scenario": "Non-loopback/odd endpoints (example.com, localhost, path, creds, https, query, 127.0.0.1.evil.com, 0x7f.1)",
+      "expected": "null, zero requests",
+      "observed": "null, 0 requests",
+      "verdict": "pass"
+    },
+    {
+      "id": "input-1",
+      "scenario": "Secrets (sk-ant, ghp_, PEM, password=, api_key, Bearer, AIza), >2000 chars, empty",
+      "expected": "no request",
+      "observed": "no request",
+      "verdict": "pass"
+    },
+    {
+      "id": "input-2",
+      "scenario": "2000-char boundary and emoji (UTF-16 units)",
+      "expected": "2000 allowed; 1001 emoji (2002 units) refused",
+      "observed": "as expected (limit counts UTF-16 units)",
+      "verdict": "pass"
+    },
+    {
+      "id": "input-3",
+      "scenario": "Secret in candidate description",
+      "expected": "no request",
+      "observed": "sensitive_metadata, 0 requests",
+      "verdict": "pass"
+    },
+    {
+      "id": "input-4",
+      "scenario": "Prompt injection naming skill / ralplan",
+      "expected": "cannot force pick; injected text never becomes candidate",
+      "observed": "low-margin -> null; criteria keys only candidates+none",
+      "verdict": "pass"
+    },
+    {
+      "id": "input-5",
+      "scenario": "Secret scanner gaps: AKIA..., xoxb-..., bare JWT pass containsSecret",
+      "expected": "(informational) ideally blocked",
+      "observed": "requests sent to loopback JEV only; pre-existing containsSecret regex, shared with OpenCode router",
+      "verdict": "note"
+    },
+    {
+      "id": "parse-1",
+      "scenario": "parseSkillAuto non-object/array/function, bad mode (case, type), unknown keys, __proto__ keys",
+      "expected": "string error (fail closed)",
+      "observed": "all rejected; mode:null/absent -> shadow (non-applying default)",
+      "verdict": "pass"
+    },
+    {
+      "id": "parse-2",
+      "scenario": "include/exclude: non-array, non-string, path-like (../, /, a/b), uppercase, empty, 65 chars, __proto__, newline, fullwidth, NUL, >256, 100000 entries, array-like object",
+      "expected": "string error",
+      "observed": "all rejected; 256 accepted, result frozen",
+      "verdict": "pass"
+    },
+    {
+      "id": "parse-3",
+      "scenario": "readSkillTrust: invalid fields/JSONC/directory path -> off with problem; missing file -> shadow; duplicate key last-wins",
+      "expected": "off + problem",
+      "observed": "off + problem; non-object file ([] null \"s\") -> shadow (same as absent, not applying)",
+      "verdict": "pass"
+    },
+    {
+      "id": "prefilter-1",
+      "scenario": "Determinism under 20 random permutations with all-tie scores; limit 0/1/100/empty",
+      "expected": "stable, name-ordered, <=limit",
+      "observed": "pass",
+      "verdict": "pass"
+    },
+    {
+      "id": "prefilter-2",
+      "scenario": "Empty/whitespace/emoji/punct/Hangul/Latin/fullwidth/NUL/2000-char requests",
+      "expected": "exactly 8, order-independent, empty=first 8 by name",
+      "observed": "pass",
+      "verdict": "pass"
+    },
+    {
+      "id": "prefilter-3",
+      "scenario": "No input mutation, identity preserved, relevant first, duplicate names, huge descriptions, __proto__ name",
+      "expected": "no crash/NaN",
+      "observed": "pass",
+      "verdict": "pass"
+    },
+    {
+      "id": "backoff-1",
+      "scenario": "Non-transport results (none, low margin, invalid_response) x5",
+      "expected": "never backoff",
+      "observed": "no backoff",
+      "verdict": "pass"
+    },
+    {
+      "id": "backoff-2",
+      "scenario": "2 fails, success, 2 fails; then 3rd -> backoff; cooldown boundary (-1ms stays, +0 probes); counter reset after backoff",
+      "expected": "consecutive-only, cooldown resets",
+      "observed": "pass",
+      "verdict": "pass"
+    },
+    {
+      "id": "backoff-3",
+      "scenario": "Caller abort mid-flight x5 not counted; real timeouts counted",
+      "expected": "abort ignored; timeouts back off after 3",
+      "observed": "pass",
+      "verdict": "pass"
+    },
+    {
+      "id": "backoff-4",
+      "scenario": "Malformed JSON / oversize / HTTP 5xx classified unavailable",
+      "expected": "(characterization)",
+      "observed": "counted as transport failure and trigger backoff after 3; reasonable (server misbehaving)",
+      "verdict": "note"
+    },
+    {
+      "id": "backoff-5",
+      "scenario": "Concurrent call while in flight",
+      "expected": "busy, one request",
+      "observed": "pass",
+      "verdict": "pass"
+    },
+    {
+      "id": "thresh-1",
+      "scenario": "Project config min_probability 0.5/min_margin 0; server returns plan 0.6/0.4, 0.9/0.1, 0.94/0.06",
+      "expected": "abstained (floors 0.95/0.2 apply)",
+      "observed": "abstained, skill null",
+      "verdict": "pass"
+    },
+    {
+      "id": "thresh-2",
+      "scenario": "Same loosened config, plan 0.97/0.03; and config tightened to min_probability 1",
+      "expected": "0.97 applies under floors; tightening still honoured",
+      "observed": "plan selected; null when tightened",
+      "verdict": "pass"
+    },
+    {
+      "id": "thresh-3",
+      "scenario": "measurementTimeoutMs option 80ms vs 400ms server",
+      "expected": "null within bound",
+      "observed": "null <300ms",
+      "verdict": "pass"
+    },
+    {
+      "id": "backoff-api",
+      "scenario": "Backoff cases rerun with options object { now }",
+      "expected": "unchanged behaviour",
+      "observed": "pass",
+      "verdict": "pass"
+    },
+    {
+      "id": "B1-1",
+      "scenario": "Untracked project skill shadows name-trusted home skill orca-cli",
+      "expected": "not a candidate; prepare consent never refuses; zero prompts; no grants",
+      "observed": "autoCandidates [] ; prepare rejects 'not usable without consent' (with/without requiredTools); choices [] ; grants []",
+      "verdict": "pass"
+    },
+    {
+      "id": "B1-2",
+      "scenario": "Import include of same name; committed then tampered project skill with name trust",
+      "expected": "not candidate / refused",
+      "observed": "[] and refused, 0 prompts",
+      "verdict": "pass"
+    },
+    {
+      "id": "B1-3",
+      "scenario": "Name trust for a project-only skill",
+      "expected": "not candidate, refused",
+      "observed": "pass",
+      "verdict": "pass"
+    },
+    {
+      "id": "B2-1",
+      "scenario": "Trusted skill edited to narrower allowed-tools ([read], []) after listing; requiredTools [read,grep]/[read]",
+      "expected": "prepare refuses without prompt",
+      "observed": "refused 'not usable without consent', 0 prompts",
+      "verdict": "pass"
+    },
+    {
+      "id": "B2-2",
+      "scenario": "Widened scope or no allowed-tools after edit",
+      "expected": "prepare succeeds silently",
+      "observed": "succeeds, 0 prompts; narrowed skill is not listed as candidate",
+      "verdict": "pass"
+    },
+    {
+      "id": "B2-3",
+      "scenario": "consent never refusals create no grants",
+      "expected": "listGrants empty",
+      "observed": "empty",
+      "verdict": "pass"
+    },
+    {
+      "id": "api-gen3",
+      "scenario": "prepare options union: consent never now requires requiredTools; scratch call sites updated",
+      "expected": "all B1/B2 cases unchanged",
+      "observed": "33/33 scratch, 66/66 and 7/7 focused pass",
+      "verdict": "pass"
+    },
+    {
+      "id": "gen4-rerun",
+      "scenario": "Rerun on gen-4 hash; product code unchanged since gen 3",
+      "expected": "all cases unchanged",
+      "observed": "33/33 scratch, 66/66 and 7/7 focused pass",
+      "verdict": "pass"
+    }
+  ],
+  "defects": [],
+  "passed": true,
+  "sourceHash": "sha256:7480ea6bc07780e998a49f51ce23e45cdc727b6f45bcd46ffb16d9802612b919",
+  "generation": 4
+}

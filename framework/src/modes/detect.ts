@@ -187,6 +187,11 @@ export type IntentClassification = {
 }
 
 const INTENT_FORCE_PREFIX = /^\s*force\s*:\s*/i
+
+/** `force:` asks to send the line as-is: no intent offer and no automatic skill. */
+export function hasIntentForcePrefix(text: string): boolean {
+  return INTENT_FORCE_PREFIX.test(unwrapWholeQuote((text ?? "").replace(/\r\n?/g, "\n")))
+}
 const DETAILED_WORDS = 15
 
 const EN_VERBS = [

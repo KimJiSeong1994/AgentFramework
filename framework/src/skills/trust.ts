@@ -14,9 +14,42 @@ const NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/u
 const MAX_ENTRIES = 256
 
 export type SkillTrust = Readonly<{ names: ReadonlySet<string>; folders: readonly string[] }>
-export type SkillTrustLookup = Readonly<{ trust: SkillTrust; problem?: string; source: string }>
+/**
+ * `skill_auto` (user config only): in `otter chat`, `auto` (default) lists consent-free skills to the main model, which
+ * loads them with the `skill` tool as the conversation calls for them; `off` offers none. `include` admits import-tier
+ * (Claude/Codex convention) skills by name, `exclude` removes any skill by name. A project config cannot widen this.
+ */
+export type SkillAutoMode = "off" | "auto"
+export type SkillAutoPolicy = Readonly<{ mode: SkillAutoMode; include: ReadonlySet<string>; exclude: ReadonlySet<string> }>
+export type SkillTrustLookup = Readonly<{ trust: SkillTrust; auto: SkillAutoPolicy; problem?: string; source: string }>
 
 export const NO_SKILL_TRUST: SkillTrust = Object.freeze({ names: new Set<string>(), folders: Object.freeze([]) })
+export const DEFAULT_SKILL_AUTO: SkillAutoPolicy = Object.freeze({ mode: "auto", include: new Set<string>(), exclude: new Set<string>() })
+const OFF_SKILL_AUTO: SkillAutoPolicy = Object.freeze({ mode: "off", include: new Set<string>(), exclude: new Set<string>() })
+
+function nameSet(value: unknown, key: string): Set<string> | string {
+  if (value === undefined) return new Set()
+  if (!Array.isArray(value) || value.length > MAX_ENTRIES || !value.every(entry => typeof entry === "string" && NAME.test(entry))) {
+    return `skill_auto.${key} must be an array of at most ${MAX_ENTRIES} skill names`
+  }
+  return new Set(value as string[])
+}
+
+/** Parse `skill_auto`. Absent means the default (auto); any invalid field disables it rather than guessing. */
+export function parseSkillAuto(value: unknown): SkillAutoPolicy | string {
+  if (value === undefined || value === null) return DEFAULT_SKILL_AUTO
+  if (typeof value !== "object" || Array.isArray(value)) return "skill_auto must be an object"
+  const record = value as Record<string, unknown>
+  const unknown = Object.keys(record).filter(key => !["mode", "include", "exclude"].includes(key))
+  if (unknown.length) return `skill_auto has unknown key ${JSON.stringify(unknown[0]!.slice(0, 40))}`
+  const mode = record.mode ?? DEFAULT_SKILL_AUTO.mode
+  if (mode !== "off" && mode !== "auto") return "skill_auto.mode must be off or auto"
+  const include = nameSet(record.include, "include")
+  if (typeof include === "string") return include
+  const exclude = nameSet(record.exclude, "exclude")
+  if (typeof exclude === "string") return exclude
+  return Object.freeze({ mode, include, exclude })
+}
 
 function canonical(path: string): string {
   try { return realpathSync.native(path) } catch { return resolve(path) }
@@ -39,20 +72,30 @@ export function parseSkillTrust(value: unknown, home = homedir()): SkillTrust | 
   return Object.freeze({ names, folders: Object.freeze(folders) })
 }
 
-/** Read trust from the user config file alone; a missing file trusts nothing, an unreadable one reports why. */
+/**
+ * Read trust and the auto-selection policy from the user config file alone. A missing file trusts nothing and keeps the
+ * default auto mode; an unreadable or invalid file trusts nothing, disables auto selection and reports why.
+ */
 export function readSkillTrust(path = userConfigPath(), home = homedir()): SkillTrustLookup {
   let text: string
   try { text = readFileSync(path, "utf8") } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { trust: NO_SKILL_TRUST, source: path }
-    return { trust: NO_SKILL_TRUST, problem: `${path} is unreadable`, source: path }
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { trust: NO_SKILL_TRUST, auto: DEFAULT_SKILL_AUTO, source: path }
+    return { trust: NO_SKILL_TRUST, auto: OFF_SKILL_AUTO, problem: `${path} is unreadable`, source: path }
   }
   let parsed: unknown
   try { parsed = parseJsonc<unknown>(text) } catch {
-    return { trust: NO_SKILL_TRUST, problem: `${path} is not valid JSONC`, source: path }
+    return { trust: NO_SKILL_TRUST, auto: OFF_SKILL_AUTO, problem: `${path} is not valid JSONC`, source: path }
   }
-  const value = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>).skill_trust : undefined
-  const trust = parseSkillTrust(value, home)
-  return typeof trust === "string" ? { trust: NO_SKILL_TRUST, problem: trust, source: path } : { trust, source: path }
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+  const trust = parseSkillTrust(record.skill_trust, home)
+  const auto = parseSkillAuto(record.skill_auto)
+  const problems = [trust, auto].filter((item): item is string => typeof item === "string")
+  return {
+    trust: typeof trust === "string" ? NO_SKILL_TRUST : trust,
+    auto: typeof auto === "string" ? OFF_SKILL_AUTO : auto,
+    ...(problems.length ? { problem: problems.join("; ") } : {}),
+    source: path,
+  }
 }
 
 function within(folder: string, path: string): boolean {

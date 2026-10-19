@@ -1,0 +1,12 @@
+# captured 2026-10-18T12:00:24Z
+## GET /health
+{"status":"ok"} HTTP 200 0.063379s
+## POST /v1/systemone (60s cap)
+HTTP 000 60.007024s
+## process
+  PID     ELAPSED STAT    RSS COMMAND
+53914 19-10:38:17 U     92704 /opt/homebrew/Cellar/python@3.12/3.12.11_1/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python -m
+## memory
+Swapins: 43397233 
+Swapouts: 45934163 
+System-wide memory free percentage: 10%

@@ -504,10 +504,55 @@ execution approvals are unchanged. `skill_trust` in a project's `.otter/otter.js
 cannot approve skills for itself. An invalid list trusts nothing and is reported once per session; `/skills` marks
 trusted entries and `/skills grants` shows `trusted by config`.
 
+### Model-loaded skills (`skill_auto`)
+
+In a plain chat turn the main model sees a list of consent-free skills (name and description) and a `skill` tool. It
+loads a skill when the request or the conversation calls for it, so a follow-up such as "write that up for the release"
+can pull in a release-notes skill from context; nothing is preselected for it. Loading returns the captured
+instructions as a tool result for that turn, with the same content checks as `/skill:<name>`; the role's tools,
+read-only limits and approval rules are unchanged. The reply is preceded by `Skills used: <name>` and each load is
+audited (`Skill tool load` notice, routing-log `skill_tool_load` event; no skill bytes or message text are stored).
+Configured in the **user** config only:
+
+```jsonc
+{
+  "skill_auto": {
+    "mode": "auto",               // auto (default) | off
+    "include": ["code-review"],   // import-tier (Claude/Codex convention) skills to admit by name
+    "exclude": ["computer-use"]   // never list these
+  }
+}
+```
+
+- **Listed skills** are only those usable without any prompt: committed, unchanged project skills; home skills in
+  `skill_trust` (by name or folder); project skills only under a trusted *folder* (name trust never lists a project
+  skill, so a cloned repository cannot shadow a trusted home name). Grants from an earlier "Allow" prompt do not
+  qualify. Native roots only, unless `include` names an import-tier skill; `exclude` always wins; protected workflows
+  are never listed; a skill larger than the conversation's skill budget (about 14K characters) is skipped, and so is a
+  skill whose `allowed-tools` is narrower than the planning role's tools. `/skills auto` lists the candidates.
+- **Loads** re-check the current content and tool scope; anything that would need a prompt, is not listed, was already
+  loaded this turn, or would not fit whole in the remaining input budget comes back as a tool error, never a prompt.
+- **Opt-outs**: `force:` before a message (one message), `/skills auto off|on` (this session), `mode: "off"`.
+  Explicit `/skill:` commands (which bind that skill instead), slash commands and turns during an active workflow get no
+  `skill` tool. An invalid `skill_auto` block turns it off and is reported once per session.
+- **Workflows** (`deep-interview`, `ralplan`, `ultragoal`, `autoresearch`) are never started automatically; the intent
+  offer below remains the only non-explicit path to them. In `auto` mode, when the offer lists more than one workflow,
+  the OpenJev selector's pick is moved first and marked `(suggested)`; a failure or abstention keeps the fixed order.
+- **Live check**: `bun scripts/otter-skill-tool-smoke.ts local gemma4-26b-mtp:latest "<turn 1>" "<turn 2>"` runs the
+  real host and engine in a scratch worktree with a fixed two-skill catalog. On 2026-10-19 (`artifacts/skill-tool-smoke/`
+  plus five more runs) a context-only follow-up ("그거 정리해서 배포용 문서로 써줘") loaded the release-notes skill in
+  5/5 conversations and the unrelated turns loaded nothing (10/10). One of 15 turns failed with a malformed JSON
+  envelope (an unescaped code block in the final text), a local-model formatting failure rather than a skill call.
+- **Router evaluation** (`bun scripts/otter-skill-route-eval.ts`) measures the OpenJev selector that ranks the intent
+  offer. 2026-10-18 (`artifacts/skill-route-eval/`): after restarting a hung MLX server, 24 of 132 cases were answered
+  (all positives: 22 correct, 2 abstained, 0 wrong); every `none`/adversarial case timed out, so its false-positive
+  rate is unmeasured; answered latency was 63-90 s under memory pressure. It no longer decides which ordinary skill
+  applies.
+
 ### Otter workflows: truth labels and the four kinds
 
 Otter owns four workflow kinds on one authority (`workflow/workflow.json`) and never runs GJC. They are started only by
-a submitted `/skill:<name>` command that matches a **builtin protected name**; a project or home skill with the same
+a submitted `/skill:<name>` command that matches a **builtin protected name** (or by choosing one in the intent offer); a project or home skill with the same
 name cannot supply instructions or redirect the kind (it is shown as refused), and model output or text that merely
 mentions `/skill:ralplan` starts nothing. **Invoking a name is not consent to execute anything.**
 
@@ -1281,6 +1326,9 @@ if set) before using otter. `otter-doctor.sh` reports this as `D05c WARN`. With 
 tools (`call_omo_agent`, `session_*`, …) in their prefix — another reason not to run both.
 
 ## Optional OpenJev skill recommendations
+
+This section covers the OpenCode plugin. In `otter chat` the model loads skills itself (`skill_auto`, see
+"Model-loaded skills" above); OpenJev there only ranks the intent offer.
 
 `skill_router` is a per-turn recommendation layer, not a replacement for mode detection
 or permission checks. Library defaults are **off**; this repository explicitly opts into

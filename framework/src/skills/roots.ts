@@ -614,6 +614,12 @@ export async function discoverSkills(
   return Object.freeze({ descriptors: Object.freeze(descriptors), refusals: Object.freeze(finalRefusals) })
 }
 
+/** The root tier a discovered descriptor came from: Otter/GJC `native` roots or Claude/Codex `import` conventions. */
+export function skillRootTier(descriptor: LocalSkillDescriptor): "native" | "import" | undefined {
+  return ROOT_BASES.find((spec) => spec.source === descriptor.source &&
+    `${spec.source}:${spec.base}/${descriptor.name}` === descriptor.identity)?.tier
+}
+
 /** Resolve only a descriptor's canonical identity; the returned path is for capture, never an authority token. */
 export function skillDirectoryPath(roots: SkillRoots, descriptor: LocalSkillDescriptor): string {
   if (!validName(descriptor.name)) throw new TypeError("invalid skill name")
