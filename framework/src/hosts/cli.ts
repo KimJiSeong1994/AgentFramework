@@ -1,9 +1,11 @@
 #!/usr/bin/env bun
 import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs"
+import { homedir } from "node:os"
 import { isAbsolute, relative, resolve, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import { loadConfig } from "../config.ts"
+import { harnessProfile, renderProfile } from "../harness/profile.ts"
 import { renderStatusDetail, renderStatusSnapshot, StatusReadError, statusJson } from "../flow/status.ts"
 import { readWorkflow, workflowEngineRefusal, type Workflow } from "../flow/state.ts"
 import type { WorkflowEnvelope } from "../workflows/types.ts"
@@ -53,6 +55,10 @@ not OpenCode. The model picker lists bounded native choices when available; expl
 also accepted. In chat, /model shows the current selection and picker, /model <engine> <native-id>
 switches directly, and /help lists local commands. A switch requires no active workflow, valid
 workflow state and settled execution ownership, and starts a new conversation context. Plans require a separate local human approval.
+Harness profile (read-only, no model call):
+  otter harness profile [--worktree PATH] [--json]   code-owned identity of the agent: components c1..c8 (not proposable)
+                                                      plus the proposable task-data overlays, role policy IDs, skill hashes
+                                                      and one fingerprint. Describes identity, not quality.
 Role combo: chat.combo in otter.jsonc routes planner/architect/critic/worker/reviewer roles to other engines and models;
 roles without a route use the main model. /model combo (or the "combo" entry in the /model engine list) opens a menu
 (role -> engine -> model) that saves it; typed forms /model combo show, /model combo <role> <engine> <native-id>,
@@ -767,6 +773,10 @@ function main(argv: string[]): void {
     console.log(CLI_USAGE)
     return
   }
+  if (argv[0] === "harness") {
+    harnessCli(argv.slice(1)).then(text => { console.log(text) }).catch(error => failCli(error, "harness"))
+    return
+  }
   if (argv[0] === "auth" || argv[0] === "login" || argv[0] === "logout") {
     authCli(argv).then(code => { process.exitCode = code }).catch(failCli)
     return
@@ -787,6 +797,30 @@ function main(argv: string[]): void {
     command = args.command
     runCli(args).then(text => { if (text) console.log(text) }).catch(error => failCli(error, command))
   } catch (error) { failCli(error, command) }
+}
+
+/** `otter harness profile [--worktree PATH] [--json]`: read-only identity profile; builds no runtime and calls no model. */
+export async function harnessCli(argv: readonly string[]): Promise<string> {
+  const [sub, ...rest] = argv
+  if (sub !== "profile") throw new CliUsageError("usage: otter harness profile [--worktree PATH] [--json]")
+  let json = false
+  let worktreeArg: string | undefined
+  for (let index = 0; index < rest.length; index++) {
+    const flag = rest[index]!
+    if (flag === "--json" && !json) json = true
+    else if (flag === "--worktree" && worktreeArg === undefined && rest[index + 1] && !rest[index + 1]!.startsWith("--")) worktreeArg = rest[++index]!
+    else throw new CliUsageError("usage: otter harness profile [--worktree PATH] [--json]")
+  }
+  let worktree: string
+  try {
+    worktree = realpathSync(worktreeArg ?? process.cwd())
+    if (!statSync(worktree).isDirectory()) throw new Error()
+    accessSync(worktree, constants.R_OK | constants.X_OK)
+  } catch {
+    throw new CliUsageError("--worktree must name an accessible directory; check the path and permissions")
+  }
+  const profile = await harnessProfile(loadConfig(worktree), worktree, { homeDirectory: homedir() })
+  return json ? JSON.stringify(profile) : renderProfile(profile)
 }
 
 /**
