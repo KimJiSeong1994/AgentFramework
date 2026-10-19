@@ -79,6 +79,12 @@ export type QueueOrigin = {
    * and reviewer root is this worktree, nothing merges per task, and the queue never creates or re-baselines it.
    */
   planWorktree?: TaskWorktree
+  /**
+   * Same-task probe (harness/probe-flow.ts): requires `planWorktree`, which must be the managed worktree of `scope` and start from
+   * exactly `baseTree`, else the run is refused. A probe never merges (the human applies it later), has no in-place fallback,
+   * runs one attempt only, and its worker prompt carries no earlier-task handoff. Data tasks are refused.
+   */
+  probe?: { scope: string; baseTree: string }
 }
 
 export type Queue = {
@@ -442,10 +448,14 @@ export function createQueue(deps: ExecutionRuntime): Queue {
   }
 
   /** The supplied plan worktree must be the authenticated managed worktree of this session and of every open task's workflow. */
-  function assertPlanWorktreeOwner(sessionID: string, plan: TaskWorktree, ledger: ReturnType<typeof readLedger>): void {
+  function assertPlanWorktreeOwner(sessionID: string, plan: TaskWorktree, ledger: ReturnType<typeof readLedger>, probeScope?: string): void {
     const owner = taskWorktreeOwner(plan.path)
     if (!owner || owner.sessionID !== sessionID || owner.mainWorktree !== realpathSync.native(deps.worktree)) {
       throw new Error("plan worktree recovery refused: the supplied worktree is not this session's managed worktree")
+    }
+    if (probeScope !== undefined) {
+      if (owner.taskId !== probeScope) throw new Error("probe worktree is not the managed worktree of the probe scope; refused")
+      return
     }
     for (const task of ledger.tasks) {
       if (task.kind === "data" || (task.status !== "running" && task.status !== "pending")) continue
@@ -525,7 +535,16 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     const reopenedWorktrees = new Map<string, TaskWorktree>()
     // Ownership and the original durable baseline must be authenticated before repairing any running-task
     // ledger state. In particular, do not let a missing or substituted worktree become a fresh baseline.
-    if (origin?.planWorktree) assertPlanWorktreeOwner(sessionID, origin.planWorktree, ledger)
+    if (origin?.probe) {
+      if (!origin.planWorktree) throw new Error("probe refused: a probe requires its isolated worktree; there is no in-place fallback")
+      if (ledger.tasks.some(task => task.kind === "data" && (task.status === "running" || task.status === "pending"))) {
+        throw new Error("probe refused: data tasks cannot be probed")
+      }
+      assertPlanWorktreeOwner(sessionID, origin.planWorktree, ledger, origin.probe.scope)
+      if (origin.planWorktree.baseline.tree !== origin.probe.baseTree) {
+        throw new Error("probe baseline tree does not match the recorded base tree; refused")
+      }
+    } else if (origin?.planWorktree) assertPlanWorktreeOwner(sessionID, origin.planWorktree, ledger)
     for (const task of ledger.tasks) {
       if (origin?.planWorktree) {
         if (task.kind !== "data" && hasTaskWorktreeState(deps.worktree, sessionID, task.id)) {
@@ -596,7 +615,9 @@ export function createQueue(deps: ExecutionRuntime): Queue {
 
   async function runTask(sessionID: string, entry: Active, task0: LedgerTask, result: QueueRun, origin?: QueueOrigin, reopenedWorktree?: TaskWorktree): Promise<LedgerTask> {
     if (task0.kind === "data") return runDataTask(sessionID, entry, task0, origin)
-    const c = cfg()
+    // A probe is one attempt: a failure-reason retry would change the task the contrast is measured on.
+    // Review is off too: the contrast signal is the deterministic verify outcome, not a model verdict.
+    const c = origin?.probe ? { ...cfg(), max_attempts: 1, review: false } : cfg()
     let task = task0
     let ledger = readLedger(deps.worktree, sessionID)
     let rejectReason: string | undefined
@@ -665,7 +686,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
         entry.attempt = attempt
         observeTaskStart(attempt)
 
-        const worker = await runChild(deps, entry, sessionID, "worker", `otter task ${task.n}: ${task.title}`, workerPrompt(ledger, task, rejectReason, c.handoff_context_chars), c.task_ttl_ms, (child) => {
+        const worker = await runChild(deps, entry, sessionID, "worker", `otter task ${task.n}: ${task.title}`, workerPrompt(ledger, task, rejectReason, origin?.probe ? 0 : c.handoff_context_chars), c.task_ttl_ms, (child) => {
           ledger = writeLedger(deps.worktree, { ...ledger, running: { taskId: task.id, childSessionID: child, since: Date.now() } })
         }, wt?.path ?? planRoot, attempt)
         task = { ...task, workerSessionID: worker.sessionID ?? task.workerSessionID, childSessions: [...task.childSessions, ...(worker.sessionID ? [worker.sessionID] : [])] }
@@ -1039,7 +1060,7 @@ export function workerPrompt(ledger: Ledger, task: LedgerTask, previousFailure: 
   if (task.verify) lines.push(`The framework will run this verification after your edits; do not run it: ${task.verify}`)
   const prot = protectedFiles(task)
   if (prot.length) lines.push(`Never edit ${prot.join(", ")}. If the check cannot pass with honest code, report that under Open issues.`)
-  const ctx = handoffContext(ledger, task.id, contextChars)
+  const ctx = contextChars > 0 ? handoffContext(ledger, task.id, contextChars) : ""
   if (ctx) lines.push("", ctx)
   if (previousFailure) {
     lines.push(

@@ -1193,6 +1193,28 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
 - Modes (`ulw`, `plan`) as <= 300-char suffixes on the user message, state under `$XDG_STATE_HOME/otter/<repo-hash>/`.
 - Acceptance: prefix <= 8K tokens, zero repeated identical calls, fib task done in < 5 min.
 
+## Same-task probes (harness2-inspired)
+
+`scripts/otter-probe.ts` runs one task several times in isolated worktrees and shows you the verify outcomes side by side, so you can see whether a short approach overlay changed what the deterministic check did. It is a script, not a workflow kind; nothing in it approves, merges or adopts anything.
+
+```
+bun scripts/otter-probe.ts propose --task "<title>" --detail "<text>" --verify "<allow-listed test cmd>" [--k 2] --engine local|codex|claude --model <id>
+bun scripts/otter-probe.ts approve --wid <id> --sha <subject sha printed by propose>
+bun scripts/otter-probe.ts run     --wid <id>
+bun scripts/otter-probe.ts show    --wid <id>
+bun scripts/otter-probe.ts apply   --wid <id> <label>      # base1.. | inv | dom
+bun scripts/otter-probe.ts discard --wid <id>
+```
+
+- `propose` runs two read-only researcher turns: an INV overlay (how to work) and a DOM overlay (what a practitioner knows). A model may propose only that overlay text (at most 1200 bytes, no secrets, no absolute paths, no test-edit text); an empty or `KEEP_BASE` answer spends no probe and an invalid one is recorded and skipped. The overlay reaches the worker only as part of the task detail in its user message. System prompts, guardrails, tool guidance, roles, scripts, plugins, hooks and skills are not proposable, and role policy ids are identical across base, inv and dom. Newest admitted lessons (see `src/harness/lessons.ts`) are shown to these two turns as reference data, never to workers.
+- `approve` writes a write-once receipt bound to the sha256 of the canonical subject (task, verify, overlays, HEAD and working-tree snapshot, harness profile fingerprint, `k`, routes). Any changed byte is a new subject and needs a new approval. `run` refuses without a matching receipt, and refuses if HEAD, the working tree or the profile changed since `propose`.
+- `run` executes `k` unmodified bases, then `inv`, then `dom`, one at a time. Each is one worker session plus the verify command, in its own worktree `probe-<id>-<label>`, with one attempt, no earlier-task handoff, no reviewer and no merge. Commands run only through the framework verifier and `delegate.verify_allow`. A repository without a commit is refused; there is no in-place fallback. Your checkout is byte-identical until you `apply`. After the run, one read-only reflector turn may add at most one lesson; code admits it only if every cited row is a clean one-overlay contrast whose verify outcome differs from `k>=2` consistent base runs.
+- `show` prints, per run: label, overlay, verify ok/exit, diff stat, duration, valid. `apply` applies exactly that probe's diff (only a valid run whose verify passed) and removes that worktree; `discard` removes the rest. Records under the state root stay as evidence.
+
+Cost: each probe is one worker session (`task_ttl_ms`) plus one verify (`verify_timeout_ms`), and the default is `k=2`, so up to 4 probes plus 3 short read-only turns. No latency figure is claimed.
+
+Not claimed: a passing probe does not show that the overlay caused the pass (one run per variant, sampling variance), a verify pass does not show correctness, and nothing here reproduces or supports the harness2 paper's results or any generality beyond this repository and task. Attribution is in `src/workflows/ATTRIBUTION`. `test/harness-probe.test.ts` uses a scripted fake host and is not live-model proof.
+
 ## Layout
 
 ```
