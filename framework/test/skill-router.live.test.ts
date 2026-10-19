@@ -21,7 +21,8 @@ test.skipIf(!host || !endpoint)("real host catalog -> live OpenJev -> applied op
   const deps: HookDeps = {
     worktree: root, directory: root,
     client: createOpencodeClient({ baseUrl: host, directory: root }),
-    config: { ...loadConfig(root), skill_router: { ...DEFAULT_CONFIG.skill_router, mode: "shadow", endpoint: endpoint!, timeout_ms: 3000 } },
+    config: { ...loadConfig(root), skill_router: { ...DEFAULT_CONFIG.skill_router, mode: "shadow", endpoint: endpoint!, timeout_ms: 3000 },
+      memory: { ...DEFAULT_CONFIG.memory, engine: "jev" } },
     log: (message, extra) => logs.push({ message, extra }),
   }
   const text = "Before changing authentication, investigate the dependencies and provide a numbered implementation plan with files, risks and verification steps. Do not edit anything."

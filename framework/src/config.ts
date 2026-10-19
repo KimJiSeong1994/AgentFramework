@@ -171,7 +171,9 @@ export type OtterConfig = {
   /** Optional per-turn advice, never execution authorization. Only project-local skills are considered. */
   skill_router: {
     mode: "off" | "shadow" | "suggest"
+    /** OpenJev server for skill routing when `memory.engine` is `jev`; unused with the Claude/Codex CLI engines. */
     endpoint: string
+    /** OpenJev request budget; a Claude/Codex CLI judgment uses `min(memory.timeout_ms, 15 s)`. */
     timeout_ms: number
     min_probability: number
     min_margin: number

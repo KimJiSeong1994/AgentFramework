@@ -25,6 +25,7 @@ beforeEach(() => {
   config.skills.allow = ["plan", "review"]
   config.skill_router.mode = "shadow"
   config.skill_router.endpoint = "http://127.0.0.1:8080"
+  config.memory = { ...config.memory, engine: "jev" }
   deps = { directory: worktree, worktree, config, log() {} }
   skill("plan", "Plan relevant implementation work.")
   skill("review", "Review a proposed implementation.")

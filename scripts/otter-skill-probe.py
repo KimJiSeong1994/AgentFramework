@@ -123,6 +123,7 @@ def configure_scenario(work, scenario, observer=None, router_endpoint=None):
             skills.append(MISSING_SKILL)
     if scenario == "advice-only":
         config["skill_router"] = {"mode": "suggest", "endpoint": router_endpoint, "timeout_ms": 1000}
+        config["memory"] = {**config.get("memory", {}), "engine": "jev"}
     if scenario == "verify-failure":
         config["disabled_hooks"] = [hook for hook in config.get("disabled_hooks", [])
                                     if hook not in ("tool.delegate", "loop.idle")]

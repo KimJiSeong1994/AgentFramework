@@ -18,6 +18,8 @@ export type RoutingDecision = {
   candidates: string[]
   thresholds: { minProbability: number; minMargin: number; timeoutMs: number } | null
   scores: RoutingScores | null
+  /** Judging engine (claude/codex/local/jev); absent means the OpenCode path's OpenJev. */
+  engine?: string
 }
 
 function identifier(value: string): string {
@@ -61,7 +63,7 @@ export function recordRoutingDecision(deps: CoreDeps, decision: RoutingDecision)
     }
     append(deps, d.sessionID, {
       event: "decision", decisionID: identifier(d.decisionID), sessionID: identifier(d.sessionID), messageID: identifier(d.messageID),
-      model: "jev-latest", mode: d.mode, skill: d.skill === null ? null : identifier(d.skill), reason: identifier(d.reason),
+      model: d.engine === undefined || d.engine === "jev" ? "jev-latest" : identifier(d.engine), mode: d.mode, skill: d.skill === null ? null : identifier(d.skill), reason: identifier(d.reason),
       elapsedMs: d.elapsedMs, requestSent: d.requestSent, candidates: d.candidates.map(identifier),
       thresholds: d.thresholds && { minProbability: d.thresholds.minProbability, minMargin: d.thresholds.minMargin, timeoutMs: d.thresholds.timeoutMs }, scores,
     })

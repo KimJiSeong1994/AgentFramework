@@ -1,0 +1,99 @@
+{
+  "schema": "otter-skill-route-eval.v1",
+  "recordedAt": "2026-10-19T08:48:33.124Z",
+  "gateTarget": {
+    "precision": 0.95,
+    "noneFalsePositive": 0.02,
+    "p95Ms": 15000
+  },
+  "gate": {
+    "precision": true,
+    "noneFalsePositive": false,
+    "p95Ms": true,
+    "nonTrivial": true,
+    "transportHealthy": true
+  },
+  "passed": false,
+  "metrics": {
+    "cases": 132,
+    "candidates": [
+      "computer-use",
+      "find-skills",
+      "llm-wiki",
+      "orca-cli",
+      "orchestration",
+      "plan",
+      "typesafe-ai",
+      "ulw"
+    ],
+    "picked": 62,
+    "precision": 0.9516129032258065,
+    "noneAnswered": 68,
+    "noneFalsePositive": 0.04411764705882353,
+    "adversarialFalsePositive": 0.10344827586206896,
+    "recall": 0.921875,
+    "p50Ms": 4921,
+    "p95Ms": 6596,
+    "reasons": {
+      "recommended": 62,
+      "abstained": 70
+    },
+    "thresholds": {
+      "minProbability": 0.95,
+      "minMargin": 0.2,
+      "timeoutMs": 15000
+    },
+    "engine": "codex",
+    "measurementTimeoutMs": null
+  },
+  "errors": [
+    {
+      "text": "Compile the pending wiki sources into concept pages",
+      "expect": "llm-wiki",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Break the migration into tasks, hand them to workers, and report the result",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Fan this out into independent worker tasks and give me the final report",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "Decompose implementing the five new commands into delegated tasks",
+      "expect": "ulw",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "How do I extend my agent with new skills from the ecosystem?",
+      "expect": "find-skills",
+      "skill": null,
+      "reason": "abstained"
+    },
+    {
+      "text": "What is the plan skill for?",
+      "expect": "none",
+      "skill": "plan",
+      "reason": "recommended"
+    },
+    {
+      "text": "Use the OMX worker protocol: ACK the mailbox task",
+      "expect": "none",
+      "skill": "orchestration",
+      "reason": "recommended"
+    },
+    {
+      "text": "omx_wiki에 이 결정 기록해줘",
+      "expect": "none",
+      "skill": "llm-wiki",
+      "reason": "recommended"
+    }
+  ]
+}

@@ -154,3 +154,35 @@
   - 위 맥락 후속 요청은 의도 분류에서 "under-specified" 제안이 먼저 뜬다. 기존 동작이며, "Continue in chat"을 고르면 진행된다.
 - Claude 엔진은 CLI가 로그인되어 있지 않아(`loggedIn: false`) 실측하지 못했다.
 - OpenJev는 지금도 요청 1건에 약 64초가 걸린다(여유 메모리 10%). 그래서 '스킬 없음' 케이스의 오탐률은 여전히 미측정이다. 이 선택기는 이제 의도 제안 순서에만 쓰인다.
+
+## 9. 판단 엔진을 OpenJev에서 Claude/Codex로 통일 (2026-10-19)
+
+결정 사항: 판단은 OpenJev가 아니라 Claude/Codex가 각자 지원하는 기능으로 한다(메모리 recall은 이미 `memory.engine: auto`로 그렇게 동작). 이번 작업에서 남아 있던 OpenJev 직접 호출을 같은 경로로 옮겼다.
+
+- 공통 판단 모듈 `framework/src/routing/judge.ts`(`judgeChoice`)
+  - 엔진: claude/codex/local CLI(도구 없이 실행) 또는 jev.
+  - 엔진 선택은 `memory.engine`을 그대로 따른다. `auto`는 claude가 먼저, 없으면 codex이고, 모델을 지정하지 않으면 claude-haiku-5-5 / gpt-5.6-luna.
+- 옮긴 곳
+  - 메모리 recall: 동작 변화 없이 `judgeChoice`를 쓰도록만 정리(테스트 23/23).
+  - `otter chat`의 의도 제안 순위.
+  - OpenCode 플러그인의 스킬 조언(`skill_router`, 이 저장소는 suggest 모드).
+  - 평가 스크립트(`--engine auto|claude|codex|jev`).
+- 남은 OpenJev 경로: `memory.engine: jev`로 설정했을 때만 호출한다. 메모리는 `memory.endpoint`, 스킬 판단은 `skill_router.endpoint`를 쓴다. `skill_router.endpoint`는 지우지 않았다. 지우면 동결된 역할 정책 ID 해시가 바뀌어 기록된 실행·워크플로 재개가 깨지기 때문이다.
+- 시간 제한
+  - CLI 판단은 몇 초가 걸리므로 `min(memory.timeout_ms, 15 s)`를 쓴다.
+  - jev는 기존 `skill_router.timeout_ms`(기본 1초)를 쓴다.
+  - OpenCode suggest 모드에서는 메시지마다 CLI 판단 몇 초가 더해진다. 대신 메시지 텍스트와 스킬 이름·설명이 해당 벤더로 전송된다.
+- 실측(132건, 라벨 데이터)
+
+  | 엔진 | 게이트 | 고른 수 | 정밀도 | 'none' 오탐 | 재현율 | p95 |
+  |---|---|---|---|---|---|---|
+  | claude-haiku-5-5 | 통과 | 9 | 9/9 | 0/68 (적대 0) | 14% | 4.9초 |
+  | gpt-5.6-luna | 실패 | 62 | 95% | 3/68 | 92% | 6.6초 |
+
+  - Codex 오탐 3건: "What is the plan skill for?", OMX worker 요청 → orchestration, `omx_wiki` 기록 → llm-wiki.
+  - `auto`는 claude를 먼저 쓰므로 기본 경로는 게이트를 통과한다. Codex만 설치된 환경은 오탐 위험이 있다(의도 제안 순서에만 영향, 자동 시작 없음).
+  - 이전에 막혀 있던 'none' 오탐률을 이번에 처음으로 측정했다.
+- 실제 `otter chat` E2E에 Claude 엔진을 추가했다(로그인 후, claude-haiku-5-5).
+  - 맥락 후속 요청에서 release-notes, SQL 리뷰에서 sql-style을 불러왔다.
+  - 무관한 턴은 스킬을 불러오지 않았다.
+  - 동의 창은 0회였다. 2회 실행 모두 같은 결과(`artifacts/skill-tool-smoke/chat-e2e-2026-10-19.txt`).

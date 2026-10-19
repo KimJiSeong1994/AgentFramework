@@ -162,6 +162,7 @@ beforeEach(() => {
       disabled_hooks: ["tool.delegate"],
       skills: { allow: ["plan"] },
       skill_router: { ...DEFAULT_CONFIG.skill_router, mode: "shadow", endpoint: `http://127.0.0.1:${server.port}` },
+      memory: { ...DEFAULT_CONFIG.memory, engine: "jev" },
     },
     client: hostClient(),
     log: (message, extra) => logs.push({ message, extra }),
