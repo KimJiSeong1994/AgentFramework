@@ -269,7 +269,15 @@ opens an inline editor. The chosen label or typed text is recorded as the answer
 prompt (where `/finish`, `/pause`, `/cancel` still work). Options are stored next to the question
 (`rounds/<n>-question.options.json`); the question text and its hash are unchanged. Readline prints the numbered
 options and accepts a bare number or free text. Beneath it sit up to two status rows, a rule
-carrying the `⬢ engine / model` badge and scroll position, and a bordered composer.
+carrying the `⬢ engine / model` badge, the workspace (`⑂ branch / ~/path`, read from `.git/HEAD` at most every
+two seconds; `git:branch` in ASCII) and scroll position, and a bordered composer. An empty composer shows a muted
+hint naming only what works in the current context (`Type a message · / commands · ! shell · …`; `Session held ·
+/status explains …` while held); it is never part of the draft and is omitted under `NO_COLOR`, where it would read
+as typed text. While chat is held the status row says why in words (`deep-interview workflow owned by another
+session`, beside the `safety[…]` markers), the hint row names the way out in the same order Enter checks it
+(`Observer · /status · /resume <owner> opens the owner`, `Session held · /continue reviews and resumes`, …), and
+the home panel replaces "Get started" with "Session held". The `/` palette uses GJC rows: a `❯` cursor, aligned
+names, descriptions clipped with `…`, and a `(n/N) · ↑↓ move · Tab/Enter insert · Esc dismiss` footer.
 
 Tool calls read like GJC: `✔ Read framework/test/cli-progress.test.ts:120-140 · 42ms`, `✔ Edit calc.py ⟦+2 / -1⟧ · 8ms`,
 `✘ Grep "todo" in src · 15ms`, with the call/task facts on a muted line beneath (`▸ #1 · execution not observed ·

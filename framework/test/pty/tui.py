@@ -1395,7 +1395,7 @@ def run_skills(temp_root: Path):
         assert_no_source_choice(session, "catalog listing")
 
         # GJC-style `/` palette: a fuzzy, typo-tolerant name lists the skill beside its description.
-        palette_row = re.compile(r"> skill:pty-inspect\s{2,}Inspect the PTY fixture project")
+        palette_row = re.compile(r"❯ skill:pty-inspect\s{2,}Inspect the PTY fixture project")
         session.send_text("/pty-insepct")
         session._wait(lambda: palette_row.search(session.screen.current_text()) is not None, "fuzzy / palette lists the skill")
         session.send(b"\r")
@@ -2498,7 +2498,7 @@ def run_cancel_unconfirmed(temp_root: Path):
             raise AssertionError("a cancelled label was shown before proof")
         # The interrupted run returns to the held prompt; a pending cancel then blocks /continue.
         session.wait_screen("[final] Workflow")
-        session.wait_screen("Enter send")
+        session.wait_screen("Session held · /continue reviews and resumes")
         session.send_text("/continue\r")
         session.wait_screen("Resume refused: workflow cancellation is pending")
         session.send_text("/status\r")
