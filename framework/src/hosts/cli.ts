@@ -12,6 +12,7 @@ import type { WorkflowEnvelope } from "../workflows/types.ts"
 import type { HookDeps } from "../hooks/types.ts"
 import { getOpenCodeRuntime } from "./opencode-runtime.ts"
 import { createForegroundController } from "./controller.ts"
+import { settled } from "./run-state.ts"
 import { incompleteArtifactSummary } from "../workflows/artifacts.ts"
 import { humanDecision, type DecisionBinding } from "./operator.ts"
 import { createCliRuntime } from "./cli-runtime.ts"
@@ -22,7 +23,7 @@ import { InteractiveLaunchError, launchInteractive, parseInteractiveArgs } from 
 import { createStatusWatchState, watchTick } from "./status-watch.ts"
 import { admissionEpoch, admissionFence, attachAdmission, detachAdmission, effectiveHold, isAdmissionCurrent, resumeAdmission } from "../sessions/admission.ts"
 import type { SessionStore } from "../sessions/store.ts"
-import { getOwnedSession, readSessionMetadata } from "../sessions/store.ts"
+import { getOwnedSession, readSessionMetadata, sessionWasRebound } from "../sessions/store.ts"
 import { assertSDKSessionQuiescent, readSDKResumeIdentity } from "../sessions/sdk-quiescence.ts"
 import { captureSDKSessionLifetime } from "../sessions/sdk-transcript.ts"
 import { assertNever, isCancelPending, stopDisplay } from "../workflows/types.ts"
@@ -443,8 +444,10 @@ function validateCliOwnerIdentity(runtime: ExecutionRuntime, sessionID: string, 
 
 /** Pinned-route evidence is checked before attachment can rebind or mutate anything: tampered metadata routes change the role policy IDs. */
 function assertPinnedPolicyEvidence(runtime: ExecutionRuntime, sessionID: string): void {
+  const rebound = sessionWasRebound(runtime.worktree, sessionID)
   for (const execution of runtime.runs.status().executions) {
-    if (execution.ownerSession !== sessionID || execution.kind !== "host") continue
+    // After an in-place model rebind, settled executions keep the policy they ran under; unsettled ones must match.
+    if (execution.ownerSession !== sessionID || execution.kind !== "host" || (rebound && settled(execution))) continue
     const role = EXECUTION_ROLES.find(candidate => candidate === execution.role)
     if (!role || !execution.policyID || execution.policyID !== runtime.policy.resolve(role).id) throw new Error(HOST_POLICY_MISMATCH)
   }

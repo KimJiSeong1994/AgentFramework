@@ -95,6 +95,15 @@ export function restoreTranscript(
         if (message.role === "user") history.push(message.text as string)
         model.append({ provenance: message.role as "user" | "assistant", text: message.text as string })
       }
+    } else if (record.kind === "model-rebind") {
+      const side = (value: unknown): string | undefined => {
+        const item = value as { engine?: unknown; model?: unknown } | null
+        return item && typeof item === "object" && typeof item.engine === "string" && typeof item.model === "string" ? `${item.engine} / ${item.model}` : undefined
+      }
+      const from = side(data.from)
+      const to = side(data.to)
+      if (!from || !to) throw new Error("invalid stored model rebind")
+      model.append({ provenance: "notice", text: `Model changed in place: ${from} -> ${to}${typeof data.workflowID === "string" ? ` (workflow ${data.workflowID})` : ""}` })
     } else if (record.kind === "workflow-choice" || record.kind === "workflow-stage") {
       if (typeof data.text === "string") model.append({ provenance: "notice", text: data.text })
     }

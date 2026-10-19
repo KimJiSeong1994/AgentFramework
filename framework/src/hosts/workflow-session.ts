@@ -61,7 +61,7 @@ export type WorkflowHostContext = {
 export type WorkflowOutcome = { quit: boolean }
 
 const ANSWER_HINT = "Answer · /finish ends early · /pause · /cancel · /status · /quit"
-const COMMANDS_BLOCKED_WHILE_ANSWERING = /^\/(help|skills|continue|model|new|resume|sessions|plan|skill:[a-z0-9_-]*)(\s|$)/u
+const COMMANDS_BLOCKED_WHILE_ANSWERING = /^\/(help|skills|continue|new|resume|sessions|plan|skill:[a-z0-9_-]*)(\s|$)/u
 
 /** `kind · stage · phase|stop label` of the committed workflow, plus the facts a reader needs; recomputed from committed state. */
 /** Structured stage facts for the input-box progress bar; goal counts only where the state records them. */
@@ -134,6 +134,8 @@ export type WorkflowHost = {
   continueActive(wf: WorkflowEnvelope): Promise<WorkflowOutcome>
   /** Refresh the status segment from committed state (clears it when no planning workflow is live). */
   syncStatus(): void
+  /** A `/model` line typed at the answer prompt, to be run by the session prompt; consumed once. */
+  takeDeferredCommand(): string | undefined
 }
 
 type DriveResult = WorkflowOutcome
@@ -144,6 +146,7 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
   const { terminal, worktree } = ctx
   let lastStatus: string | undefined
   let quit = false
+  let deferredCommand: string | undefined
 
   const write = (text: string) => terminal.write(terminalSafeText(text.endsWith("\n") ? text : `${text}\n`))
 
@@ -197,6 +200,32 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
       },
       notice: text => write(text),
       async readAnswer(open, signal) {
+        /**
+         * A `/command` at the answer prompt or in the "Other" editor. `continue` asks for another line; `literal` means
+         * the slash text is not a command and is the answer as typed.
+         */
+        const answerPromptCommand = (text: string): { result: DiAnswer | undefined } | "continue" | "literal" => {
+          if (text === "/finish") return { result: { kind: "finish" } }
+          if (text === "/status") { write(ctx.statusText()); return "continue" }
+          if (text === "/pause" || text === "/cancel") {
+            const stop = requestWorkflowStop(ctx.runtime(), worktree, ctx.sessionID(), text === "/pause" ? "pause" : "cancel")
+            write(stop.text)
+            return { result: undefined }
+          }
+          if (text === "/quit" || text === "/exit") { quit = true; return { result: undefined } }
+          if (/^\/model(\s|$)/u.test(text)) {
+            // No turn is running while the interview awaits an answer: hand the command to the session prompt, which
+            // rebinds in place; the next plain line is then this interview's answer on the new model.
+            deferredCommand = text
+            write("Changing the model; type your answer afterwards to continue the interview.")
+            return { result: undefined }
+          }
+          if (COMMANDS_BLOCKED_WHILE_ANSWERING.test(text)) {
+            write("That command is unavailable while an interview awaits an answer: answer, /finish, /pause, /cancel, /status or /quit.")
+            return "continue"
+          }
+          return "literal"
+        }
         if (pending) { const answer = pending; pending = undefined; return answer }
         const active = signal ?? ctx.processSignal
         const options = open.options
@@ -215,6 +244,12 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
             let text: string | undefined
             if (picked?.kind === "option") text = options[picked.index]
             else if (picked?.kind === "custom") text = picked.text.trim().slice(0, DI_MAX_ANSWER_CHARS)
+            // A command typed into the "Other" editor (e.g. /model, /finish) is handled like the chat prompt, never recorded as an answer.
+            if (text?.startsWith("/") && picked?.kind === "custom") {
+              const command = answerPromptCommand(text)
+              if (typeof command === "object") return command.result
+              if (command === "continue") text = undefined
+            }
             if (text) {
               ctx.persist("user", { text })
               return { kind: "answer", text }
@@ -232,17 +267,10 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
           if (line === undefined || active.aborted) return undefined
           const text = line.trim()
           if (!text) continue
-          if (text === "/finish") return { kind: "finish" }
-          if (text === "/status") { write(ctx.statusText()); continue }
-          if (text === "/pause" || text === "/cancel") {
-            const stop = requestWorkflowStop(ctx.runtime(), worktree, ctx.sessionID(), text === "/pause" ? "pause" : "cancel")
-            write(stop.text)
-            return undefined
-          }
-          if (text === "/quit" || text === "/exit") { quit = true; return undefined }
-          if (COMMANDS_BLOCKED_WHILE_ANSWERING.test(text)) {
-            write("That command is unavailable while an interview awaits an answer: answer, /finish, /pause, /cancel, /status or /quit.")
-            continue
+          if (text.startsWith("/")) {
+            const command = answerPromptCommand(text)
+            if (typeof command === "object") return command.result
+            if (command === "continue") continue
           }
           if (options && /^[0-9]+$/u.test(text)) {
             const picked = Number(text)
@@ -580,5 +608,11 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
     return drive(wf)
   }
 
-  return { start, finish, answer, continueActive, syncStatus }
+  function takeDeferredCommand(): string | undefined {
+    const text = deferredCommand
+    deferredCommand = undefined
+    return text
+  }
+
+  return { start, finish, answer, continueActive, syncStatus, takeDeferredCommand }
 }

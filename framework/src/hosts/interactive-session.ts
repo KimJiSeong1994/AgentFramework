@@ -17,6 +17,7 @@ import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, logoutArgv, runVendo
 import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus, type CliToolDisplay } from "./cli-progress.ts"
 import { formatDuration, type WorkflowProgress } from "../tui/progress.ts"
 import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, skillInstructionBudget, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
+import type { WorkflowEnvelope } from "../workflows/types.ts"
 import { PROTECTED_WORKFLOWS, resolveSkillRoots } from "../skills/roots.ts"
 import { chatIntentMode, chatWorktreeMode } from "../config.ts"
 import { classifyIntent, hasIntentForcePrefix, INTENT_CLASSIFIER, type IntentClass } from "../modes/detect.ts"
@@ -24,7 +25,7 @@ import { claimPreparedSkillInvocation, SkillSession, type AutoSkillCandidate, ty
 import { readSkillTrust, type SkillTrustLookup } from "../skills/trust.ts"
 import { createAutoSkillSelector, type AutoSkillSelection } from "../routing/router.ts"
 import { recordSkillToolLoad } from "../telemetry/routing.ts"
-import { attachAdmission, detachAdmission, effectiveHold, holdAdmission, resumeAdmission } from "../sessions/admission.ts"
+import { attachAdmission, detachAdmission, effectiveHold, holdAdmission, rebindAdmissionModel, resumeAdmission } from "../sessions/admission.ts"
 import { canonicalRoutes, inspectSessions, MAX_CARRIED_MESSAGES, routesKey, MAX_SHELL_COMMAND_BYTES, MAX_SHELL_LINES, MAX_SHELL_OUTPUT_BYTES, readSessionMetadata, replaySession, type SessionStore, type ReplayOptions, type ReplayResult, type TranscriptKind } from "../sessions/store.ts"
 import { persistToolActivity } from "../tui/session-transcript.ts"
 import { createForegroundController, PlanIsolationUnavailableError, readForegroundStatus, type ForegroundController } from "./controller.ts"
@@ -1926,6 +1927,74 @@ export async function runInteractiveSession(
       }
     }
 
+    /** The live workflow owned by this session whose model may be changed in place (not held, stopped or foreign). */
+    function rebindableWorkflow(): WorkflowEnvelope | undefined {
+      try {
+        if (retainedSDKSessionID || !sessionStore || !attachedRuntime) return undefined
+        const wf = activeAnyWorkflow(worktree)
+        return wf && wf.sessionID === selection.sessionID && !effectiveHold(worktree, selection.sessionID) ? wf : undefined
+      } catch { return undefined }
+    }
+
+    /**
+     * Change the model/routes under an active workflow in place: same session ID, same history, same workflow. Only at a
+     * step boundary (the switch guard refuses while any execution or activity is unsettled) and never across engines.
+     */
+    async function rebindSelection(wf: WorkflowEnvelope, nextEngine: CliEngine, nextModel: string, nextRoutes: ComboRoutes, discovery: InteractiveViewFacts["discovery"], comboNotice: string | undefined): Promise<boolean> {
+      if (nextEngine !== wf.engine) {
+        terminal.write(terminalSafeText(`Model switch refused: the active workflow ${wf.id} runs on ${wf.engine}; pick another ${wf.engine} model, or finish/cancel the workflow to switch engines.\n`))
+        return true
+      }
+      const guard = acquireSwitchGuard(true)
+      if (!guard.release) {
+        terminal.write(guard.refusal ?? "Model switch refused; current selection is unchanged.\n")
+        return true
+      }
+      const store = sessionStore!
+      try {
+        let prior: ConversationMessage[]
+        try { prior = restoredConversation(selection.sessionID) }
+        catch {
+          terminal.write("Model switch refused: the current conversation could not be read in full; selection and conversation are unchanged.\n")
+          return true
+        }
+        const nextProgress = scopedProgress()
+        const runtime = deps.createRuntime({ worktree, engine: nextEngine, model: nextModel, progress: nextProgress.sink, ...(Object.keys(nextRoutes).length ? { routes: nextRoutes } : {}) })
+        runtime.linuxAdmission?.assertBootEpoch()
+        await deps.admitRuntime(runtime)
+        if (abort.signal.aborted) return false
+        const controller = deps.createController(runtime)
+        const conversation = deps.createConversation(runtime, selection.sessionID, prior.length ? prior : undefined)
+        if (abort.signal.aborted) return false
+        // The admission check below requires no live local activity, so the guard's own activity is released first.
+        guard.release()
+        const changed = rebindAdmissionModel(runtime, selection.sessionID, store.epoch, { engine: nextEngine, model: nextModel, ...(Object.keys(nextRoutes).length ? { routes: nextRoutes } : {}) })
+        nextProgress.bind(store)
+        attachedRuntime = runtime
+        requestObservation = { state: "not-observed" }
+        discoveryObservation = discovery
+        selection = { engine: nextEngine, model: nextModel, routes: nextRoutes, sessionID: selection.sessionID, runtime, controller, conversation }
+        const side = (value: { engine: string; model?: string; routes?: ComboRoutes }) => ({ engine: value.engine, model: value.model ?? "", ...(value.routes && Object.keys(value.routes).length ? { routes: value.routes } : {}) })
+        persist("model-rebind", { from: side(changed.from), to: side(changed.to), workflowID: wf.id })
+        terminal.bindView?.(currentViewIdentity())
+        publishView()
+        terminal.write(terminalSafeText(`Now using ${nextEngine} / ${nextModel}. Same session and workflow ${wf.id} continue; the next step uses this model.\n`))
+        if (comboNotice) terminal.write(terminalSafeText(comboNotice))
+      } catch (error) {
+        if (!(error instanceof AdmissionRefusal) && !(error instanceof TypeError) && !(error instanceof Error && /^model rebind refused/.test(error.message))) throw error
+        if (abort.signal.aborted) return false
+        if (error instanceof Error && /^model rebind refused/.test(error.message)) terminal.write(terminalSafeText(`Model switch refused: ${boundedTerminalDiagnostic(error.message)}; the current selection and conversation are unchanged.\n`))
+        else {
+          const route = error instanceof AdmissionRefusal && error.comboRoutes ? ` Combo route unavailable: ${error.comboRoutes}.` : ""
+          const hint = await signInHint(engineSet(nextEngine, nextRoutes))
+          terminal.write(terminalSafeText(`Model switch failed; the current selection and conversation are unchanged.${route}${hint ? ` ${hint}` : ""}\n`))
+        }
+      } finally {
+        guard.release()
+      }
+      return true
+    }
+
     async function switchSelection(
       nextEngine: CliEngine,
       nextModel: string,
@@ -1950,6 +2019,10 @@ export async function runInteractiveSession(
         publishView()
         terminal.write("Already using that engine, model and routes; conversation context is unchanged.\n")
         return true
+      }
+      if (!forceNew && !targetSessionID) {
+        const workflow = rebindableWorkflow()
+        if (workflow) return rebindSelection(workflow, nextEngine, nextModel, nextRoutes, discovery, comboNotice)
       }
       const guard = acquireSwitchGuard(targetSessionID !== undefined || retainedSDKSessionID !== undefined)
       if (!guard.release) {
@@ -2265,7 +2338,8 @@ export async function runInteractiveSession(
       const promptTitle = retainedSDKSessionID
         ? `Retained SDK session ${retainedSDKSessionID} · read-only history`
         : `${selection.engine} · ${selection.model}`
-      const text = await withProgressSuspended(() => readInput(
+      const deferredCommand = workflowHost.takeDeferredCommand()
+      const text = deferredCommand ?? await withProgressSuspended(() => readInput(
         terminal, promptTitle,
         retainedSDKSessionID ? "Read-only history · /resume or /new to switch · /quit exit" : "Enter send · /help commands · /model switch · /quit exit",
         retainedSDKSessionID ? "History> " : "You> ", abort.signal,
@@ -2501,6 +2575,8 @@ export async function runInteractiveSession(
         catch (error) { terminal.write(`Resume refused or incomplete: ${boundedTerminalDiagnostic(String(error))}\n`) }
         continue
       }
+      // A live workflow this session owns keeps /model available at its step boundaries (the rebind path checks the rest).
+      const modelAllowed = hasInteractiveAction(actionContext, "model") || (actionContext === "held" && rebindableWorkflow() !== undefined)
       // Combo show/set/clear only read or edit config, so they work while held; only apply starts a session.
       /** Run the combo menu (no args) or a typed combo command; false means the chat must exit. */
       const runCombo = async (rest: readonly string[]): Promise<boolean> => {
@@ -2509,7 +2585,7 @@ export async function runInteractiveSession(
         if (outcome === "aborted") return !abort.signal.aborted
         if (outcome === "apply") {
           const derived = comboRoutesFor(deps.combo.read(worktree), selection.engine, selection.model)
-          if (!hasInteractiveAction(actionContext, "model")) terminal.write("Combo not applied: model selection is unavailable while this session is held; resolve the active workflow first or recover execution ownership. The current session is unchanged.\n")
+          if (!modelAllowed) terminal.write("Combo not applied: model selection is unavailable while this session is held; resolve the active workflow first or recover execution ownership. The current session is unchanged.\n")
           else if (derived.invalid !== undefined) terminal.write(terminalSafeText(`Combo is invalid and was not applied: ${boundedTerminalDiagnostic(derived.invalid)}. The current session is unchanged.\n`))
           else if (!await switchSelection(selection.engine, selection.model)) return false
         }
@@ -2524,17 +2600,17 @@ export async function runInteractiveSession(
         if (await withProgressSuspended(() => authCommand(command, commandArgs)) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
         continue
       }
-      if (command === "/model" && !hasInteractiveAction(actionContext, "model")) {
+      if (command === "/model" && !modelAllowed) {
         terminal.write("Model selection is unavailable while this session is held; resolve the active workflow first or recover execution ownership. No discovery or switch was attempted.\n")
         continue
       }
-      if (command === "/model" && commandArgs[0] === "default" && hasInteractiveAction(actionContext, "model")) {
+      if (command === "/model" && commandArgs[0] === "default" && modelAllowed) {
         defaultModelCommand(commandArgs.slice(1), { engine: selection.engine, model: selection.model })
         continue
       }
-      if (command === "/model" && hasInteractiveAction(actionContext, "model")) {
+      if (command === "/model" && modelAllowed) {
         if (commandArgs.length === 0) {
-          const guard = acquireSwitchGuard()
+          const guard = acquireSwitchGuard(rebindableWorkflow() !== undefined)
           if (!guard.release) {
             terminal.write(guard.refusal ?? "Model switch refused; current selection is unchanged.\n")
             continue

@@ -637,6 +637,39 @@ export async function detachAdmission(
   }
 }
 
+/**
+ * Change the model/routes of the session this process owns, in place: same session ID, epoch, history and workflow.
+ * Refused unless the admission is live and epoch-current (not held, not foreign), the engine is unchanged, any
+ * workflow bound to the session is owned by this attachment and not stopping, and nothing is running or unsettled.
+ * Settled execution records keep the policy ID they ran under; only unsettled ones are policy-checked by recovery.
+ */
+export function rebindAdmissionModel(
+  runtime: ExecutionRuntime,
+  sid: string,
+  expectedEpoch: string,
+  next: { engine: string; model: string; routes?: ComboRoutes },
+): { from: { engine: string; model?: string; routes?: ComboRoutes }; to: { engine: string; model?: string; routes?: ComboRoutes }; workflowID?: string } {
+  if (!expectedEpoch) throw new Error("model rebind refused: no session epoch")
+  const owned = getOwnedSession(runtime.worktree, sid)
+  if (!owned || owned.epoch !== expectedEpoch || owned.sessionID !== sid) throw new Error("model rebind refused: session attachment is not owned by this process")
+  if (owned.metadata.engine !== next.engine || runtime.host.identity.engine !== next.engine) throw new Error("model rebind refused: the session engine cannot change")
+  if (!isAdmissionCurrent(runtime.worktree, sid, expectedEpoch)) throw new Error("model rebind refused: the session is held or its admission is not current")
+  return withFlowTransaction(runtime.worktree, tx => {
+    const checked = readWorkflowForWrite(tx)
+    if (checked.corrupt) throw new Error("model rebind refused: workflow state is corrupt")
+    const workflow = checked.wf?.sessionID === sid && !TERMINAL.has(checked.wf.phase) ? checked.wf : undefined
+    if (workflow) {
+      if (workflowEngineRefusal(workflow, next.engine)) throw new Error("model rebind refused: workflow engine identity mismatch")
+      if (workflow.owner.instance !== expectedEpoch || workflow.owner.pid !== process.pid) throw new Error("model rebind refused: workflow is not owned by this attachment")
+      if (isCancelPending(workflow) || workflow.stopIntent) throw new Error("model rebind refused: workflow stop is pending")
+    }
+    assertAdmissionQuiescent(runtime, sid)
+    owned.assertOwner()
+    const changed = owned.rebindModel({ engine: next.engine, model: next.model, ...(next.routes ? { routes: next.routes } : {}) })
+    return { ...changed, ...(workflow ? { workflowID: workflow.id } : {}) }
+  })
+}
+
 /** Explicit Resume clears admission only after a held attachment is already bound to this workflow epoch. */
 export function resumeAdmission(
   runtime: ExecutionRuntime,

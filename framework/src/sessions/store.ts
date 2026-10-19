@@ -12,7 +12,7 @@ import { consumeValidatedResumeProof } from "./admission.ts"
 import { validateComboRoutes } from "../hosts/default-model.ts"
 import type { ComboRoutes } from "../hosts/types.ts"
 
-export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "shell" | "verify"
+export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "model-rebind" | "shell" | "verify"
 export type TranscriptRecord = { seq: number; kind: TranscriptKind; eventID: string; data: Record<string, unknown> }
 export type SessionMetadata = {
   version: 1
@@ -49,6 +49,11 @@ export interface SessionStore {
   append(kind: TranscriptKind, data: Record<string, unknown>, eventID?: string): TranscriptRecord
   hold(reason: string): void
   clearHold(proof: SessionClearHoldProof): void
+  /**
+   * Durably replace this attachment's model and routes in place. The engine and session identity never change;
+   * callers (sessions/admission.ts rebindAdmissionModel) prove epoch, quiescence and workflow binding first.
+   */
+  rebindModel(next: SessionOpenMetadata): { from: SessionOpenMetadata; to: SessionOpenMetadata }
   assertOwner(): void
   release(proof: SessionReleaseProof): void
 }
@@ -82,7 +87,7 @@ const MAX_EVENT_ID_BYTES = 16 * 1024
 const MAX_TOOL_TEXT_BYTES = 4096
 const noFollow = fs.constants.O_NOFOLLOW ?? 0
 const directoryOnly = fs.constants.O_DIRECTORY ?? 0
-const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice", "carried-context", "shell", "verify"])
+const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice", "carried-context", "model-rebind", "shell", "verify"])
 /** Bounds for a persisted operator shell run (see hosts/operator-shell.ts). */
 export const MAX_SHELL_LINES = 200
 export const MAX_SHELL_OUTPUT_BYTES = 64 * 1024
@@ -640,6 +645,19 @@ function validateKindData(kind: TranscriptKind, data: Record<string, unknown>): 
     }
     return
   }
+  if (kind === "model-rebind") {
+    // In-place model change of this session (same session ID and history); it grants no approval.
+    const side = (value: unknown): boolean => {
+      if (!plainObject(value) || !boundedText(value.engine, 64) || !boundedText(value.model, 256)) return false
+      if (!Object.keys(value).every(key => key === "engine" || key === "model" || key === "routes")) return false
+      return value.routes === undefined || typeof validatedRoutes(value.routes) !== "string"
+    }
+    if (!(exactKeys(data, ["from", "to"]) || (exactKeys(data, ["from", "to", "workflowID"]) && boundedText(data.workflowID, 512))) ||
+        !side(data.from) || !side(data.to)) {
+      throw new TypeError("model-rebind transcript data must be {from:{engine,model,routes?},to:{engine,model,routes?},workflowID?}")
+    }
+    return
+  }
   if (kind === "task-state") {
     if (!exactKeys(data, ["taskID", "status"]) || !boundedText(data.taskID, 256) || !boundedText(data.status, 256)) throw new TypeError("task-state transcript data must be {taskID,status}")
     return
@@ -929,6 +947,20 @@ class SessionStoreImpl implements SessionStore {
     this.assertOwner()
   }
 
+  rebindModel(next: SessionOpenMetadata): { from: SessionOpenMetadata; to: SessionOpenMetadata } {
+    this.assertOwner()
+    const requested = validateEngineModel(next)
+    const current = this.currentMetadata
+    if (requested.engine !== current.engine) throw new Error("session engine is immutable; model rebind refused")
+    if (requested.model === undefined) throw new TypeError("a model is required to rebind a session")
+    const from: SessionOpenMetadata = { engine: current.engine, ...(current.model === undefined ? {} : { model: current.model }), ...(current.routes ? { routes: current.routes } : {}) }
+    const { routes: _routes, model: _model, ...rest } = current
+    this.currentMetadata = { ...rest, model: requested.model, ...(requested.routes ? { routes: requested.routes } : {}), updatedAt: Date.now() }
+    durableWriteJson(metadataPath(this.directory), this.currentMetadata)
+    this.assertOwner()
+    return { from, to: requested }
+  }
+
   clearHold(proof: SessionClearHoldProof): void {
     this.assertOwner()
     if (!plainObject(proof) || proof.authorized !== true || !boundedText(proof.reason, 512)) throw new TypeError("explicit admission authorization is required to clear session hold")
@@ -1094,6 +1126,12 @@ export function inspectCurrentSessionAttachment(worktree: string, sid: string): 
   } catch {
     return null
   }
+}
+
+/** True when this session's model was ever changed in place; its settled executions then legitimately carry older policy IDs. */
+export function sessionWasRebound(worktree: string, sid: string): boolean {
+  try { return replaySession(worktree, sid, { kind: "model-rebind", limit: 1 }).records.length > 0 }
+  catch { return false }
 }
 
 export function readSessionMetadata(worktree: string, sid: string): SessionMetadata | null {
