@@ -529,9 +529,16 @@ Configured in the **user** config only:
   skill, so a cloned repository cannot shadow a trusted home name). Grants from an earlier "Allow" prompt do not
   qualify. Native roots only, unless `include` names an import-tier skill; `exclude` always wins; protected workflows
   are never listed; a skill larger than the conversation's skill budget (about 14K characters) is skipped, and so is a
-  skill whose `allowed-tools` is narrower than the planning role's tools. `/skills auto` lists the candidates.
+  skill whose `allowed-tools` is narrower than the planning role's tools. Each turn lists at most 12, ranked against
+  the request, with descriptions clipped to 160 characters; if even that would overflow the input limit, the turn runs
+  without skills. `/skills auto` lists the candidates. By design, with the default `auto` a repository's committed
+  skills are listed without any user action (tools and approvals are unchanged); set `exclude` or `mode: "off"` if
+  that is not wanted.
 - **Loads** re-check the current content and tool scope; anything that would need a prompt, is not listed, was already
-  loaded this turn, or would not fit whole in the remaining input budget comes back as a tool error, never a prompt.
+  loaded this turn, or would not fit whole in the remaining input budget comes back as a tool error, never a prompt
+  (a repeated refused call gets the same answer without reloading). Loaded instructions are never truncated: later
+  tool results shrink first, and if the instructions themselves must go they are replaced by a notice that they no
+  longer apply and are dropped from `Skills used`.
 - **Opt-outs**: `force:` before a message (one message), `/skills auto off|on` (this session), `mode: "off"`.
   Explicit `/skill:` commands (which bind that skill instead), slash commands and turns during an active workflow get no
   `skill` tool. An invalid `skill_auto` block turns it off and is reported once per session.

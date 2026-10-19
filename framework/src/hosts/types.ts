@@ -97,9 +97,13 @@ export type ExecutionRequest = {
  */
 export type SkillToolProvider = Readonly<{
   catalog: readonly Readonly<{ name: string; description: string }>[]
+  /** Text the catalog is ranked against when it must be narrowed (the latest user message); defaults to the task text. */
+  query?: string
   load(name: string, signal: AbortSignal): Promise<{ ok: true; text: string } | { ok: false; error: string }>
   /** Called once the loaded instructions were actually placed in the model's input (not when refused for budget). */
   delivered?(name: string): void
+  /** Called when delivered instructions were later dropped whole to fit the input budget; they no longer apply. */
+  withdrawn?(name: string): void
 }>
 
 export type ExecutionReference = {
