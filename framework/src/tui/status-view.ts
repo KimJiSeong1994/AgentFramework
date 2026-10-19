@@ -40,6 +40,9 @@ function factSegments(facts: InteractiveViewFacts | undefined, selectionInHeader
     const elapsed = request ? ` · ${request.elapsedSeconds}s` : ""
     segments.push({ text: `${request ? `${request.frame} ` : ""}Model request running${elapsed}`, priority: 90 })
   }
+  if (facts.owner === "foreign" && facts.workflow.state === "known" && facts.workflow.value) {
+    segments.push({ text: `${facts.workflow.value.kind} workflow owned by another session`, priority: 60 })
+  }
   if (facts.discovery === "failed") segments.push({ text: "Model list unavailable", priority: 85 })
   if (facts.hold.state === "known" && facts.hold.value.held && facts.hold.value.reason) {
     segments.push({ text: `hold reason: ${facts.hold.value.reason}`, priority: 55 })

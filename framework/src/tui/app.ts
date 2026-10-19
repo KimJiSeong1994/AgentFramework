@@ -1,7 +1,7 @@
 import type { ShellView, Terminal, TerminalControl } from "../hosts/interactive-session.ts"
 import { Editor, searchSubmittedHistory } from "./editor.ts"
 import type { InputEvent } from "./keys.ts"
-import { belowPanelRows, bodyPanelRows, panelInnerColumns, renderFrame, transcriptViewportRows, transcriptVisualRows, wrapText, type FrameHome } from "./render.ts"
+import { belowPanelRows, bodyPanelRows, ellipsize, panelInnerColumns, renderFrame, transcriptViewportRows, transcriptVisualRows, wrapText, type FrameHome } from "./render.ts"
 import { TerminalDriver } from "./terminal.ts"
 import { MIN_COLUMNS, MIN_ROWS, MIN_SIZE_LABEL } from "./capability.ts"
 import { TranscriptModel } from "./transcript-model.ts"
@@ -17,6 +17,7 @@ import { sameViewIdentity, selectionLabel, type AskAnswer, type AskPrompt, type 
 import { statusLines } from "./status-view.ts"
 import { formatDuration, progressState, renderProgress, type WorkflowProgress } from "./progress.ts"
 import { resolveTheme, type ThemeName } from "./theme.ts"
+import { WorkspaceLabel } from "./workspace.ts"
 
 const SPINNER_INTERVAL_MS = 120
 const UNICODE_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -107,6 +108,7 @@ export class TuiApp implements Terminal {
   private themeName: ThemeName = "neutral"
   private asciiChrome = false
   private workflowProgress?: WorkflowProgress
+  private readonly workspace = new WorkspaceLabel()
   queueAdmission(allowed: boolean): void { this.queueAllowed = allowed && !this.readFailure }
   workflowStatus(line: string | undefined, progress?: WorkflowProgress): void {
     const nextProgress = line === undefined ? undefined : progress
@@ -386,6 +388,19 @@ export class TuiApp implements Terminal {
     })
   }
 
+  /** GJC-style muted hint inside an empty chat composer; it names only actions valid in the current context. */
+  private composerPlaceholder(prompt: string): string | undefined {
+    if (prompt !== "You> " && prompt !== "History> ") return undefined
+    const keys = this.separator()
+    switch (this.interactionContext) {
+      case "chat": return ["Type a message", "/ commands", "! shell", "Ctrl+R history", "Ctrl+J newline", "Ctrl+C clear"].join(keys)
+      case "unselected": return ["Choose a model with /model", "/ commands", "! shell", "/quit exit"].join(keys)
+      case "held": return ["Session held", "/status explains", "/ commands", "! shell"].join(keys)
+      case "read-only": return ["Read-only history", "/resume or /new to switch", "/ commands"].join(keys)
+      default: return undefined
+    }
+  }
+
   private cursorGlyph(): string { return this.asciiChrome ? ">" : "❯" }
   private selectHint(): string {
     return (this.asciiChrome ? ["Up/Down move", "Enter select", "1-9 jump", "Esc cancel"] : ["↑↓ move", "Enter select", "1-9 jump", "Esc cancel"]).join(this.separator())
@@ -430,7 +445,12 @@ export class TuiApp implements Terminal {
     return {
       title: "Otter · local coding agent",
       left: ["", ...logo, "", "plan · approve · prove", "", selection ? `${ascii ? "*" : "⬢"} ${selection}` : "No model is selected."],
-      sections: this.interactionContext === "unselected"
+      sections: this.interactionContext === "held"
+        ? [
+          { heading: "Session held", lines: ["New chat waits until the active work is resolved.", "/status  why, and what to do", "/sessions  open another session"] },
+          { heading: "Flow keys", lines: [["/ commands", "! shell"].join(keys), ["Ctrl+R history", "PgUp/PgDn scroll"].join(keys)] },
+        ]
+        : this.interactionContext === "unselected"
         ? [
           { heading: "Get started", lines: ["/model  choose a model", "/help   commands and keys", "/quit   leave"] },
           { heading: "Flow keys", lines: [["/ commands", "Ctrl+R history"].join(keys), ["Ctrl+J newline", "Ctrl+C clear"].join(keys)] },
@@ -611,11 +631,11 @@ export class TuiApp implements Terminal {
       const visible = paletteWindow(suggestions.rows, this.completionIndex, maximumRows)
       const labelColumns = paletteLabelColumns(suggestions.rows)
       const panelLines = visible.rows.map((row, index) =>
-        `${visible.start + index === this.completionIndex ? ">" : " "} ${wrapText(formatPaletteRow(row, labelColumns), Math.max(1, columns - 2))[0] ?? ""}`)
+        `${visible.start + index === this.completionIndex ? this.cursorGlyph() : " "} ${ellipsize(formatPaletteRow(row, labelColumns), Math.max(1, columns - 2), this.asciiChrome)}`)
       if (!panelLines.length) panelLines.push(this.catalog ? "No matching skills" : "No skill catalog is available for this session")
-      const shown = visible.start > 0 || visible.start + visible.rows.length < suggestions.rows.length
-        ? [`${visible.start + 1}-${visible.start + visible.rows.length} of ${suggestions.rows.length}`] : []
-      panelLines.push([...shown, "Up/Down move", "Tab/Enter insert", "Esc dismiss"].join(this.separator()))
+      const position = suggestions.rows.length
+        ? [`(${Math.min(suggestions.rows.length, this.completionIndex + 1)}/${suggestions.rows.length})`] : []
+      panelLines.push([...position, this.asciiChrome ? "Up/Down move" : "↑↓ move", "Tab/Enter insert", "Esc dismiss"].join(this.separator()))
       panel = { title: suggestions.skillsOnly ? "Skills" : "Commands", focus: "composer", placement: "below", columns: true, lines: panelLines }
       screen = suggestions.skillsOnly ? "Skill suggestions" : "Command suggestions"
     }
@@ -649,6 +669,7 @@ export class TuiApp implements Terminal {
       header: {
         screen,
         ...(this.viewFacts ? { selection: selectionLabel(this.viewFacts.selection) } : {}),
+        context: this.workspace.value(this.asciiChrome),
       },
       ...(panel ? { panel } : {}),
       composerVisible,
@@ -667,6 +688,7 @@ export class TuiApp implements Terminal {
       draft,
       cursor,
       prompt,
+      ...(composerVisible && !panel && this.composerPlaceholder(prompt) ? { placeholder: this.composerPlaceholder(prompt)! } : {}),
       color: process.env.NO_COLOR === undefined,
       theme: resolveTheme(this.themeName),
       ascii: this.asciiChrome,

@@ -46,6 +46,8 @@ export type FramePanel = {
 export type FrameHeader = {
   readonly screen: string
   readonly selection?: string
+  /** Workspace context after the model badge, e.g. `⑂ main / ~/repo`. */
+  readonly context?: string
 }
 
 /** Empty-session welcome box: left column identity, right column titled sections. */
@@ -707,6 +709,16 @@ export function clipToWidth(value: string, columns: number): string {
   return result
 }
 
+/** Clip to `columns`, ending in `…` when anything was cut. */
+export function ellipsize(value: string, columns: number, ascii = false): string {
+  const width = safeColumns(columns)
+  const line = oneLineText(value)
+  if (displayWidth(line) <= width) return line
+  const mark = ascii ? "..." : "…"
+  if (width <= displayWidth(mark)) return clipToWidth(line, width)
+  return `${clipToWidth(line, width - displayWidth(mark)).trimEnd()}${mark}`
+}
+
 function snapCursor(groups: readonly DisplayGroup[], requested: number, length: number): number {
   const cursor = Number.isFinite(requested) ? Math.max(0, Math.min(length, Math.floor(requested))) : 0
   for (const group of groups) {
@@ -875,6 +887,8 @@ export function renderFrame(input: {
   /** Current spinner frame while the host is working; live shell/tool icons animate with it. */
   spinner?: string
   notice?: string
+  /** Muted hint shown after the prompt while the draft is empty (color only); never part of the draft. */
+  placeholder?: string
 }): string {
   const columns = terminalDimension(input.columns)
   const rows = terminalDimension(input.rows)
@@ -1013,10 +1027,14 @@ export function renderFrame(input: {
     right = duplicate ? "Otter" : `Otter${separator}${oneLineText(screen)}`
   }
   const badge = input.header?.selection ? `${glyph.model} ${oneLineText(input.header.selection)}` : `${glyph.model} no model`
-  const left = clipToWidth(badge, Math.max(12, Math.min(Math.floor(columns / 2), columns - displayWidth(right) - 5)))
-  const rightClipped = clipToWidth(right, Math.max(1, columns - displayWidth(left) - 4))
-  const fill = Math.max(1, columns - displayWidth(left) - displayWidth(rightClipped) - 3)
-  frameLines[ruleRow] = `${paint(` ${left}`, "accent")}${paint(` ${horizontal(fill)} `, "border")}${paint(rightClipped, "muted")}`
+  const leftBudget = Math.max(12, columns - displayWidth(right) - 5)
+  const left = clipToWidth(badge, Math.max(12, Math.min(Math.floor(columns / 2), leftBudget)))
+  const contextBudget = leftBudget - displayWidth(left) - 3
+  const context = input.header?.context && contextBudget >= 8 ? ` / ${ellipsize(input.header.context, contextBudget, input.ascii)}` : ""
+  const leftWidth = displayWidth(left) + displayWidth(context)
+  const rightClipped = clipToWidth(right, Math.max(1, columns - leftWidth - 4))
+  const fill = Math.max(1, columns - leftWidth - displayWidth(rightClipped) - 3)
+  frameLines[ruleRow] = `${paint(` ${left}`, "accent")}${context ? paint(context, "muted") : ""}${paint(` ${horizontal(fill)} `, "border")}${paint(rightClipped, "muted")}`
 
   if (composerVisible) {
     const overflow = composerOverflow
@@ -1029,13 +1047,21 @@ export function renderFrame(input: {
     frameLines[composerTop] = titleText
       ? `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(titleText, progress ? "accent" : "focus")}${paint(` ${horizontal(columns - 5 - displayWidth(titleText))}${glyph.tr}`, "border")}`
       : paint(`${glyph.tl}${horizontal(columns - 2)}${glyph.tr}`, "border")
+    const promptText = input.prompt ?? "> "
+    const placeholderBudget = innerWidth - displayWidth(promptText)
+    // Without color a hint is indistinguishable from typed text, so NO_COLOR shows an empty composer instead.
+    const placeholder = color && input.placeholder && input.draft === "" && placeholderBudget >= 4
+      ? ellipsize(input.placeholder, placeholderBudget, input.ascii) : undefined
     for (let index = 0; index < composerRows; index += 1) {
       const text = composer.rows[firstVisibleComposerRow + index]?.text ?? ""
-      frameLines[composerTop + 1 + index] = `${paint(`${glyph.v} `, "border")}${padToWidth(text, innerWidth)}${paint(` ${glyph.v}`, "border")}`
+      const cell = placeholder && index === 0
+        ? `${promptText}${paint(placeholder, "muted")}${" ".repeat(Math.max(0, placeholderBudget - displayWidth(placeholder)))}`
+        : padToWidth(text, innerWidth)
+      frameLines[composerTop + 1 + index] = `${paint(`${glyph.v} `, "border")}${cell}${paint(` ${glyph.v}`, "border")}`
     }
     frameLines[composerTop + 1 + composerRows] = paint(`${glyph.bl}${horizontal(columns - 2)}${glyph.br}`, "border")
     belowLines.forEach((line, index) => {
-      const selected = line.startsWith("> ")
+      const selected = line.startsWith("> ") || line.startsWith("❯ ")
       const option = selected || line.startsWith("  ")
       const split = belowPanel?.columns && option ? /^(. \S+?)( {2,}.*)$/u.exec(line) : null
       frameLines[composerTop + composerRows + composerBorderRows + index] = split

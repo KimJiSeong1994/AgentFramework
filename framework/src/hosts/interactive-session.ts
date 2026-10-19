@@ -2318,6 +2318,22 @@ export async function runInteractiveSession(
       }
     }
 
+    /** Why chat is held, in the same order the submit path checks it, so the hint matches what Enter will do. */
+    const heldInputHint = (): string => {
+      if (effectiveHold(worktree, selection.sessionID)) return "Session held · /continue reviews and resumes · /status · /quit exit"
+      const executionState = selection.runtime.runs.status()
+      if (executionState.claim || executionState.executions.some(execution => !settled(execution))) {
+        return "Execution ownership unresolved · /status · /cancel · /quit exit"
+      }
+      if (readAnyWorkflowChecked(worktree).corrupt) return "Workflow state is corrupt · /status inspects it · /quit exit"
+      const occupant = activeAnyWorkflow(worktree)
+      if (occupant && occupant.sessionID !== selection.sessionID) {
+        return `Observer · /status · /resume ${occupant.sessionID} opens the owner · /quit exit`
+      }
+      if (occupant) return `${occupant.kind} workflow ${occupant.phase} at ${occupant.stage} · /status · /pause · /cancel`
+      return "Session held · /status · /help commands · /quit exit"
+    }
+
     while (!abort.signal.aborted) {
       if (persistenceFailed) throw new InteractiveLaunchError("Session transcript persistence failed; the session remains held.")
       let actionContext: InteractiveContext = "chat"
@@ -2341,7 +2357,8 @@ export async function runInteractiveSession(
       const deferredCommand = workflowHost.takeDeferredCommand()
       const text = deferredCommand ?? await withProgressSuspended(() => readInput(
         terminal, promptTitle,
-        retainedSDKSessionID ? "Read-only history · /resume or /new to switch · /quit exit" : "Enter send · /help commands · /model switch · /quit exit",
+        retainedSDKSessionID ? "Read-only history · /resume or /new to switch · /quit exit"
+          : actionContext === "held" ? heldInputHint() : "Enter send · /help commands · /model switch · /quit exit",
         retainedSDKSessionID ? "History> " : "You> ", abort.signal,
       ))
       if (abort.signal.aborted) return signalExit(receivedSignal)
