@@ -1,0 +1,75 @@
+{
+  "schema": "otter-skill-load-eval.v1",
+  "recordedAt": "2026-10-19T16:29:00.653Z",
+  "engine": "claude",
+  "model": "claude-haiku-5-5",
+  "reps": 1,
+  "cases": 87,
+  "excluded": [
+    "plan"
+  ],
+  "noneEvery": 2,
+  "catalog": [],
+  "skillAuto": "auto",
+  "metrics": {
+    "recall": {
+      "num": 29,
+      "den": 48,
+      "value": 0.604
+    },
+    "recallExcludingPlan": {
+      "num": 29,
+      "den": 48,
+      "value": 0.604
+    },
+    "recallEndToEnd": {
+      "num": 29,
+      "den": 53,
+      "value": 0.547
+    },
+    "precision": {
+      "num": 29,
+      "den": 30,
+      "value": 0.967
+    },
+    "loadPrecision": {
+      "num": 29,
+      "den": 30,
+      "value": 0.967
+    },
+    "noneFalsePositive": {
+      "num": 1,
+      "den": 34,
+      "value": 0.029
+    },
+    "wrongSkill": 0,
+    "failedTurns": {
+      "num": 5,
+      "den": 87,
+      "value": 0.057
+    },
+    "p50Ms": 9609
+  },
+  "failures": {
+    "transport": 4,
+    "malformed_response": 1
+  },
+  "perSkill": {
+    "computer-use": "1/4",
+    "find-skills": "5/5",
+    "llm-wiki": "10/11",
+    "orca-cli": "3/7",
+    "orchestration": "2/5",
+    "typesafe-ai": "8/8",
+    "ulw": "0/8"
+  },
+  "falsePositives": [
+    {
+      "text": "omx_wiki에 이 결정 기록해줘",
+      "loads": [
+        "llm-wiki"
+      ],
+      "category": "adversarial"
+    }
+  ]
+}

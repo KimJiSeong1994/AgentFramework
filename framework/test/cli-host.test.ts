@@ -503,10 +503,109 @@ describe("common CLI execution host", () => {
     expect(capped.controls[0]?.cancelCalls).toBeGreaterThan(0)
   })
 
-  test("malformed and unknown model tool envelopes fail closed without fallback execution", async () => {
-    for (const response of ["Here is the answer: {\"type\":\"final\",\"text\":\"done\"}",
+  test("wrapped, fenced or shorthand read-only calls from any engine are read as one call; known tools only", async () => {
+    writeFileSync(join(root, "README.md"), "fixture\n")
+    // Live claude-haiku-5-5 / gemma4 replies observed 2026-10-19 that the strict parser refused.
+    const wrapped = [
+      '<invoke_tool>\n{"type":"tool","name":"read","input":{"path":"README.md"}}\n</invoke_tool>',
+      '\n<reasoning_effort>8</reasoning_effort>\n\n{"type":"tool","name":"read","input":{"path":"README.md"}}',
+      "I'll read it first. {\"type\":\"tool\",\"name\":\"read\",\"input\":{\"path\":\"README.md\"}}",
+      '```\n{"type":"read","input":{"path":"README.md"}}\n```',
+      '{"type":"read","path":"README.md"}',
+    ]
+    for (const engine of ["claude", "codex"] as const) {
+      for (const response of wrapped) {
+        const subject = harness({ engine, responses: [response, JSON.stringify({ type: "final", text: "done" })] })
+        expect(await (await subject.host.prepare(subject.request)).run()).toEqual({ status: "completed", text: "done" })
+        expect(subject.observed.before).toBe(1)
+        expect(subject.prompts[1]).toContain("fixture")
+      }
+    }
+    const final = harness({ engine: "claude", responses: ["Here is the answer: {\"type\":\"final\",\"text\":\"done\"}"] })
+    expect(await (await final.host.prepare(final.request)).run()).toEqual({ status: "completed", text: "done" })
+
+    // gemma4 quoting the user inside the final text without escaping: repaired to the intended final answer only.
+    const quoted = '{"type":"final","text":"사용자 요청("여러 파일 수정")을 확인했습니다. 경로 \\"x\\"도 유지."}\n\n'
+    for (const engine of ["local", "claude"] as const) {
+      const subject = harness({ engine, responses: [quoted] })
+      expect(await (await subject.host.prepare(subject.request)).run()).toEqual({ status: "completed", text: '사용자 요청("여러 파일 수정")을 확인했습니다. 경로 "x"도 유지.' })
+    }
+    const multiline = harness({ engine: "local", responses: ['{"type":"final","text":"첫 줄\n- 둘째\t탭"}'] })
+    expect(await (await multiline.host.prepare(multiline.request)).run()).toEqual({ status: "completed", text: "첫 줄\n- 둘째\t탭" })
+    // Truncated replies are not "repaired": the closing quote and brace must be present.
+    const truncated = harness({ engine: "claude", responses: ['{"type":"final","text":"cut off here'] })
+    expect(await (await truncated.host.prepare(truncated.request)).run()).toMatchObject({ status: "failed" })
+  })
+
+  test("a write or edit runs only from a strict whole-body envelope, never from prose, wrappers or a batch", async () => {
+    writeFileSync(join(root, "a.txt"), "current\n")
+    const write = '{"type":"tool","name":"write","input":{"path":"a.txt","content":"old"}}'
+    const edit = '{"type":"tool","name":"edit","input":{"path":"a.txt","oldText":"current","newText":"x"}}'
+    for (const engine of ["claude", "codex", "local"] as const) {
+      for (const response of [
+        `Done. Earlier I ran ${write} and it passed.`,
+        `<invoke_tool>${write}</invoke_tool>`,
+        `Not ${write} but ${edit}`,
+        `{"type":"tool","name":"read","input":{"path":"a.txt"}} ${write}`,
+        '{"type":"write","path":"a.txt","content":"old"} trailing note',
+      ]) {
+        const subject = harness({ engine, responses: [response, JSON.stringify({ type: "final", text: "done" })] })
+        const outcome = await (await subject.host.prepare(subject.request)).run()
+        expect(subject.observed.before).toBe(0)
+        expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("current\n")
+        if (engine !== "local") expect(outcome).toMatchObject({ status: "failed" })
+      }
+    }
+    // A broken final answer that quotes a call is repaired to text or refused; the quoted call never runs.
+    const oddQuotes = `{"type":"final","text":"he said "run ${write.replaceAll('"', '\\"')}" ok"}`
+    const odd = harness({ engine: "claude", responses: [oddQuotes] })
+    const oddOutcome = await (await odd.host.prepare(odd.request)).run()
+    expect(odd.observed.before).toBe(0)
+    expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("current\n")
+    expect(oddOutcome.status === "failed" || (oddOutcome.status === "completed" && oddOutcome.text?.includes("he said"))).toBe(true)
+    // The strict whole-body form still writes.
+    const strict = harness({ engine: "claude", responses: [write, JSON.stringify({ type: "final", text: "done" })] })
+    expect(await (await strict.host.prepare(strict.request)).run()).toEqual({ status: "completed", text: "done" })
+    expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("old")
+  })
+
+  test("the main role answers with prose that merely mentions an envelope instead of running it", async () => {
+    writeFileSync(join(root, "README.md"), "fixture\n")
+    const explained = 'To load a skill, reply exactly {"type":"tool","name":"skill","input":{"name":"x"}} and wait.'
+    const main = harness({ engine: "claude", role: "main", responses: [explained] })
+    expect(await (await main.host.prepare(main.request)).run()).toEqual({ status: "completed", text: explained })
+    expect(main.observed.before).toBe(0)
+    // A stray "<word" before prose is not markup: the explanation stays the answer.
+    const stray = '<b So to load a skill send {"type":"tool","name":"skill","input":{"name":"x"}} first.'
+    const strayMain = harness({ engine: "claude", role: "main", responses: [stray] })
+    expect(await (await strayMain.host.prepare(strayMain.request)).run()).toEqual({ status: "completed", text: stray })
+    expect(strayMain.observed.before).toBe(0)
+    // A valid final closed by wrapper markup is that final.
+    const closed = harness({ engine: "claude", responses: ['{"type":"final","text":"ok"}\n</final>'] })
+    expect(await (await closed.host.prepare(closed.request)).run()).toEqual({ status: "completed", text: "ok" })
+    // A pure wrapper around a read-only call is still a call for main.
+    const wrapped = harness({ engine: "claude", role: "main", responses: ['<invoke_tool>{"type":"tool","name":"read","input":{"path":"README.md"}}</invoke_tool>', JSON.stringify({ type: "final", text: "done" })] })
+    expect(await (await wrapped.host.prepare(wrapped.request)).run()).toEqual({ status: "completed", text: "done" })
+    expect(wrapped.observed.before).toBe(1)
+  })
+
+  test("a plain prose reply is the final answer for the main role on any engine, but not for a worker", async () => {
+    const prose = "let and const are both block-scoped; let can be reassigned."
+    const main = harness({ engine: "claude", role: "main", responses: [prose] })
+    expect(await (await main.host.prepare(main.request)).run()).toEqual({ status: "completed", text: prose })
+    const worker = harness({ engine: "claude", role: "worker", responses: [prose] })
+    expect(await (await worker.host.prepare(worker.request)).run()).toMatchObject({ status: "failed" })
+  })
+
+  test("malformed, ambiguous and unknown model tool envelopes fail closed without fallback execution", async () => {
+    for (const response of ["Here is the answer without an envelope.",
       '{"type":"tool","name":"bash","input":{"command":"touch unsafe"}}',
-      '{"type":"read","input":{"path":"README.md"}}']) {
+      '{"type":"bash","command":"touch unsafe"}',
+      '<invoke_tool>{"type":"bash","input":{"command":"touch unsafe"}}</invoke_tool>',
+      '{"type":"read","input":"README.md"}',
+      '{"type":"read","input":{"path":"README.md"},"extra":1}',
+      'Done: {"type":"final","text":"a"} or {"type":"final","text":"b"}',
+      '{"type":"tool","name":"read","name":"write","input":{"path":"README.md"}}']) {
       const subject = harness({ engine: "claude", responses: [response] })
       const handle = await subject.host.prepare(subject.request)
       expect(await handle.run()).toMatchObject({ status: "failed" })

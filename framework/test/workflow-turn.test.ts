@@ -169,6 +169,26 @@ describe("workflow turn lifecycle (R12)", () => {
     expect(status.executions.at(-1)?.fence).toBeUndefined()
   })
 
+  test("a failed host execution carries a fixed reason class, never provider text", async () => {
+    for (const [error, reason, hint] of [
+      ["malformed CLI response; no fallback execution was attempted", "malformed_response", "not in the required tool/answer format"],
+      ["Otter tool round limit reached", "tool_rounds", "too many tool rounds"],
+      ["estimated input budget exceeded before model dispatch", "input_budget", "did not fit the input budget"],
+      ["CLI inference turn failed or exceeded its output bound", "transport", "did not complete the request"],
+      ["reactive output byte limit reached", "output_bound", "exceeded the output limit"],
+      ["PRIVATE_PROVIDER_SECRET unrecognized text", "other", undefined],
+    ] as const) {
+      const h = harness({ outcome: { status: "failed", error } })
+      let caught: unknown
+      try { await runWorkflowTurn(h.runtime, bindingFor(null, `s-reason-${reason}`), request()) }
+      catch (thrown) { caught = thrown }
+      expect(caught).toMatchObject({ category: "model_failed", reason, message: "planning model did not complete a response" })
+      const diagnostic = (caught as ModelRequestError).diagnostic
+      if (hint) expect(diagnostic).toContain(hint)
+      expect(diagnostic).not.toContain("PRIVATE_PROVIDER_SECRET")
+    }
+  })
+
   test("empty and oversized completed responses have finite typed categories", async () => {
     const empty = harness({ text: "  " })
     await expect(runWorkflowTurn(empty.runtime, bindingFor(null, "s-empty-response"), request()))
