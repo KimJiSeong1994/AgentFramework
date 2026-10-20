@@ -116,7 +116,10 @@ export function validateCliToolInput(name: string, input: unknown): asserts inpu
           !input.query.trim() || input.query.length > 2000) throw new CliToolInputError()
       return
     case "skill":
-      if (!hasExactKeys(input, ["name"]) || typeof input.name !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/u.test(input.name)) throw new CliToolInputError()
+      // {name} loads a skill; {name, path} reads one file the loaded skill bundles (relative to its directory).
+      if (!(hasExactKeys(input, ["name"]) || hasExactKeys(input, ["name", "path"])) || typeof input.name !== "string" ||
+          !/^[a-z0-9][a-z0-9_-]{0,63}$/u.test(input.name)) throw new CliToolInputError()
+      if (Object.hasOwn(input, "path") && !(path(input.path) && !String(input.path).startsWith("/") && !String(input.path).split(/[\\/]/u).includes(".."))) throw new CliToolInputError()
       return
     case "write":
       if (!hasExactKeys(input, ["path", "content"]) || !path(input.path) || !boundedString(input.content, MAX_WRITE_BYTES)) throw new CliToolInputError()

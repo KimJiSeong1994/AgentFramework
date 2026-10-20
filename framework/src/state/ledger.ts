@@ -7,6 +7,7 @@ import { createHash } from "node:crypto"
 import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import { basename, join } from "node:path"
 import { AUTOLOAD_PROTECTED } from "../config.ts"
+import { containsSecret } from "../security/secrets.ts"
 import { readJsonChecked, sessionDir, writeJsonAtomic } from "./store.ts"
 
 export type TaskStatus = "pending" | "running" | "done" | "failed" | "cancelled"
@@ -55,6 +56,37 @@ export type LedgerTask = TaskInput & {
   answer?: string
 }
 
+/** A model-loaded skill that was in force when a plan was made: the reference instructions captured at plan time. */
+export type PlanSkill = { name: string; contentHash: string; instructions: string }
+export type PlanSkillDropReason = "invalid" | "sensitive" | "over_budget" | "limit"
+export type PlanSkills = { skills: PlanSkill[]; dropped: Array<{ name: string; reason: PlanSkillDropReason }> }
+
+export const PLAN_SKILLS_MAX = 4
+/** Storage bound for instructions carried per plan; CLI dispatch separately fits whole skills to its token budget. */
+export const PLAN_SKILLS_MAX_CHARS = 6000
+const SKILL_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/
+const SKILL_HASH = /^[A-Za-z0-9:_-]{1,128}$/
+
+/** Bound the skills delivered to a plan-making turn. A skill that does not fit is dropped whole, never truncated. */
+export function boundPlanSkills(input: ReadonlyArray<PlanSkill>): PlanSkills {
+  const skills: PlanSkill[] = []
+  const dropped: PlanSkills["dropped"] = []
+  let used = 0
+  for (const raw of input) {
+    const name = typeof raw?.name === "string" ? raw.name : ""
+    const label = oneLine(name, 64)
+    const drop = (reason: PlanSkillDropReason) => { dropped.push({ name: label, reason }) }
+    if (!SKILL_NAME.test(name) || typeof raw.contentHash !== "string" || !SKILL_HASH.test(raw.contentHash) ||
+      typeof raw.instructions !== "string" || !raw.instructions.trim()) { drop("invalid"); continue }
+    if (containsSecret(raw.instructions)) { drop("sensitive"); continue }
+    if (skills.length >= PLAN_SKILLS_MAX) { drop("limit"); continue }
+    if (used + raw.instructions.length > PLAN_SKILLS_MAX_CHARS) { drop("over_budget"); continue }
+    used += raw.instructions.length
+    skills.push({ name, contentHash: raw.contentHash, instructions: raw.instructions })
+  }
+  return { skills, dropped }
+}
+
 export type Ledger = {
   version: 1
   sessionID: string
@@ -64,6 +96,8 @@ export type Ledger = {
   running?: { taskId: string; childSessionID?: string; since: number }
   /** idle loop: open task ids main has already been told about (resume offer is made once per task) */
   resumeNotifiedFor?: string[]
+  /** skills in force when each plan workflow (key: workflow id) was made; read by the worker prompt */
+  planSkills?: Record<string, PlanSkills>
   tasks: LedgerTask[]
 }
 
@@ -96,6 +130,9 @@ export function parseLedger(value: unknown, sessionID: string): Ledger {
   const reviewResult = (input: unknown): boolean => object(input) && ["accept", "reject", "skipped", "error"].includes(input.verdict as string) &&
     optional(input, "reason", text) && optional(input, "sessionID", text) && optional(input, "aborted", x => typeof x === "boolean")
   const workflowTag = (input: unknown): boolean => object(input) && text(input.id) && text(input.planSha)
+  const planSkillsShape = (input: unknown): boolean => object(input) && Object.values(input).every(entry => object(entry) &&
+    Array.isArray(entry.skills) && entry.skills.every(s => object(s) && text(s.name) && text(s.contentHash) && text(s.instructions)) &&
+    Array.isArray(entry.dropped) && entry.dropped.every(d => object(d) && text(d.name) && text(d.reason)))
   const taskShape = (input: unknown): boolean => object(input) && text(input.id) && input.id.length > 0 &&
     integer(input.n, 1) && integer(input.batch, 1) && ["pending", "running", "done", "failed", "cancelled"].includes(input.status as string) &&
     integer(input.attempts) && timestamp(input.createdAt) && stringArray(input.childSessions) && text(input.title) &&
@@ -108,7 +145,8 @@ export function parseLedger(value: unknown, sessionID: string): Ledger {
     !timestamp(value.createdAt) || !timestamp(value.updatedAt) || !Array.isArray(value.tasks) ||
     (value.running !== undefined && (!object(value.running) || typeof value.running.taskId !== "string" || !value.running.taskId ||
       !timestamp(value.running.since) || !optional(value.running, "childSessionID", text))) ||
-    (value.resumeNotifiedFor !== undefined && !stringArray(value.resumeNotifiedFor)) || !value.tasks.every(taskShape)) throw new Error("invalid ledger state")
+    (value.resumeNotifiedFor !== undefined && !stringArray(value.resumeNotifiedFor)) ||
+    (value.planSkills !== undefined && !planSkillsShape(value.planSkills)) || !value.tasks.every(taskShape)) throw new Error("invalid ledger state")
   return value as Ledger
 }
 

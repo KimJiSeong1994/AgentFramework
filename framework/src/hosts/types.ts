@@ -40,7 +40,10 @@ export type BudgetEvidence = {
   input: "estimated"
   output: "reactive"
   vendorContext: "unobserved"
+  /** Main and read-only workflow roles on the local (Ollama) engine. */
   mainLimit: 8192
+  /** Main and read-only workflow roles on the Claude/Codex CLIs, whose models take far larger inputs. */
+  vendorMainLimit: 16384
   workerLimit: 5120
 }
 export type HostIdentity = {
@@ -75,6 +78,8 @@ export type ExecutionRequest = {
   title: string
   cwd: string
   text: string
+  /** Optional plan-time reference instructions; CLI hosts may omit whole skills to preserve the task budget. */
+  planSkills?: readonly Readonly<{ name: string; instructions: string }>[]
   deadlineAt: number
   policy: ExecutionPolicySnapshot
   handlers: ExecutionPolicyHandlers
@@ -100,6 +105,16 @@ export type SkillToolProvider = Readonly<{
   /** Text the catalog is ranked against when it must be narrowed (the latest user message); defaults to the task text. */
   query?: string
   load(name: string, signal: AbortSignal): Promise<{ ok: true; text: string } | { ok: false; error: string }>
+  /**
+   * One file the loaded skill bundles (references/, scripts/ …), path relative to the skill directory, read from the
+   * same captured snapshot as its instructions. Read-only reference text; never executed.
+   */
+  readResource?(name: string, path: string, signal: AbortSignal): Promise<{ ok: true; text: string } | { ok: false; error: string }>
+  /**
+   * Skills delivered in an earlier turn of this conversation that still apply: their recaptured instructions are placed
+   * in this turn's input as already loaded (pinned like a load), so a follow-up keeps them without a reload.
+   */
+  sticky?: readonly Readonly<{ name: string; text: string }>[]
   /** Called once the loaded instructions were actually placed in the model's input (not when refused for budget). */
   delivered?(name: string): void
   /** Called when delivered instructions were later dropped whole to fit the input budget; they no longer apply. */

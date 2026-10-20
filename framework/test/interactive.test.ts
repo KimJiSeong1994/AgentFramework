@@ -372,7 +372,7 @@ function harness(options: HarnessOptions = {}) {
 }
 
 /** `modelLoads` simulates the main model calling the `skill` tool for these names during the turn. */
-function useRealSkillCoordinator(h: ReturnType<typeof harness>, modelLoads: string[] = []) {
+function useRealSkillCoordinator(h: ReturnType<typeof harness>, modelLoads: string[] | ((turn: number) => string[]) = []) {
   const handoffs: Array<{ text: string; sessionID: string; invocation?: SkillConversationInvocation; skillTool?: SkillToolProvider; loads?: Array<{ name: string; ok: boolean; text?: string; error?: string }> }> = []
   const requestedRoot = realpathSync.native(wt.worktree)
   const gitRoot = h.deps.gitTopLevel?.(requestedRoot)
@@ -391,9 +391,12 @@ function useRealSkillCoordinator(h: ReturnType<typeof harness>, modelLoads: stri
       h.calls.turns.push(text)
       const handoff: (typeof handoffs)[number] = { text, sessionID, ...(invocation ? { invocation } : {}), ...(skillTool ? { skillTool } : {}) }
       handoffs.push(handoff)
-      if (!invocation && skillTool && modelLoads.length) {
+      const turnLoads = typeof modelLoads === "function" ? modelLoads(handoffs.length - 1) : modelLoads
+      // The real host places sticky skills in the input and reports them delivered before the model runs.
+      for (const sticky of skillTool?.sticky ?? []) skillTool?.delivered?.(sticky.name)
+      if (!invocation && skillTool && turnLoads.length) {
         handoff.loads = []
-        for (const name of modelLoads) {
+        for (const name of turnLoads) {
           const loaded = await skillTool.load(name, new AbortController().signal)
           // The real host reports delivery once the instructions are placed in the model input.
           if (loaded.ok) skillTool.delivered?.(name)
@@ -3070,6 +3073,42 @@ describe("model-loaded skills in otter chat", () => {
     expect(JSON.stringify(replay.records)).not.toContain("AUTO_SKILL_BYTES")
   })
 
+  test("a follow-up keeps the previous turn's skill active without a reload, gets no offer, and an unrelated turn drops it", async () => {
+    projectSkill(".agents", "wiki-helper", "RULE_BODY\n")
+    commitAll()
+    const h = harness({
+      lines: ["compile the wiki", "그거 정리해서 배포용 문서로 써줘", "파이썬 리스트 예시 보여줘", "/quit"],
+      intent: "offer", choose: async () => 0, skillPolicy: policy("auto"),
+    })
+    const handoffs = useRealSkillCoordinator(h, turn => turn === 0 ? ["wiki-helper"] : [])
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+    expect(handoffs.map(handoff => handoff.text)).toEqual(["compile the wiki", "그거 정리해서 배포용 문서로 써줘", "파이썬 리스트 예시 보여줘"])
+    // The back-reference follow-up reached the model without an "under-specified" offer.
+    expect(h.calls.choices.filter(choice => choice.title.includes("under-specified"))).toEqual([])
+    expect(handoffs[1]?.skillTool?.sticky?.map(skill => skill.name)).toEqual(["wiki-helper"])
+    expect(handoffs[1]?.skillTool?.sticky?.[0]?.text).toContain("RULE_BODY")
+    expect(handoffs[1]?.skillTool?.query).toContain("compile the wiki")
+    expect(handoffs[2]?.skillTool?.sticky).toEqual([])
+    expect(h.calls.output.join("").match(/Skills used: wiki-helper/gu)?.length).toBe(2)
+  })
+
+  test("a loaded skill lists its bundled files and serves one from the captured snapshot", async () => {
+    projectSkill(".agents", "wiki-helper", "See references/style.md\n")
+    mkdirSync(join(wt.worktree, ".agents", "skills", "wiki-helper", "references"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".agents", "skills", "wiki-helper", "references", "style.md"), "STYLE_RULE\n")
+    commitAll()
+    const h = harness({ lines: ["compile the wiki", "/quit"], choose: async () => 0, skillPolicy: policy("auto") })
+    const handoffs = useRealSkillCoordinator(h, ["wiki-helper"])
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+    const tool = handoffs[0]!.skillTool!
+    expect(handoffs[0]?.loads?.[0]?.text).toContain("- references/style.md")
+    // Edited on disk after the capture: the snapshot still serves the captured bytes.
+    writeFileSync(join(wt.worktree, ".agents", "skills", "wiki-helper", "references", "style.md"), "CHANGED\n")
+    expect(await tool.readResource!("wiki-helper", "references/style.md", new AbortController().signal)).toEqual({ ok: true, text: "STYLE_RULE\n" })
+    expect(await tool.readResource!("wiki-helper", "references/missing.md", new AbortController().signal)).toMatchObject({ ok: false })
+    expect(await tool.readResource!("other", "references/style.md", new AbortController().signal)).toMatchObject({ ok: false })
+  })
+
   test("a load the model attempts outside the consent-free set is refused as a tool error, never a prompt", async () => {
     projectSkill(".agents", "wiki-helper")
     commitAll()
@@ -3114,7 +3153,7 @@ describe("model-loaded skills in otter chat", () => {
     expect(h.calls.output.join("")).toContain("Automatic skills: on for this session · skill_auto.mode auto · candidates: wiki-helper")
   })
 
-  test("only consent-free, policy-eligible skills within the budget and role tools are listed", async () => {
+  test("only consent-free, policy-eligible skills within the budget are listed, regardless of declared allowed-tools", async () => {
     projectSkill(".agents", "committed")
     projectSkill(".agents", "huge", "x".repeat(20_000) + "\n")
     projectSkill(".codex", "imported")
@@ -3127,7 +3166,8 @@ describe("model-loaded skills in otter chat", () => {
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
     const names = handoffs[0]?.skillTool?.catalog.map(skill => skill.name) ?? []
     expect(names).toContain("committed")
-    for (const excluded of ["huge", "imported", "read-only", "uncommitted"]) expect(names).not.toContain(excluded)
+    expect(names).toContain("read-only")
+    for (const excluded of ["huge", "imported", "uncommitted"]) expect(names).not.toContain(excluded)
     expect(handoffs[0]?.loads?.[0]).toMatchObject({ name: "uncommitted", ok: false })
     expect(h.calls.choices).toEqual([])
 

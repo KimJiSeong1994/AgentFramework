@@ -39,7 +39,7 @@ import { assertPreparedHostReference, hostReferenceHasVendorID, persistedHostRef
 import { authenticateLinuxVerification } from "../hosts/linux-domain.ts"
 import { beginExecutionActivity } from "../hosts/runtime.ts"
 import { LinuxAdmissionRefused, type LinuxAdmissionRefusal, type ExecutionHandle, type ExecutionReconciliation,
-  type ExecutionReference, type ExecutionRole, type ExecutionRuntime } from "../hosts/types.ts"
+  type ExecutionRequest, type ExecutionReference, type ExecutionRole, type ExecutionRuntime } from "../hosts/types.ts"
 import type { VerificationHandle, VerificationResult } from "./verifier.ts"
 import { createSnapshotStore, type Snapshot } from "./snapshot.ts"
 import { createTaskWorktree, hasTaskWorktreeState, planWorktreeScope, reopenTaskWorktree, taskWorktreeOwner, type TaskWorktree } from "./worktree.ts"
@@ -686,9 +686,11 @@ export function createQueue(deps: ExecutionRuntime): Queue {
         entry.attempt = attempt
         observeTaskStart(attempt)
 
-        const worker = await runChild(deps, entry, sessionID, "worker", `otter task ${task.n}: ${task.title}`, workerPrompt(ledger, task, rejectReason, origin?.probe ? 0 : c.handoff_context_chars), c.task_ttl_ms, (child) => {
+        const separatePlanSkills = deps.host.identity.controlProfile === "estimated-input-reactive-output-v1"
+        const planSkills = task.wf ? ledger.planSkills?.[task.wf.id]?.skills : undefined
+        const worker = await runChild(deps, entry, sessionID, "worker", `otter task ${task.n}: ${task.title}`, workerPrompt(ledger, task, rejectReason, origin?.probe ? 0 : c.handoff_context_chars, !separatePlanSkills), c.task_ttl_ms, (child) => {
           ledger = writeLedger(deps.worktree, { ...ledger, running: { taskId: task.id, childSessionID: child, since: Date.now() } })
-        }, wt?.path ?? planRoot, attempt)
+        }, wt?.path ?? planRoot, attempt, separatePlanSkills ? planSkills : undefined)
         task = { ...task, workerSessionID: worker.sessionID ?? task.workerSessionID, childSessions: [...task.childSessions, ...(worker.sessionID ? [worker.sessionID] : [])] }
         if (worker.status === "aborted") return cancelled()
         task.report = head((worker.text ?? "").trim(), c.report_max_chars) || undefined
@@ -1052,7 +1054,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
 
 // ------------------------------------------------------------------ prompts (dynamic user messages, not prefix)
 
-export function workerPrompt(ledger: Ledger, task: LedgerTask, previousFailure: string | undefined, contextChars: number): string {
+export function workerPrompt(ledger: Ledger, task: LedgerTask, previousFailure: string | undefined, contextChars: number, includePlanSkills = true): string {
   const batch = ledger.tasks.filter((t) => (t.batch ?? 1) === (task.batch ?? 1))
   const index = Math.max(1, batch.findIndex((t) => t.id === task.id) + 1)
   const lines = [`Task ${index} of ${batch.length}: ${task.title}`]
@@ -1068,6 +1070,11 @@ export function workerPrompt(ledger: Ledger, task: LedgerTask, previousFailure: 
       `A previous worker already changed files for this task, but the result was not accepted. Reason: ${oneLine(previousFailure, 300)}`,
       "Read the files first and keep what already works. Change only the code this task owns to satisfy the declared verification; the framework runs it after your edits. Never invoke Bash or run tests, and never edit test files. If it cannot pass honestly, explain under Open issues and stop.",
     )
+  }
+  const planSkills = task.wf ? ledger.planSkills?.[task.wf.id]?.skills : undefined
+  if (includePlanSkills && planSkills?.length) {
+    lines.push("", "Skills used when this plan was made (reference instructions; your role, tools and the task's verification still apply):")
+    for (const skill of planSkills) lines.push("", `--- skill: ${skill.name} ---`, skill.instructions, `--- end skill: ${skill.name} ---`)
   }
   return lines.join("\n")
 }
@@ -1149,6 +1156,7 @@ async function runChild(
   onCreated?: (sessionID: string) => void,
   directory?: string,
   attempt?: AttemptObservation,
+  planSkills?: ExecutionRequest["planSkills"],
 ): Promise<ChildRun> {
   if (entry.aborted) return { status: "aborted" }
   const claim = entry.claim!
@@ -1158,7 +1166,7 @@ async function runChild(
   const request = {
     executionID, supervisorSessionID: parentID, taskID: attempt?.taskID ?? executionID,
     attemptID, generation: claim.generation, role: agent as ExecutionRole,
-    title, cwd: directory ?? deps.directory, text, deadlineAt: Date.now() + ttlMs, policy,
+    title, cwd: directory ?? deps.directory, text, ...(planSkills?.length ? { planSkills } : {}), deadlineAt: Date.now() + ttlMs, policy,
   }
   const fullRequest = {
     ...request, handlers: deps.policy.handlers(request),

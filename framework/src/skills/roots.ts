@@ -75,14 +75,16 @@ export const PROTECTED_WORKFLOWS: readonly ProtectedWorkflowDescriptor[] = Objec
 
 const metadataSchema = z.object({
   name: z.string().regex(NAME),
-  description: z.string().trim().min(1).max(800),
+  description: z.string().trim().min(1).max(1024),
   "allowed-tools": z.unknown().optional(),
+  "disable-model-invocation": z.boolean().optional(),
 })
 
 export type SkillFrontmatter = Readonly<{
   name: string
   description: string
   allowedTools?: readonly SkillToolName[]
+  disableModelInvocation?: true
 }>
 
 type SkillRootSpec = Readonly<{ source: "project" | "home"; base: string; root: string; tier: "native" | "import"; optional?: true }>
@@ -203,14 +205,15 @@ function parseAllowedTools(value: unknown): readonly SkillToolName[] | undefined
     tools = trimmed.includes(",") ? trimmed.split(/\s*,\s*/) : trimmed.split(/\s+/)
   } else throw new TypeError("allowed-tools must be a list or a delimited string")
 
+  // Claude-style entries (`Bash(git:*)`, tools Otter lacks) are ignored rather than refusing the skill; matching is case-insensitive.
   const result: SkillToolName[] = []
   const seen = new Set<string>()
   for (const tool of tools) {
-    if (typeof tool !== "string" || !KNOWN_TOOL_SET.has(tool) || seen.has(tool)) {
-      throw new TypeError("allowed-tools contains an unknown or duplicate tool")
-    }
-    seen.add(tool)
-    result.push(tool as SkillToolName)
+    if (typeof tool !== "string" || !tool.trim()) throw new TypeError("allowed-tools entries must be nonempty strings")
+    const name = tool.trim().toLowerCase()
+    if (!KNOWN_TOOL_SET.has(name) || seen.has(name)) continue
+    seen.add(name)
+    result.push(name as SkillToolName)
   }
   return Object.freeze(result)
 }
@@ -238,6 +241,7 @@ export function parseSkillFrontmatter(bytes: Uint8Array, expectedName: string): 
     name: result.data.name,
     description: result.data.description,
     ...(allowedTools === undefined ? {} : { allowedTools }),
+    ...(result.data["disable-model-invocation"] === true ? { disableModelInvocation: true as const } : {}),
   })
 }
 
@@ -437,6 +441,7 @@ async function scanRoot(
             name,
             description: frontmatter.description,
             ...(frontmatter.allowedTools === undefined ? {} : { allowedTools: frontmatter.allowedTools }),
+            ...(frontmatter.disableModelInvocation ? { disableModelInvocation: true as const } : {}),
           })
           candidates.push({ source: spec.source, base: spec.base, tier: spec.tier, name, identity, descriptor,
             directory: `${candidateDirectory.openedStat.dev}:${candidateDirectory.openedStat.ino}` })

@@ -10,7 +10,7 @@ import { activeAnyWorkflow, activeWorkflow, readAnyWorkflowChecked, readWorkflow
 import { sessionActivityBlocker } from "./runtime.ts"
 import { getQueue, type QueueOrigin, type QueueRun } from "../orchestration/queue.ts"
 import { createTaskWorktree, hasPlanWorktreeState, planIsolationAvailability, planWorktreeScope, reopenPlanWorktree, type TaskWorktree } from "../orchestration/worktree.ts"
-import { readLedger, OPEN_STATUSES } from "../state/ledger.ts"
+import { boundPlanSkills, readLedger, writeLedger, OPEN_STATUSES, type PlanSkill } from "../state/ledger.ts"
 import { sessionDir, stateRoot } from "../state/store.ts"
 import { admissionEpoch, admissionFence, effectiveHold, isAdmissionCurrent } from "../sessions/admission.ts"
 import { getOwnedSession, inspectSessionAttachment, readSessionMetadata, sessionWasRebound } from "../sessions/store.ts"
@@ -331,7 +331,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
     return importedPlan(value, revision, runtime)
   }
 
-  async function importPlan(sessionID: string, sourcePath: string, signal?: AbortSignal, parsed?: unknown): Promise<PlanSubmission> {
+  async function importPlan(sessionID: string, sourcePath: string, signal?: AbortSignal, parsed?: unknown, options?: { skills?: ReadonlyArray<PlanSkill> }): Promise<PlanSubmission> {
     runtime.linuxAdmission?.assertBootEpoch()
     if (!flowOn(runtime.config)) throw new Error("plan workflow is disabled")
     if (!sessionID || sessionID.includes("/") || sessionID.includes("\\") || sessionID === "." || sessionID === "..") throw new Error("invalid session ID")
@@ -371,7 +371,17 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
         ? submitAdmittedImportedPlan(runtime, started.wf, plan, admission, review.signal)
         : submitImportedPlan(runtime, started.wf, plan, review.signal))
       assertWorkflowRecordUnchanged(started.wf, sessionID, epoch)
-      return submitted
+      if (!submitted.result.ok) return submitted
+      // Skills that shaped this plan travel with it (per workflow, replaced on every revision) for the workers.
+      const bounded = options?.skills?.length ? boundPlanSkills(options.skills) : undefined
+      const ledger = readLedger(root, sessionID)
+      if (bounded || ledger.planSkills?.[started.wf.id]) {
+        const { [started.wf.id]: _stale, ...others } = ledger.planSkills ?? {}
+        const planSkills = bounded ? { ...others, [started.wf.id]: bounded } : others
+        const { planSkills: _old, ...rest } = ledger
+        writeLedger(root, Object.keys(planSkills).length ? { ...rest, planSkills } : rest)
+      }
+      return bounded ? { ...submitted, skills: bounded } : submitted
     }
     finally {
       signal?.removeEventListener("abort", abort)

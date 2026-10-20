@@ -219,3 +219,26 @@ describe("classifyIntent", () => {
     expect(classifyIntent("make it better").force).toBe(false)
   })
 })
+
+describe("classifyIntent conversation context", () => {
+  test("a back-reference follow-up after a prior turn is anchored by that turn, not under-specified", () => {
+    for (const text of ["그거 정리해서 배포용 문서로 써줘", "그 내용으로 릴리스 노트 만들어줘", "아까 말한 대로 정리해줘", "write it up as release notes"]) {
+      expect(classifyIntent(text).class).toBe("ambiguous")
+      const followUp = classifyIntent(text, { priorTurn: true })
+      expect(followUp.class).toBe("implement")
+      expect(followUp.signals).toContain("anchor:follow-up")
+    }
+  })
+
+  test("open-ended or unanchored requests keep the offer even after a prior turn", () => {
+    for (const text of ["뭔가 좀 개선해줘", "make it better", "코드 정리해줘", "fix the bug"]) {
+      expect(classifyIntent(text, { priorTurn: true }).class).toBe("ambiguous")
+    }
+  })
+
+  test("naming an available skill or saying skill anchors the request; architecture still offers", () => {
+    expect(classifyIntent("llm-wiki로 정리해줘", { skillNames: ["llm-wiki"] }).signals).toContain("anchor:skill:llm-wiki")
+    expect(classifyIntent("위키 스킬로 정리해줘").class).toBe("implement")
+    expect(classifyIntent("그거 전부 리팩터링해줘", { priorTurn: true }).class).toBe("architecture")
+  })
+})

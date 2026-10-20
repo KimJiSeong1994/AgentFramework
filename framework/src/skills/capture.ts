@@ -132,7 +132,8 @@ function canonicalName(name: string): boolean {
 
 function equalsDescriptor(a: LocalSkillDescriptor, b: LocalSkillDescriptor): boolean {
   return a.identity === b.identity && a.source === b.source && a.name === b.name &&
-    a.description === b.description && JSON.stringify(a.allowedTools ?? null) === JSON.stringify(b.allowedTools ?? null)
+    a.description === b.description && JSON.stringify(a.allowedTools ?? null) === JSON.stringify(b.allowedTools ?? null) &&
+    a.disableModelInvocation === b.disableModelInvocation
 }
 
 function frame(hash: ReturnType<typeof createHash>, bytes: Uint8Array): void {
@@ -988,6 +989,7 @@ export async function captureSkill(
         name: current.name,
         description: metadata.description,
         ...(metadata.allowedTools === undefined ? {} : { allowedTools: metadata.allowedTools }),
+        ...(metadata.disableModelInvocation ? { disableModelInvocation: true as const } : {}),
       })
       if (!equalsDescriptor(current, capturedDescriptor)) throw new CaptureRace("skill metadata changed during capture")
 

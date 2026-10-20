@@ -233,15 +233,44 @@ describe("skill discovery", () => {
   test("refuses malformed metadata and validates allowed-tools against the execution tool registry", async () => {
     writeSkill("malformed")
     writeFileSync(join(project, BASE, "malformed", "SKILL.md"), "---\nname: [broken\ndescription: no\n---\n")
-    writeSkill("invalid-tools", { allowedTools: "[read, invented_tool]" })
     writeSkill("valid-tools", { allowedTools: "[read, grep, task]" })
+    writeSkill("invalid-tools", { allowedTools: "[read, 17]" })
 
     const result = await discoverSkills(roots)
-    expect(result.descriptors.some((item) => item.name === "malformed" || item.name === "invalid-tools")).toBe(false)
+    expect(result.descriptors.some((item) => item.name === "malformed")).toBe(false)
     expect(result.refusals.some((item) => item.name === "malformed" && item.reason === "invalid-metadata")).toBe(true)
     expect(result.refusals.some((item) => item.name === "invalid-tools" && item.reason === "invalid-metadata")).toBe(true)
     const valid = result.descriptors.find((item) => item.name === "valid-tools")
     expect(valid?.kind === "skill" ? valid.allowedTools : undefined).toEqual(["read", "grep", "task"])
+  })
+
+  test("parses Claude-style allowed-tools, ignoring unknown and parameterized entries", async () => {
+    writeSkill("claude-list", { allowedTools: "Read, Grep" })
+    writeSkill("claude-param", { allowedTools: "Bash(git:*) Read" })
+    writeSkill("claude-unknown", { allowedTools: "[read, invented_tool, READ]" })
+    const result = await discoverSkills(roots)
+    const tools = (name: string) => {
+      const item = result.descriptors.find((descriptor) => descriptor.name === name)
+      return item?.kind === "skill" ? item.allowedTools : "missing"
+    }
+    expect(tools("claude-list")).toEqual(["read", "grep"])
+    expect(tools("claude-param")).toEqual(["read"])
+    expect(tools("claude-unknown")).toEqual(["read"])
+  })
+
+  test("accepts a 1024-character description, refuses 1025, and records disable-model-invocation", async () => {
+    for (const [name, length] of [["desc-ok", 1024], ["desc-long", 1025]] as const) {
+      const directory = skillDirectory(name)
+      writeFileSync(join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: ${"d".repeat(length)}\n---\nBody\n`)
+    }
+    const manual = skillDirectory("manual-only")
+    writeFileSync(join(manual, "SKILL.md"), "---\nname: manual-only\ndescription: Manual only\ndisable-model-invocation: true\n---\nBody\n")
+    const result = await discoverSkills(roots)
+    expect(result.descriptors.some((item) => item.name === "desc-ok")).toBe(true)
+    expect(result.descriptors.some((item) => item.name === "desc-long")).toBe(false)
+    expect(result.refusals.some((item) => item.name === "desc-long" && item.reason === "invalid-metadata")).toBe(true)
+    const item = result.descriptors.find((descriptor) => descriptor.name === "manual-only")
+    expect(item?.kind === "skill" ? item.disableModelInvocation : undefined).toBe(true)
   })
 })
 

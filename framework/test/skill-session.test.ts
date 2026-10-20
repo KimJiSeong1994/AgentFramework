@@ -222,7 +222,7 @@ test("auto candidates are consent-free, policy-filtered and size-bounded; consen
       terminal: { stdinIsTTY: true, stderrIsTTY: true, choose: async (title: string) => { choices.push(title); return 0 } },
     }, signal())
     sessions.push(session)
-    const names = async (policy: SkillAutoPolicy, max = 1000, tools: string[] = ["read"]) => (await session.autoCandidates(policy, max, tools, signal())).map(c => c.name)
+    const names = async (policy: SkillAutoPolicy, max = 1000) => (await session.autoCandidates(policy, max, signal())).map(c => c.name)
 
     expect(await names(DEFAULT_SKILL_AUTO)).toEqual(["common", "native-home"])
     expect(await names(DEFAULT_SKILL_AUTO, 10_000)).toEqual(["common", "large", "native-home"])
@@ -233,23 +233,28 @@ test("auto candidates are consent-free, policy-filtered and size-bounded; consen
     await session.prepare("uncommitted", signal())
     expect(choices).toHaveLength(1)
     expect(await names(DEFAULT_SKILL_AUTO)).not.toContain("uncommitted")
-    expect((await session.autoCandidates(DEFAULT_SKILL_AUTO, 1000, ["read"], signal()))[0]).toEqual({ name: "common", description: "Inspect this project", bytes: expect.any(Number) })
+    expect((await session.autoCandidates(DEFAULT_SKILL_AUTO, 1000, signal()))[0]).toEqual({ name: "common", description: "Inspect this project", bytes: expect.any(Number) })
 
     // consent "never": authorized skills prepare silently; anything needing a prompt refuses without one.
     choices = []
-    claimPreparedSkillInvocation(await session.prepare("common", signal(), { consent: "never", requiredTools: ["read"] }))
-    claimPreparedSkillInvocation(await session.prepare("native-home", signal(), { consent: "never", requiredTools: ["read"] }))
-    await expect(session.prepare("untrusted-home", signal(), { consent: "never", requiredTools: ["read"] })).rejects.toThrow("never prompts")
+    claimPreparedSkillInvocation(await session.prepare("common", signal(), { consent: "never" }))
+    claimPreparedSkillInvocation(await session.prepare("native-home", signal(), { consent: "never" }))
+    await expect(session.prepare("untrusted-home", signal(), { consent: "never" })).rejects.toThrow("never prompts")
     expect(choices).toEqual([])
     expect(session.listGrants().map(grant => grant.name)).not.toContain("untrusted-home")
     // An explicit session grant (prompted earlier) still does not authorize automatic use.
-    await expect(session.prepare("uncommitted", signal(), { consent: "never", requiredTools: ["read"] })).rejects.toThrow("not usable without consent")
-    // A skill whose declared tool scope is narrower than the role's tools is never a candidate.
-    expect(await names(DEFAULT_SKILL_AUTO, 1000, ["read", "grep"])).toEqual(["native-home"])
-    // A trusted skill that gains a narrower scope after listing is refused at prepare time, without a prompt.
+    await expect(session.prepare("uncommitted", signal(), { consent: "never" })).rejects.toThrow("not usable without consent")
+    // A declared allowed-tools scope pre-approves; it no longer excludes a skill from automatic use.
+    expect(await names(DEFAULT_SKILL_AUTO, 1000)).toEqual(["common", "native-home"])
     writeFileSync(join(home, ".agents/skills", "native-home", "SKILL.md"), "---\nname: native-home\ndescription: Native home skill\nallowed-tools: [read]\n---\nBody.\n")
-    await expect(session.prepare("native-home", signal(), { consent: "never", requiredTools: ["read", "grep"] })).rejects.toThrow("not usable without consent")
-    claimPreparedSkillInvocation(await session.prepare("native-home", signal(), { consent: "never", requiredTools: ["read"] }))
+    expect(await names(DEFAULT_SKILL_AUTO, 1000)).toContain("native-home")
+    claimPreparedSkillInvocation(await session.prepare("native-home", signal(), { consent: "never" }))
+    // disable-model-invocation keeps a trusted skill out of automatic use, while explicit prepare still works.
+    writeFileSync(join(home, ".agents/skills", "native-home", "SKILL.md"), "---\nname: native-home\ndescription: Native home skill\ndisable-model-invocation: true\n---\nBody.\n")
+    expect(await names(DEFAULT_SKILL_AUTO)).not.toContain("native-home")
+    await expect(session.prepare("native-home", signal(), { consent: "never" })).rejects.toThrow("not usable without consent")
+    expect(choices).toEqual([])
+    claimPreparedSkillInvocation(await session.prepare("native-home", signal()))
     expect(choices).toEqual([])
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
@@ -267,17 +272,17 @@ test("a project skill shadowing a name-trusted home skill is never automatic, wh
       return session
     }
     let session = await create(parseSkillTrust(["orca-cli"], home) as SkillTrust)
-    expect((await session.autoCandidates(DEFAULT_SKILL_AUTO, 1000, [], signal())).map(c => c.name)).toEqual(["orca-cli"])
+    expect((await session.autoCandidates(DEFAULT_SKILL_AUTO, 1000, signal())).map(c => c.name)).toEqual(["orca-cli"])
     // A cloned repository adds an untracked project skill with the trusted name: project wins discovery.
     put("orca-cli", "REPO BYTES\n")
-    expect(await session.autoCandidates(DEFAULT_SKILL_AUTO, 1000, ["read"], signal())).toEqual([])
-    await expect(session.prepare("orca-cli", signal(), { consent: "never", requiredTools: ["read"] })).rejects.toThrow("not usable without consent")
+    expect(await session.autoCandidates(DEFAULT_SKILL_AUTO, 1000, signal())).toEqual([])
+    await expect(session.prepare("orca-cli", signal(), { consent: "never" })).rejects.toThrow("not usable without consent")
     // Explicit name trust is unchanged for explicit invocation.
     expect(claimPreparedSkillInvocation(await session.prepare("orca-cli", signal())).text).toContain("REPO BYTES")
     // Folder trust that contains the project skill directory is an operator decision about that path.
     session.close()
     session = await create(parseSkillTrust([join(fixture.worktree, ".agents", "skills")], home) as SkillTrust)
-    expect((await session.autoCandidates(DEFAULT_SKILL_AUTO, 1000, ["read"], signal())).map(c => c.name)).toEqual(["orca-cli"])
+    expect((await session.autoCandidates(DEFAULT_SKILL_AUTO, 1000, signal())).map(c => c.name)).toEqual(["orca-cli"])
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 

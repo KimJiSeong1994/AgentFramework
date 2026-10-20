@@ -18,6 +18,8 @@
 #       agent: task/delegate/todowrite hidden, steps set), delegate tool schema <= 400 est. tokens
 #   D12a otter_flow tool schema <= 300 est. tokens and only visible on main; D12b M1 command set: effective config
 #       contains stop,status,plan,approve,reject,cancel (WARN if missing); D12c PLAN_REVIEW_TEMPLATE <= 350 est. tokens
+#   D13 project skill descriptions (.opencode/skills, .agents/skills): WARN on no trigger phrase in the first 160
+#       characters, name < 3 chars or generic, description > 1024 characters
 #   D10 chat.params option keys are AI-SDK camelCase keys also used by the user's model options (reasoningEffort)
 #   D11 stage-3 data layer: vendored EvoOntology MCP server answers initialize/tools/list (python3, stdio), the sqlite
 #       query helper runs a read-only query, and the fixture ontology validates; D11d = effective config when the
@@ -534,6 +536,54 @@ if [ -f "$EVOLVE" ] && command -v python3 >/dev/null 2>&1; then
   [ "$out" = "self-test ok" ] && bash -n "$ROOT/scripts/otter-evo-nightly.sh" 2>/dev/null && report PASS D11e evo-evolve "ontology evolution driver + nightly wrapper: self-test ok (patch validation, judge decoding)" "self-test ok" || report FAIL D11e evo-evolve "$(printf '%s' "$out" | tail -1 | head -c 160)" "self-test ok" "python3 scripts/otter-evo-evolve.py --self-test"
 else
   report SKIP D11e evo-evolve "driver or python3 missing" "" ""
+fi
+
+# ---------------------------------------------------------------- D13 project skill descriptions (read-only, no network)
+if want D13; then
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$ROOT" > "$TMP/d13.txt" 2>&1 <<'PY'
+import glob, os, re, sys
+root = sys.argv[1]
+TRIGGERS = ("use when", "use for", "triggers", "사용", "할 때")
+GENERIC = {"helper", "utils", "misc"}
+def field(lines, key):
+    for i, line in enumerate(lines):
+        m = re.match(r"^" + key + r":\s*(.*)$", line)
+        if not m: continue
+        value = m.group(1).strip()
+        if value in (">", "|", ">-", "|-", ">+", "|+"):
+            parts = []
+            for rest in lines[i + 1:]:
+                if rest[:1] in (" ", "\t"): parts.append(rest.strip())
+                elif rest.strip(): break
+            return " ".join(parts)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'": value = value[1:-1]
+        return value
+    return ""
+bad, total = [], 0
+for base in (".opencode/skills", ".agents/skills"):
+    for path in sorted(glob.glob(os.path.join(root, base, "*", "SKILL.md"))):
+        total += 1
+        try: text = open(path, encoding="utf-8").read()
+        except Exception: continue
+        m = re.match(r"^---\r?\n([\s\S]*?)\r?\n---", text)
+        lines = m.group(1).splitlines() if m else []
+        name, desc = field(lines, "name"), field(lines, "description")
+        issues = []
+        if len(name) < 3 or name.lower() in GENERIC: issues.append("name '%s' too short/generic" % name)
+        if not any(t in desc[:160].lower() for t in TRIGGERS): issues.append("no trigger phrase in first 160 chars")
+        if len(desc) > 1024: issues.append("description %d > 1024 chars" % len(desc))
+        if issues: bad.append("%s/%s: %s" % (base, os.path.basename(os.path.dirname(path)), "; ".join(issues)))
+print("total=%d" % total)
+print("bad=%s" % " | ".join(bad))
+PY
+    d13_total="$(sed -n 's/^total=//p' "$TMP/d13.txt")"; d13_bad="$(sed -n 's/^bad=//p' "$TMP/d13.txt")"
+    if [ -z "$d13_total" ]; then report WARN D13 skill-descriptions "check failed: $(tail -1 "$TMP/d13.txt")" "descriptions checkable" "python3 available?"
+    elif [ -z "$d13_bad" ]; then report PASS D13 skill-descriptions "$d13_total project skills ok" "trigger phrase in first 160 chars, name >= 3 chars and not generic, description <= 1024"
+    else report WARN D13 skill-descriptions "$d13_bad" "trigger phrase (Use when/Use for/Triggers/사용/할 때) in first 160 chars, name >= 3 chars and not generic, description <= 1024" "edit the SKILL.md frontmatter so the description says when to use the skill"; fi
+  else
+    report SKIP D13 skill-descriptions "python3 missing" "" ""
+  fi
 fi
 
 # ---------------------------------------------------------------- result

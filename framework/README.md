@@ -601,6 +601,10 @@ trusted entries and `/skills grants` shows `trusted by config`.
 
 ### Model-loaded skills (`skill_auto`)
 
+Skill `allowed-tools` names are matched case-insensitively against Otter's tool registry. Unsupported names and
+parameterized vendor entries such as `Bash(git:*)` are ignored; they cannot grant tools. Nonstring or empty entries
+are rejected as malformed metadata. Automatic skill use retains the execution role's existing tool restrictions.
+
 In a plain chat turn the main model sees a list of consent-free skills (name and description) and a `skill` tool. It
 loads a skill when the request or the conversation calls for it, so a follow-up such as "write that up for the release"
 can pull in a release-notes skill from context; nothing is preselected for it. Loading returns the captured
@@ -624,7 +628,8 @@ Configured in the **user** config only:
   skill, so a cloned repository cannot shadow a trusted home name). Grants from an earlier "Allow" prompt do not
   qualify. Native roots only, unless `include` names an import-tier skill; `exclude` always wins; protected workflows
   are never listed; a skill larger than the conversation's skill budget (about 14K characters) is skipped, and so is a
-  skill whose `allowed-tools` is narrower than the planning role's tools. Each turn lists at most 12, ranked against
+  skill with `disable-model-invocation: true` (explicit `/skill:` only). A declared `allowed-tools` never excludes a
+  skill: automatic use runs with the planning role's own tools and does not bind it. Each turn lists at most 12, ranked against
   the request, with descriptions clipped to 160 characters; if even that would overflow the input limit, the turn runs
   without skills. `/skills auto` lists the candidates. By design, with the default `auto` a repository's committed
   skills are listed without any user action (tools and approvals are unchanged); set `exclude` or `mode: "off"` if
