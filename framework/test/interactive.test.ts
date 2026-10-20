@@ -1094,7 +1094,7 @@ describe("interactive terminal", () => {
     expect(h.calls.signalListeners.size).toBe(0)
   })
 
-  test("canonicalizes nested Git worktree paths and rejects non-Git directories", async () => {
+  test("canonicalizes nested Git worktree paths; a non-Git directory is used as is", async () => {
     const nested = join(wt.worktree, "src")
     mkdirSync(nested, { recursive: true })
     const h = harness({ lines: ["/quit"] })
@@ -1102,10 +1102,26 @@ describe("interactive terminal", () => {
     expect(result.code).toBe(0)
     expect(h.calls.runtime?.worktree).toBe(realpathSync(wt.worktree))
 
-    const notGit = harness({ gitTopLevel: undefined })
-    await expect(launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, notGit.deps))
+    const notGit = harness({ gitTopLevel: undefined, lines: ["/quit"] })
+    const plain = await launchInteractive({ worktree: nested, engine: "codex", model: "gpt-5-codex" }, notGit.deps)
+    expect(plain.code).toBe(0)
+    expect(notGit.calls.runtime?.worktree).toBe(realpathSync(nested))
+
+    for (const [reason, shown] of [
+      ["execution authority worktree is owned by a different operating-system user", "belongs to another user"],
+      ["fixed execution authority resolves inside the worktree", "your home folder"],
+    ] as const) {
+      const refused = harness({ gitTopLevel: undefined })
+      refused.deps.checkWorktree = () => { throw new Error(reason) }
+      await expect(launchInteractive({ worktree: nested, engine: "codex", model: "gpt-5-codex" }, refused.deps))
+        .rejects.toThrow(new RegExp(`cannot start in .*${shown}.*cd into a project folder`))
+      expect(refused.calls.runtime).toBeUndefined()
+    }
+
+    const relativeGit = harness({ gitTopLevel: "relative/top" })
+    await expect(launchInteractive({ worktree: nested, engine: "codex", model: "gpt-5-codex" }, relativeGit.deps))
       .rejects.toThrow("canonical Git worktree")
-    expect(notGit.calls.runtime).toBeUndefined()
+    expect(relativeGit.calls.runtime).toBeUndefined()
   })
 
   test("bare chat stays unselected until /model opens engine and model selection", async () => {

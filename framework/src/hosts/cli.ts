@@ -55,7 +55,8 @@ Saved conversations are retained across restarts. Startup always opens a new con
 choose a previous one only when needed with --resume, /sessions or /resume [ID] (before model selection too). Restored sessions keep their saved
 model and conversation; /continue performs the existing explicit work-resume checks.
 
-Bare 'otter' and 'otter chat' start Otter's interactive terminal in the current Git worktree,
+Bare 'otter' and 'otter chat' start Otter's interactive terminal in the current Git worktree
+(any other folder is used as is; approved plans then ask before running in place),
 or in the canonical worktree selected by --worktree. Choose an engine from the menu, or
 specify --engine. Enter a native model ID or supply --model; local selects the Ollama CLI,
 not OpenCode. The model picker lists bounded native choices when available; explicit IDs are

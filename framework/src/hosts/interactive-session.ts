@@ -11,6 +11,7 @@ import { createInterface } from "node:readline"
 import { activeAnyWorkflow, activeWorkflow, readAnyWorkflowChecked, readWorkflowChecked, type Workflow } from "../flow/state.ts"
 import { savedPlan } from "../flow/actions.ts"
 import { ledgerPath } from "../state/ledger.ts"
+import { executionRunDirectory } from "../state/store.ts"
 import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
 import { inputColorSupported, inputLine, renderInput, type InputPresentation } from "./cli-input.ts"
 import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
@@ -123,6 +124,8 @@ export type InteractiveDependencies = {
   cwd: string
   terminal: Terminal
   gitTopLevel: (directory: string) => string | undefined
+  /** Read-only: throws when the folder cannot hold execution state (another user's folder, or the home folder itself). */
+  checkWorktree: (worktree: string) => void
   createRuntime: (options: RuntimeOptions) => ExecutionRuntime
   admitRuntime: (runtime: ExecutionRuntime) => Promise<void>
   createConversation: (runtime: ExecutionRuntime, sessionID: string, prior?: readonly ConversationMessage[]) => PlanConversation
@@ -419,6 +422,7 @@ export function defaultDependencies(): InteractiveDependencies {
     cwd: process.cwd(),
     terminal: createReadlineTerminal(),
     gitTopLevel: defaultGitTopLevel,
+    checkWorktree: worktree => { executionRunDirectory(worktree) },
     createRuntime: (options) => createCliRuntime(options),
     admitRuntime: async (runtime) => {
       assertHostAdmission(await runtime.host.preflight(runtime.host.identity.profile), runtime.host.identity.controlProfile)
@@ -440,6 +444,10 @@ export function defaultDependencies(): InteractiveDependencies {
   }
 }
 
+/**
+ * The chat worktree: the Git top-level when the directory is inside a repository, otherwise the directory itself, so
+ * `otter` starts from any folder. Without Git there is no plan worktree; an approved run asks before running in place.
+ */
 function canonicalWorktree(requested: string, deps: InteractiveDependencies): string {
   let directory: string
   try {
@@ -447,18 +455,29 @@ function canonicalWorktree(requested: string, deps: InteractiveDependencies): st
     if (!statSync(directory).isDirectory()) throw new Error()
     accessSync(directory, constants.R_OK | constants.X_OK)
   } catch {
-    throw new InteractiveLaunchError("chat requires an accessible Git worktree")
+    throw new InteractiveLaunchError("chat requires an accessible directory")
   }
   const topLevel = deps.gitTopLevel(directory)
-  if (!topLevel || !isAbsolute(topLevel)) throw new InteractiveLaunchError("chat requires a canonical Git worktree")
-  try {
-    const canonical = realpathSync(topLevel)
-    if (!statSync(canonical).isDirectory()) throw new Error()
-    accessSync(canonical, constants.R_OK | constants.X_OK)
-    return canonical
-  } catch {
-    throw new InteractiveLaunchError("chat requires a canonical Git worktree")
+  let canonical = directory
+  if (topLevel) {
+    if (!isAbsolute(topLevel)) throw new InteractiveLaunchError("chat requires a canonical Git worktree")
+    try {
+      canonical = realpathSync(topLevel)
+      if (!statSync(canonical).isDirectory()) throw new Error()
+      accessSync(canonical, constants.R_OK | constants.X_OK)
+    } catch {
+      throw new InteractiveLaunchError("chat requires a canonical Git worktree")
+    }
   }
+  // Refuse before model selection, with a fix the user can act on, instead of failing later at runtime creation.
+  try { deps.checkWorktree(canonical) } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    const fix = /different operating-system user/u.test(reason) ? "it belongs to another user"
+      : /inside the worktree/u.test(reason) ? "Otter keeps its state under this folder (your home folder)"
+      : boundedTerminalDiagnostic(reason)
+    throw new InteractiveLaunchError(`cannot start in ${canonical}: ${fix}. cd into a project folder (or pass --worktree PATH) and run otter again`)
+  }
+  return canonical
 }
 
 function signalExit(signal: SignalName | undefined): InteractiveExit {
