@@ -1867,12 +1867,30 @@ describe("interactive terminal", () => {
     expect(h.calls.comboReplacements).toBeUndefined()
   })
 
-  test("combo preset menu saves, supports custom edits, and applies only to a new session", async () => {
-    let visits = 0
+  test("choosing a recommended combo applies it to the session at once and carries the conversation", async () => {
     const h = harness({ fullscreen: true, lines: ["q1", "/model combo", "/quit"], turns: [{ text: "a1" }],
       choose: async (title, values) => {
         if (title.startsWith("Combo · main")) return 0
-        if (title === "Combo preset · astra-fable") return 0
+        if (title === "Combo preset · astra-fable") { expect(values[0]).toBe("Apply to this session"); return 0 }
+        return undefined
+      },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.comboReplacements).toEqual([COMBO_PRESETS[0]!.routes])
+    // No second "Apply" step: the new session runs under the preset right after it is chosen.
+    expect(h.calls.runtimes).toHaveLength(2)
+    expect(h.calls.runtimes[0]?.routes ?? {}).toEqual({})
+    expect(h.calls.runtimes[1]).toMatchObject({ engine: "local", model: "native", routes: COMBO_PRESETS[0]!.routes })
+    expect(h.calls.conversationRestores.at(-1)?.prior).toEqual([{ role: "user", text: "q1" }, { role: "assistant", text: "a1" }])
+    expect(h.calls.output.join("")).toContain("Applying it to this session now; the conversation carries over.")
+    // The menu closed after applying; it was not shown again.
+    expect(h.calls.choices.filter(choice => choice.title.startsWith("Combo · main"))).toHaveLength(1)
+  })
+
+  test("custom role edits still save only; Apply to a new session applies them", async () => {
+    let visits = 0
+    const h = harness({ fullscreen: true, lines: ["q1", "/model combo custom", "/quit"], turns: [{ text: "a1" }],
+      choose: async (title, values) => {
         if (title.startsWith("Custom combo · main")) return visits++ === 0
           ? values.findIndex(value => value.startsWith("worker —")) : values.indexOf("Apply to a new session")
         if (title === "Combo · worker · engine") return 0
@@ -1881,23 +1899,20 @@ describe("interactive terminal", () => {
       },
     })
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
-    expect(h.calls.comboReplacements).toEqual([COMBO_PRESETS[0]!.routes])
     expect(h.calls.comboWrites).toEqual([{ role: "worker", route: { engine: "local", model: "llama3.2" } }])
     expect(h.calls.runtimes).toHaveLength(2)
-    expect(h.calls.runtimes[0]?.routes ?? {}).toEqual({})
-    expect(h.calls.runtimes[1]).toMatchObject({ engine: "local", model: "native", routes: {
-      ...COMBO_PRESETS[0]!.routes, worker: { engine: "local", model: "llama3.2" },
-    } })
+    expect(h.calls.runtimes[1]).toMatchObject({ engine: "local", model: "native", routes: { worker: { engine: "local", model: "llama3.2" } } })
     expect(readSessionMetadata(wt.worktree, "otter-fixture-session")?.routes ?? {}).toEqual({})
     expect(h.calls.conversationRestores.at(-1)?.prior).toEqual([{ role: "user", text: "q1" }, { role: "assistant", text: "a1" }])
   })
 
-  test("typed combo presets replace saved routes without switching; failures preserve config", async () => {
+  test("typed combo presets save and apply to the session at once; failures preserve config and the session", async () => {
     const h = harness({ lines: ["/model combo preset opus-codex", "/quit"], combo: configuredCombo })
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
     expect(h.calls.comboReplacements).toEqual([COMBO_PRESETS[2]!.routes])
-    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.runtimes).toHaveLength(2)
     expect(h.calls.runtimes[0]).toMatchObject({ routes: comboRoutes })
+    expect(h.calls.runtimes[1]).toMatchObject({ engine: "local", model: "native", routes: COMBO_PRESETS[2]!.routes })
     const failed = harness({ lines: ["/model combo preset astra-fable", "/quit"], combo: configuredCombo })
     failed.deps.combo!.replace = () => { throw new Error("config is read-only") }
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, failed.deps)

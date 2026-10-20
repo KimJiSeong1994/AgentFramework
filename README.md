@@ -43,13 +43,14 @@ bun scripts/otter-wiki.ts lint      # 링크·해시 무결성
 
 - **엔진 무관**: Ollama(로컬)·Codex·Claude CLI 모두 같은 이력 형식. 대화 중 `/model`로 전환
 - **콤보**: planner / architect / critic / worker / reviewer 역할별로 엔진·모델 지정. 미지정 역할은 메인 모델
-- **프리셋**: 추천 조합 제공(예: *Astra + Fable*: Astra 계획 · Luna 실행 · Fable 리뷰)
+- **프리셋**: 추천 조합 제공(예: *Astra + Fable*: Astra 계획 · Luna 실행 · Fable 리뷰). 고르면 저장하고 **지금 세션에 바로 적용**(대화 이어짐)
 - **인증**: 각 CLI 공식 로그인 그대로 사용. otter는 인증 정보를 읽거나 저장하지 않음
 
 ```text
-/model combo                                   # 메뉴: 프리셋 선택 또는 역할 → 엔진 → 모델
-/model combo planner claude opus               # 직접 지정
-/model combo apply                             # 새 세션에 적용(기존 세션은 고정 유지)
+/model combo                                   # 메뉴: 추천 프리셋(고르면 바로 적용) 또는 역할 → 엔진 → 모델
+/model combo preset astra-fable                # 프리셋 저장 + 바로 적용
+/model combo planner claude opus               # 역할 직접 지정(저장만)
+/model combo apply                             # 직접 지정한 콤보를 적용(대화 이어짐)
 ```
 
 ## 3. 자동 스킬 · 의도 라우팅

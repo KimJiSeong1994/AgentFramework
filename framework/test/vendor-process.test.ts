@@ -12,7 +12,12 @@ import { tempGitWorktree } from "./guards-helpers.ts"
 
 const FIXTURE = join(import.meta.dir, "fixtures/vendor-process-child.ts")
 const ROOT = resolve(import.meta.dir, "../..")
-const ENV_ALLOWLIST = ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TERM"]
+const ENV_ALLOWLIST = [
+  "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TERM",
+  "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+  "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+]
 const tempDirectories: string[] = []
 const executionFixtureCleanups: Array<() => void> = []
 
@@ -394,6 +399,12 @@ test("preparation is inert and run is one-shot", async () => {
 test("argv is literal, stdin and exit are captured, and child environment is exactly allowlisted", async () => {
   const previous = process.env.VENDOR_PROCESS_TEST_ONLY
   process.env.VENDOR_PROCESS_TEST_ONLY = "synthetic-test-value"
+  // Sign-in locations reach the CLI; credentials never do.
+  const saved = { CODEX_HOME: process.env.CODEX_HOME, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY, OPENAI_API_KEY: process.env.OPENAI_API_KEY }
+  process.env.CODEX_HOME = "/fixture/codex-home"
+  process.env.CLAUDE_CONFIG_DIR = "/fixture/claude-config"
+  process.env.ANTHROPIC_API_KEY = "sk-ant-fixture"
+  process.env.OPENAI_API_KEY = "sk-fixture"
   try {
     const argv = ["two words", ";", "$(not-a-shell)", "--literal=value", "quote'\"", "雪"]
     const input = "fixture stdin only\n"
@@ -405,6 +416,9 @@ test("argv is literal, stdin and exit are captured, and child environment is exa
     expect(report.args).toEqual(argv)
     expect(report.envKeys).toEqual(expectedEnvKeys)
     expect(report.envKeys).not.toContain("VENDOR_PROCESS_TEST_ONLY")
+    expect(report.envKeys).toEqual(expect.arrayContaining(["CODEX_HOME", "CLAUDE_CONFIG_DIR"]))
+    expect(report.envKeys).not.toContain("ANTHROPIC_API_KEY")
+    expect(report.envKeys).not.toContain("OPENAI_API_KEY")
     expect(result.stdout.text.slice(newline + 1)).toBe(input)
     expect(result.status).toBe("completed")
     expect(result.code).toBe(0)
@@ -415,6 +429,10 @@ test("argv is literal, stdin and exit are captured, and child environment is exa
   } finally {
     if (previous === undefined) delete process.env.VENDOR_PROCESS_TEST_ONLY
     else process.env.VENDOR_PROCESS_TEST_ONLY = previous
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
   }
 }, { timeout: 4000 })
 

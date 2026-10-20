@@ -5,7 +5,34 @@ import type { Readable } from "node:stream"
 import type { ExecutionCancelResult, ExecutionReconciliation } from "./types.ts"
 
 // Native keychain lookup needs the non-secret account names; authentication tokens are never forwarded.
-const ENV_ALLOWLIST = ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TERM"] as const
+// Location variables say where the vendor CLI keeps its own sign-in (CODEX_HOME, CLAUDE_CONFIG_DIR, XDG dirs) and how it
+// reaches its service (proxy, CA bundle). They carry no model-provider credential; without them a model call reads a
+// different sign-in than the one `otter auth` / `/login` saw, and a signed-in user is refused.
+const ENV_ALLOWLIST = [
+  "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TERM",
+  "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+  "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+] as const
+
+/**
+ * Credentials a vendor CLI would also accept from the environment. Otter never forwards them; a user who signed in only
+ * this way is told to sign in with the CLI itself (stored in its own CODEX_HOME / CLAUDE_CONFIG_DIR / keychain).
+ */
+export const UNFORWARDED_CREDENTIAL_ENV = Object.freeze({
+  codex: ["OPENAI_API_KEY", "CODEX_API_KEY"],
+  claude: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
+} as const)
+
+/** The environment every vendor CLI process gets: the allowlist only. Sign-in status checks use exactly this too. */
+export function vendorProcessEnvironment(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  for (const key of ENV_ALLOWLIST) {
+    const value = process.env[key]
+    if (typeof value === "string" && !value.includes("\0")) env[key] = value
+  }
+  return env
+}
 const POSIX_PLATFORMS = new Set(["aix", "darwin", "dragonfly", "freebsd", "linux", "netbsd", "openbsd", "sunos"])
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 const MAX_STDIN_BYTES = 1024 * 1024
@@ -125,11 +152,7 @@ function validateOptions(options: VendorProcessOptions): {
     stdin = Buffer.from(options.stdin)
   } else throw invalidOptions()
 
-  const env: NodeJS.ProcessEnv = {}
-  for (const key of ENV_ALLOWLIST) {
-    const value = process.env[key]
-    if (typeof value === "string" && !value.includes("\0")) env[key] = value
-  }
+  const env = vendorProcessEnvironment()
   if (!isAbsolute(executable) && !env.PATH) throw invalidOptions()
 
   return { executable, argv: copiedArgv, cwd, stdin, deadlineAt, maxCombinedOutputBytes, termToKillMs, onStdoutChunk, env }

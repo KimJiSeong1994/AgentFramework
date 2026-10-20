@@ -1365,7 +1365,9 @@ export async function runInteractiveSession(
         if (!preset) { write(`Unknown combo preset. Choose: ${COMBO_PRESETS.map(candidate => candidate.id).join(", ")}.`); return undefined }
         try {
           const path = deps.combo.replace(preset.routes)
-          write(`Saved combo preset ${preset.id} to ${path}. User routes were replaced; project overrides still take precedence. Main stays the /model selection. ${current ? "The current session is unchanged; /model combo apply starts a new session with it." : "It applies when a model is selected."}`)
+          write(`Saved combo preset ${preset.id} to ${path}. User routes were replaced; project overrides still take precedence. Main stays the /model selection. ${current ? "Applying it to this session now; the conversation carries over." : "It applies when a model is selected."}`)
+          // A recommended combo takes effect at once: with a model selected, the caller re-binds the session under it.
+          if (current) return "apply"
           show()
         } catch (error) { write(`Combo preset not saved: ${boundedTerminalDiagnostic(error instanceof Error ? error.message : String(error))}`) }
         return undefined
@@ -1441,11 +1443,14 @@ export async function runInteractiveSession(
           if (!preset) continue
           const summary = comboPresetSummary(preset)
           write(`${preset.label}: ${preset.description}\n${summary}\nMain stays the /model selection. Requires Codex and Claude; check /auth or use /login <engine>.`)
-          const confirm = await chooseFrom(terminal, `Combo preset · ${preset.id}`, ["Save this combo", "Back"],
-            [preset.description, "Return without saving."],
-            "Save replaces all user role routes; project overrides still win. Existing sessions stay unchanged.", signal)
+          const confirm = await chooseFrom(terminal, `Combo preset · ${preset.id}`, [current ? "Apply to this session" : "Save this combo", "Back"],
+            [current ? `${preset.description} Saved and applied now; the conversation carries over.` : preset.description, "Return without saving."],
+            current ? "Saves the combo and applies it to this session now; project overrides still win." : "Saves the combo; it applies when a model is selected. Project overrides still win.", signal)
           if (confirm === undefined) return "aborted"
-          if (confirm === 0) { comboCommand(["preset", preset.id], current); custom = true }
+          if (confirm === 0) {
+            if (comboCommand(["preset", preset.id], current) === "apply") return "apply"
+            custom = true
+          }
           continue
         }
         const role = COMBO_ROLE_INFO[picked]![0]
@@ -1475,8 +1480,13 @@ export async function runInteractiveSession(
       if (!wanted.length) return undefined
       let states: AuthState[]
       try { states = await Promise.all(wanted.map(engine => deps.auth.status(engine, worktree))) } catch { return undefined }
-      const out = states.filter(state => state.state === "signed-out").map(state => state.engine)
-      return out.length ? `${out.join(" and ")} ${out.length === 1 ? "is" : "are"} not signed in; run ${out.map(engine => `/login ${engine}`).join(" or ")}.` : undefined
+      const signedOut = states.filter(state => state.state === "signed-out")
+      const out = signedOut.map(state => state.engine)
+      // A key that is only in the environment never reaches the CLI: say so, or the user keeps seeing "signed in" elsewhere.
+      const envOnly = signedOut.flatMap(state => state.state === "signed-out" && state.envOnly ? [`${state.envOnly} is set, but otter never passes API keys to the ${state.engine} CLI`] : [])
+      return out.length
+        ? `${out.join(" and ")} ${out.length === 1 ? "is" : "are"} not signed in; run ${out.map(engine => `/login ${engine}`).join(" or ")}.${envOnly.length ? ` (${envOnly.join("; ")}.)` : ""}`
+        : undefined
     }
     const modelSwitchHint = async (engines: Iterable<CliEngine>): Promise<string | undefined> => {
       const targets = [...engines]
