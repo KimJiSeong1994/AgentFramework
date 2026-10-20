@@ -3,6 +3,7 @@ import type { CliProgressTask } from "../hosts/cli-progress.ts"
 import { settled, type ExecutionRunStatus } from "../hosts/run-state.ts"
 import type { TranscriptText } from "../hosts/interactive-view.ts"
 import { formatDuration } from "./progress.ts"
+import { SHELL_OUTPUT_NOT_CAPTURED } from "../hosts/operator-shell.ts"
 
 export type ExecutionDisplay = {
   state: "not-observed" | "unconfirmed" | "settled" | "historical"
@@ -226,13 +227,6 @@ export class TranscriptModel {
     return item
   }
 
-  shellOutput(id: string, lines: readonly string[], totalLines: number): void {
-    const item = this.shells.get(id)
-    if (!item || item.status !== "running") return
-    item.lines = [...lines]
-    item.totalLines = totalLines
-  }
-
   shellFinished(id: string, result: { status: Exclude<ShellItemStatus, "running">; exitCode: number | null; signal: string | null; durationMs: number; lines: readonly string[]; totalLines: number }): void {
     const item = this.shells.get(id)
     if (!item) return
@@ -282,6 +276,7 @@ export class TranscriptModel {
           ...origin,
           ...(hidden > 0 ? [`  : … ${hidden} earlier line${hidden === 1 ? "" : "s"}${item.expanded ? " not retained" : ` · /expand $${item.ordinal}`}`] : []),
           ...shown.map(line => `  | ${line}`),
+          ...(item.source !== "verify" && item.status !== "running" && item.totalLines === 0 ? [`  : ${SHELL_OUTPUT_NOT_CAPTURED}`] : []),
           `  = ${shellFooter(item, this.now())}`,
         ]
       }

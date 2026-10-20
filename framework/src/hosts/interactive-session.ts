@@ -54,7 +54,7 @@ import type { AskPrompt, ChoicePresentation, InteractiveViewFacts, RequestObserv
 import { commandInsertion, interactiveActions, interactiveHelp, type InteractiveContext } from "./interactive-actions.ts"
 import { fileComboStore, fileDefaultModelStore, validateComboRoutes, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
 import { COMBO_PRESETS, comboPresetSummary } from "./combo-presets.ts"
-import { runOperatorShell, type ShellResult, type ShellSnapshot } from "./operator-shell.ts"
+import { runTerminalShell, type ShellResult } from "./operator-shell.ts"
 import { fileMemoryStore, memoryCommand, type MemoryCommandStore } from "./memory-command.ts"
 
 export type CliEngine = CliRuntimeOptions["engine"]
@@ -99,14 +99,9 @@ export type Terminal = {
   readLine: (prompt: string, signal?: AbortSignal) => Promise<string | undefined>
   write: (text: string) => void
   writeText?: (text: TranscriptText) => void
-  /** Live operator shell window (full-screen TUI); readline prints output lines instead. */
-  shellStart?: (run: { id: string; command: string }) => ShellView
+  /** A finished operator `!command`, drawn as a Bash card (full-screen TUI); readline prints a one-line summary. */
+  shellRun?: (run: { id: string; command: string; result: ShellResult }) => void
   close: () => void
-}
-
-export type ShellView = {
-  output: (snapshot: ShellSnapshot) => void
-  finish: (result: ShellResult) => void
 }
 
 type PlanConversation = {
@@ -127,6 +122,8 @@ export type InteractiveDependencies = {
   gitTopLevel: (directory: string) => string | undefined
   /** Read-only: throws when the folder cannot hold execution state (another user's folder, or the home folder itself). */
   checkWorktree: (worktree: string) => void
+  /** Operator `!command` with the real terminal; called only after the terminal has been released. */
+  runShell: (command: string, cwd: string) => Promise<ShellResult>
   /** Background update check for installer-managed copies; must never reject (a failure is "no notice"). */
   checkUpdate: () => Promise<UpdateNotice | undefined>
   createRuntime: (options: RuntimeOptions) => ExecutionRuntime
@@ -426,6 +423,7 @@ export function defaultDependencies(): InteractiveDependencies {
     terminal: createReadlineTerminal(),
     gitTopLevel: defaultGitTopLevel,
     checkWorktree: worktree => { executionRunDirectory(worktree) },
+    runShell: runTerminalShell,
     checkUpdate: defaultUpdateCheck,
     createRuntime: (options) => createCliRuntime(options),
     admitRuntime: async (runtime) => {
@@ -972,7 +970,7 @@ export async function runInteractiveSession(
     try { progress.cancelRequested() } catch { persistenceFailed = true }
     abort.abort()
   }
-  const onSigint = () => shellAbort ? shellAbort.abort() : signalCancel("SIGINT")
+  const onSigint = () => signalCancel("SIGINT")
   const onSigterm = () => signalCancel("SIGTERM")
   const onSighup = () => signalCancel("SIGHUP")
   let requestCancel = () => { progress.cancelRequested(); abort.abort() }
@@ -1020,46 +1018,35 @@ export async function runInteractiveSession(
     persist("verify", { taskID: run.taskID, attempt: run.attempt, command, status, exitCode: run.exitCode,
       durationMs: result.durationMs, timeoutMs: Math.max(0, Math.round(run.timeoutMs)), lines, totalLines: result.totalLines }, id)
   }
-  // Operator `!command`: the host owns the run (cwd, cancellation, persistence); the terminal only renders it.
-  let shellAbort: AbortController | undefined
+  // Operator `!command`: the command gets the real terminal (like /login), then Otter takes it back and records the
+  // command, outcome and duration. Keyboard Ctrl+C reaches the command; Otter ignores SIGINT until it exits.
   async function runShell(command: string, cwd: string): Promise<void> {
     const id = `shell:${deps.randomUUID()}`
-    const controller = new AbortController()
-    const onSessionAbort = () => controller.abort()
-    shellAbort = controller
-    abort.signal.addEventListener("abort", onSessionAbort, { once: true })
-    const view = terminal.shellStart?.({ id, command })
-    if (!view) visibleWrite(terminalSafeText(`$ ${command}\n`))
-    let printed = 0
-    const printCompleted = (completed: number, tail: readonly string[]) => {
-      const fresh = Math.min(completed - printed, tail.length)
-      if (fresh > 0) visibleWrite(terminalSafeText(`${tail.slice(-fresh).join("\n")}\n`))
-      printed = completed
-    }
+    progress.suspend()
+    terminal.suspend?.()
+    const ignoreInterrupt = () => {}
+    if (sigintRegistered) deps.signals.off("SIGINT", onSigint)
+    deps.signals.on("SIGINT", ignoreInterrupt)
+    let result: ShellResult
     try {
-      const result = await runOperatorShell(command, {
-        cwd, signal: controller.signal,
-        onUpdate: snapshot => view ? view.output(snapshot) : printCompleted(snapshot.completed, snapshot.completedTail),
-      })
-      if (view) view.finish(result)
-      else {
-        printCompleted(result.totalLines, result.lines)
-        const seconds = `${(result.durationMs / 1000).toFixed(1)}s`
-        const outcome = result.status === "cancelled" ? "cancelled" : result.status === "timeout" ? "timed out" :
-          result.signal ? `signal ${result.signal}` : `exit ${result.exitCode ?? "?"}`
-        visibleWrite(`[shell] ${outcome} · ${seconds}\n`)
-      }
-      persist("shell", { command, status: result.status, exitCode: result.exitCode, signal: result.signal,
-        durationMs: result.durationMs, lines: [...result.lines], totalLines: result.totalLines }, id)
+      process.stderr.write(`\n$ ${command}\n`)
+      result = await deps.runShell(command, cwd)
     } finally {
-      abort.signal.removeEventListener("abort", onSessionAbort)
-      if (shellAbort === controller) shellAbort = undefined
+      deps.signals.off("SIGINT", ignoreInterrupt)
+      if (sigintRegistered) deps.signals.on("SIGINT", onSigint)
+      terminal.resume?.()
+      progress.resume()
     }
+    if (terminal.shellRun) terminal.shellRun({ id, command, result })
+    else {
+      const outcome = result.status === "cancelled" ? "cancelled" : result.signal ? `signal ${result.signal}` : `exit ${result.exitCode ?? "?"}`
+      visibleWrite(`[shell] ${outcome} · ${(result.durationMs / 1000).toFixed(1)}s\n`)
+    }
+    persist("shell", { command, status: result.status, exitCode: result.exitCode, signal: result.signal,
+      durationMs: result.durationMs, lines: [...result.lines], totalLines: result.totalLines }, id)
   }
   terminal.controls?.(action => {
-    // Esc / Ctrl+C / /cancel stop a running operator shell before they reach the session.
-    if (shellAbort && (action === "cancel" || action === "interrupt" || action === "shutdown")) shellAbort.abort()
-    else if (action === "interrupt") requestInterrupt()
+    if (action === "interrupt") requestInterrupt()
     else if (action === "shutdown") onSigint()
     else if (action === "quit") signalCancel()
     else if (action === "disconnect") onSighup()

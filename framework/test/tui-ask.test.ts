@@ -180,16 +180,15 @@ describe("plain choose restyle", () => {
 describe("live status row", () => {
   test("shows the most specific step, elapsed and the esc hint without duplicate generic text", () => {
     const { app, internal, last } = setup(100, 30)
-    const view = app.shellStart({ id: "shell:1", command: "bun test && git commit -m 'Full suite before committing'" })
+    internal.hostWorking = true
+    app.activity({ kind: "tool-started", executionID: "e1", callID: "c1", taskID: "t1", tool: "bash", role: "worker" } as never)
     const frame = last()
-    expect(frame).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Bash: bun test && git commit .* · \d+ms ⟦esc⟧/u)
-    expect(frame).not.toContain("Shell running")
+    expect(frame).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Bash · \d+ms ⟦esc⟧/u)
     expect(frame).not.toContain("Model request running")
     expect(frame).not.toContain("Escape cancels")
     internal.asciiChrome = true
-    app.shellStart({ id: "shell:2", command: "ls" })
-    expect(last()).toMatch(/[-\\|/] Bash: ls \| \d+ms \[esc\]/u)
-    view.finish({ status: "complete", exitCode: 0, signal: null, durationMs: 1, lines: [], totalLines: 0 })
+    app.activity({ kind: "tool-finished", executionID: "e1", callID: "c1", taskID: "t1", tool: "bash", role: "worker", outcome: "succeeded" } as never)
+    expect(last()).toMatch(/[-\\|/] .* \| \d+ms \[esc\]/u)
     app.close()
   })
 

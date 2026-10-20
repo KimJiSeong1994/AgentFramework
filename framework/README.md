@@ -314,8 +314,14 @@ outcome-only row. `/expand <n>` adds the call identity, the returned line count 
 Shell commands render as titled cards: `┌─── ✔ Bash ───┐`, the full `$ command` (wrapped), an `├─── Output ───┤`
 divider with the output tail, and a `⟦exit 0 · 1.8s⟧` footer. Each queue verify command gets the same card titled
 `Verify · <task>` (and `· attempt <n>` after the first) with `⟦exit 1 · 2.4s · timeout 2m00s⟧`; it is recorded in the
-session transcript with a bounded output tail (200 lines / 64 KiB, like `!command`) so `/resume` shows it again. The
+session transcript with a bounded output tail (200 lines / 64 KiB) so `/resume` shows it again. The
 ledger remains the authority for task outcome. Readline prints the verify run as a `[verify]` block.
+`!<command>` is the operator shell escape: Otter hands the real terminal to `$SHELL -c <command>` in the worktree (like
+`/login`), so interactive programs work (`vim`, `less`, `ssh`, `sudo` prompts, `git rebase -i`), and takes it back when
+the command exits. Ctrl+C/Ctrl+Z from the keyboard reach the command; Otter ignores SIGINT meanwhile. There is no
+timeout. Output goes straight to the terminal and is not captured: the session records the command, outcome and
+duration, shown as a Bash card that says so (readline prints `[shell] exit 0 · 1.2s`). It is never sent to the model and
+works before a model is selected.
 While work is live, the composer's top border carries a progress bar built only from observed state, most
 concrete first: a task run (`███░░ 3/5 tasks · 60%`, failed/cancelled counted as finished), ultragoal goals
 (`1/4 goals`), the owned workflow's step (`step 2/5 · ralplan · architect`; a position, not a percent, because

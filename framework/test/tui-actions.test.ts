@@ -182,7 +182,7 @@ describe("exclusive application input ownership", () => {
     expect(internal.spinnerTimer).toBeUndefined()
   })
 
-  test("!command renders as a live shell window, not a chat message, and /expand $N shows retained output", async () => {
+  test("!command is not a chat message; the finished run is a Bash card that says its output went to the terminal", async () => {
     const app = new TuiApp()
     app.resume = () => {}
     const internal = app as unknown as AppInput & { spinnerTimer?: unknown; hostWorking: boolean }
@@ -191,38 +191,20 @@ describe("exclusive application input ownership", () => {
     const frames: string[] = []
     internal.driver.write = frame => frames.push(frame)
     const pending = app.readInput({ title: "Chat", hint: "Enter send", prompt: "You> ", kind: "chat" }, new AbortController().signal)
-    internal.input({ type: "text", text: "!seq 30" })
+    internal.input({ type: "text", text: "!vim notes.md" })
     internal.input({ type: "key", key: "enter" })
-    expect(await pending).toBe("!seq 30")
+    expect(await pending).toBe("!vim notes.md")
     expect(internal.transcript.lines().join("\n")).not.toContain("[You]")
 
-    // Even without a pending submitted turn, a live shell keeps the spinner clock running.
     internal.hostWorking = false
-    const view = app.shellStart({ id: "shell:1", command: "seq 30" })
-    expect(internal.spinnerTimer).toBeDefined()
-    view.output({ lines: ["1", "2"], totalLines: 2, completed: 1, completedTail: ["1"] })
-    await Bun.sleep(80)
-    expect(plain(frames.at(-1))).toMatch(/┌─── ⠋ Bash ─+┐/u)
-    expect(plain(frames.at(-1))).toMatch(/│ \$ seq 30\s+│/u)
-    expect(plain(frames.at(-1))).toMatch(/├─── Output ─+┤/u)
-    expect(plain(frames.at(-1))).toMatch(/┌─── [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Bash ─+┐/u)
-    expect(plain(frames.at(-1))).toMatch(/│ ⟦running · 0s · Esc cancels⟧\s+│/u)
-
-    const all = Array.from({ length: 30 }, (_, index) => String(index + 1))
-    view.finish({ status: "complete", exitCode: 0, signal: null, durationMs: 120, lines: all, totalLines: 30 })
+    app.shellRun({ id: "shell:1", command: "vim notes.md", result: { status: "complete", exitCode: 0, signal: null, durationMs: 120, lines: [], totalLines: 0 } })
     expect(internal.spinnerTimer).toBeUndefined()
     const done = plain(frames.at(-1))
+    expect(done).toMatch(/┌─── ✔ Bash ─+┐/u)
+    expect(done).toMatch(/│ \$ vim notes\.md\s+│/u)
+    expect(done).toContain("(ran in your terminal; output was not captured)")
     expect(done).toContain("⟦exit 0 · 120ms⟧")
-    expect(done).toContain("… 10 earlier lines · /expand $1")
-    expect(done).not.toMatch(/│ 10\s/u)
-
-    const next = app.readInput({ title: "Chat", hint: "Enter send", prompt: "You> ", kind: "chat" }, new AbortController().signal)
-    internal.input({ type: "text", text: "/expand $1" })
-    internal.input({ type: "key", key: "enter" })
-    expect(internal.transcript.lines()).toContain("  | 1")
-    expect(internal.transcript.lines().join("\n")).not.toContain("Usage: /expand")
     app.close()
-    expect(await next).toBeUndefined()
   })
 
   test("/ palette lists skills by fuzzy name, Enter inserts the skill, and a typed command still submits", async () => {

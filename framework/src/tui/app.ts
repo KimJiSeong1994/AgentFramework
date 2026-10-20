@@ -1,4 +1,5 @@
-import type { ShellView, Terminal, TerminalControl } from "../hosts/interactive-session.ts"
+import type { Terminal, TerminalControl } from "../hosts/interactive-session.ts"
+import type { ShellResult } from "../hosts/operator-shell.ts"
 import { Editor, searchSubmittedHistory } from "./editor.ts"
 import type { InputEvent } from "./keys.ts"
 import { belowPanelRows, bodyPanelRows, ellipsize, panelInnerColumns, renderFrame, transcriptViewportRows, transcriptVisualRows, wrapText, type FrameHome } from "./render.ts"
@@ -96,8 +97,6 @@ export class TuiApp implements Terminal {
   private spinnerTimer?: ReturnType<typeof setInterval>
   private busySince?: number
   private hostWorking = false
-  // Coalesces bursty shell output into one redraw.
-  private shellDraw?: ReturnType<typeof setTimeout>
   private prompt = "You> "
   private lastSubmittedDraft: string | undefined
   private lastSubmittedCursor: number | undefined
@@ -1260,36 +1259,18 @@ export class TuiApp implements Terminal {
     this.transcript.shellFinished(run.id, run.result)
     this.draw()
   }
-  shellStart(run: { id: string; command: string }): ShellView {
+  /** A finished operator `!command` (it ran with the real terminal), drawn as a Bash card with its outcome. */
+  shellRun(run: { id: string; command: string; result: ShellResult }): void {
     this.transcript.shellStarted(run.id, run.command)
+    this.transcript.shellFinished(run.id, run.result)
     this.scrollOffset = 0
     this.draw()
-    return {
-      output: snapshot => {
-        // A transcript reload during the run replaces the model; re-seat the live window by its id.
-        this.transcript.shellStarted(run.id, run.command)
-        this.transcript.shellOutput(run.id, snapshot.lines, snapshot.totalLines)
-        this.scheduleShellDraw()
-      },
-      finish: result => {
-        this.transcript.shellStarted(run.id, run.command)
-        this.transcript.shellFinished(run.id, result)
-        this.draw()
-      },
-    }
-  }
-  private scheduleShellDraw(): void {
-    if (this.shellDraw) return
-    this.shellDraw = setTimeout(() => { this.shellDraw = undefined; this.draw() }, 50)
-    this.shellDraw.unref?.()
   }
 
   close(): void {
     if (this.closed) return
     this.closed = true
     this.trackRequest()
-    if (this.shellDraw) clearTimeout(this.shellDraw)
-    this.shellDraw = undefined
     this.queue.length = 0
     this.pending?.finish(undefined)
     this.choice?.finish(undefined)

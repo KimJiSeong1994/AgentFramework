@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import { spawnSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
@@ -113,6 +114,7 @@ function harness(options: HarnessOptions = {}) {
     controllerStatusCalls: number
     controllerCancelCalls: number
     signalListeners: Map<string, Set<() => void>>
+    shellRuns: Array<{ command: string; cwd: string; sigintHandlers: number }>
     choices: Array<{ title: string; values: readonly string[]; presentation?: ChoicePresentation }>
     actionContexts: string[]
     drafts: string[]
@@ -134,7 +136,7 @@ function harness(options: HarnessOptions = {}) {
     authRuns: Array<{ engine: string; argv: readonly string[] }>
     authStatusChecks: string[]
     autoSelections: Array<{ text: string; mode: string; candidates: string[] }>
-  } = { autoSelections: [], authRuns: [], authStatusChecks: [], prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [], defaultModel: options.defaultModel ?? { state: "unset" }, defaultModelWrites: [], combo: options.combo ?? { state: "unset" }, comboWrites: [] }
+  } = { autoSelections: [], authRuns: [], authStatusChecks: [], prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), shellRuns: [], choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [], defaultModel: options.defaultModel ?? { state: "unset" }, defaultModelWrites: [], combo: options.combo ?? { state: "unset" }, comboWrites: [] }
   let boundSessionID: string | undefined
 
   let releaseRun: (() => void) | undefined
@@ -165,6 +167,8 @@ function harness(options: HarnessOptions = {}) {
     transcriptSource: source => { calls.transcriptSources.push(source) },
     viewSnapshot: facts => { calls.viewFacts.push(facts) },
     write: (text) => { calls.output.push(text); options.beforeWrite?.(text) },
+    suspend: () => { calls.events.push("terminal.suspend") },
+    resume: () => { calls.events.push("terminal.resume") },
     close: () => { calls.events.push("terminal.close") },
   }
   const controller = {
@@ -230,6 +234,15 @@ function harness(options: HarnessOptions = {}) {
     terminal,
     gitTopLevel: () => Object.hasOwn(options, "gitTopLevel") ? options.gitTopLevel : wt.worktree,
     checkUpdate: async () => undefined,
+    // The real runner hands the test process's terminal to the command; the fixture runs it captured instead.
+    runShell: async (command, cwd) => {
+      calls.events.push("runShell")
+      calls.shellRuns.push({ command, cwd, sigintHandlers: calls.signalListeners.get("SIGINT")?.size ?? 0 })
+      const started = Date.now()
+      const run = spawnSync("/bin/sh", ["-c", command], { cwd, encoding: "utf8" })
+      calls.output.push(run.stdout)
+      return { status: run.status === 0 ? "complete" : "error", exitCode: run.status, signal: run.signal, durationMs: Date.now() - started, lines: [], totalLines: 0 }
+    },
     createRuntime: ({ worktree, engine, model, progress, routes }) => {
       calls.events.push("runtime")
       if (options.failRuntimeFor?.(engine, model)) throw new TypeError("fixture runtime setup failed")
@@ -956,7 +969,8 @@ describe("interactive terminal", () => {
     const h = harness({ lines: ["!echo before-model", "/help", "/quit"] })
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     const output = h.calls.output.join("")
-    expect(output).toContain("$ echo before-model\nbefore-model\n[shell] exit 0 · ")
+    expect(output).toContain("before-model\n[shell] exit 0 · ")
+    expect(h.calls.shellRuns.map(run => run.command)).toEqual(["echo before-model"])
     expect(output).toContain("!<command> — run one shell command in the worktree")
     expect(output).not.toContain("No model selected")
     expect(h.calls.runtimes).toHaveLength(0)
@@ -2093,51 +2107,34 @@ describe("interactive terminal", () => {
     expect(replaySession(wt.worktree, "otter-fixture-session-2", { order: "asc" }).records.some(record => record.kind === "carried-context")).toBe(false)
   })
 
-  test("!command runs in the worktree, prints and persists the run, and never reaches the model", async () => {
+  test("!command hands the terminal to the command in the worktree, records the outcome, and never reaches the model", async () => {
     const h = harness({ lines: ["!pwd; printf 'a\\nb\\n'; exit 3", "!", "/quit"] })
     const result = await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
     expect(result.code).toBe(0)
     expect(h.calls.turns).toEqual([])
+    // Terminal released before the command and taken back after it; Otter's SIGINT handler is out of the way meanwhile.
+    const events = h.calls.events
+    expect(events.slice(events.indexOf("runShell") - 1, events.indexOf("runShell") + 2)).toEqual(["terminal.suspend", "runShell", "terminal.resume"])
+    expect(h.calls.shellRuns).toEqual([{ command: "pwd; printf 'a\\nb\\n'; exit 3", cwd: realpathSync(wt.worktree), sigintHandlers: 1 }])
+    expect(h.calls.signalListeners.get("SIGINT")?.size ?? 0).toBe(0)
     const output = h.calls.output.join("")
-    expect(output).toContain(`$ pwd; printf 'a\\nb\\n'; exit 3\n${realpathSync(wt.worktree)}\na\nb\n[shell] exit 3 · `)
+    expect(output).toContain(`${realpathSync(wt.worktree)}\na\nb\n[shell] exit 3 · `)
     expect(output).toContain("Usage: !<command> runs one shell command in the worktree.")
     const records = replaySession(wt.worktree, "otter-fixture-session", { order: "asc" }).records
     expect(records.some(record => record.kind === "user")).toBe(false)
     const shell = records.find(record => record.kind === "shell")
     expect(shell?.eventID).toStartWith("shell:")
-    expect(shell?.data).toMatchObject({ command: "pwd; printf 'a\\nb\\n'; exit 3", status: "error", exitCode: 3, signal: null,
-      lines: [realpathSync(wt.worktree), "a", "b"], totalLines: 3 })
+    expect(shell?.data).toMatchObject({ command: "pwd; printf 'a\\nb\\n'; exit 3", status: "error", exitCode: 3, signal: null, lines: [], totalLines: 0 })
   })
 
-  test("a shell window streams through shellStart and Esc cancels only the shell", async () => {
-    let h: ReturnType<typeof harness>
-    const runs: Array<{ id: string; command: string }> = []
-    const snapshots: string[][] = []
-    const results: ShellResult[] = []
-    h = harness({ lines: ["!echo started; sleep 30", "/quit"] })
-    h.deps.terminal!.shellStart = run => {
-      runs.push(run)
-      return {
-        output: snapshot => {
-          snapshots.push([...snapshot.lines])
-          if (snapshot.lines.includes("started")) h.calls.control?.("cancel")
-        },
-        finish: result => { results.push(result) },
-      }
-    }
-    const result = await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
-    expect(result.code).toBe(0)
-    expect(runs).toHaveLength(1)
-    expect(runs[0]!.command).toBe("echo started; sleep 30")
-    expect(snapshots.at(-1)).toEqual(["started"])
-    expect(results[0]).toMatchObject({ status: "cancelled", lines: ["started"] })
-    expect(results[0]!.durationMs).toBeLessThan(10_000)
-    // The cancelled shell left the session alive: /quit was still read afterwards.
-    expect(h.calls.prompts.length).toBeGreaterThanOrEqual(2)
+  test("full-screen: the finished !command is drawn as a card and the session continues", async () => {
+    const runs: Array<{ id: string; command: string; result: ShellResult }> = []
+    const h = harness({ fullscreen: true, lines: ["!true", "hello", "/quit"] })
+    h.deps.terminal!.shellRun = run => { runs.push(run) }
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(runs).toMatchObject([{ command: "true", result: { status: "complete", exitCode: 0 } }])
     expect(h.calls.output.join("")).not.toContain("[shell]")
-    const shell = replaySession(wt.worktree, "otter-fixture-session", { order: "asc" }).records.find(record => record.kind === "shell")
-    expect(shell?.eventID).toBe(runs[0]!.id)
-    expect(shell?.data.status).toBe("cancelled")
+    expect(h.calls.turns).toEqual(["hello"])
   })
 
   test("local help, picker and unknown slash commands never reach inference; /plan stays a prompt", async () => {
