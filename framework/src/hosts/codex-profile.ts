@@ -10,6 +10,9 @@ const bundledModels = catalog as {
 }
 
 export const CODEX_VERSION = "0.159.3"
+// Catalog provenance stays fixed; CLI releases are admitted only after qualifying
+// this profile's instructions, native-tool removal, and execution protocol.
+export const CODEX_SUPPORTED_VERSIONS = Object.freeze(["0.159.3", "0.163.0"] as const)
 export const CODEX_INSTRUCTIONS = "You are an Otter text-only inference engine. Follow the supplied Otter JSON response protocol. Native tools are unavailable; propose Otter tool requests only as JSON text."
 
 export type CodexProfile = Readonly<{
@@ -120,6 +123,7 @@ export function codexProfileArgv(profile: CodexProfile, scratchWorkdir: string, 
     "-c", `permissions.otter_text_only={ filesystem = { ${tomlBasicString(scratchWorkdir)} = "read" } }`,
     "-c", `model_catalog_json=${tomlBasicString(catalogPath)}`,
     "-c", "features.code_mode=false",
+    "-c", "features.goals=false",
     "-c", "tools.experimental_request_user_input.enabled=false",
   ]
 }

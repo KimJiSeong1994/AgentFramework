@@ -30,6 +30,7 @@ import { DEFAULT_CONFIG } from "../src/config.ts"
 import { interactiveActions } from "../src/hosts/interactive-actions.ts"
 import type { ComboLookup, DefaultModelLookup } from "../src/hosts/default-model.ts"
 import type { AuthState } from "../src/hosts/engine-auth.ts"
+import { CODEX_SUPPORTED_VERSIONS } from "../src/hosts/codex-profile.ts"
 import { getOwnedSession, inspectSessionAttachment, openSession, replaySession, readSessionMetadata, type ReplayOptions, type ReplayResult } from "../src/sessions/store.ts"
 import { sessionDir } from "../src/state/store.ts"
 import type { ConversationMessage, SkillConversationInvocation } from "../src/hosts/plan-conversation.ts"
@@ -48,6 +49,7 @@ type HarnessOptions = {
   decision?: "approve" | "reject"
   tty?: { stdin: boolean; stderr: boolean }
   fullscreen?: boolean
+  scopeChoice?: number | null
   gitTopLevel?: string | undefined
   beforeRead?: (prompt: string, signal?: AbortSignal) => void
   beforeWrite?: (text: string) => void
@@ -146,9 +148,10 @@ function harness(options: HarnessOptions = {}) {
       if (signal?.aborted) return undefined
       return lines.shift()
     },
-    ...(options.choose ? { choose: async (title: string, values: readonly string[], signal: AbortSignal, presentation?: ChoicePresentation) => {
+    ...(options.choose || options.scopeChoice !== undefined ? { choose: async (title: string, values: readonly string[], signal: AbortSignal, presentation?: ChoicePresentation) => {
       calls.choices.push({ title, values, ...(presentation ? { presentation } : {}) })
-      return options.choose!(title, values, signal, presentation)
+      if (title.startsWith("Apply model · ")) return options.scopeChoice === null ? undefined : options.scopeChoice ?? 0
+      return options.choose?.(title, values, signal, presentation)
     } } : {}),
     actionContext: context => { calls.actionContexts.push(context) },
     setDraft: draft => { calls.drafts.push(draft) },
@@ -1051,13 +1054,105 @@ describe("interactive terminal", () => {
     })
     await launchInteractive({ worktree: wt.worktree }, h.deps)
 
-    expect(h.calls.choices.map(choice => choice.presentation?.kind)).toEqual(["picker", "picker"])
+    expect(h.calls.choices.map(choice => choice.presentation?.kind)).toEqual(["picker", "picker", "picker"])
     expect(h.calls.choices[0]?.values).toEqual(["local — Ollama CLI", "codex — Codex CLI", "claude — Claude CLI", "combo — per-role models"])
     expect(h.calls.choices[1]?.title).toContain("Choose a model · codex")
     expect(h.calls.choices[1]?.presentation).toMatchObject({ kind: "picker", purpose: "selection" })
     expect(h.calls.discoveries).toEqual([{ engine: "codex", worktree: realpathSync(wt.worktree) }])
     expect(h.calls.runtimes[0]).toMatchObject({ engine: "codex", model: "native-secondary" })
     expect(h.calls.turnBindings).toMatchObject([{ engine: "codex", model: "native-secondary", text: "hello after selection" }])
+  })
+
+  test.each([0, 1])("TUI startup model scope %s applies the model and persists only a default choice", async scopeChoice => {
+    const h = harness({ fullscreen: true, scopeChoice, lines: ["/model local chosen", "hello", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree }, h.deps)
+    expect(h.calls.choices).toEqual([{
+      title: "Apply model · local / chosen",
+      values: ["This session only", "Set as default"],
+      presentation: expect.objectContaining({ kind: "picker", purpose: "selection" }),
+    }])
+    expect(h.calls.turnBindings).toMatchObject([{ engine: "local", model: "chosen", text: "hello" }])
+    expect(h.calls.defaultModelWrites).toEqual(scopeChoice === 1 ? [{ engine: "local", model: "chosen" }] : [])
+  })
+
+  test("canceling TUI startup model scope leaves the session unselected", async () => {
+    const h = harness({ fullscreen: true, scopeChoice: null, lines: ["/model local chosen", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree }, h.deps)
+    expect(h.calls.runtimes).toEqual([])
+    expect(h.calls.defaultModelWrites).toEqual([])
+    expect(h.calls.actionContexts.at(-1)).toBe("unselected")
+  })
+
+  test.each([0, 1, null])("TUI active model scope %s preserves or commits the requested selection", async scopeChoice => {
+    const originalDefault: DefaultModelLookup = { state: "configured", value: { engine: "codex", model: "original" }, source: "user" }
+    const h = harness({ fullscreen: true, scopeChoice, defaultModel: originalDefault, lines: ["/model local chosen", "hello", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree }, h.deps)
+    expect(h.calls.turnBindings).toMatchObject([{
+      engine: scopeChoice === null ? "codex" : "local",
+      model: scopeChoice === null ? "original" : "chosen", text: "hello",
+    }])
+    expect(h.calls.runtimes).toHaveLength(scopeChoice === null ? 1 : 2)
+    expect(h.calls.defaultModelWrites).toEqual(scopeChoice === 1 ? [{ engine: "local", model: "chosen" }] : [])
+    if (scopeChoice !== 1) expect(h.calls.defaultModel).toEqual(originalDefault)
+  })
+
+  test("TUI selecting the current model as default saves without replacing the conversation", async () => {
+    const h = harness({ fullscreen: true, scopeChoice: 1, lines: ["/model local chosen", "hello", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "chosen" }, h.deps)
+    expect(h.calls.defaultModelWrites).toEqual([{ engine: "local", model: "chosen" }])
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.sessionIDs).toEqual(["otter-fixture-session"])
+    expect(h.calls.turnBindings).toMatchObject([{ model: "chosen", text: "hello" }])
+  })
+
+  test.each([false, true])("TUI default save failure leaves the selected model usable (active=%s)", async active => {
+    const h = harness({ fullscreen: true, scopeChoice: 1, defaultModelSaveError: new Error("fixture save failed"), lines: ["/model local chosen", "hello", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, ...(active ? { engine: "codex", model: "original" } : {}) }, h.deps)
+    expect(h.calls.defaultModelWrites).toEqual([])
+    expect(h.calls.output.join("")).toContain("Default model not saved")
+    expect(h.calls.turnBindings).toMatchObject([{ engine: "local", model: "chosen", text: "hello" }])
+  })
+
+  test("TUI failed candidate setup never saves the requested default", async () => {
+    const h = harness({ fullscreen: true, scopeChoice: 1, failRuntimeFor: engine => engine === "local", lines: ["/model local chosen", "hello", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "original" }, h.deps)
+    expect(h.calls.defaultModelWrites).toEqual([])
+    expect(h.calls.turnBindings).toMatchObject([{ engine: "codex", model: "original", text: "hello" }])
+  })
+
+  test("TUI candidate admission refusal never saves the requested default", async () => {
+    const h = harness({ fullscreen: true, scopeChoice: 1, lines: ["/model local chosen", "hello", "/quit"] })
+    let admissions = 0
+    h.deps.admitRuntime = async () => { if (++admissions === 2) throw AdmissionRefusal.hostIncompatible() }
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "original" }, h.deps)
+    expect(admissions).toBe(2)
+    expect(h.calls.defaultModelWrites).toEqual([])
+    expect(h.calls.turnBindings).toMatchObject([{ engine: "codex", model: "original", text: "hello" }])
+  })
+
+  test.each(["signed-in", "signed-out"] as const)("failed Codex Astra switch shows actionable diagnostics (%s)", async auth => {
+    const h = harness({ fullscreen: true, scopeChoice: 1, auth: { codex: auth }, lines: ["/model codex gpt-6-astra", "hello", "/quit"] })
+    let admissions = 0
+    h.deps.admitRuntime = async () => { if (++admissions === 2) throw AdmissionRefusal.hostIncompatible() }
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "original" }, h.deps)
+    const output = h.calls.output.join("")
+    expect(output).toContain("Model switch failed")
+    if (auth === "signed-in") {
+      expect(output).toContain(`supported versions are ${CODEX_SUPPORTED_VERSIONS.join(", ")}`)
+      expect(output).toContain("codex --version and otter doctor")
+    } else expect(output).toContain("codex is not signed in; run /login codex.")
+    expect(h.calls.turnBindings).toMatchObject([{ engine: "local", model: "original", text: "hello" }])
+    expect(h.calls.defaultModelWrites).toEqual([])
+  })
+
+  test("TUI startup saves a default only after runtime admission", async () => {
+    const h = harness({ fullscreen: true, scopeChoice: 1, lines: ["/model local chosen", "/quit"] })
+    h.deps.admitRuntime = async () => {
+      expect(h.calls.defaultModelWrites).toEqual([])
+      throw AdmissionRefusal.hostIncompatible()
+    }
+    await expect(launchInteractive({ worktree: wt.worktree }, h.deps)).rejects.toBeInstanceOf(AdmissionRefusal)
+    expect(h.calls.defaultModelWrites).toEqual([])
   })
 
   test("canceling the model picker after choosing another engine keeps the selected session", async () => {

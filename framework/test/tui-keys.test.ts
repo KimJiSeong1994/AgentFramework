@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test"
 import fixtureSet from "./fixtures/gjc-keys-8cd17c0.json"
 import { KeyDecoder } from "../src/tui/keys.ts"
 import type { InputEvent } from "../src/tui/keys.ts"
+import { Editor } from "../src/tui/editor.ts"
 
 interface ReferenceFixture {
   id: string
@@ -105,5 +106,41 @@ describe("KeyDecoder", () => {
       { type: "key", key: "backspace" },
     ])
     expect(reference.expected?.counts?.ignoredReleaseEvents).toBe(1)
+  })
+  test("SGR mouse wheel notches retain modified wheels and ignore unsupported buttons", () => {
+    const decoder = new KeyDecoder()
+    expect(decoder.feed("\x1b[<64;10;5M\x1b[<65;10;5M\x1b[<68;1;1M")).toEqual([
+      { type: "key", key: "wheelUp" },
+      { type: "key", key: "wheelDown" },
+      { type: "key", key: "wheelUp" },
+    ])
+    expect(decoder.feed("\x1b[<1;3;4M\x1b[<2;3;4m\x1b[<35;3;4M\x1b[<66;1;1M\x1b[<4;1;1M\x1b[<36;1;1M")).toEqual([])
+    expect(decoder.feed("\x1b[<65;1")).toEqual([])
+    expect(decoder.feed(";1Mx")).toEqual([{ type: "key", key: "wheelDown" }, { type: "text", text: "x" }])
+  })
+
+  test("fragmented left-button drag packets retain 1-based coordinates", () => {
+    const decoder = new KeyDecoder()
+    const sequence = "\x1b[<0;3;4M\x1b[<32;12;5M\x1b[<0;12;5m"
+    const events = [...sequence].flatMap(character => decoder.feed(character))
+    expect(events).toEqual([
+      { type: "mouse", action: "down", x: 3, y: 4 },
+      { type: "mouse", action: "move", x: 12, y: 5 },
+      { type: "mouse", action: "up", x: 12, y: 5 },
+    ])
+    const editor = new Editor()
+    editor.handle({ type: "text", text: "draft" })
+    for (const event of events) expect(editor.handle(event)).toBeUndefined()
+    expect(editor.text).toBe("draft")
+  })
+
+  test("rejects malformed SGR packets and unsafe coordinates without generating keys", () => {
+    const decoder = new KeyDecoder()
+    for (const packet of [
+      "<0;0;1M", "<0;1;0M", "<0;-1;1M", "<0;1.5;1M", "<0;;1M", "<0;1M", "<0;1;1;2M",
+      "<0;9007199254740992;1M", "<0;1;9007199254740992M", "<4294967360;1;1M",
+      "<64;0;1M", "<64;1M", "<64;1;1m", "<96;1;1M", "<32;1;1m", "<0;1;1Z",
+    ]) expect(decoder.feed(`\x1b[${packet}`)).toEqual([])
+    expect(decoder.feed("ok")).toEqual([{ type: "text", text: "ok" }])
   })
 })

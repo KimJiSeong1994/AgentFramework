@@ -3,7 +3,7 @@ import { lstatSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, test } from "bun:test"
-import { CODEX_INSTRUCTIONS, CODEX_VERSION, codexProfileArgv, createCodexProfile } from "../src/hosts/codex-profile.ts"
+import { CODEX_INSTRUCTIONS, CODEX_VERSION, CODEX_SUPPORTED_VERSIONS, codexProfileArgv, createCodexProfile } from "../src/hosts/codex-profile.ts"
 
 const BUNDLED_SLUGS = [
   "gpt-6-astra",
@@ -51,6 +51,8 @@ describe("Codex 0.159.3 static text-only profile", () => {
 
   test("exports all 11 bundled model slugs with exact native-tool removals", () => {
     expect(CODEX_VERSION).toBe("0.159.3")
+    expect(CODEX_SUPPORTED_VERSIONS).toEqual(["0.159.3", "0.163.0"])
+    expect(Object.isFrozen(CODEX_SUPPORTED_VERSIONS)).toBe(true)
     expect(new Set(BUNDLED_SLUGS).size).toBe(11)
 
     for (const slug of BUNDLED_SLUGS) {
@@ -109,6 +111,7 @@ describe("Codex 0.159.3 static text-only profile", () => {
       "-c", String.raw`permissions.otter_text_only={ filesystem = { "/tmp/otter scratch/quo\"te\\dir\nchild" = "read" } }`,
       "-c", String.raw`model_catalog_json="/tmp/otter config/catalog\"copy\\model.json"`,
       "-c", "features.code_mode=false",
+      "-c", "features.goals=false",
       "-c", "tools.experimental_request_user_input.enabled=false",
     ])
     expect(args).not.toContain("--sandbox")
