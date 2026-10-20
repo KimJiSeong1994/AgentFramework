@@ -742,6 +742,7 @@ async function main(): Promise<void> {
     cwd: worktree,
     terminal,
     gitTopLevel: directory => directory,
+    checkUpdate: async () => undefined,
     createRuntime: runtimeFactory,
     admitRuntime: async runtime => {
       report.runtimeAdmissionCount = Number(report.runtimeAdmissionCount) + 1

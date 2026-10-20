@@ -1445,6 +1445,7 @@ bash scripts/otter-e2e.sh --smoke-command status  # M0 live smoke: /status deliv
 | otter workflow/session state (ledger, mode, abort marker, session map) | `$XDG_STATE_HOME/otter/<repo-hash>/sessions/<id>/` (default `~/.local/state/otter/…`; `OTTER_STATE_HOME` overrides) |
 | otter execution claims and run records | `<OS-account-home>/.local/state/otter/<canonical-worktree-hash>/execution-runs/`; independent of `HOME`, `XDG_STATE_HOME`, and `OTTER_STATE_HOME` |
 | otter handoffs (data plane) | `<repo>/.otter/handoffs/<session>/task-<n>.md` |
+| otter update-check cache | `$XDG_STATE_HOME/otter/update-check.json` (`OTTER_STATE_HOME` overrides) |
 | OpenCode session DB (read-only for us) | `~/.local/share/opencode/opencode.db` |
 
 Execution authority requires an existing worktree owned by the operating-system user and
@@ -1456,6 +1457,20 @@ migration, deletion, or stale-owner takeover. Do not switch namespaces or erase 
 bypass a refusal. This gives cooperating current-protocol controllers one authority regardless
 of state-directory overrides; it does not discover unselected historical namespaces or prove
 that a terminated controller's descendants have stopped.
+
+## Updates (installer-managed copies)
+
+Modeled on GJC's startup check. `install.sh` records `repo=`, `ref=` and `bin=` in
+`$OTTER_HOME/AgentFramework/.git/otter-installer`. An interactive start of such a copy compares the installed commit
+with the remote branch head (`git ls-remote`, at most once a day per installed commit, cached in `update-check.json`)
+in the background: it never blocks or fails startup, never installs, and a network failure or a pinned tag/commit
+shows nothing. When the branch moved it shows `Update available: a newer otter is on master (<old> -> <new>). Run:
+otter update` once (in the full-screen TUI it is also recorded into the new session so the rebuilt transcript keeps
+it). `otter update` re-runs that copy's `install.sh` with the recorded repository, branch, install root and launcher
+directory and never edits the shell rc file again; `otter update --check` only reports. A source checkout (no marker)
+is never checked and `otter update` refuses it (use git). Disable the check with `"update": { "check": false }` in
+`~/.config/otter/otter.jsonc` or `OTTER_NO_UPDATE_CHECK=1`; this setting is read on its own and is not part of role or
+policy identity.
 
 ## OMO coexistence warning
 

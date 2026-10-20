@@ -12,6 +12,7 @@ import { activeAnyWorkflow, activeWorkflow, readAnyWorkflowChecked, readWorkflow
 import { savedPlan } from "../flow/actions.ts"
 import { ledgerPath } from "../state/ledger.ts"
 import { executionRunDirectory } from "../state/store.ts"
+import { defaultUpdateCheck, updateNoticeText, type UpdateNotice } from "./update-check.ts"
 import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
 import { inputColorSupported, inputLine, renderInput, type InputPresentation } from "./cli-input.ts"
 import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
@@ -126,6 +127,8 @@ export type InteractiveDependencies = {
   gitTopLevel: (directory: string) => string | undefined
   /** Read-only: throws when the folder cannot hold execution state (another user's folder, or the home folder itself). */
   checkWorktree: (worktree: string) => void
+  /** Background update check for installer-managed copies; must never reject (a failure is "no notice"). */
+  checkUpdate: () => Promise<UpdateNotice | undefined>
   createRuntime: (options: RuntimeOptions) => ExecutionRuntime
   admitRuntime: (runtime: ExecutionRuntime) => Promise<void>
   createConversation: (runtime: ExecutionRuntime, sessionID: string, prior?: readonly ConversationMessage[]) => PlanConversation
@@ -423,6 +426,7 @@ export function defaultDependencies(): InteractiveDependencies {
     terminal: createReadlineTerminal(),
     gitTopLevel: defaultGitTopLevel,
     checkWorktree: worktree => { executionRunDirectory(worktree) },
+    checkUpdate: defaultUpdateCheck,
     createRuntime: (options) => createCliRuntime(options),
     admitRuntime: async (runtime) => {
       assertHostAdmission(await runtime.host.preflight(runtime.host.identity.profile), runtime.host.identity.controlProfile)
@@ -890,6 +894,7 @@ export async function runInteractiveSession(
   let retainedSDKSessionID: string | undefined
   let retainedViewSelection: { engine: string; model: string } | undefined
   let persistenceFailed = false
+  let sessionEnded = false
   const visibleWrite = terminal.write.bind(terminal)
   const persist = (kind: TranscriptKind, data: Record<string, unknown>, eventID?: string) => {
     if (persistenceFailed) throw new InteractiveLaunchError("Session transcript persistence failed; the session remains held.")
@@ -1081,6 +1086,22 @@ export async function runInteractiveSession(
     }
     const worktree = canonicalWorktree(args.worktree, deps)
     signalWorktree = worktree
+    // Like GJC: check in the background, never block startup, and notify once as soon as a newer version is known. The
+    // full-screen transcript is rebuilt from the session record when the first session binds, so a notice shown before
+    // that is also recorded into the session (once) to stay visible after the rebuild.
+    let updateNotice: string | undefined
+    let updateNoticeRecorded = false
+    const recordUpdateNotice = (): void => {
+      if (!updateNotice || updateNoticeRecorded || !sessionStore || sessionEnded) return
+      updateNoticeRecorded = true
+      try { persist("notice", { text: `${updateNotice}\n` }) } catch { /* persist already marks the session failed */ }
+    }
+    void Promise.resolve().then(() => deps.checkUpdate()).then(notice => {
+      if (!notice || sessionEnded) return
+      updateNotice = updateNoticeText(notice)
+      if (sessionStore) { terminal.write(`${updateNotice}\n`); updateNoticeRecorded = true }
+      else visibleWrite(`${updateNotice}\n`)
+    }).catch(() => {})
     let latestSkillCatalog: SkillCatalog | undefined
     // Automatic skill selection: the user-config policy, the session toggle (`/skills auto on|off`) and the cached
     // consent-free candidate list (refreshed with the catalog). Candidates are re-prepared per use, so a stale entry
@@ -1503,13 +1524,21 @@ export async function runInteractiveSession(
       await chooseStartupSession()
     }
     if (abort.signal.aborted) return signalExit(receivedSignal)
+    // Startup selection and admission repeat until a runtime is admitted: a refused selection (for example a signed-out
+    // engine) names the fix and returns to model selection instead of ending otter. Later passes ignore flags and the
+    // saved default, which already failed.
+    let retrySelection = false
+    let initialRuntime: ExecutionRuntime | undefined
+    let initialProgress: ReturnType<typeof scopedProgress> | undefined
+    let initialRoutes: ComboRoutes = {}
+    startup: while (true) {
     // Explicit flags win; a persisted default applies only when neither flag was given.
-    const configuredDefault: DefaultModelLookup = args.engine === undefined && args.model === undefined
+    const configuredDefault: DefaultModelLookup = !retrySelection && args.engine === undefined && args.model === undefined
       ? deps.defaultModel.read(worktree)
       : { state: "unset" }
     if (startupSession) {
       // The retained selection and routes take precedence over today's defaults.
-    } else if (args.engine !== undefined && args.model !== undefined) {
+    } else if (!retrySelection && args.engine !== undefined && args.model !== undefined) {
       engine = args.engine
       model = args.model
     } else if (configuredDefault.state === "configured") {
@@ -1523,11 +1552,13 @@ export async function runInteractiveSession(
         terminal.write(terminalSafeText(`Default model ignored: ${boundedTerminalDiagnostic(configuredDefault.reason)}. Choose with /model.\n`))
       }
       terminal.actionContext?.("unselected")
-      const selectionTitle = args.engine
-        ? `Engine ${args.engine} selected; model unselected`
-        : args.model
-          ? "Model supplied; engine unselected"
-          : "Model not selected"
+      const selectionTitle = retrySelection
+        ? "Model not available; choose again"
+        : args.engine
+          ? `Engine ${args.engine} selected; model unselected`
+          : args.model
+            ? "Model supplied; engine unselected"
+            : "Model not selected"
       selection: while (!abort.signal.aborted) {
         const input = await withProgressSuspended(() => readInput(
           terminal,
@@ -1613,7 +1644,7 @@ export async function runInteractiveSession(
             terminal.write("Usage: /model or /model <local|codex|claude> <native-id>\n")
             continue
           }
-          let nextEngine: CliEngine | null | undefined = args.engine
+          let nextEngine: CliEngine | null | undefined = retrySelection ? undefined : args.engine
           if (!nextEngine) {
             const chosen = await withProgressSuspended(() => chooseEngine(terminal, abort.signal, { combo: true }))
             if (abort.signal.aborted) return signalExit(receivedSignal)
@@ -1625,7 +1656,7 @@ export async function runInteractiveSession(
             if (!nextEngine) continue
           }
           while (!abort.signal.aborted) {
-            const picked = args.model !== undefined
+            const picked = !retrySelection && args.model !== undefined
               ? { value: args.model, discovery: "not-observed" as const, backToEngine: false }
               : await withProgressSuspended(() => chooseModel(terminal, nextEngine!, worktree, abort.signal, deps.discoverModels))
             if (abort.signal.aborted) return signalExit(receivedSignal)
@@ -1663,18 +1694,37 @@ export async function runInteractiveSession(
     }
     if (!engine || !model || abort.signal.aborted) return signalExit(receivedSignal)
     if (!validModelID(model)) throw new InteractiveLaunchError("invalid model ID; enter a native model name without whitespace")
-    terminal.actionContext?.("chat")
 
+    initialProgress = scopedProgress()
+    const startupCombo = startupSession ? { routes: startupSession.routes ?? {}, invalid: undefined } : comboRoutesFor(deps.combo.read(worktree), engine, model)
+    initialRoutes = startupCombo.routes
+    try {
+      initialRuntime = deps.createRuntime({ worktree, engine, model, progress: initialProgress.sink, ...(Object.keys(initialRoutes).length ? { routes: initialRoutes } : {}) })
+      initialRuntime.linuxAdmission?.assertBootEpoch()
+      if (!startupSession) await deps.admitRuntime(initialRuntime)
+    } catch (error) {
+      // Same recoverable refusals as a mid-session model switch; anything else still ends the launch.
+      if (startupSession || !(error instanceof AdmissionRefusal || error instanceof TypeError)) throw error
+      if (abort.signal.aborted) return signalExit(receivedSignal)
+      const route = error instanceof AdmissionRefusal && error.comboRoutes ? ` Combo route unavailable: ${error.comboRoutes}.` : ""
+      const hint = await modelSwitchHint(engineSet(engine, initialRoutes))
+      terminal.write(terminalSafeText(`Cannot start ${engine} / ${model}.${route}${hint ? ` ${hint}` : ""} Sign in with /login, or choose another model with /model.\n`))
+      initialRuntime = undefined
+      engine = undefined
+      model = undefined
+      startupModelScope = "session"
+      startupDiscovery = "not-observed"
+      retrySelection = true
+      continue startup
+    }
+    if (abort.signal.aborted) return signalExit(receivedSignal)
+    if (startupCombo.invalid !== undefined) startupNotices.push(`Combo ignored: ${boundedTerminalDiagnostic(startupCombo.invalid)}. No role routes are applied; every role uses ${engine} / ${model}.`)
+    break startup
+    }
+    if (!engine || !model || !initialRuntime || !initialProgress) return signalExit(receivedSignal)
+    terminal.actionContext?.("chat")
     terminal.write("\nNative CLI limitations: input size is estimated and output limits are reactive; these are not strict guarantees. No process or filesystem containment is claimed.\n\n")
     const initialSessionID = startupSession?.sessionID ?? defaultSessionID(deps.randomUUID())
-    const initialProgress = scopedProgress()
-    const startupCombo = startupSession ? { routes: startupSession.routes ?? {}, invalid: undefined } : comboRoutesFor(deps.combo.read(worktree), engine, model)
-    if (startupCombo.invalid !== undefined) startupNotices.push(`Combo ignored: ${boundedTerminalDiagnostic(startupCombo.invalid)}. No role routes are applied; every role uses ${engine} / ${model}.`)
-    const initialRoutes = startupCombo.routes
-    const initialRuntime = deps.createRuntime({ worktree, engine, model, progress: initialProgress.sink, ...(Object.keys(initialRoutes).length ? { routes: initialRoutes } : {}) })
-    initialRuntime.linuxAdmission?.assertBootEpoch()
-    if (!startupSession) await deps.admitRuntime(initialRuntime)
-    if (abort.signal.aborted) return signalExit(receivedSignal)
     sessionStore = attachAdmission(initialRuntime, initialSessionID, { engine, model, ...(Object.keys(initialRoutes).length ? { routes: initialRoutes } : {}) })
     initialProgress.bind(sessionStore)
     attachedRuntime = initialRuntime
@@ -1737,6 +1787,7 @@ export async function runInteractiveSession(
     const usedSessionIDs = new Set([initialSessionID])
     terminal.bindSession?.(initialSessionID)
     terminal.bindView?.(currentViewIdentity())
+    if (terminal.fullscreen) recordUpdateNotice()
     terminal.transcriptSource?.(options => replaySession(worktree, initialSessionID, options))
     if (startupSession) {
       terminal.write(`Restored session ${initialSessionID}. Previous conversation and model restored; use /continue to resume.\n`)
@@ -3384,6 +3435,7 @@ export async function runInteractiveSession(
     progress.error()
     throw error
   } finally {
+    sessionEnded = true
     skillSession?.close()
     skillSession = undefined
     terminal.skillCatalog?.({ entries: [], refusals: [] })

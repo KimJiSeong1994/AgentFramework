@@ -74,7 +74,8 @@ bun scripts/otter-wiki.ts lint      # 링크·해시 무결성
 - macOS/Linux, `git` 필요. `bun`은 없으면 자동 설치
 - 엔진(`ollama`/`codex`/`claude`) 하나 이상이 PATH에 있어야 함
 - 로그인 `otter login codex|claude`, 상태 `otter auth`(대화 중 `/login`·`/auth`·`/logout`)
-- 재실행하면 업데이트, 제거는 `~/.local/share/otter/AgentFramework/install.sh --uninstall`
+- **업데이트**: `otter update`(확인만 `otter update --check`). 새 버전이 나오면 `otter` 시작 시 `Update available … Run: otter update` 알림(하루 한 번 백그라운드 확인, 설치는 하지 않음). 끄기: `~/.config/otter/otter.jsonc`에 `"update": { "check": false }` 또는 `OTTER_NO_UPDATE_CHECK=1`
+- 제거는 `~/.local/share/otter/AgentFramework/install.sh --uninstall`
 
 **Windows**: otter는 POSIX 소유권·권한 검사에 기대므로 WSL2(기본 Ubuntu) 안에서 실행됨
 - 준비: 관리자 PowerShell에서 `wsl --install` → 재부팅 → Ubuntu를 한 번 열어 사용자 생성
