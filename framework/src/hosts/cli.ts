@@ -69,7 +69,8 @@ Harness profile (read-only, no model call):
                                                       and one fingerprint. Describes identity, not quality.
 Role combo: chat.combo in otter.jsonc routes planner/architect/critic/worker/reviewer roles to other engines and models;
 roles without a route use the main model. /model combo (or the "combo" entry in the /model engine list) opens a menu
-(role -> engine -> model) that saves it; typed forms /model combo show, /model combo <role> <engine> <native-id>,
+(recommended combos or custom role -> engine -> model settings); /model combo presets lists templates,
+/model combo preset <name> saves one, and /model combo custom opens role editing. Typed forms /model combo show, /model combo <role> <engine> <native-id>,
 /model combo clear [role] and /model combo apply (which starts a new session under it) also work. A project route replaces the
 user's route for that role as a whole object. Every new session (a plain /model switch, /new, apply) takes its routes from the
 currently saved combo, normalized against the new main model; an invalid combo is reported and not applied. /resume and the

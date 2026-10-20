@@ -217,6 +217,13 @@ export function saveComboRole(role: ExecutionRole, route: ComboRoute): string {
   return rewriteUserConfig(text => applyEdits(text, modify(text, ["chat", "combo", role], { engine: checked.engine, model: checked.model }, formatting)))
 }
 
+/** Replace the whole user-level combo after validating every route; returns the path written. */
+export function saveCombo(routes: ComboRoutes): string {
+  const checked = validateComboRoutes(routes)
+  if (typeof checked === "string") throw new TypeError(checked)
+  return rewriteUserConfig(text => applyEdits(text, modify(text, ["chat", "combo"], checked, formatting)))
+}
+
 function userComboValue(): unknown {
   return rawComboValue(userConfigPath())
 }
@@ -256,6 +263,8 @@ export type ComboStore = {
   read: (worktree: string) => ComboLookup
   /** Persist one user-level role route; returns the path written. */
   save: (role: ExecutionRole, route: ComboRoute) => string
+  /** Replace all user-level role routes; returns the path written. */
+  replace: (routes: ComboRoutes) => string
   clearRole: (role: ExecutionRole) => boolean
   clear: () => boolean
 }
@@ -263,6 +272,7 @@ export type ComboStore = {
 export const fileComboStore: ComboStore = {
   read: readCombo,
   save: saveComboRole,
+  replace: saveCombo,
   clearRole: clearComboRole,
   clear: clearCombo,
 }

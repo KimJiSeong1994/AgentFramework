@@ -46,6 +46,7 @@ import { EXECUTION_ROLES, LinuxAdmissionRefused, type ComboRoutes, type Executio
 import type { AskPrompt, ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
 import { commandInsertion, interactiveActions, interactiveHelp, type InteractiveContext } from "./interactive-actions.ts"
 import { fileComboStore, fileDefaultModelStore, validateComboRoutes, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
+import { COMBO_PRESETS, comboPresetSummary } from "./combo-presets.ts"
 import { runOperatorShell, type ShellResult, type ShellSnapshot } from "./operator-shell.ts"
 import { fileMemoryStore, memoryCommand, type MemoryCommandStore } from "./memory-command.ts"
 
@@ -1186,7 +1187,7 @@ export async function runInteractiveSession(
       write("Usage: /model default [show | save | clear | <local|codex|claude> <native-id>]")
       return undefined
     }
-    const comboUsage = "Usage: /model combo (menu) or /model combo [show | <role> <local|codex|claude> <native-id> | clear [role] | apply]; roles: " + COMBO_ROLES.join(", ")
+    const comboUsage = "Usage: /model combo (menu) or /model combo [show | presets | preset <name> | custom | <role> <local|codex|claude> <native-id> | clear [role] | apply]; roles: " + COMBO_ROLES.join(", ")
     /**
      * `/model combo` shows the effective routes; `<role> <engine> <id>` and `clear` edit user config only. Neither
      * changes the running session: a combo applies to new sessions, via `apply`. Returns "apply" for the caller.
@@ -1216,6 +1217,22 @@ export async function runInteractiveSession(
         write(lines.join("\n"))
       }
       if (rest.length === 1 && rest[0] === "show") { show(); return undefined }
+      if (rest.length === 1 && rest[0] === "presets") {
+        write("Recommended combo templates (main stays the /model selection; requires Codex and Claude):")
+        for (const preset of COMBO_PRESETS) write(`${preset.id} — ${preset.description}\n${comboPresetSummary(preset)}`)
+        write("/model combo preset <name> replaces saved user routes; /model combo custom edits individual roles.")
+        return undefined
+      }
+      if (rest.length === 2 && rest[0] === "preset") {
+        const preset = COMBO_PRESETS.find(candidate => candidate.id === rest[1])
+        if (!preset) { write(`Unknown combo preset. Choose: ${COMBO_PRESETS.map(candidate => candidate.id).join(", ")}.`); return undefined }
+        try {
+          const path = deps.combo.replace(preset.routes)
+          write(`Saved combo preset ${preset.id} to ${path}. User routes were replaced; project overrides still take precedence. Main stays the /model selection. ${current ? "The current session is unchanged; /model combo apply starts a new session with it." : "It applies when a model is selected."}`)
+          show()
+        } catch (error) { write(`Combo preset not saved: ${boundedTerminalDiagnostic(error instanceof Error ? error.message : String(error))}`) }
+        return undefined
+      }
       if (rest.length === 1 && rest[0] === "apply") return "apply"
       if (rest[0] === "clear" && rest.length <= 2) {
         const role = rest[1]
@@ -1247,11 +1264,11 @@ export async function runInteractiveSession(
       return undefined
     }
     /**
-     * `/model combo` (and the /model "combo" entry): menu-driven editing of the saved combo (role -> engine -> model). Every save and clear goes through
+     * `/model combo` previews recommended templates or edits custom routes (role -> engine -> model). Every save and clear goes through
      * comboCommand, so validation and messages are identical to the typed form. Returns "apply" when the operator
      * chose to apply, undefined when they finished, and "aborted" when the turn was aborted.
      */
-    const comboPicker = async (current: { engine: CliEngine; model: string; routes: ComboRoutes } | undefined): Promise<"apply" | "aborted" | undefined> => {
+    const comboPicker = async (current: { engine: CliEngine; model: string; routes: ComboRoutes } | undefined, custom = false): Promise<"apply" | "aborted" | undefined> => {
       const signal = abort.signal
       const write = (text: string) => terminal.write(terminalSafeText(`${text}\n`))
       while (!signal.aborted) {
@@ -1262,22 +1279,38 @@ export async function runInteractiveSession(
           return `${role} — ${route ? `${route.engine} / ${route.model}` : "main model"}`
         })
         const actions = [
+          { id: "toggle" as const, label: custom ? "Recommended combos" : "Custom settings — edit role routes", detail: custom ? "Browse recommended templates." : "Choose any role, engine and model, or customize a saved template." },
           ...(current ? [{ id: "apply" as const, label: "Apply to a new session", detail: "Start a new session under the saved combo; the current one is kept." }] : []),
-          { id: "clear" as const, label: "Clear all routes", detail: "Every role uses the main model." },
+          { id: "clear" as const, label: "Clear all routes", detail: "Remove user routes; project routes still apply." },
           { id: "done" as const, label: "Done", detail: current ? "Keep the current session unchanged." : "The combo applies when a model is selected." },
         ]
         if (lookup.state === "invalid") write(`Combo is invalid and is not applied: ${boundedTerminalDiagnostic(lookup.reason)}.`)
         const main = current ? `main: ${current.engine} / ${current.model}` : "main: not selected yet"
-        const picked = await chooseFrom(terminal, `Combo · ${main}`,
-          [...roleLabels, ...actions.map(action => action.label)],
-          [...COMBO_ROLE_INFO.map(([, info]) => info), ...actions.map(action => action.detail)],
-          "Pick a role to route it to another engine and model; saved to ~/.config/otter/otter.jsonc.", signal)
+        const entries = custom ? roleLabels : COMBO_PRESETS.map(preset => `${preset.id} — ${preset.label}`)
+        const details = custom ? COMBO_ROLE_INFO.map(([, info]) => info) : COMBO_PRESETS.map(preset => preset.description)
+        const picked = await chooseFrom(terminal, `${custom ? "Custom combo" : "Combo"} · ${main}`,
+          [...entries, ...actions.map(action => action.label)],
+          [...details, ...actions.map(action => action.detail)],
+          custom ? "Pick a role to customize; saved to ~/.config/otter/otter.jsonc." : "Choose a recommended combo to preview, or customize role routes. Main stays unchanged.", signal)
         if (picked === undefined) return "aborted"
         if (picked === null) return undefined
-        const action = actions[picked - COMBO_ROLE_INFO.length]
+        const action = actions[picked - entries.length]
+        if (action?.id === "toggle") { custom = !custom; continue }
         if (action?.id === "done") return undefined
         if (action?.id === "apply") return "apply"
         if (action?.id === "clear") { comboCommand(["clear"], current); continue }
+        if (!custom) {
+          const preset = COMBO_PRESETS[picked]
+          if (!preset) continue
+          const summary = comboPresetSummary(preset)
+          write(`${preset.label}: ${preset.description}\n${summary}\nMain stays the /model selection. Requires Codex and Claude; check /auth or use /login <engine>.`)
+          const confirm = await chooseFrom(terminal, `Combo preset · ${preset.id}`, ["Save this combo", "Back"],
+            [preset.description, "Return without saving."],
+            "Save replaces all user role routes; project overrides still win. Existing sessions stay unchanged.", signal)
+          if (confirm === undefined) return "aborted"
+          if (confirm === 0) { comboCommand(["preset", preset.id], current); custom = true }
+          continue
+        }
         const role = COMBO_ROLE_INFO[picked]![0]
         const engineChoice = await chooseFrom(terminal, `Combo · ${role} · engine`,
           ["local — Ollama CLI", "codex — Codex CLI", "claude — Claude CLI", "Use the main model (remove this route)"],
@@ -1529,8 +1562,8 @@ export async function runInteractiveSession(
         }
         if (command === "/model" && commandArgs[0] === "combo" && hasInteractiveAction("unselected", "model")) {
           const rest = commandArgs.slice(1)
-          if (rest.length === 0) {
-            if (await withProgressSuspended(() => comboPicker(undefined)) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
+          if (rest.length === 0 || (rest.length === 1 && rest[0] === "custom")) {
+            if (await withProgressSuspended(() => comboPicker(undefined, rest[0] === "custom")) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
           } else if (comboCommand(rest, undefined) === "apply") {
             terminal.write("No model is selected yet; select one with /model, then run /model combo apply.\n")
           }
@@ -2762,7 +2795,8 @@ export async function runInteractiveSession(
       /** Run the combo menu (no args) or a typed combo command; false means the chat must exit. */
       const runCombo = async (rest: readonly string[]): Promise<boolean> => {
         const current = { engine: selection.engine, model: selection.model, routes: selection.routes }
-        const outcome = rest.length === 0 ? await withProgressSuspended(() => comboPicker(current)) : comboCommand(rest, current)
+        const outcome = rest.length === 0 || (rest.length === 1 && rest[0] === "custom")
+          ? await withProgressSuspended(() => comboPicker(current, rest[0] === "custom")) : comboCommand(rest, current)
         if (outcome === "aborted") return !abort.signal.aborted
         if (outcome === "apply") {
           const derived = comboRoutesFor(deps.combo.read(worktree), selection.engine, selection.model)

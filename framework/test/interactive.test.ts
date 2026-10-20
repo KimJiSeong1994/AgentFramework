@@ -15,7 +15,8 @@ import { AdmissionRefusal } from "../src/hosts/required-controls.ts"
 import { ModelRequestError } from "../src/workflows/turn.ts"
 import { holdAdmission } from "../src/sessions/admission.ts"
 import { PlanIsolationUnavailableError, type ForegroundController } from "../src/hosts/controller.ts"
-import type { ExecutionRuntime } from "../src/hosts/types.ts"
+import type { ComboRoutes, ExecutionRuntime } from "../src/hosts/types.ts"
+import { COMBO_PRESETS } from "../src/hosts/combo-presets.ts"
 import type { CliProgressSink } from "../src/hosts/cli-progress.ts"
 import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
 import { bindSkillInvocation, finishSkillInvocation, skillInvocationAudit } from "../src/skills/context.ts"
@@ -129,6 +130,7 @@ function harness(options: HarnessOptions = {}) {
     defaultModelWrites: Array<{ engine: string; model: string } | null>
     combo: ComboLookup
     comboWrites: Array<{ role: string; route: { engine: string; model: string } | null }>
+    comboReplacements?: ComboRoutes[]
     authRuns: Array<{ engine: string; argv: readonly string[] }>
     authStatusChecks: string[]
     autoSelections: Array<{ text: string; mode: string; candidates: string[] }>
@@ -322,6 +324,11 @@ function harness(options: HarnessOptions = {}) {
     },
     combo: {
       read: () => calls.combo,
+      replace: routes => {
+        (calls.comboReplacements ??= []).push(routes)
+        calls.combo = { state: "configured", routes, sources: Object.fromEntries(Object.keys(routes).map(role => [role, "user"])) }
+        return "/config/otter/otter.jsonc"
+      },
       save: (role, route) => {
         calls.comboWrites.push({ role, route: { ...route } })
         const prior = calls.combo.state === "configured" ? calls.combo : undefined
@@ -1611,7 +1618,8 @@ describe("interactive terminal", () => {
       lines: ["/model combo", "/quit"],
       choose: async (title, values) => {
         titles.push(title)
-        if (title.startsWith("Combo · main")) return titles.filter(t => t.startsWith("Combo · main")).length === 1
+        if (title.startsWith("Combo · main")) return values.indexOf("Custom settings — edit role routes")
+        if (title.startsWith("Custom combo · main")) return titles.filter(t => t.startsWith("Custom combo · main")).length === 1
           ? values.findIndex(value => value.startsWith("architect —"))
           : values.indexOf("Done")
         if (title === "Combo · architect · engine") return 1
@@ -1620,11 +1628,83 @@ describe("interactive terminal", () => {
       },
     })
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
-    expect(titles).toEqual(["Combo · main: local / native", "Combo · architect · engine", "Choose a model · codex", "Combo · main: local / native"])
+    expect(titles).toEqual(["Combo · main: local / native", "Custom combo · main: local / native", "Combo · architect · engine", "Choose a model · codex", "Custom combo · main: local / native"])
     expect(h.calls.comboWrites).toEqual([{ role: "architect", route: { engine: "codex", model: "gpt-5-codex" } }])
     expect(h.calls.discoveries).toEqual([{ engine: "codex", worktree: realpathSync(wt.worktree) }])
     expect(h.calls.output.join("")).toContain("Saved combo route architect -> codex / gpt-5-codex")
     expect(h.calls.runtimes).toHaveLength(1)
+  })
+
+  test("combo presets list and unknown names never change saved routes or the session", async () => {
+    const h = harness({ lines: ["/model combo presets", "/model combo preset unknown", "/quit"], combo: configuredCombo })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    for (const preset of COMBO_PRESETS) expect(h.calls.output.join("")).toContain(preset.id)
+    expect(h.calls.output.join("")).toContain("Unknown combo preset")
+    expect(h.calls.combo).toEqual(configuredCombo)
+    expect(h.calls.comboReplacements).toBeUndefined()
+    expect(h.calls.runtimes).toHaveLength(1)
+  })
+
+  test("combo preset preview can be cancelled without changing config", async () => {
+    let visits = 0
+    const h = harness({ fullscreen: true, lines: ["/model combo", "/quit"], combo: configuredCombo,
+      choose: async (title, values) => {
+        if (title.startsWith("Combo · main")) return visits++ === 0 ? 0 : values.indexOf("Done")
+        return undefined
+      },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.choices.some(choice => choice.title === "Combo preset · astra-fable")).toBe(true)
+    expect(h.calls.output.join("")).toContain("codex / gpt-6-luna")
+    expect(h.calls.combo).toEqual(configuredCombo)
+    expect(h.calls.comboReplacements).toBeUndefined()
+  })
+
+  test("combo preset menu saves, supports custom edits, and applies only to a new session", async () => {
+    let visits = 0
+    const h = harness({ fullscreen: true, lines: ["q1", "/model combo", "/quit"], turns: [{ text: "a1" }],
+      choose: async (title, values) => {
+        if (title.startsWith("Combo · main")) return 0
+        if (title === "Combo preset · astra-fable") return 0
+        if (title.startsWith("Custom combo · main")) return visits++ === 0
+          ? values.findIndex(value => value.startsWith("worker —")) : values.indexOf("Apply to a new session")
+        if (title === "Combo · worker · engine") return 0
+        if (title === "Choose a model · local") return 0
+        return undefined
+      },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.comboReplacements).toEqual([COMBO_PRESETS[0]!.routes])
+    expect(h.calls.comboWrites).toEqual([{ role: "worker", route: { engine: "local", model: "llama3.2" } }])
+    expect(h.calls.runtimes).toHaveLength(2)
+    expect(h.calls.runtimes[0]?.routes ?? {}).toEqual({})
+    expect(h.calls.runtimes[1]).toMatchObject({ engine: "local", model: "native", routes: {
+      ...COMBO_PRESETS[0]!.routes, worker: { engine: "local", model: "llama3.2" },
+    } })
+    expect(readSessionMetadata(wt.worktree, "otter-fixture-session")?.routes ?? {}).toEqual({})
+    expect(h.calls.conversationRestores.at(-1)?.prior).toEqual([{ role: "user", text: "q1" }, { role: "assistant", text: "a1" }])
+  })
+
+  test("typed combo presets replace saved routes without switching; failures preserve config", async () => {
+    const h = harness({ lines: ["/model combo preset opus-codex", "/quit"], combo: configuredCombo })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.comboReplacements).toEqual([COMBO_PRESETS[2]!.routes])
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.runtimes[0]).toMatchObject({ routes: comboRoutes })
+    const failed = harness({ lines: ["/model combo preset astra-fable", "/quit"], combo: configuredCombo })
+    failed.deps.combo!.replace = () => { throw new Error("config is read-only") }
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, failed.deps)
+    expect(failed.calls.output.join("")).toContain("Combo preset not saved: config is read-only")
+    expect(failed.calls.combo).toEqual(configuredCombo)
+    expect(failed.calls.runtimes).toHaveLength(1)
+  })
+
+  test("readline combo preset can be previewed and saved before model selection", async () => {
+    const h = harness({ lines: ["/model combo", "1", "1", "16", "/quit"] })
+    expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
+    expect(h.calls.output.join("")).toContain("Combo preset · astra-fable")
+    expect(h.calls.comboReplacements).toEqual([COMBO_PRESETS[0]!.routes])
+    expect(h.calls.runtimes).toEqual([])
   })
 
   test("/model lists combo under the engines and opens the same combo menu", async () => {
@@ -1635,7 +1715,8 @@ describe("interactive terminal", () => {
       choose: async (title, values) => {
         titles.push(title)
         if (title === "Choose an execution engine") return values.indexOf("combo — per-role models")
-        if (title.startsWith("Combo · main")) return titles.filter(t => t.startsWith("Combo · main")).length === 1
+        if (title.startsWith("Combo · main")) return values.indexOf("Custom settings — edit role routes")
+        if (title.startsWith("Custom combo · main")) return titles.filter(t => t.startsWith("Custom combo · main")).length === 1
           ? values.findIndex(value => value.startsWith("critic —"))
           : values.indexOf("Done")
         if (title === "Combo · critic · engine") return 0
@@ -1655,9 +1736,9 @@ describe("interactive terminal", () => {
     let mainVisits = 0
     const h = harness({
       fullscreen: true, combo: configuredCombo,
-      lines: ["/model combo", "/model combo", "/quit"],
+      lines: ["/model combo custom", "/model combo custom", "/quit"],
       choose: async (title, values) => {
-        if (title.startsWith("Combo · main")) {
+        if (title.startsWith("Custom combo · main")) {
           mainVisits += 1
           if (mainVisits === 1) return values.findIndex(value => value.startsWith("architect —"))
           if (mainVisits === 2) return values.indexOf("Apply to a new session")
@@ -1674,13 +1755,13 @@ describe("interactive terminal", () => {
   })
 
   test("readline /model offers combo as entry 4; the combo menu works before a model is selected", async () => {
-    // Engine 4 = combo. Role list: 13 roles + "Clear all routes" (14) + "Done" (15); no Apply entry yet.
-    const h = harness({ lines: ["/model", "4", "2", "1", "1", "16", "15", "/quit"] })
+    // Engine 4 = combo; Custom settings = 4. 13 roles + Recommended combos + Clear + Done.
+    const h = harness({ lines: ["/model", "4", "4", "2", "1", "1", "17", "16", "/quit"] })
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     const output = h.calls.output.join("")
     expect(output).toContain("4) combo  — per-role models")
-    expect(output).toContain("Choose a listed number (1-15).")
-    expect(output).toContain("15) Done")
+    expect(output).toContain("Choose a listed number (1-16).")
+    expect(output).toContain("16) Done")
     expect(output).toContain("Combo · main: not selected yet:")
     expect(output).toContain("2) architect — main model")
     expect(h.calls.comboWrites).toEqual([{ role: "architect", route: { engine: "local", model: "llama3.2" } }])

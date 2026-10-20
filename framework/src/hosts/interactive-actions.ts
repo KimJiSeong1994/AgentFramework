@@ -11,7 +11,7 @@ export type InteractiveAction = Readonly<{
 
 const all: readonly InteractiveAction[] = [
   { id: "help", syntax: "/help", summary: "show contextual commands and keys", contexts: ["chat", "busy", "held", "read-only", "selection", "unselected"] },
-  { id: "model", syntax: "/model [engine native-id | default ... | combo ...]", summary: "pick a model or a per-role combo; /model default sets the startup default; /model combo opens the combo menu", contexts: ["chat", "selection", "unselected"] },
+  { id: "model", syntax: "/model [engine native-id | default ... | combo ...]", summary: "pick a model; /model default sets the startup default; /model combo offers recommended combos and custom role settings", contexts: ["chat", "selection", "unselected"] },
   { id: "memory", syntax: "/memory [show | test | auto | claude [model] | codex [model] | local <model> | jev | off]", summary: "show, measure (test) or pick the engine that links requests to wiki memory; applies to the next memory call", contexts: ["chat", "held", "read-only", "unselected"] },
   { id: "auth", syntax: "/login [codex|claude]", summary: "sign in to an engine with its own CLI (/auth shows status, /logout signs out); otter stores no credentials", contexts: ["chat", "held", "unselected"] },
   { id: "sessions", syntax: "/sessions", summary: "inspect or choose retained sessions", contexts: ["chat", "held", "read-only", "selection", "unselected"] },
