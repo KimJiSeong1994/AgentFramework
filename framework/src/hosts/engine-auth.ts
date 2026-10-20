@@ -3,13 +3,15 @@
 // method label, and login/logout hand the real terminal to the vendor's own interactive command.
 import { spawn } from "node:child_process"
 import { findExecutable, insideWsl, type CliEngine } from "./cli-transport.ts"
+import { UNFORWARDED_CREDENTIAL_ENV, vendorProcessEnvironment } from "./vendor-process.ts"
 
 export type AuthEngine = Extract<CliEngine, "codex" | "claude">
 export const AUTH_ENGINES: readonly AuthEngine[] = ["codex", "claude"]
 
 export type AuthState =
   | { engine: AuthEngine; state: "signed-in"; method?: string }
-  | { engine: AuthEngine; state: "signed-out" }
+  /** `envOnly`: a credential variable is set in otter's environment, but model calls never receive it. */
+  | { engine: AuthEngine; state: "signed-out"; envOnly?: string }
   | { engine: AuthEngine; state: "unknown"; reason: string }
 
 export type LoginMethod = "browser" | "device" | "console" | "api-key"
@@ -57,7 +59,9 @@ function statusArgv(engine: AuthEngine): string[] {
 export function parseAuthStatus(engine: AuthEngine, exitCode: number | null, output: string): AuthState {
   if (engine === "claude") {
     try {
-      const value: unknown = JSON.parse(output)
+      // The JSON object may follow a notice line (update or migration messages); parse from its first brace.
+      const start = output.indexOf("{")
+      const value: unknown = JSON.parse(start >= 0 ? output.slice(start) : output)
       if (value && typeof value === "object" && typeof (value as { loggedIn?: unknown }).loggedIn === "boolean") {
         const record = value as { loggedIn: boolean; authMethod?: unknown }
         if (!record.loggedIn) return { engine, state: "signed-out" }
@@ -76,15 +80,29 @@ export function parseAuthStatus(engine: AuthEngine, exitCode: number | null, out
   return { engine, state: "unknown", reason: `codex login status exited ${exitCode ?? "without a code"}` }
 }
 
-/** Run the vendor status command without a terminal; bounded time and output. */
+/** The first credential variable set in otter's environment that model calls will not receive. */
+function unforwardedCredential(engine: AuthEngine): string | undefined {
+  return UNFORWARDED_CREDENTIAL_ENV[engine].find(name => typeof process.env[name] === "string" && process.env[name] !== "")
+}
+
+/**
+ * Run the vendor status command without a terminal; bounded time and output. It runs with exactly the environment a model
+ * call gets (vendorProcessEnvironment), so "signed in" here means a model call will find the same sign-in.
+ */
 export async function authStatus(engine: AuthEngine, cwd: string): Promise<AuthState> {
   let executable: string
   try { executable = findExecutable(engine) } catch { return { engine, state: "unknown", reason: `${engine} CLI not found on PATH` } }
+  const envOnly = unforwardedCredential(engine)
   return await new Promise<AuthState>(settle => {
     let output = ""
     let done = false
-    const child = spawn(executable, statusArgv(engine), { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] })
-    const finish = (value: AuthState) => { if (!done) { done = true; clearTimeout(timer); settle(value) } }
+    const child = spawn(executable, statusArgv(engine), { cwd, env: vendorProcessEnvironment(), stdio: ["ignore", "pipe", "pipe"] })
+    const finish = (value: AuthState) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      settle(value.state === "signed-out" && envOnly ? { ...value, envOnly } : value)
+    }
     const timer = setTimeout(() => { try { child.kill("SIGKILL") } catch {} finish({ engine, state: "unknown", reason: "status check timed out" }) }, STATUS_TIMEOUT_MS)
     const take = (chunk: Buffer) => { if (output.length < STATUS_OUTPUT_BYTES) output += chunk.toString("utf8").slice(0, STATUS_OUTPUT_BYTES - output.length) }
     child.stdout.on("data", take)
@@ -100,8 +118,12 @@ export async function authStatus(engine: AuthEngine, cwd: string): Promise<AuthS
  */
 export async function runVendorAuth(engine: AuthEngine, argv: readonly string[], cwd: string): Promise<AuthRun> {
   const executable = findExecutable(engine)
+  // The user's own session (browser, display, WSL interop), minus credential variables: the sign-in must land in the
+  // CLI's own store, which model calls read, not be satisfied by an environment key they never receive.
+  const env: NodeJS.ProcessEnv = { ...process.env }
+  for (const name of UNFORWARDED_CREDENTIAL_ENV[engine]) delete env[name]
   return await new Promise<AuthRun>((settle, fail) => {
-    const child = spawn(executable, [...argv], { cwd, env: process.env, stdio: "inherit" })
+    const child = spawn(executable, [...argv], { cwd, env, stdio: "inherit" })
     child.on("error", fail)
     child.on("close", (exitCode, signal) => settle({ exitCode, signal }))
   })
@@ -109,6 +131,10 @@ export async function runVendorAuth(engine: AuthEngine, argv: readonly string[],
 
 export function describeAuth(state: AuthState): string {
   if (state.state === "signed-in") return `${state.engine}: signed in${state.method ? ` (${state.method})` : ""}`
-  if (state.state === "signed-out") return `${state.engine}: not signed in · /login ${state.engine}`
+  if (state.state === "signed-out") {
+    return state.envOnly
+      ? `${state.engine}: not signed in · ${state.envOnly} is set, but otter never passes API keys to the CLI; sign in with /login ${state.engine}${state.engine === "codex" ? " (api-key stores a key in the CLI)" : " (console uses API billing)"}`
+      : `${state.engine}: not signed in · /login ${state.engine}`
+  }
   return `${state.engine}: unknown (${state.reason})`
 }

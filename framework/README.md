@@ -217,9 +217,13 @@ and `/model combo clear` remove user routes (any value, including a malformed on
 project route still applies. Show, set and clear only touch config,
 so they also work while a session is held. `/model combo apply` starts a new session with the carried
 conversation under the saved combo; it is refused while a workflow is active or ownership is unsettled.
+Choosing a recommended combo (menu "Apply to this session", or `/model combo preset <name>`) saves it and, once a
+model is selected, applies it at once through the same path as `/model combo apply` (conversation carried; rebound
+in place during an active workflow; refused while held). Before a model is selected it is saved and used by the
+first selection. Custom role edits still only save until `/model combo apply`.
 Status shows `engine / model +N roles`.
 
-A combo applies only to new sessions. The routes are pinned in the session metadata. Every non-resume new
+A combo applies to a session when it starts (or when a recommended combo is chosen, see above). The routes are pinned in the session metadata. Every non-resume new
 session (a plain `/model <engine> <id>` switch, `/new`, `/model combo apply`) derives its routes from the
 currently saved combo, normalized against the new main model, so a route that equals an intermediate main
 model comes back when you switch away from it; an invalid combo is reported and not applied. `/resume` and the
@@ -522,9 +526,14 @@ The terminal requires a TTY and uses existing vendor authentication. Model disco
 does not start Ollama, inspect credentials, install a model, or rewrite global
 configuration. A manually entered local ID is not proof of installation; subsequent
 inference uses the installed Ollama CLI's native `run` behavior.
-The subprocess allowlist retains non-secret `USER`/`LOGNAME` for native keychain lookup,
-but does not forward API-key/token environment variables. These names do not establish
-execution authority. Vendor account quotas still apply.
+The subprocess allowlist retains non-secret `USER`/`LOGNAME` for native keychain lookup and the variables that say
+where the vendor CLI keeps its own sign-in and how it reaches its service (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_*`,
+proxy and CA-bundle variables), but does not forward API-key/token environment variables (`OPENAI_API_KEY`,
+`CODEX_API_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`). `otter auth`, `/auth` and the
+sign-in hint run the vendor status command with exactly this environment, so "signed in" means a model call finds the
+same sign-in; a key that exists only in the environment is reported as "not signed in · `<VAR>` is set, but otter never
+passes API keys to the CLI", and `/login` (which runs without those variables) stores the sign-in in the CLI itself.
+These names do not establish execution authority. Vendor account quotas still apply.
 
 All three engines use the same conversation → canonical plan → local human decision →
 serial execution controller. Main/reviewer file tools are read-only. Otter owns the JSON
