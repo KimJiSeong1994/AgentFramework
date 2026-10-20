@@ -2,7 +2,7 @@
 // status runs the vendor's own read-only status command and keeps only "signed in / not / unknown" plus the sign-in
 // method label, and login/logout hand the real terminal to the vendor's own interactive command.
 import { spawn } from "node:child_process"
-import { findExecutable, type CliEngine } from "./cli-transport.ts"
+import { findExecutable, insideWsl, type CliEngine } from "./cli-transport.ts"
 
 export type AuthEngine = Extract<CliEngine, "codex" | "claude">
 export const AUTH_ENGINES: readonly AuthEngine[] = ["codex", "claude"]
@@ -31,6 +31,18 @@ export function loginArgv(engine: AuthEngine, method: LoginMethod = "browser"): 
   if (method === "console") return ["auth", "login", "--console"]
   if (method === "device" || method === "api-key") throw new TypeError(`claude does not offer ${method} sign-in through auth login`)
   return ["auth", "login"]
+}
+
+/**
+ * Shown before a browser sign-in under WSL (the Windows install): the vendor CLI opens the Windows browser through
+ * BROWSER (set by scripts/otter-wsl), and its callback reaches WSL via localhost forwarding. When either fails, the
+ * printed URL still works from Windows, and codex's device code needs neither.
+ */
+export function loginHint(engine: AuthEngine, method: LoginMethod, wsl = insideWsl()): string | undefined {
+  if (!wsl || method !== "browser") return undefined
+  return engine === "codex"
+    ? "WSL: if no browser opens, open the printed URL in Windows. If the page cannot reach localhost, use: /login codex device"
+    : "WSL: if no browser opens, open the printed URL in Windows and paste the code back here."
 }
 
 export function logoutArgv(engine: AuthEngine): string[] {

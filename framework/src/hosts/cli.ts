@@ -27,7 +27,7 @@ import { getOwnedSession, readSessionMetadata, sessionWasRebound } from "../sess
 import { assertSDKSessionQuiescent, readSDKResumeIdentity } from "../sessions/sdk-quiescence.ts"
 import { captureSDKSessionLifetime } from "../sessions/sdk-transcript.ts"
 import { assertNever, isCancelPending, stopDisplay } from "../workflows/types.ts"
-import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, logoutArgv, runVendorAuth, type AuthEngine, type LoginMethod } from "./engine-auth.ts"
+import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type LoginMethod } from "./engine-auth.ts"
 import { updateCli } from "./update-check.ts"
 
 const COMMANDS = new Set(["status", "import", "approve", "reject", "run", "resume", "pause", "cancel"])
@@ -871,6 +871,8 @@ async function authCli(argv: readonly string[]): Promise<number> {
   catch (error) { console.error(`${(error as Error).message}. ${usage}`); return 2 }
   if (methodArg !== undefined && !["browser", "device", "console", "api-key"].includes(methodArg)) { console.error(usage); return 2 }
   console.error(`$ ${engine} ${argvFor.join(" ")}`)
+  const hint = command === "login" ? loginHint(engine, (methodArg ?? "browser") as LoginMethod) : undefined
+  if (hint) console.error(hint.replace("/login codex device", "otter login codex device"))
   try { await runVendorAuth(engine, argvFor, cwd) }
   catch { console.error(`${engine} CLI not found on PATH.`); return 1 }
   const after = await authStatus(engine, cwd)

@@ -3,7 +3,28 @@ import { describe, expect, test } from "bun:test"
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { authStatus, describeAuth, loginArgv, logoutArgv, parseAuthStatus } from "../src/hosts/engine-auth.ts"
+import { authStatus, describeAuth, loginArgv, loginHint, logoutArgv, parseAuthStatus } from "../src/hosts/engine-auth.ts"
+import { usablePathEntry } from "../src/hosts/cli-transport.ts"
+
+describe("engine CLI lookup under WSL", () => {
+  test("Windows drive mounts never supply an engine CLI under WSL (their sign-in lives on the Windows side)", () => {
+    for (const windows of ["/mnt/c/Users/me/AppData/Roaming/npm", "/mnt/c/Program Files/nodejs", "/mnt/d", "/MNT/C/tools"]) {
+      expect(usablePathEntry(windows, true)).toBe(false)
+      expect(usablePathEntry(windows, false)).toBe(true)
+    }
+    for (const linux of ["/home/me/.local/bin", "/home/me/.nvm/versions/node/v22/bin", "/usr/local/bin", "/mnt/data/bin", "/mnt"]) {
+      expect(usablePathEntry(linux, true)).toBe(true)
+    }
+    expect(usablePathEntry("", false)).toBe(false)
+  })
+
+  test("a browser sign-in under WSL says what to do when the Windows browser or the localhost callback fails", () => {
+    expect(loginHint("codex", "browser", true)).toContain("/login codex device")
+    expect(loginHint("claude", "browser", true)).toContain("paste the code back")
+    expect(loginHint("codex", "device", true)).toBeUndefined()
+    expect(loginHint("codex", "browser", false)).toBeUndefined()
+  })
+})
 
 describe("vendor auth commands", () => {
   test("login/logout map to the vendor's own commands; unsupported methods are refused", () => {
