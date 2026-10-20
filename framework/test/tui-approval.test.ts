@@ -6,6 +6,7 @@ type TestApp = { input(event: unknown): void; choice?: { focus: string; document
 describe("approval and generic choice focus", () => {
   test("approval document navigation and paste cannot decide", async () => {
     const tui = new TuiApp()
+    tui.resume = () => {}
     const internal = tui as unknown as TestApp
     const controller = new AbortController()
     const result = tui.choose("Decision", ["Approve", "Reject", "Keep pending"], controller.signal, {
@@ -26,6 +27,7 @@ describe("approval and generic choice focus", () => {
 
   test("generic chooser pages in original index space", async () => {
     const tui = new TuiApp()
+    tui.resume = () => {}
     const internal = tui as unknown as TestApp
     const values = Array.from({ length: 240 }, (_, index) => `session-${index}`)
     const result = tui.choose("Sessions", values, new AbortController().signal, {
@@ -44,6 +46,7 @@ describe("approval and generic choice focus", () => {
 
   test("single long paragraph keeps a visual-row anchor while paging", () => {
     const tui = new TuiApp()
+    tui.resume = () => {}
     const internal = tui as unknown as TestApp
     const controller = new AbortController()
     void tui.choose("Decision", ["Approve", "Reject", "Keep pending"], controller.signal, {

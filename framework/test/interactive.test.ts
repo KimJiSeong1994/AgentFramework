@@ -779,7 +779,7 @@ describe("interactive terminal", () => {
     expect(picker.calls.boundSessions).toEqual(["otter-fixture-session"])
   })
 
-  test("startup history picker shows saved conversations before model selection", async () => {
+  test("--resume history picker shows saved conversations before model selection", async () => {
     const first = harness({ lines: ["Saved question", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "claude", model: "fable" }, first.deps)
     const h = harness({ fullscreen: true, lines: ["/quit"], choose: async (title, choices) => {
@@ -789,21 +789,21 @@ describe("interactive terminal", () => {
       expect(choices.at(-1)).toBe("Start a new conversation")
       return 0
     } })
-    await launchInteractive({ worktree: wt.worktree }, h.deps)
+    await launchInteractive({ worktree: wt.worktree, resume: true }, h.deps)
     expect(h.calls.boundSessions).toEqual(["otter-fixture-session"])
     expect(h.calls.discoveries).toEqual([])
   })
 
-  test("startup history picker cancellation starts fresh with the default; --new bypasses it", async () => {
+  test("bare startup opens a new conversation without the history picker; a cancelled --resume picker starts fresh", async () => {
     const first = harness({ lines: ["Saved question", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "claude", model: "fable" }, first.deps)
-    for (const newSession of [false, true]) {
+    for (const resume of [undefined, true as const]) {
       const h = harness({ fullscreen: true, lines: ["/quit"], choose: async () => undefined,
         defaultModel: { state: "configured", value: { engine: "local", model: "fresh" }, source: "user" } })
-      await launchInteractive({ worktree: wt.worktree, newSession }, h.deps)
+      await launchInteractive({ worktree: wt.worktree, ...(resume ? { resume } : {}) }, h.deps)
       expect(h.calls.conversationRestores[0]!.prior).toBeUndefined()
       expect(h.calls.runtimes[0]!.model).toBe("fresh")
-      expect(h.calls.choices).toHaveLength(newSession ? 0 : 1)
+      expect(h.calls.choices).toHaveLength(resume ? 1 : 0)
     }
   })
 
@@ -1081,8 +1081,7 @@ describe("interactive terminal", () => {
     expect(parseInteractiveArgs(["--continue"], wt.worktree)).toEqual({ worktree: wt.worktree, continue: true })
     expect(parseInteractiveArgs(["--resume"], wt.worktree)).toEqual({ worktree: wt.worktree, resume: true })
     expect(parseInteractiveArgs(["--resume", "saved"], wt.worktree)).toEqual({ worktree: wt.worktree, resume: "saved" })
-    expect(parseInteractiveArgs(["--new"], wt.worktree)).toEqual({ worktree: wt.worktree, newSession: true })
-    for (const flags of [["--continue", "--resume"], ["--new", "--continue"], ["--resume", "--engine", "local"], ["--continue", "--model", "fixture"], ["--continue", "--continue"]]) {
+    for (const flags of [["--continue", "--resume"], ["--new"], ["--resume", "--engine", "local"], ["--continue", "--model", "fixture"], ["--continue", "--continue"]]) {
       expect(() => parseInteractiveArgs(flags, wt.worktree)).toThrow()
     }
   })

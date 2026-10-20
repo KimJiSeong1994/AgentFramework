@@ -56,7 +56,7 @@ import { runOperatorShell, type ShellResult, type ShellSnapshot } from "./operat
 import { fileMemoryStore, memoryCommand, type MemoryCommandStore } from "./memory-command.ts"
 
 export type CliEngine = CliRuntimeOptions["engine"]
-export type InteractiveArgs = { worktree: string; engine?: CliEngine; model?: string; resume?: string | true; continue?: boolean; newSession?: boolean }
+export type InteractiveArgs = { worktree: string; engine?: CliEngine; model?: string; resume?: string | true; continue?: boolean }
 export type InteractiveExit = { code: number }
 /** `interrupt` is Escape: it stops running work only; `cancel` is the explicit /cancel that may also stop a workflow. */
 export type TerminalControl = "cancel" | "interrupt" | "pause" | "shutdown" | "quit" | "disconnect" | "suspend"
@@ -241,12 +241,12 @@ export { validModelID } from "./default-model.ts"
 
 export function parseInteractiveArgs(argv: string[], cwd = process.cwd()): InteractiveArgs {
   const fields: Record<string, string> = {}
-  const allowed = new Set(["--worktree", "--engine", "--model", "--resume", "--continue", "--new"])
+  const allowed = new Set(["--worktree", "--engine", "--model", "--resume", "--continue"])
   for (let index = 0; index < argv.length; index++) {
     const flag = argv[index]!
-    if (!allowed.has(flag)) throw new InteractiveLaunchError("unknown chat option; use --worktree, --engine, --model, --resume [ID], --continue, or --new")
+    if (!allowed.has(flag)) throw new InteractiveLaunchError("unknown chat option; use --worktree, --engine, --model, --resume [ID], or --continue")
     if (Object.hasOwn(fields, flag)) throw new InteractiveLaunchError(`duplicate ${flag} option`)
-    if (flag === "--continue" || flag === "--new") {
+    if (flag === "--continue") {
       fields[flag] = "true"
       continue
     }
@@ -262,8 +262,8 @@ export function parseInteractiveArgs(argv: string[], cwd = process.cwd()): Inter
     index++
   }
   const restoring = Object.hasOwn(fields, "--resume") || Object.hasOwn(fields, "--continue")
-  if (["--resume", "--continue", "--new"].filter(flag => Object.hasOwn(fields, flag)).length > 1) {
-    throw new InteractiveLaunchError("choose only one of --resume, --continue, or --new")
+  if (Object.hasOwn(fields, "--resume") && Object.hasOwn(fields, "--continue")) {
+    throw new InteractiveLaunchError("choose only one of --resume or --continue")
   }
   if (restoring && (fields["--engine"] !== undefined || fields["--model"] !== undefined)) {
     throw new InteractiveLaunchError("restoring uses the saved model; omit --engine and --model, then switch with /model")
@@ -282,7 +282,6 @@ export function parseInteractiveArgs(argv: string[], cwd = process.cwd()): Inter
     ...(model ? { model } : {}),
     ...(Object.hasOwn(fields, "--resume") ? { resume: fields["--resume"] || true as const } : {}),
     ...(fields["--continue"] ? { continue: true } : {}),
-    ...(fields["--new"] ? { newSession: true } : {}),
   }
 }
 
@@ -1480,8 +1479,8 @@ export async function runInteractiveSession(
       if (!latest) throw new InteractiveLaunchError("No saved CLI sessions in this worktree; start a new conversation with otter.")
       if (latest.corrupt) throw new InteractiveLaunchError(`Latest saved session ${latest.sessionID} is unavailable: ${boundedTerminalDiagnostic(latest.corrupt)}. Use --resume to choose another session.`)
       selectStartupSession(latest.sessionID)
-    } else if (args.resume || (!args.newSession && !args.engine && !args.model && terminal.fullscreen && terminal.choose &&
-      startupCandidates().length > 0)) {
+    } else if (args.resume) {
+      // Startup always opens a new conversation; the previous-session chooser is opt-in (--resume, /sessions).
       await chooseStartupSession()
     }
     if (abort.signal.aborted) return signalExit(receivedSignal)

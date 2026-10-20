@@ -379,16 +379,16 @@ Alt+Q on macOS / Alt+Enter on Linux queues text for later serial turns; queued
 text never answers choices or supplies execution approval.
 
 Sessions are saved automatically in the current canonical worktree's state directory and survive
-Otter restarts. On startup, the full-screen TUI offers previous CLI sessions (newest activity first),
+Otter restarts. Startup always opens a new conversation; previous sessions are chosen only when
+needed. `otter --resume`, `/sessions` or `/resume` lists previous CLI sessions (newest activity first),
 showing the first question, model, time, and session ID. Choose a session to restore its conversation,
-model, and role routes, or choose **Start a new conversation**. Escape starts fresh; explicit
-`--engine`/`--model` flags also start fresh. Saved defaults apply only to new conversations.
+model, and role routes, or choose **Start a new conversation**; Escape starts fresh. Saved defaults
+apply only to new conversations.
 
 ```sh
 otter --continue          # open the most recent saved CLI session in this worktree
 otter --resume            # choose a previous session
 otter --resume SESSION_ID # open an exact session
-otter --new               # skip the startup chooser
 ```
 
 `/sessions` and `/resume [SESSION_ID]` are also available before selecting a model, including
