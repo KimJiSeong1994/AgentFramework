@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { getOwnedSession, inspectSessionAttachment, inspectSessions, openSession, readSessionMetadata, replaySession } from "../src/sessions/store.ts"
 import { ensureDurableDirectory } from "../src/state/durable.ts"
@@ -17,6 +17,48 @@ const open = (sid = "session_store", engine = "codex") => openSession(wt.worktre
 const release = (store: ReturnType<typeof open>) => store.release({ workflowQuiescent: true, evidence: "test fixture has no dispatched work", workflowID: null, revision: null })
 
 describe("durable session store", () => {
+  test("inspection orders by recent activity and bounds the first user summary", () => {
+    for (const sid of ["a_older", "z_recent", "b_tied", "empty"]) {
+      const store = open(sid)
+      if (sid !== "empty") {
+        store.append("notice", { text: "not the title" })
+        store.append("user", { text: " \n\t " })
+        store.append("user", { text: `  첫 질문\n\t${"😀".repeat(130)}` })
+        store.append("user", { text: "later question" })
+      }
+      release(store)
+      const dir = sessionDir(wt.worktree, sid)
+      const path = join(dir, "metadata.json")
+      const metadata = JSON.parse(readFileSync(path, "utf8"))
+      writeFileSync(path, JSON.stringify({ ...metadata, createdAt: 1_000, updatedAt: sid === "empty" ? 40_000 : 2_000 }))
+      if (sid !== "empty") utimesSync(join(dir, "segments000001.jsonl"), 10, sid === "a_older" ? 10 : 30)
+    }
+    const sessions = inspectSessions(wt.worktree)
+    expect(sessions.map(session => session.sessionID)).toEqual(["empty", "b_tied", "z_recent", "a_older"])
+    expect(sessions.map(session => session.lastActivityAt)).toEqual([40_000, 30_000, 30_000, 10_000])
+    expect(sessions[0]?.summary).toBeUndefined()
+    expect(sessions[1]?.summary).toBe(`첫 질문 ${"😀".repeat(114)}…`)
+    expect(Array.from(sessions[1]?.summary ?? "")).toHaveLength(120)
+  })
+
+  test("inspection supports legacy timestamps and withholds corrupt transcript previews", () => {
+    const store = open()
+    store.append("user", { text: "valid prefix" })
+    release(store)
+    const dir = sessionDir(wt.worktree, store.sessionID)
+    const path = join(dir, "metadata.json")
+    const { createdAt, updatedAt, ...legacy } = JSON.parse(readFileSync(path, "utf8"))
+    writeFileSync(path, JSON.stringify(legacy))
+    const segment = join(dir, "segments000001.jsonl")
+    utimesSync(segment, 20, 20)
+    expect(inspectSessions(wt.worktree)[0]).toMatchObject({ lastActivityAt: 20_000, summary: "valid prefix" })
+    appendFileSync(segment, '{"seq":2')
+    const corrupt = inspectSessions(wt.worktree)[0]
+    expect(corrupt?.corrupt).toContain("incomplete trailing")
+    expect(corrupt?.summary).toBeUndefined()
+    expect(corrupt?.lastActivityAt).toBeUndefined()
+  })
+
   test("combo routes persist, validate, stay immutable and legacy metadata without routes opens", () => {
     const routes = { architect: { engine: "codex", model: "gpt-5.6-sol" }, planner: { engine: "claude", model: "opus" } } as const
     const store = openSession(wt.worktree, "combo_routes", { engine: "local", model: "gemma4:31b", routes })

@@ -199,7 +199,8 @@ subprocess environment as inference; unavailable or empty discovery is reported
 without starting a service or downloading a model. Discovery happens only when the
 operator requests `/model`; explicit `--model` skips discovery. Codex choices are the bundled,
 version-pinned supported slugs, not an account entitlement query. Claude choices are
-native aliases, not a fetched account catalogue.
+the native aliases Fable (`fable`), Sonnet (`sonnet`), Opus (`opus`), and Haiku (`haiku`),
+not a fetched account catalogue. `/model claude fable` selects Fable directly.
 
 Before initial selection, `/model` opens the engine and model pickers (using any
 partial flag already supplied); `/model claude sonnet` selects that engine/model
@@ -359,6 +360,25 @@ the other session's workflow; chat stays blocked until that workflow is resolved
 session itself, unresolved execution ownership or corrupt workflow state still refuse `/model`. While busy,
 Alt+Q on macOS / Alt+Enter on Linux queues text for later serial turns; queued
 text never answers choices or supplies execution approval.
+
+Sessions are saved automatically in the current canonical worktree's state directory and survive
+Otter restarts. On startup, the full-screen TUI offers previous CLI sessions (newest activity first),
+showing the first question, model, time, and session ID. Choose a session to restore its conversation,
+model, and role routes, or choose **Start a new conversation**. Escape starts fresh; explicit
+`--engine`/`--model` flags also start fresh. Saved defaults apply only to new conversations.
+
+```sh
+otter --continue          # open the most recent saved CLI session in this worktree
+otter --resume            # choose a previous session
+otter --resume SESSION_ID # open an exact session
+otter --new               # skip the startup chooser
+```
+
+`/sessions` and `/resume [SESSION_ID]` are also available before selecting a model, including
+in readline. Restoring opens the transcript and restores bounded complete conversation turns
+for the next model request. The session remains held: enter `/continue` and choose Resume to
+admit further work. Restoring alone does not execute pending tasks or send saved drafts.
+Histories are scoped to the canonical worktree path; use `--worktree PATH` to open that worktree's history.
 
 `/sessions` opens a captured, stable-ID retained-session chooser with original-index
 paging and selected/visible-range indicators; it never refreshes or rebinds candidates

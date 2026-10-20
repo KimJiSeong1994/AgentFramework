@@ -669,7 +669,7 @@ describe("interactive terminal", () => {
     const metadataBefore = readFileSync(metadataPath)
     const h = harness({ lines: [
       `/resume ${writer.sessionID}`, "must not be sent", "/continue", "/cancel", "/model", "/plan change it",
-      "/status", "/search history", "/expand 1", "/skills", "/sessions", "/new", "fresh CLI message", "/quit",
+      "/status", "/search history", "/expand 1", "/skills", "/sessions", "/cancel", "/new", "fresh CLI message", "/quit",
     ] })
 
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "fixture" }, h.deps)
@@ -720,6 +720,109 @@ describe("interactive terminal", () => {
     expect(inspectSessionAttachment(wt.worktree, writer.sessionID, writer.epoch)?.state).toBe("attached")
     writer.assertOwner()
     releaseTestSession(writer)
+  })
+
+  test("startup resume restores the saved conversation and routes across launches", async () => {
+    const first = harness({ lines: ["Remember the blue boat", "/quit"], turns: [{ text: "The boat is blue." }],
+      combo: { state: "configured", routes: { reviewer: { engine: "local", model: "helper" } }, sources: { reviewer: "user" } } })
+    await launchInteractive({ worktree: wt.worktree, engine: "claude", model: "fable" }, first.deps)
+    const second = harness({ lines: ["must stay unsent", "/continue", "RESUME", "What colour?", "/quit"],
+      defaultModel: { state: "configured", value: { engine: "codex", model: "different" }, source: "user" } })
+    await launchInteractive({ worktree: wt.worktree, resume: "otter-fixture-session" }, second.deps)
+    expect(second.calls.runtimes).toHaveLength(1)
+    expect(second.calls.runtimes[0]).toMatchObject({ engine: "claude", model: "fable", routes: first.calls.runtimes[0]!.routes })
+    expect(second.calls.conversationRestores[0]).toEqual({ sessionID: "otter-fixture-session", prior: [
+      { role: "user", text: "Remember the blue boat" }, { role: "assistant", text: "The boat is blue." },
+    ] })
+    expect(second.calls.turns).toEqual(["What colour?"])
+    expect(second.calls.boundSessions).toEqual(["otter-fixture-session"])
+    expect(second.calls.defaultModelWrites).toEqual([])
+    expect(second.calls.transcriptSources[0]!({}).records.some(record => record.data.text === "Remember the blue boat")).toBe(true)
+  })
+
+  test("startup continue opens the newest saved session without creating an empty session", async () => {
+    for (const text of ["older conversation", "newer conversation"]) {
+      const h = harness({ lines: [text, "/quit"] })
+      await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, h.deps)
+    }
+    const h = harness({ lines: ["/quit"] })
+    await launchInteractive({ worktree: wt.worktree, continue: true }, h.deps)
+    expect(h.calls.boundSessions).toEqual(["otter-fixture-run-2"])
+    expect(h.calls.conversationRestores[0]!.prior![0]!.text).toBe("newer conversation")
+    expect(h.calls.events).not.toContain("admitRuntime")
+  })
+
+  test("startup continue reports damaged latest history instead of silently opening an older session", async () => {
+    const first = harness({ lines: ["Older conversation", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, first.deps)
+    const latest = harness({ lines: ["Latest conversation", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, latest.deps)
+    writeFileSync(join(sessionDir(wt.worktree, latest.calls.boundSessions[0]!), "segments000001.jsonl"), "broken\n")
+    const h = harness()
+    await expect(launchInteractive({ worktree: wt.worktree, continue: true }, h.deps)).rejects.toThrow("Latest saved session otter-fixture-run-2 is unavailable")
+    expect(h.calls.runtimes).toEqual([])
+    const picker = harness({ fullscreen: true, lines: ["/quit"], choose: async (_title, choices) => {
+      expect(choices[0]).toContain("unavailable:")
+      return 1
+    } })
+    await launchInteractive({ worktree: wt.worktree, resume: true }, picker.deps)
+    expect(picker.calls.boundSessions).toEqual(["otter-fixture-session"])
+  })
+
+  test("startup history picker shows saved conversations before model selection", async () => {
+    const first = harness({ lines: ["Saved question", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "claude", model: "fable" }, first.deps)
+    const h = harness({ fullscreen: true, lines: ["/quit"], choose: async (title, choices) => {
+      expect(title).toBe("Previous sessions")
+      expect(choices[0]).toContain("Saved question")
+      expect(choices[0]).toContain("claude fable")
+      expect(choices.at(-1)).toBe("Start a new conversation")
+      return 0
+    } })
+    await launchInteractive({ worktree: wt.worktree }, h.deps)
+    expect(h.calls.boundSessions).toEqual(["otter-fixture-session"])
+    expect(h.calls.discoveries).toEqual([])
+  })
+
+  test("startup history picker cancellation starts fresh with the default; --new bypasses it", async () => {
+    const first = harness({ lines: ["Saved question", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "claude", model: "fable" }, first.deps)
+    for (const newSession of [false, true]) {
+      const h = harness({ fullscreen: true, lines: ["/quit"], choose: async () => undefined,
+        defaultModel: { state: "configured", value: { engine: "local", model: "fresh" }, source: "user" } })
+      await launchInteractive({ worktree: wt.worktree, newSession }, h.deps)
+      expect(h.calls.conversationRestores[0]!.prior).toBeUndefined()
+      expect(h.calls.runtimes[0]!.model).toBe("fresh")
+      expect(h.calls.choices).toHaveLength(newSession ? 0 : 1)
+    }
+  })
+
+  test("startup /sessions and /resume work without choosing a model in readline", async () => {
+    const first = harness({ lines: ["Saved question", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, first.deps)
+    for (const lines of [["/sessions", "1", "/quit"], ["/resume otter-fixture-session", "/quit"]]) {
+      const h = harness({ lines })
+      await launchInteractive({ worktree: wt.worktree }, h.deps)
+      expect(h.calls.boundSessions).toEqual(["otter-fixture-session"])
+      expect(h.calls.conversationRestores[0]!.prior![0]!.text).toBe("Saved question")
+    }
+  })
+
+  test("startup resume fails without creating a session when history is missing or corrupt", async () => {
+    const h = harness()
+    await expect(launchInteractive({ worktree: wt.worktree, continue: true }, h.deps)).rejects.toThrow("No saved CLI sessions")
+    expect(h.calls.runtimes).toEqual([])
+    const missing = harness()
+    await expect(launchInteractive({ worktree: wt.worktree, resume: "missing" }, missing.deps)).rejects.toThrow("No compatible saved CLI session")
+    expect(missing.calls.runtimes).toEqual([])
+    const first = harness({ lines: ["Saved question", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "fixture" }, first.deps)
+    const savedID = first.calls.boundSessions[0]!
+    const dir = sessionDir(wt.worktree, savedID)
+    writeFileSync(join(dir, "metadata.json"), "broken")
+    const corrupt = harness()
+    await expect(launchInteractive({ worktree: wt.worktree, resume: savedID }, corrupt.deps)).rejects.toThrow()
+    expect(corrupt.calls.runtimes).toEqual([])
   })
 
   test("switching sessions retains transcript and restored drafts never dispatch without Resume", async () => {
@@ -790,7 +893,7 @@ describe("interactive terminal", () => {
     })
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     expect(chrome[0]).toContain("── Model not selected\n")
-    expect(chrome[0]).toContain("/model choose | /help | /quit")
+    expect(chrome[0]).toContain("/model choose | /sessions resume | /help | /quit")
     expect(chrome[1]).toContain("── Engine selection\n")
     expect(chrome[2]).toContain("── Model selection · codex\n")
     expect(chrome[3]).toContain("── codex · gpt-5-codex\n")
@@ -887,7 +990,7 @@ describe("interactive terminal", () => {
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     const commands = h.calls.choices.find(choice => choice.title === "Commands")!.values
       .map(value => value.split(" ")[0])
-    expect(commands).toEqual(["/help", "/model", "/memory", "/login", "/theme", "/ascii", "!", "/quit"])
+    expect(commands).toEqual(["/help", "/model", "/memory", "/login", "/sessions", "/resume", "/theme", "/ascii", "!", "/quit"])
     expect(h.calls.runtimes).toEqual([])
     expect(h.calls.discoveries).toEqual([])
     expect(h.calls.turns).toEqual([])
@@ -962,6 +1065,16 @@ describe("interactive terminal", () => {
     expect(() => parseInteractiveArgs(["--model", "provider/ model"], wt.worktree)).toThrow("invalid --model")
     expect(() => parseInteractiveArgs(["--worktree", wt.worktree, "--worktree", wt.worktree])).toThrow("duplicate")
     expect(() => parseInteractiveArgs(["--model"], wt.worktree)).toThrow("missing value")
+  })
+
+  test("parses startup session options and rejects conflicting selections", () => {
+    expect(parseInteractiveArgs(["--continue"], wt.worktree)).toEqual({ worktree: wt.worktree, continue: true })
+    expect(parseInteractiveArgs(["--resume"], wt.worktree)).toEqual({ worktree: wt.worktree, resume: true })
+    expect(parseInteractiveArgs(["--resume", "saved"], wt.worktree)).toEqual({ worktree: wt.worktree, resume: "saved" })
+    expect(parseInteractiveArgs(["--new"], wt.worktree)).toEqual({ worktree: wt.worktree, newSession: true })
+    for (const flags of [["--continue", "--resume"], ["--new", "--continue"], ["--resume", "--engine", "local"], ["--continue", "--model", "fixture"], ["--continue", "--continue"]]) {
+      expect(() => parseInteractiveArgs(flags, wt.worktree)).toThrow()
+    }
   })
 
   test("requires an interactive terminal before Git lookup or runtime construction", async () => {
