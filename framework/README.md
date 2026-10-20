@@ -89,6 +89,32 @@ otter chat --engine codex --model gpt-5.6-sol
 otter chat --engine claude --model sonnet
 ```
 
+### Chat execution (`chat.execute`)
+
+Every execution is approved by the local human, one action at a time or one plan at a time.
+
+| `chat.execute` | Chat model tools | Approval |
+| --- | --- | --- |
+| `"ask"` (default) | `read list glob grep memory` + `write edit bash` | every write, edit and command |
+| `"auto-edit"` | same | commands only; file edits apply and are noted |
+| `"plan"` | `read list glob grep memory` | none (read-only; the model points to `/plan` and `!<command>`) |
+
+- The mode shapes the main role's tool set, so it is part of main's policy identity (`otter:main:<sha>`); it applies
+  when a runtime is created (model selection, `/new`, model switch). Workers, reviewers and workflow roles are unchanged.
+- The host owns every decision (`ActionGate`, `src/hosts/chat-actions.ts`). Right before the effect it shows the action
+  (edit diff, write content, command line and time limit) and asks [Allow once | Always allow `<rule>` | Deny]; readline
+  shows a numbered menu where empty input denies. A denial is the tool result, so the turn continues and the model adapts.
+- `bash` runs `/bin/sh -c` in the worktree without a terminal (`OTTER_CHAT_COMMAND=1`), time limit 120 s by default
+  (`timeoutSeconds` 1..600), output tail to the model, process group stopped on Esc/cancel or timeout. `"interactive":
+  true` hands the real terminal over after approval (editors, password prompts); its output is not captured.
+- Refused even when the human would allow: privilege escalation (`sudo`, `su`, `doas`), deleting `/` or home, force
+  push, disk formatting/raw disk writes, shutdown, fork bombs. The human can still run them with `!<command>`.
+- "Always allow" saves a command rule (the first two words, e.g. `bun test`) to `chat.allow` in the user config only;
+  a project config cannot pre-approve commands. Commands that chain, pipe, redirect or substitute never match or offer a
+  rule. `/permissions` shows the mode and rules; `/permissions clear` removes them.
+- Writes stay inside the worktree and never touch `.git/`, `.otter/` or `.gjc/` (the existing file-tool scope). Each
+  command run is recorded as a shell card in the session; approvals and denials are recorded as notices.
+
 To skip `/model` on every launch, set a default. With neither `--engine` nor `--model`,
 `otter` starts with `chat.default_model` from `~/.config/otter/otter.jsonc` (a project's
 `.otter/otter.jsonc` wins per key), exactly as if both flags were given: no discovery, the

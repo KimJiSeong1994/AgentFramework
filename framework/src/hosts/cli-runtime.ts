@@ -1,5 +1,5 @@
 import { realpathSync, statSync } from "node:fs"
-import { loadConfig } from "../config.ts"
+import { chatExecuteMode, loadConfig } from "../config.ts"
 import { createCliHost } from "./cli-host.ts"
 import { createCodexProfile } from "./codex-profile.ts"
 import type { CliEngine, CliTransportHandle, CliTransportOptions } from "./cli-transport.ts"
@@ -68,6 +68,7 @@ export function createCliRuntime(options: CliRuntimeOptions): ExecutionRuntime {
       ...(options.createTransport ? { createTransport: options.createTransport } : {}),
     }), {
       planningOnlyMain: true,
+      chatExecuteMain: chatExecuteMode(config) !== "plan",
       ...(nativeContext ? { nativeContext } : {}),
       ...(Object.keys(routePolicies).length ? { routes: routePolicies } : {}),
     })

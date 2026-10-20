@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { readFileSync, realpathSync } from "node:fs"
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { newWorkflow, withFlowTransaction, workflowPath } from "../src/flow/state.ts"
 import { writeWorkflow } from "./commit-fixture.ts"
@@ -32,6 +33,7 @@ function fixture(options: {
   unknown?: boolean
   incompatible?: boolean
   nativeContext?: Readonly<{ identity: string; instructions: string }>
+  chatExecute?: boolean
 } = {}) {
   const requests: ExecutionRequest[] = []
   let complete = false
@@ -70,18 +72,44 @@ function fixture(options: {
         },
       }
     },
-  }), { planningOnlyMain: true, nativeContext: options.nativeContext })
+  }), { planningOnlyMain: true, chatExecuteMain: options.chatExecute === true, nativeContext: options.nativeContext })
   return { runtime, requests, get cancels() { return cancels }, get started() { return !!resolveRun } }
 }
 
 describe("common planning conversation", () => {
-  test("CLI runtime selects the fixed planning-only main snapshot", () => {
-    const runtime = createCliRuntime({ worktree: wt.worktree, engine: "local", model: "fixture-model" })
-    const main = runtime.policy.resolve("main")
-    expect(main.tools.allowed).toEqual(["read", "list", "glob", "grep", "memory"])
-    expect(main.tools.denied).toEqual(expect.arrayContaining(["write", "bash", "delegate", "otter_flow"]))
-    expect(main.system[0]).toContain("Never modify files, run commands, execute or approve plans, or delegate work")
-    expect(main.nativeContext).toBeUndefined()
+  test("CLI runtime main follows chat.execute: ask (default) may write/edit/run with approval; plan stays read-only", () => {
+    const ask = createCliRuntime({ worktree: wt.worktree, engine: "local", model: "fixture-model" }).policy.resolve("main")
+    expect(ask.tools.allowed).toEqual(["read", "list", "glob", "grep", "memory", "write", "edit", "bash"])
+    expect(ask.tools.denied).toEqual(expect.arrayContaining(["delegate", "otter_flow", "task", "webfetch"]))
+    expect(ask.tools.denied).not.toContain("bash")
+    expect(ask.system[0]).toContain("approves or denies it before it happens")
+    expect(ask.system[0]).toContain("Never approve plans or delegate work")
+    expect(ask.nativeContext).toBeUndefined()
+
+    mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".otter", "otter.jsonc"), '{ "chat": { "execute": "plan" } }')
+    const plan = createCliRuntime({ worktree: wt.worktree, engine: "local", model: "fixture-model" }).policy.resolve("main")
+    expect(plan.tools.allowed).toEqual(["read", "list", "glob", "grep", "memory"])
+    expect(plan.tools.denied).toEqual(expect.arrayContaining(["write", "bash", "delegate", "otter_flow"]))
+    expect(plan.system[0]).toContain("Never modify files, run commands, execute or approve plans, or delegate work")
+    // The mode shapes main's tools, so it is part of main's policy identity.
+    expect(plan.id).not.toBe(ask.id)
+  })
+
+  test("the conversation prompt follows main's tools and only an execution-capable main carries the action gate", async () => {
+    const gate = { approve: async () => ({ allow: true as const }), run: async () => ({ ok: true, text: "" }) }
+    const readOnly = fixture()
+    await createPlanConversation(readOnly.runtime, "chat-readonly-gate").turn("Fix it", undefined, undefined, undefined, gate)
+    expect(readOnly.requests[0]!.actionGate).toBeUndefined()
+    expect(readOnly.requests[0]!.text).toContain("this session is read-only")
+    expect(readOnly.requests[0]!.text).toContain("/plan")
+    expect(readOnly.requests[0]!.text).toContain("!<command>")
+
+    const acting = fixture({ chatExecute: true })
+    await createPlanConversation(acting.runtime, "chat-acting-gate").turn("Fix it", undefined, undefined, undefined, gate)
+    expect(acting.requests[0]!.actionGate).toBe(gate)
+    expect(acting.requests[0]!.text).toContain("You are the coding agent of the common Otter terminal")
+    expect(acting.requests[0]!.policy.tools.allowed).toEqual(expect.arrayContaining(["write", "edit", "bash"]))
   })
 
   test("Codex CLI runtime binds the bundled native profile and refuses unknown slugs", () => {

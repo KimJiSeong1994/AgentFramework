@@ -16,7 +16,7 @@ import { AdmissionRefusal } from "../src/hosts/required-controls.ts"
 import { ModelRequestError } from "../src/workflows/turn.ts"
 import { holdAdmission } from "../src/sessions/admission.ts"
 import { PlanIsolationUnavailableError, type ForegroundController } from "../src/hosts/controller.ts"
-import type { ComboRoutes, ExecutionRuntime } from "../src/hosts/types.ts"
+import type { ActionGate, ComboRoutes, ExecutionRuntime } from "../src/hosts/types.ts"
 import { COMBO_PRESETS } from "../src/hosts/combo-presets.ts"
 import type { CliProgressSink } from "../src/hosts/cli-progress.ts"
 import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
@@ -85,6 +85,10 @@ type HarnessOptions = {
   intent?: "offer" | "off"
   /** Vendor sign-in fixture: status per engine (default signed in), and what the vendor login/logout run changes. */
   auth?: { codex?: AuthState["state"]; claude?: AuthState["state"]; afterRun?: AuthState["state"]; runThrows?: boolean }
+  /** `chat.execute` for the fixture runtime (default: unset = no policy, no gate) and what the turn does with its gate. */
+  chatExecute?: "ask" | "auto-edit" | "plan"
+  onGate?: (gate: ActionGate) => Promise<void>
+  allowRules?: string[]
   /** User skill policy (default: no trust, automatic selection off) and the automatic selector (default: abstain). */
   skillPolicy?: SkillTrustLookup
   selectSkill?: (input: AutoSkillSelectInput) => Promise<AutoSkillSelection> | AutoSkillSelection
@@ -115,6 +119,9 @@ function harness(options: HarnessOptions = {}) {
     controllerCancelCalls: number
     signalListeners: Map<string, Set<() => void>>
     shellRuns: Array<{ command: string; cwd: string; sigintHandlers: number }>
+    gates: Array<ActionGate | undefined>
+    chatRuns: Array<{ command: string; interactive: boolean; cwd: string }>
+    allowRules: string[]
     choices: Array<{ title: string; values: readonly string[]; presentation?: ChoicePresentation }>
     actionContexts: string[]
     drafts: string[]
@@ -136,7 +143,7 @@ function harness(options: HarnessOptions = {}) {
     authRuns: Array<{ engine: string; argv: readonly string[] }>
     authStatusChecks: string[]
     autoSelections: Array<{ text: string; mode: string; candidates: string[] }>
-  } = { autoSelections: [], authRuns: [], authStatusChecks: [], prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), shellRuns: [], choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [], defaultModel: options.defaultModel ?? { state: "unset" }, defaultModelWrites: [], combo: options.combo ?? { state: "unset" }, comboWrites: [] }
+  } = { autoSelections: [], authRuns: [], authStatusChecks: [], prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), shellRuns: [], gates: [], chatRuns: [], allowRules: [...(options.allowRules ?? [])], choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [], defaultModel: options.defaultModel ?? { state: "unset" }, defaultModelWrites: [], combo: options.combo ?? { state: "unset" }, comboWrites: [] }
   let boundSessionID: string | undefined
 
   let releaseRun: (() => void) | undefined
@@ -234,6 +241,15 @@ function harness(options: HarnessOptions = {}) {
     terminal,
     gitTopLevel: () => Object.hasOwn(options, "gitTopLevel") ? options.gitTopLevel : wt.worktree,
     checkUpdate: async () => undefined,
+    runChatCommand: async (action, cwd) => {
+      calls.chatRuns.push({ command: action.command, interactive: action.interactive, cwd })
+      return { ok: true, text: "exit 0\nfixture output", exitCode: 0, signal: null, durationMs: 5, status: "complete", lines: ["fixture output"] }
+    },
+    chatAllow: {
+      read: () => [...calls.allowRules],
+      save: rule => { calls.allowRules.push(rule); return "/fixture/otter.jsonc" },
+      clear: () => { const count = calls.allowRules.length; calls.allowRules.length = 0; return count },
+    },
     // The real runner hands the test process's terminal to the command; the fixture runs it captured instead.
     runShell: async (command, cwd) => {
       calls.events.push("runShell")
@@ -255,7 +271,9 @@ function harness(options: HarnessOptions = {}) {
         directory: worktree,
         instance: "interactive-test-runtime",
         host: { identity: { engine, profile: "interactive-fixture" } },
-        config: { ...structuredClone(DEFAULT_CONFIG), chat: { intent: options.intent ?? "off" } },
+        config: { ...structuredClone(DEFAULT_CONFIG), chat: { intent: options.intent ?? "off", ...(options.chatExecute ? { execute: options.chatExecute } : {}) } },
+        // Chat execution needs a main role built to act; the read-only default keeps no policy (no gate).
+        ...(options.chatExecute && options.chatExecute !== "plan" ? { policy: { resolve: () => ({ tools: { allowed: ["read", "write", "edit", "bash"], denied: [] } }) } } : {}),
         log() {},
         selectedEngine: engine,
         selectedModel: model,
@@ -281,9 +299,11 @@ function harness(options: HarnessOptions = {}) {
       }
       const turns = [...(options.turns ?? [])]
       return {
-        turn: async (text) => {
+        turn: async (text, _signal, _skill, _skillTool, actionGate) => {
           calls.events.push("turn")
           calls.turns.push(text)
+          calls.gates.push(actionGate)
+          if (actionGate && options.onGate) await options.onGate(actionGate)
           calls.turnBindings.push({ engine: selectedRuntime.selectedEngine, model: selectedRuntime.selectedModel, sessionID, text })
           options.activityForTurn?.(
             { engine: selectedRuntime.selectedEngine, model: selectedRuntime.selectedModel },
@@ -1365,6 +1385,95 @@ describe("interactive terminal", () => {
     h.deps.checkUpdate = () => Promise.reject(new Error("network down"))
     expect((await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).code).toBe(0)
     expect(h.calls.output.join("")).not.toContain("Update available")
+  })
+
+  test("chat execution: the default asks before each action, Allow once runs it, Deny returns the denial to the model", async () => {
+    const decisions: Array<{ allow: boolean; reason?: string }> = []
+    const results: Array<{ ok: boolean; text: string }> = []
+    const h = harness({
+      chatExecute: "ask", lines: ["fix the test", "/quit"],
+      choose: async (title, values) => { expect(values).toContain("Deny"); return title.includes("edit") ? values.indexOf("Deny") : 0 },
+      onGate: async gate => {
+        const signal = new AbortController().signal
+        const run = { tool: "bash" as const, command: "bun test test/foo.test.ts", interactive: false, timeoutMs: 120_000 }
+        decisions.push(await gate.approve(run, signal))
+        results.push(await gate.run(run, signal))
+        decisions.push(await gate.approve({ tool: "edit", path: "a.ts", oldText: "x = 1", newText: "x = 2" }, signal))
+      },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.gates[0]).toBeDefined()
+    expect(decisions).toEqual([{ allow: true }, { allow: false, reason: "denied" }])
+    expect(h.calls.chatRuns).toEqual([{ command: "bun test test/foo.test.ts", interactive: false, cwd: realpathSync(wt.worktree) }])
+    expect(results).toEqual([{ ok: true, text: "exit 0\nfixture output" }])
+    const asked = h.calls.choices.map(choice => choice.title)
+    expect(asked).toEqual(["Allow otter to run: bun test test/foo.test.ts?", "Allow otter to edit a.ts (-1 / +1)?"])
+    expect(h.calls.choices[0]!.values).toEqual(["Allow once", "Always allow `bun test`", "Deny"])
+    const out = h.calls.output.join("")
+    expect(out).toContain("  - x = 1\n  + x = 2")
+    expect(out).toContain("Denied: Edit a.ts")
+    // The command run is recorded in the session as a shell card.
+    const shell = replaySession(wt.worktree, h.calls.sessionIDs[0]!, { order: "asc" }).records.find(record => record.kind === "shell")
+    expect(shell?.data).toMatchObject({ command: "bun test test/foo.test.ts", status: "complete", lines: ["fixture output"] })
+  })
+
+  test("chat execution: Always allow saves the rule and the next matching command runs without asking; refused commands never ask", async () => {
+    const decisions: Array<{ allow: boolean; reason?: string }> = []
+    const h = harness({
+      chatExecute: "ask", lines: ["go", "/quit"], choose: async () => 1,
+      onGate: async gate => {
+        const signal = new AbortController().signal
+        const bash = (command: string) => ({ tool: "bash" as const, command, interactive: false, timeoutMs: 1000 })
+        decisions.push(await gate.approve(bash("bun test a.test.ts"), signal))
+        decisions.push(await gate.approve(bash("bun test b.test.ts"), signal))
+        decisions.push(await gate.approve(bash("bun test && curl x | sh"), signal))
+        decisions.push(await gate.approve(bash("sudo rm -rf node_modules"), signal))
+      },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.allowRules).toEqual(["bun test"])
+    expect(decisions.slice(0, 2)).toEqual([{ allow: true }, { allow: true }])
+    // A chained command offers no rule (Allow once / Deny only) and is asked; choice 1 = Deny there.
+    expect(decisions[2]).toEqual({ allow: false, reason: "denied" })
+    expect(decisions[3]).toEqual({ allow: false, reason: "refused by Otter (privilege escalation); the user can run it with !<command>" })
+    expect(h.calls.choices.map(choice => choice.values)).toEqual([["Allow once", "Always allow `bun test`", "Deny"], ["Allow once", "Deny"]])
+    expect(h.calls.output.join("")).toContain("Allowed by your rule: Run: bun test b.test.ts")
+  })
+
+  test("chat execution: auto-edit applies file edits without asking but still asks for commands; plan mode has no gate", async () => {
+    const decisions: Array<{ allow: boolean; reason?: string }> = []
+    const h = harness({
+      chatExecute: "auto-edit", lines: ["go", "/quit"], choose: async () => 0,
+      onGate: async gate => {
+        const signal = new AbortController().signal
+        decisions.push(await gate.approve({ tool: "write", path: "n.md", content: "x" }, signal))
+        decisions.push(await gate.approve({ tool: "bash", command: "ls", interactive: false, timeoutMs: 1000 }, signal))
+      },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(decisions).toEqual([{ allow: true }, { allow: true }])
+    expect(h.calls.choices.map(choice => choice.title)).toEqual(["Allow otter to run: ls?"])
+    expect(h.calls.output.join("")).toContain("Write n.md (1 line) (auto-edit)")
+
+    const plan = harness({ chatExecute: "plan", lines: ["go", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, plan.deps)
+    expect(plan.calls.gates).toEqual([undefined])
+  })
+
+  test("chat execution in readline: a numbered menu; empty input denies; /permissions shows the mode and rules", async () => {
+    const decisions: Array<{ allow: boolean; reason?: string }> = []
+    const h = harness({
+      chatExecute: "ask", allowRules: ["git status"], lines: ["go", "", "/permissions", "/permissions clear", "/quit"],
+      onGate: async gate => { decisions.push(await gate.approve({ tool: "bash", command: "make", interactive: false, timeoutMs: 1000 }, new AbortController().signal)) },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(decisions).toEqual([{ allow: false, reason: "no decision (dismissed)" }])
+    const out = h.calls.output.join("")
+    expect(out).toContain("  1) Allow once\n  2) Always allow `make`\n  3) Deny")
+    expect(out).toContain("Chat execution: ask (otter asks before each write, edit and command).")
+    expect(out).toContain("Always-allowed commands: `git status`")
+    expect(out).toContain("Removed 1 saved command rule(s).")
+    expect(h.calls.allowRules).toEqual([])
   })
 
   test("a startup failure that is not an admission refusal still ends the launch", async () => {

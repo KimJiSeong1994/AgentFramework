@@ -17,7 +17,11 @@ import { FdTree, fdStatKind, type FdDirectory, type FdEntry } from "../skills/fd
 import type { OtterConfig } from "../config.ts"
 import { memoryToolText } from "../wiki/recall.ts"
 
-export const CLI_TOOL_NAMES = ["read", "list", "glob", "grep", "memory", "skill", "write", "edit"] as const
+export const CLI_TOOL_NAMES = ["read", "list", "glob", "grep", "memory", "skill", "write", "edit", "bash"] as const
+/** Upper bounds for a chat `bash` call: the command text and its time limit. */
+export const MAX_BASH_COMMAND_CHARS = 4096
+export const DEFAULT_BASH_TIMEOUT_SECONDS = 120
+export const MAX_BASH_TIMEOUT_SECONDS = 600
 export type CliToolName = (typeof CLI_TOOL_NAMES)[number]
 
 export type CliToolOutput = { ok: true; text: string } | { ok: false; error: string }
@@ -37,6 +41,11 @@ export type CliToolsOptions = {
   beforeEffect?: () => void
   /** Offer the host-provided `skill` tool (only when the request carries a skill provider). */
   skillTool?: boolean
+  /**
+   * The request carries an ActionGate (chat execution, main role): main may then write/edit and run `bash`, each
+   * approved by the host first. Without it, main and other read-only roles never get these tools.
+   */
+  actionGate?: boolean
 }
 
 export type CliTools = {
@@ -128,6 +137,13 @@ export function validateCliToolInput(name: string, input: unknown): asserts inpu
       if (!hasExactKeys(input, ["path", "oldText", "newText"]) || !path(input.path) ||
           !boundedString(input.oldText, MAX_WRITE_BYTES) || input.oldText.length === 0 ||
           !boundedString(input.newText, MAX_WRITE_BYTES)) throw new CliToolInputError()
+      return
+    case "bash":
+      if (!hasExactKeys(input, ["command"], ["interactive", "timeoutSeconds"]) || typeof input.command !== "string" ||
+          !input.command.trim() || input.command.length > MAX_BASH_COMMAND_CHARS || input.command.includes("\0") ||
+          (input.interactive !== undefined && typeof input.interactive !== "boolean") ||
+          (input.timeoutSeconds !== undefined && (!Number.isSafeInteger(input.timeoutSeconds) ||
+            (input.timeoutSeconds as number) < 1 || (input.timeoutSeconds as number) > MAX_BASH_TIMEOUT_SECONDS))) throw new CliToolInputError()
       return
     default:
       throw new CliToolInputError()
@@ -301,6 +317,11 @@ function readTarget(
   } finally {
     closeSync(fd)
   }
+}
+
+/** Tool text bounded to what a tool result may carry (UTF-8 safe, with a truncation marker). */
+export function boundToolText(value: string): string {
+  return safeOutput(value)
 }
 
 function safeOutput(value: string, partial = false): string {
@@ -745,6 +766,7 @@ function executeFileTool(
     }
     case "memory": return { ok: false, error: "Tool refused: memory recall is asynchronous." }
     case "skill": return { ok: false, error: "Tool refused: skill loading is host-provided." }
+    case "bash": return { ok: false, error: "Tool refused: commands run through the host approval gate." }
     case "write": return writeTarget(root, normalizeToolPath(input.path as string), identity, input.content as string, undefined, beforeEffect)
     case "edit": return writeTarget(root, normalizeToolPath(input.path as string), identity, input.newText as string, input.oldText as string, beforeEffect)
   }
@@ -772,9 +794,12 @@ export function createCliTools(options: CliToolsOptions): CliTools {
   } catch {
     throw new Error("CLI tool worktree is unavailable")
   }
-  const readOnly = !roleAllowsCliWrites(options.role)
+  // Main writes only with an approval gate; `bash` exists only for gated main (the host runs it through the gate).
+  const gatedMain = options.role === "main" && options.actionGate === true
+  const readOnly = !roleAllowsCliWrites(options.role) && !gatedMain
   // `skill` is not a role-policy tool: the host offers it only with a request-scoped skill provider (main role).
   const available = CLI_TOOL_NAMES.filter(name => name === "skill" ? options.skillTool === true
+    : name === "bash" ? gatedMain && options.allowed.includes(name) && !options.denied.includes(name)
     : options.allowed.includes(name) && !options.denied.includes(name) && !(readOnly && (name === "write" || name === "edit")))
   const availableSet = new Set<string>(available)
   return {
@@ -784,7 +809,7 @@ export function createCliTools(options: CliToolsOptions): CliTools {
       try {
         validateCliToolInput(name, input)
         assertRootIdentity(root, rootIdentity)
-        if (name === "memory" || name === "skill") return true
+        if (name === "memory" || name === "skill" || name === "bash") return true
         if (name === "glob") normalizeToolPath(input.pattern as string)
         const relativePath = normalizeToolPath(name === "glob" ? "." : (input.path as string | undefined) ?? ".")
         let fd: number

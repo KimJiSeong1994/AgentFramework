@@ -21,7 +21,7 @@ import { formatDuration, type WorkflowProgress } from "../tui/progress.ts"
 import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, skillInstructionBudget, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
 import type { WorkflowEnvelope } from "../workflows/types.ts"
 import { PROTECTED_WORKFLOWS, resolveSkillRoots } from "../skills/roots.ts"
-import { chatIntentMode, chatWorktreeMode } from "../config.ts"
+import { chatExecuteMode, chatIntentMode, chatWorktreeMode } from "../config.ts"
 import { classifyIntent, hasIntentForcePrefix, INTENT_CLASSIFIER, isFollowUp, type IntentClass } from "../modes/detect.ts"
 import { claimPreparedSkillInvocation, SkillSession, type AutoSkillCandidate, type PreparedSkillInvocation, type SkillCatalog } from "../skills/session.ts"
 import { readCapturedFile } from "../skills/capture.ts"
@@ -49,12 +49,13 @@ import { startRefusal } from "../workflows/registry.ts"
 import { ModelRequestError } from "../workflows/turn.ts"
 import { beginExecutionActivity } from "./runtime.ts"
 import { settled, type ExecutionRunStatus } from "./run-state.ts"
-import { EXECUTION_ROLES, LinuxAdmissionRefused, type ComboRoutes, type ExecutionRole, type ExecutionRuntime, type SkillToolProvider, type VerifyRunObservation } from "./types.ts"
+import { EXECUTION_ROLES, LinuxAdmissionRefused, type ActionGate, type ChatAction, type ComboRoutes, type ExecutionRole, type ExecutionRuntime, type SkillToolProvider, type VerifyRunObservation } from "./types.ts"
 import type { AskPrompt, ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
 import { commandInsertion, interactiveActions, interactiveHelp, type InteractiveContext } from "./interactive-actions.ts"
 import { fileComboStore, fileDefaultModelStore, validateComboRoutes, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
 import { COMBO_PRESETS, comboPresetSummary } from "./combo-presets.ts"
 import { runTerminalShell, type ShellResult } from "./operator-shell.ts"
+import { allowedByRules, clearAllowRules, commandRule, describeAction, readAllowRules, refusedCommand, runCapturedCommand, runInteractiveCommand, saveAllowRule, type CommandResult } from "./chat-actions.ts"
 import { fileMemoryStore, memoryCommand, type MemoryCommandStore } from "./memory-command.ts"
 
 export type CliEngine = CliRuntimeOptions["engine"]
@@ -105,7 +106,7 @@ export type Terminal = {
 }
 
 type PlanConversation = {
-  turn: (text: string, signal?: AbortSignal, skill?: SkillConversationInvocation, skillTool?: SkillToolProvider) => Promise<ConversationTurn>
+  turn: (text: string, signal?: AbortSignal, skill?: SkillConversationInvocation, skillTool?: SkillToolProvider, actionGate?: ActionGate) => Promise<ConversationTurn>
 }
 
 type SignalName = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGTSTP" | "SIGCONT"
@@ -124,6 +125,10 @@ export type InteractiveDependencies = {
   checkWorktree: (worktree: string) => void
   /** Operator `!command` with the real terminal; called only after the terminal has been released. */
   runShell: (command: string, cwd: string) => Promise<ShellResult>
+  /** An approved chat `bash` action: captured (no terminal), or interactive with the released terminal. */
+  runChatCommand: (action: Extract<ChatAction, { tool: "bash" }>, cwd: string, signal: AbortSignal) => Promise<CommandResult>
+  /** Saved "Always allow" command rules (user config only) and saving a new one. */
+  chatAllow: { read: () => string[]; save: (rule: string) => string; clear: () => number }
   /** Background update check for installer-managed copies; must never reject (a failure is "no notice"). */
   checkUpdate: () => Promise<UpdateNotice | undefined>
   createRuntime: (options: RuntimeOptions) => ExecutionRuntime
@@ -183,6 +188,19 @@ function approvedPlanTitles(value: unknown): string[] {
     const title = (step as Record<string, unknown>).title
     return typeof title === "string" ? title : ""
   })
+}
+
+/** The last output lines that fit a persisted shell/verify record (line count, bytes and line length bounded). */
+function boundedShellLines(all: readonly string[]): string[] {
+  const lines: string[] = []
+  let bytes = 0
+  for (let index = all.length - 1; index >= 0 && lines.length < MAX_SHELL_LINES; index--) {
+    const line = all[index]!.length > 2000 ? `${all[index]!.slice(0, 1999)}…` : all[index]!
+    bytes += Buffer.byteLength(line, "utf8") + 1
+    if (bytes > MAX_SHELL_OUTPUT_BYTES) break
+    lines.unshift(line)
+  }
+  return lines
 }
 
 function skillConsentTerminal(terminal: Terminal): Pick<Terminal, "stdinIsTTY" | "stderrIsTTY" | "choose" | "resume"> {
@@ -424,6 +442,10 @@ export function defaultDependencies(): InteractiveDependencies {
     gitTopLevel: defaultGitTopLevel,
     checkWorktree: worktree => { executionRunDirectory(worktree) },
     runShell: runTerminalShell,
+    runChatCommand: (action, cwd, signal) => action.interactive
+      ? runInteractiveCommand(action.command, cwd)
+      : runCapturedCommand(action.command, cwd, action.timeoutMs, signal),
+    chatAllow: { read: () => readAllowRules(), save: saveAllowRule, clear: clearAllowRules },
     checkUpdate: defaultUpdateCheck,
     createRuntime: (options) => createCliRuntime(options),
     admitRuntime: async (runtime) => {
@@ -994,14 +1016,7 @@ export async function runInteractiveSession(
   /** A queue verify command, shown as a Bash card and recorded with a bounded output tail (display only). */
   function showVerifyRun(run: VerifyRunObservation): void {
     const all = run.output.replace(/\r\n?/gu, "\n").replace(/\n$/u, "").split("\n")
-    const lines: string[] = []
-    let bytes = 0
-    for (let index = all.length - 1; index >= 0 && lines.length < MAX_SHELL_LINES; index--) {
-      const line = all[index]!.length > 2000 ? `${all[index]!.slice(0, 1999)}…` : all[index]!
-      bytes += Buffer.byteLength(line, "utf8") + 1
-      if (bytes > MAX_SHELL_OUTPUT_BYTES) break
-      lines.unshift(line)
-    }
+    const lines = boundedShellLines(all)
     const status = run.cancelled ? "cancelled" : run.timedOut ? "timeout" : run.ok ? "complete" : "error"
     const command = Buffer.byteLength(run.command, "utf8") > MAX_SHELL_COMMAND_BYTES ? run.command.slice(0, 2000) : run.command
     const id = `verify:${run.taskID}:${run.attempt}:${deps.randomUUID()}`
@@ -1044,6 +1059,90 @@ export async function runInteractiveSession(
     }
     persist("shell", { command, status: result.status, exitCode: result.exitCode, signal: result.signal,
       durationMs: result.durationMs, lines: [...result.lines], totalLines: result.totalLines }, id)
+  }
+  /**
+   * Chat execution (`chat.execute` ask/auto-edit): the local human approves each write, edit and command the model asks
+   * for, right before its effect. Refused commands never reach the human; "Always allow" saves a command rule to the user
+   * config; auto-edit applies file edits without asking. Every decision and command run is recorded in the session.
+   */
+  function chatActionGate(runtime: ExecutionRuntime): ActionGate | undefined {
+    const mode = chatExecuteMode(runtime.config)
+    if (mode === "plan") return undefined
+    // Only a runtime whose main role was built to act (cli-runtime with chat.execute ask/auto-edit) gets a gate.
+    const mainTools = runtime.policy?.resolve("main").tools.allowed ?? []
+    if (!mainTools.includes("bash") || !mainTools.includes("edit")) return undefined
+    const note = (text: string) => terminal.write(terminalSafeText(`${text}\n`))
+    return {
+      async approve(action, signal) {
+        const { title, preview } = describeAction(action)
+        if (action.tool === "bash") {
+          const refused = refusedCommand(action.command)
+          if (refused) {
+            note(`Refused (${refused}): ${action.command}. Run it yourself with !<command> if you mean it.`)
+            return { allow: false, reason: `refused by Otter (${refused}); the user can run it with !<command>` }
+          }
+          if (allowedByRules(action.command, deps.chatAllow.read())) {
+            note(`Allowed by your rule: ${title}`)
+            return { allow: true }
+          }
+        } else if (mode === "auto-edit") {
+          note(`${title} (auto-edit)`)
+          return { allow: true }
+        }
+        const rule = action.tool === "bash" ? commandRule(action.command) : undefined
+        const labels = ["Allow once", ...(rule ? [`Always allow \`${rule}\``] : []), "Deny"]
+        note([title, ...preview.map(line => `  ${line}`)].join("\n"))
+        progress.suspend()
+        let picked: number | undefined
+        try { picked = await chooseDecision(terminal, `Allow otter to ${title.charAt(0).toLowerCase()}${title.slice(1)}?`, labels, signal) }
+        finally { terminal.resume?.(); progress.resume() }
+        if (signal.aborted || picked === undefined || labels[picked] === "Deny") {
+          note(`Denied: ${title}`)
+          return { allow: false, reason: picked === undefined ? "no decision (dismissed)" : "denied" }
+        }
+        if (rule && picked === 1) {
+          try { note(`Saved rule \`${rule}\` to ${deps.chatAllow.save(rule)}; /permissions lists or clears rules.`) }
+          catch (error) { note(`Rule not saved: ${boundedTerminalDiagnostic(String(error))}`) }
+        }
+        note(`Allowed: ${title}`)
+        return { allow: true }
+      },
+      async run(action, signal) {
+        const id = `shell:${deps.randomUUID()}`
+        let result: CommandResult
+        if (action.interactive) {
+          progress.suspend()
+          terminal.suspend?.()
+          const ignoreInterrupt = () => {}
+          if (sigintRegistered) deps.signals.off("SIGINT", onSigint)
+          deps.signals.on("SIGINT", ignoreInterrupt)
+          try {
+            process.stderr.write(`\n$ ${action.command}\n`)
+            result = await deps.runChatCommand(action, runtime.worktree, signal)
+          } finally {
+            deps.signals.off("SIGINT", ignoreInterrupt)
+            if (sigintRegistered) deps.signals.on("SIGINT", onSigint)
+            terminal.resume?.()
+            progress.resume()
+          }
+        } else {
+          result = await deps.runChatCommand(action, runtime.worktree, signal)
+        }
+        const lines = boundedShellLines(result.lines)
+        const shell: ShellResult = { status: result.status, exitCode: result.exitCode, signal: result.signal, durationMs: result.durationMs, lines, totalLines: lines.length }
+        if (terminal.shellRun) terminal.shellRun({ id, command: action.command, result: shell })
+        else {
+          const outcome = result.status === "cancelled" ? "cancelled" : result.status === "timeout" ? "timed out" : result.signal ? `signal ${result.signal}` : `exit ${result.exitCode ?? "?"}`
+          visibleWrite(terminalSafeText([`[run] $ ${action.command}`, ...lines.slice(-12).map(line => `  | ${line}`),
+            `  = ${outcome} · ${(result.durationMs / 1000).toFixed(1)}s`].join("\n") + "\n"))
+        }
+        try {
+          persist("shell", { command: action.command.slice(0, 8192), status: shell.status, exitCode: shell.exitCode, signal: shell.signal,
+            durationMs: shell.durationMs, lines, totalLines: lines.length }, id)
+        } catch { /* persist marks the session failed itself */ }
+        return { ok: result.ok, text: result.text }
+      },
+    }
   }
   terminal.controls?.(action => {
     if (action === "interrupt") requestInterrupt()
@@ -2764,6 +2863,23 @@ export async function runInteractiveSession(
         terminal.write(selection.controller.status(selection.sessionID) + "\n")
         continue
       }
+      // Config-only: chat execution mode and saved command rules; never dispatches a model.
+      if (command === "/permissions") {
+        const mode = chatExecuteMode(selection.runtime.config)
+        if (commandArgs.length === 1 && commandArgs[0] === "clear") {
+          try { terminal.write(`Removed ${deps.chatAllow.clear()} saved command rule(s).\n`) }
+          catch (error) { terminal.write(terminalSafeText(`Rules not removed: ${boundedTerminalDiagnostic(String(error))}\n`)) }
+          continue
+        }
+        if (commandArgs.length) { terminal.write("Usage: /permissions [clear]\n"); continue }
+        const rules = deps.chatAllow.read()
+        terminal.write(terminalSafeText([
+          `Chat execution: ${mode}${mode === "ask" ? " (otter asks before each write, edit and command)" : mode === "auto-edit" ? " (file edits apply without asking; commands ask)" : " (read-only; use /plan or !<command>)"}.`,
+          `Change it with "chat": { "execute": "ask" | "auto-edit" | "plan" } in ~/.config/otter/otter.jsonc; it applies to the next model selection or /new.`,
+          rules.length ? `Always-allowed commands: ${rules.map(rule => `\`${rule}\``).join(", ")} (/permissions clear removes them).` : "No always-allowed commands.",
+        ].join("\n") + "\n"))
+        continue
+      }
       // Config-only: selecting the memory engine never dispatches a model or touches the session.
       if (command === "/memory") {
         if (commandArgs[0] === "test") terminal.write("Testing the memory engine with one fixed request; this can take up to memory.timeout_ms...\n")
@@ -3271,10 +3387,11 @@ export async function runInteractiveSession(
         dispatched = true
         requestObservation = { state: "in-progress", operationID: requestID }
         publishView()
+        const actionGate = chatActionGate(turnSelection.runtime)
         turn = skillInvocation
-          ? await turnSelection.conversation.turn(outbound, operationAbort.signal, skillInvocation)
-          : skillTool
-            ? await turnSelection.conversation.turn(outbound, operationAbort.signal, undefined, skillTool)
+          ? await turnSelection.conversation.turn(outbound, operationAbort.signal, skillInvocation, undefined, actionGate)
+          : skillTool || actionGate
+            ? await turnSelection.conversation.turn(outbound, operationAbort.signal, undefined, skillTool, actionGate)
             : await turnSelection.conversation.turn(outbound, operationAbort.signal)
         if (operationAbort.signal.aborted && !abort.signal.aborted) {
           finishSkillTurn("cancelled")

@@ -21,6 +21,7 @@ const all: readonly InteractiveAction[] = [
   { id: "continue", syntax: "/continue", summary: "request proof-checked work Resume", contexts: ["held"] },
   { id: "pause", syntax: "/pause", summary: "request pause; it is not proof of stopped work", contexts: ["chat", "busy", "held"] },
   { id: "cancel", syntax: "/cancel", summary: "request cancellation; proof may remain unconfirmed", contexts: ["chat", "busy", "held"] },
+  { id: "permissions", syntax: "/permissions [clear]", summary: "show the chat execution mode and your saved \"Always allow\" command rules; clear removes them", contexts: ["chat", "held", "read-only"] },
   { id: "skills", syntax: "/skills [grants|revoke <name>|auto [on|off]]", summary: "inspect skills, consent grants and automatic selection", contexts: ["chat", "held", "read-only"] },
   { id: "skill", syntax: "/skill:<name> [request]", summary: "invoke a discovered skill explicitly", contexts: ["chat"] },
   { id: "search", syntax: "/search <tool/status/task>", summary: "filter this session transcript", contexts: ["chat", "busy", "held", "read-only"], local: true },

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createHash } from "node:crypto"
@@ -46,10 +46,13 @@ test("a persisted chat default model, skill trust list or memory engine never ch
   expect(changed.resolve("worker").id).not.toBe(plain.resolve("worker").id)
 })
 
-test("CLI selection preserves frozen model keys and old serialized policy inputs", () => {
+test("CLI selection preserves frozen model keys and old serialized policy inputs (chat.execute plan)", () => {
   const home = mkdtempSync(join(tmpdir(), "otter-policy-cli-home-"))
   const worktree = join(home, "worktree")
   mkdirSync(worktree)
+  // The frozen baseline is the read-only main; `chat.execute: "plan"` reproduces it exactly.
+  mkdirSync(join(home, "config", "otter"), { recursive: true })
+  writeFileSync(join(home, "config", "otter", "otter.jsonc"), '{ "chat": { "execute": "plan" } }')
   try {
     const source = `
       import { createCliRuntime } from ${JSON.stringify(new URL("../src/hosts/cli-runtime.ts", import.meta.url).pathname)};
@@ -71,7 +74,7 @@ test("CLI selection preserves frozen model keys and old serialized policy inputs
       expect(result.exitCode).toBe(0)
       const actual = JSON.parse(result.stdout.toString())
       // The runtime carries `chat` (launch selection), but role identity is still derived from the frozen policy input.
-      expect(actual.config).toEqual({ ...expectedConfig, chat: {} })
+      expect(actual.config).toEqual({ ...expectedConfig, chat: { execute: "plan" } })
       // `memory` is runtime recall config, outside role identity (see tool-policy.ts).
       const { memory: _memory, ...identityConfig } = expectedConfig
       for (const [name, snapshot] of Object.entries(captured.snapshots)) {
@@ -86,6 +89,22 @@ test("CLI selection preserves frozen model keys and old serialized policy inputs
       }
     }
   } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+test("chat execution (the default) changes only main: its tools, its prompt and so its ID; every other role keeps the baseline", async () => {
+  const { DEFAULT_CONFIG } = await import("../src/config.ts")
+  const { createExecutionPolicy } = await import("../src/hosts/tool-policy.ts")
+  const roles = Object.keys(baseline.fixtures[0]!.snapshots) as never[]
+  const readOnly = createExecutionPolicy(DEFAULT_CONFIG, { planningOnlyMain: true })
+  const acting = createExecutionPolicy(DEFAULT_CONFIG, { planningOnlyMain: true, chatExecuteMain: true })
+  for (const role of roles) {
+    if (role === "main") continue
+    expect(acting.resolve(role)).toEqual(readOnly.resolve(role))
+  }
+  expect(acting.resolve("main").id).not.toBe(readOnly.resolve("main").id)
+  expect(acting.resolve("main").tools.allowed).toEqual(["read", "list", "glob", "grep", "memory", "write", "edit", "bash"])
+  // Without planningOnlyMain (the OpenCode runtime) the option does nothing.
+  expect(createExecutionPolicy(DEFAULT_CONFIG, { chatExecuteMain: true }).resolve("main")).toEqual(createExecutionPolicy(DEFAULT_CONFIG).resolve("main"))
 })
 
 test("chat.combo in config alone changes no ID; empty routes match the frozen baseline; only a routed role differs", async () => {

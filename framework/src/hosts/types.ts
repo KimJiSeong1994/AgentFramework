@@ -88,6 +88,11 @@ export type ExecutionRequest = {
   /** Model-callable skill loading for this request (main role only), outside policy snapshots. */
   skillTool?: SkillToolProvider
   /**
+   * Chat execution (main role only, `chat.execute` ask/auto-edit): the local human approves each write, edit and
+   * command before its effect, and runs approved commands. Without it, main stays read-only whatever its policy lists.
+   */
+  actionGate?: ActionGate
+  /**
    * Persist one canonical recovery reference synchronously. During prepare, call before policy binding
    * or returning; during run, emit immediately once the adapter learns a stable engine recovery ID and
    * before run() settles. Never delay it to collect optional metadata or emit an enriched replacement.
@@ -95,6 +100,24 @@ export type ExecutionRequest = {
    */
   onReference?: (reference: ExecutionReference) => undefined
 }
+
+/** One effect the chat model asks for; shown to the human before anything happens. */
+export type ChatAction =
+  | Readonly<{ tool: "write"; path: string; content: string }>
+  | Readonly<{ tool: "edit"; path: string; oldText: string; newText: string }>
+  | Readonly<{ tool: "bash"; command: string; interactive: boolean; timeoutMs: number }>
+
+export type ChatActionDecision = Readonly<{ allow: true }> | Readonly<{ allow: false; reason: string }>
+
+/**
+ * The approval authority for chat actions. Only local human input (or a rule the human saved in the user config)
+ * allows an action; model output, earlier approvals for other actions and project files never do.
+ */
+export type ActionGate = Readonly<{
+  approve(action: ChatAction, signal: AbortSignal): Promise<ChatActionDecision>
+  /** Run an approved command in the worktree; interactive commands get the real terminal and return no output. */
+  run(action: Extract<ChatAction, { tool: "bash" }>, signal: AbortSignal): Promise<{ ok: boolean; text: string }>
+}>
 
 /**
  * Skills the model may load on its own during a turn, each already usable without a prompt. `load` returns the

@@ -1,5 +1,5 @@
 export { definePrompt, promptIntact, promptSha, type StagePrompt } from "./prompt.ts"
-export { PLAN_MAIN_PROMPT } from "./plan-main.ts"
+export { PLAN_CHAT_PROMPT, PLAN_MAIN_PROMPT } from "./plan-main.ts"
 export { DEEP_INTERVIEW_SUMMARIZE_PROMPT, RALPLAN_SUMMARIZE_PROMPT, SUMMARIZE_PROMPT, ULTRAGOAL_SUMMARIZE_PROMPT, AUTORESEARCH_SUMMARIZE_PROMPT } from "./summarize.ts"
 export * from "./deep-interview.prompts.ts"
 export { RALPLAN_PLANNER_PROMPT, RALPLAN_REVISION_PROMPT, RALPLAN_ARCHITECT_PROMPT, RALPLAN_CRITIC_PROMPT, RALPLAN_PROMPTS } from "./ralplan.ts"

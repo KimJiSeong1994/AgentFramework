@@ -76,7 +76,7 @@ export function createLinuxAdmission({ qualification = false }: { qualification?
 export function createExecutionRuntime(
   deps: CoreDeps,
   hostFactory: (parts: { policy: ExecutionPolicy; runs: ExecutionRunStore }) => ExecutionHost,
-  options: Pick<ExecutionPolicyOptions, "planningOnlyMain" | "nativeContext" | "routes"> = {},
+  options: Pick<ExecutionPolicyOptions, "planningOnlyMain" | "chatExecuteMain" | "nativeContext" | "routes"> = {},
 ): ExecutionRuntime {
   const verificationProfile = deps.config.delegate.verifier
   if (verificationProfile !== "legacy-unowned" && verificationProfile !== "linux-single-use") {
@@ -87,6 +87,7 @@ export function createExecutionRuntime(
     directory: deps.directory,
     worktree: deps.worktree,
     planningOnlyMain: options.planningOnlyMain,
+    chatExecuteMain: options.chatExecuteMain,
     nativeContext: options.nativeContext,
     routes: options.routes,
   })

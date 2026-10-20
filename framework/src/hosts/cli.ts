@@ -56,6 +56,10 @@ Saved conversations are retained across restarts. Startup always opens a new con
 choose a previous one only when needed with --resume, /sessions or /resume [ID] (before model selection too). Restored sessions keep their saved
 model and conversation; /continue performs the existing explicit work-resume checks.
 
+Chat execution: by default (chat.execute "ask") the model may edit files and run commands, and you approve each action
+(Allow once / Always allow / Deny); "auto-edit" applies edits without asking, "plan" keeps chat read-only. /permissions
+shows the mode and saved rules.
+
 Bare 'otter' and 'otter chat' start Otter's interactive terminal in the current Git worktree
 (any other folder is used as is; approved plans then ask before running in place),
 or in the canonical worktree selected by --worktree. Choose an engine from the menu, or

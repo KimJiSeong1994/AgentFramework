@@ -10,7 +10,7 @@ import { assertHostAdmission } from "../hosts/required-controls.ts"
 import { beginExecutionActivity } from "../hosts/runtime.ts"
 import { adoptForeignStop, observeStopSettlement } from "../flow/runtime.ts"
 import type { ExecutionClaim } from "../hosts/run-state.ts"
-import type { ExecutionHandle, ExecutionOutcome, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole, ExecutionRuntime, SkillToolProvider } from "../hosts/types.ts"
+import type { ActionGate, ExecutionHandle, ExecutionOutcome, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole, ExecutionRuntime, SkillToolProvider } from "../hosts/types.ts"
 import { finishSkillInvocation, type SkillInvocationContext } from "../skills/context.ts"
 import { getOwnedSession } from "../sessions/store.ts"
 import { DEEP_INTERVIEW_SUMMARIZE_PROMPT, RALPLAN_SUMMARIZE_PROMPT, SUMMARIZE_PROMPT, ULTRAGOAL_SUMMARIZE_PROMPT, AUTORESEARCH_SUMMARIZE_PROMPT } from "./prompts/index.ts"
@@ -48,7 +48,7 @@ export type TurnRequest = {
   /** Read-only compaction used for the single budget-overflow retry. */
   compact?: { source: string; rebuild(summary: string): string }
   /** Runs after claim, before the intent is registered: policy handlers, skill binding, final text. */
-  bind?(request: Omit<ExecutionRequest, "handlers">): { handlers: ExecutionPolicyHandlers; skillContext?: SkillInvocationContext; skillTool?: SkillToolProvider; text?: string }
+  bind?(request: Omit<ExecutionRequest, "handlers">): { handlers: ExecutionPolicyHandlers; skillContext?: SkillInvocationContext; skillTool?: SkillToolProvider; actionGate?: ActionGate; text?: string }
 }
 
 export type TurnResult =
@@ -284,6 +284,7 @@ async function dispatch(runtime: ExecutionRuntime, input: Dispatch): Promise<Tur
     const bound = request.bind?.(base)
     skillContext = bound?.skillContext
     const skillTool = bound?.skillTool
+    const actionGate = bound?.actionGate
     const text = bound?.text ?? base.text
     assertBinding(binding, { text })
     if (!fits(text, request.budget)) {
@@ -304,7 +305,7 @@ async function dispatch(runtime: ExecutionRuntime, input: Dispatch): Promise<Tur
     })
     registered = true
     handle = await runtime.host.prepare({
-      ...executionRequest, handlers, ...(skillContext ? { skillContext } : {}), ...(skillTool ? { skillTool } : {}),
+      ...executionRequest, handlers, ...(skillContext ? { skillContext } : {}), ...(skillTool ? { skillTool } : {}), ...(actionGate ? { actionGate } : {}),
       onReference(reference) { runtime.runs.bindVendorRef(claim, executionID, JSON.stringify(reference)); return undefined },
     })
     if (handle.reference.executionID !== executionID) throw new Error(`${request.label} execution identity mismatch`)

@@ -23,7 +23,10 @@ export function isErrorOutput(output: string): boolean { return ERROR_OUTPUT.tes
 const KNOWN_TOOLS: readonly string[] = EXECUTION_TOOL_NAMES
 const REVIEW_TOOLS = ["read", "glob", "grep", "list"]
 const PLANNING_MAIN_TOOLS: readonly string[] = Object.freeze(["read", "list", "glob", "grep", "memory"])
+/** `chat.execute` ask/auto-edit: the chat model may also write, edit and run commands, each approved by the host. */
+const CHAT_EXECUTE_TOOLS: readonly string[] = Object.freeze([...PLANNING_MAIN_TOOLS, "write", "edit", "bash"])
 const PLANNING_MAIN_PROMPT = "You are the planning role of the common Otter terminal. Discuss the request, inspect files with read-only tools, and create a concrete plan when asked. Never modify files, run commands, execute or approve plans, or delegate work. Do not imply work was executed."
+const CHAT_EXECUTE_PROMPT = "You are the coding agent of the common Otter terminal. Inspect files with read-only tools; change files with write/edit and run commands with bash. Every write, edit and command is shown to the local human, who approves or denies it before it happens. Never approve plans or delegate work, and never claim an effect its tool result does not show."
 const SYSTEM: Record<ExecutionRole, string> = {
   main: "", worker: WORKER_PROMPT, reviewer: REVIEWER_PROMPT,
   "data-analyst": DATA_ANALYST_PROMPT, "data-verifier": DATA_VERIFIER_PROMPT,
@@ -41,6 +44,8 @@ export type ExecutionPolicyOptions = {
   directory?: string
   worktree?: string
   planningOnlyMain?: boolean
+  /** With planningOnlyMain: the chat model may also write, edit and run commands (each approved through an ActionGate). */
+  chatExecuteMain?: boolean
   nativeContext?: Readonly<{ identity: string; instructions: string }>
   /** Per-role model (and Codex native context) overriding the runtime-wide selection; roles absent here are computed exactly as without routes. */
   routes?: Readonly<Partial<Record<ExecutionRole, Readonly<{ model: ModelSelection; nativeContext?: Readonly<{ identity: string; instructions: string }> }>>>>
@@ -58,6 +63,8 @@ function freezeNativeContext(supplied: unknown): Readonly<{ identity: string; in
 
 export function createExecutionPolicy(config: Readonly<OtterConfig>, options: ExecutionPolicyOptions = {}): ExecutionPolicy {
   const planningOnlyMain = options.planningOnlyMain === true
+  const chatExecuteMain = planningOnlyMain && options.chatExecuteMain === true
+  const mainTools = chatExecuteMain ? CHAT_EXECUTE_TOOLS : PLANNING_MAIN_TOOLS
   const nativeContext = options.nativeContext === undefined ? undefined : freezeNativeContext(options.nativeContext)
   // `chat` (launch model), `skill_trust` (user-config consent prompt skip), `skill_auto` (user-config per-turn skill
   // selection, which only chooses an already consent-free skill) and `memory` (recall engine, re-read per `memory` call
@@ -71,11 +78,12 @@ export function createExecutionPolicy(config: Readonly<OtterConfig>, options: Ex
     const agent = isWorkflowReadOnlyRole(role) ? undefined : AGENT_DEFS[role]
     const denied = new Set(agent?.denied_tools ?? [])
     const planningMain = role === "main" && planningOnlyMain
+    const roleTools = planningMain ? mainTools : PLANNING_MAIN_TOOLS
     if (planningMain || workflowReadOnly) {
-      for (const tool of KNOWN_TOOLS) if (!PLANNING_MAIN_TOOLS.includes(tool)) denied.add(tool)
+      for (const tool of KNOWN_TOOLS) if (!roleTools.includes(tool)) denied.add(tool)
     }
     const allowed = planningMain || workflowReadOnly
-      ? [...PLANNING_MAIN_TOOLS]
+      ? [...roleTools]
       : role === "reviewer" ? REVIEW_TOOLS : KNOWN_TOOLS.filter((tool) => !denied.has(tool))
     const modelSpec = workflowReadOnly ? config.models.main ?? config.models.worker : config.models[role]
     const route = options.routes?.[role]
@@ -84,7 +92,7 @@ export function createExecutionPolicy(config: Readonly<OtterConfig>, options: Ex
     const system = role !== "main"
       ? SYSTEM[role]
       : planningMain
-        ? PLANNING_MAIN_PROMPT
+        ? chatExecuteMain ? CHAT_EXECUTE_PROMPT : PLANNING_MAIN_PROMPT
         : mainPrompt(!config.disabled_hooks.includes("tool.delegate"), config.data.backend !== "none" && !config.disabled_hooks.includes("tool.data"), config.flow.enabled && !config.disabled_hooks.includes("flow"))
     const resolved: Omit<ExecutionPolicySnapshot, "id"> = {
       role, ...(model ? { model: Object.freeze(model) } : {}),

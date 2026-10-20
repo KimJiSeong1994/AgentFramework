@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SKILL_CATALOG_LIMIT, SKILL_DROPPED_RESULT, createCliHost, fitHistory } from "../src/hosts/cli-host.ts"
 import type { CliTransportHandle, CliTransportOptions } from "../src/hosts/cli-transport.ts"
-import type { ComboRoutes, ExecutionPolicy, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole, SkillToolProvider } from "../src/hosts/types.ts"
+import type { ActionGate, ChatAction, ComboRoutes, ExecutionPolicy, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole, SkillToolProvider } from "../src/hosts/types.ts"
 import type { ExecutionRunStore, ExecutionRunStatus } from "../src/hosts/run-state.ts"
 import type { CliHostActivity } from "../src/hosts/cli-progress.ts"
 import { estimateTokens } from "../src/tokens.ts"
@@ -58,6 +58,7 @@ type HarnessOptions = {
   deferTransportRun?: boolean
   beforeOutput?: () => void
   observeActivity?: (activity: CliHostActivity) => void
+  tools?: readonly string[]
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -75,7 +76,7 @@ function harness(options: HarnessOptions = {}) {
     role,
     model: Object.freeze({ providerID: engine, modelID: model }),
     maxOutputTokens: options.maxOutputTokens ?? 20_000,
-    tools: Object.freeze({ allowed: Object.freeze([...ALL_TOOLS]), denied: Object.freeze([] as string[]) }),
+    tools: Object.freeze({ allowed: Object.freeze([...(options.tools ?? ALL_TOOLS)]), denied: Object.freeze([] as string[]) }),
     system: Object.freeze([`fixed ${role} constraint`]),
     ...(codexProfile ? { nativeContext: Object.freeze({
       identity: options.nativeContextIdentity ?? codexProfile.catalogHash,
@@ -1291,5 +1292,68 @@ describe("host-provided skill tool", () => {
       expect(subject.prompts[0]).not.toContain("Available skills")
       expect(outcome).toEqual({ status: "failed", error: "Otter tool denied by role policy before effects" })
     }
+  })
+})
+
+describe("chat execution through the action gate", () => {
+  const CHAT_TOOLS = ["read", "list", "glob", "grep", "memory", "write", "edit", "bash"]
+  const final = (text: string) => JSON.stringify({ type: "final", text })
+  const bash = (command: string, extra: Record<string, unknown> = {}) => JSON.stringify({ type: "tool", name: "bash", input: { command, ...extra } })
+  function gate(decide: (action: ChatAction) => boolean, output = "exit 0\nok") {
+    const approvals: ChatAction[] = []
+    const runs: string[] = []
+    const value: ActionGate = {
+      async approve(action) { approvals.push(action); return decide(action) ? { allow: true } : { allow: false, reason: "denied" } },
+      async run(action) { runs.push(action.command); return { ok: true, text: output } },
+    }
+    return { value, approvals, runs }
+  }
+
+  test("an approved write happens and its result returns to the model; a denied write changes nothing and the turn goes on", async () => {
+    const allowed = gate(() => true)
+    const subject = harness({ role: "main", tools: CHAT_TOOLS, responses: [toolWrite("notes.md", "hello\n"), final("written")] })
+    expect(await (await subject.host.prepare({ ...subject.request, actionGate: allowed.value })).run()).toEqual({ status: "completed", text: "written" })
+    expect(readFileSync(join(root, "notes.md"), "utf8")).toBe("hello\n")
+    expect(allowed.approvals).toEqual([{ tool: "write", path: "notes.md", content: "hello\n" }])
+    expect(subject.prompts[0]).toContain("- bash: allowed")
+    expect(subject.prompts[1]).toContain("Created file")
+
+    const denied = gate(() => false)
+    const refused = harness({ role: "main", tools: CHAT_TOOLS, responses: [toolWrite("other.md", "x"), final("understood")] })
+    expect(await (await refused.host.prepare({ ...refused.request, actionGate: denied.value })).run()).toEqual({ status: "completed", text: "understood" })
+    expect(existsSync(join(root, "other.md"))).toBe(false)
+    expect(refused.prompts[1]).toContain("The user denied this action: denied")
+  })
+
+  test("bash runs only through the gate after approval and returns the command result; options reach the gate", async () => {
+    const subject = gate(() => true, "exit 1\n1 failing test")
+    const run = harness({ role: "main", tools: CHAT_TOOLS, responses: [bash("bun test", { timeoutSeconds: 30 }), bash("vim notes.md", { interactive: true }), final("checked")] })
+    expect(await (await run.host.prepare({ ...run.request, actionGate: subject.value })).run()).toEqual({ status: "completed", text: "checked" })
+    expect(subject.approvals).toEqual([
+      { tool: "bash", command: "bun test", interactive: false, timeoutMs: 30_000 },
+      { tool: "bash", command: "vim notes.md", interactive: true, timeoutMs: 120_000 },
+    ])
+    expect(subject.runs).toEqual(["bun test", "vim notes.md"])
+    expect(run.prompts[1]).toContain("1 failing test")
+
+    const denied = gate(() => false)
+    const refused = harness({ role: "main", tools: CHAT_TOOLS, responses: [bash("rm -rf build"), final("ok")] })
+    expect(await (await refused.host.prepare({ ...refused.request, actionGate: denied.value })).run()).toEqual({ status: "completed", text: "ok" })
+    expect(denied.runs).toEqual([])
+  })
+
+  test("without a gate main has no write, edit or bash, and other roles never get bash even with a gate", async () => {
+    const noGate = harness({ role: "main", tools: CHAT_TOOLS, responses: [bash("ls")] })
+    expect(await (await noGate.host.prepare(noGate.request)).run()).toEqual({ status: "failed", error: "Otter tool denied by role policy before effects" })
+    expect(noGate.prompts[0]).toContain("- bash: denied")
+    expect(noGate.prompts[0]).toContain("- write: denied")
+    const noGateWrite = harness({ role: "main", tools: CHAT_TOOLS, responses: [toolWrite("x.md", "x")] })
+    expect(await (await noGateWrite.host.prepare(noGateWrite.request)).run()).toMatchObject({ status: "failed" })
+    expect(existsSync(join(root, "x.md"))).toBe(false)
+
+    const unused = gate(() => true)
+    const worker = harness({ role: "worker", tools: CHAT_TOOLS, responses: [bash("ls")] })
+    expect(await (await worker.host.prepare({ ...worker.request, actionGate: unused.value })).run()).toMatchObject({ status: "failed" })
+    expect(unused.approvals).toEqual([])
   })
 })
