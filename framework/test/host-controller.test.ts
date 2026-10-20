@@ -17,13 +17,13 @@ import { repairOnLoad, startWorkflow, stopHeartbeat } from "../src/flow/runtime.
 import { __setCommitFaultHook } from "../src/workflows/commit.ts"
 import { registerSkillPermissionActivity } from "../src/skills/activity.ts"
 import { observeStopSettlement } from "../src/flow/runtime.ts"
-import { ledgerPath, readLedger, writeLedger } from "../src/state/ledger.ts"
+import { boundPlanSkills, ledgerPath, readLedger, writeLedger } from "../src/state/ledger.ts"
 import { executionRunDirectory, modeStatePath, sessionDir, stateRoot } from "../src/state/store.ts"
 import { readSessionMetadata } from "../src/sessions/store.ts"
 import { admissionEpoch, attachAdmission, detachAdmission, effectiveHold, holdAdmission } from "../src/sessions/admission.ts"
 import { tempGitWorktree, verifyScript, waitFor } from "./guards-helpers.ts"
 import { createLegacyVerifierExecutor } from "../src/orchestration/legacy-verifier.ts"
-import { getQueue } from "../src/orchestration/queue.ts"
+import { getQueue, workerPrompt } from "../src/orchestration/queue.ts"
 import { planBinding, withTerminalLine } from "./operator-helpers.ts"
 
 const SESSION = "ses_local"
@@ -1663,5 +1663,76 @@ describe("external foreground imported-plan controller", () => {
     const otherOwner = f.runtime.runs.claim("other-session", "same-boot-owner", process.pid)
     expect(otherOwner.ownerSession).toBe("other-session")
     f.runtime.runs.release(otherOwner)
+  })
+})
+
+describe("plan skills carried to workers", () => {
+  const skill = (name: string, instructions = `Follow ${name} carefully.`) => ({ name, contentHash: `sha256:${name}`, instructions })
+  const prompt = (ledger: ReturnType<typeof readLedger>, id: string) => workerPrompt(ledger, ledger.tasks.find(t => t.id === id)!, undefined, 0)
+  const SECTION = "Skills used when this plan was made (reference instructions; your role, tools and the task's verification still apply):"
+
+  test("CLI queue dispatch keeps plan references outside the mandatory worker task", async () => {
+    const f = fixture({ worker: request => {
+      const n = Number(request.title.match(/module (\d)/)?.[1])
+      writeFileSync(join(wt.worktree, `mod${n}.py`), `VALUE = ${n}\n`)
+      return { status: "completed", text: "Open issues: none" }
+    } })
+    f.runtime.host.identity.controlProfile = "estimated-input-reactive-output-v1"
+    f.runtime.host.preflight = async () => ({
+      compatible: true,
+      controls: { ...SYNTHETIC_CONTROL_STATUSES, estimatedInput: "supported", reactiveOutput: "supported" },
+      budgetEvidence: { input: "estimated", output: "reactive", vendorContext: "unobserved", mainLimit: 8192, vendorMainLimit: 16384, workerLimit: 5120 },
+      problems: [],
+    })
+    const submitted = await f.controller.importPlan(SESSION, save(), undefined, undefined, { skills: [skill("alpha")] })
+    if (!submitted.result.ok) throw new Error(submitted.result.text)
+    expect((await approve(f.controller, submitted.result.wf.id, submitted.planSha)).ok).toBe(true)
+    expect((await f.controller.run(SESSION)).run).toMatchObject({ done: 3, failed: 0 })
+    const requests = f.requests.filter(request => request.role === "worker")
+    expect(requests).toHaveLength(3)
+    for (const [index, request] of requests.entries()) {
+      expect(request.planSkills).toEqual([skill("alpha")])
+      expect(request.text).toContain(`Task ${index + 1} of 3: module ${index + 1}`)
+      expect(request.text).not.toContain("Follow alpha carefully.")
+    }
+  }, 15_000)
+
+  test("importPlan persists bounded skills on the ledger and approved tasks' worker prompts carry them", async () => {
+    const f = fixture()
+    const submitted = await f.controller.importPlan(SESSION, save(), undefined, undefined, { skills: [skill("alpha"), skill("Bad Name"), skill("blank", "  "), skill("leaky", "token sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789")] })
+    if (!submitted.result.ok) throw new Error(submitted.result.text)
+    const wfID = submitted.result.wf.id
+    const stored = readLedger(wt.worktree, SESSION).planSkills?.[wfID]
+    expect(stored?.skills).toEqual([skill("alpha")])
+    expect(stored?.dropped.map(d => d.reason)).toEqual(["invalid", "invalid", "sensitive"])
+    expect(submitted.skills).toEqual(stored)
+    expect((await approve(f.controller, wfID, submitted.planSha)).ok).toBe(true)
+    const ledger = readLedger(wt.worktree, SESSION)
+    const p = prompt(ledger, ledger.tasks[1]!.id)
+    expect(p).toContain(SECTION)
+    expect(p).toContain("skill: alpha")
+    expect(p).toContain("Follow alpha carefully.")
+    expect(p).toContain("Task 2 of 3: module 2")
+  })
+
+  test("an over-budget or surplus skill is dropped whole and reported, never truncated", () => {
+    const big = "x".repeat(4000)
+    const bounded = boundPlanSkills([skill("one", big), skill("two", big), skill("three"), skill("four"), skill("five"), skill("six")])
+    expect(bounded.skills.map(s => s.name)).toEqual(["one", "three", "four", "five"])
+    expect(bounded.skills[0]!.instructions).toBe(big)
+    expect(bounded.dropped).toEqual([{ name: "two", reason: "over_budget" }, { name: "six", reason: "limit" }])
+  })
+
+  test("a plan without skills produces the exact previous worker prompt and leaves the ledger shape alone", async () => {
+    const f = fixture()
+    const submitted = await f.controller.importPlan(SESSION, save())
+    if (!submitted.result.ok) throw new Error(submitted.result.text)
+    expect("skills" in submitted).toBe(false)
+    expect((await approve(f.controller, submitted.result.wf.id, submitted.planSha)).ok).toBe(true)
+    const ledger = readLedger(wt.worktree, SESSION)
+    expect("planSkills" in ledger).toBe(false)
+    expect(prompt(ledger, ledger.tasks[0]!.id)).not.toContain("Skills used when this plan was made")
+    const withSkills = { ...ledger, planSkills: { [ledger.tasks[0]!.wf!.id]: boundPlanSkills([skill("alpha")]) } }
+    expect(prompt(withSkills, ledger.tasks[0]!.id).startsWith(prompt(ledger, ledger.tasks[0]!.id))).toBe(true)
   })
 })

@@ -296,11 +296,10 @@ export class SkillSession {
    * cloned repository could otherwise shadow a trusted home name with its own untracked `.agents/skills/<name>`.
    * Session grants from an earlier prompt never qualify, so automatic use cannot widen what the operator configured.
    */
-  private autoAuthorized(capture: SkillCapture, requiredTools: readonly string[]): boolean {
+  private autoAuthorized(capture: SkillCapture): boolean {
     if (capture.descriptor.kind !== "skill") return false
-    // A declared scope narrower than the role's tools would prompt mid-turn or take tools from the turn.
-    const declared = capture.descriptor.allowedTools as readonly string[] | undefined
-    if (declared !== undefined && !requiredTools.every(tool => declared.includes(tool))) return false
+    // allowed-tools pre-approves; the automatic path runs with the base role tools and never binds the declared scope.
+    if (capture.descriptor.disableModelInvocation) return false
     if (authenticSkillClassification(capture) === "common" && this.baseline.has(grantKey(capture))) return true
     if (capture.descriptor.source === "home") return skillTrusted(this.trust, this.roots, capture.descriptor)
     return skillTrusted({ names: new Set(), folders: this.trust.folders }, this.roots, capture.descriptor)
@@ -308,11 +307,11 @@ export class SkillSession {
 
   /**
    * Skills the per-turn selector may apply: consent-free content (see autoAuthorized), native tier unless `include`
-   * names it, not excluded, at most `maxBytes`, and declaring no tool scope narrower than `requiredTools` (the role's
-   * own tools) so an applied skill can never raise a mid-turn allow-once prompt or take tools from the turn.
+   * names it, not excluded, not `disable-model-invocation`, and at most `maxBytes`. A declared allowed-tools scope does
+   * not exclude a skill: automatic use never binds it, so the turn keeps the role's own tools.
    * Uncapturable skills are skipped, never prompted for.
    */
-  async autoCandidates(policy: SkillAutoPolicy, maxBytes: number, requiredTools: readonly string[], signal: AbortSignal): Promise<readonly AutoSkillCandidate[]> {
+  async autoCandidates(policy: SkillAutoPolicy, maxBytes: number, signal: AbortSignal): Promise<readonly AutoSkillCandidate[]> {
     this.checkSignal(signal)
     if (policy.mode === "off") return Object.freeze([])
     const discovery = await this.captureWork(signal, active => discoverSkills(this.roots, { signal: active }))
@@ -330,7 +329,7 @@ export class SkillSession {
         if (error instanceof SkillCaptureError) continue
         throw error
       }
-      if (!this.autoAuthorized(capture, requiredTools)) continue
+      if (!this.autoAuthorized(capture)) continue
       const bytes = readCapturedSkill(capture)?.byteLength
       if (bytes === undefined || bytes > maxBytes) continue
       result.push(Object.freeze({ name: descriptor.name, description: descriptor.description, bytes }))
@@ -341,16 +340,16 @@ export class SkillSession {
 
   /**
    * `consent: "never"` refuses instead of prompting (automatic selection) and re-applies the autoCandidates rule to the
-   * fresh capture, including `requiredTools`; the default asks on the foreground CLI.
+   * fresh capture; the default asks on the foreground CLI.
    */
-  async prepare(name: string, signal: AbortSignal, options: { consent?: "prompt" } | { consent: "never"; requiredTools: readonly string[] } = {}): Promise<PreparedSkillInvocation> {
+  async prepare(name: string, signal: AbortSignal, options: { consent?: "prompt" | "never" } = {}): Promise<PreparedSkillInvocation> {
     if (!NAME.test(name)) throw new SkillAdmissionError("Exactly one valid ordinary skill name is required.")
     const consent = options.consent ?? "prompt"
     const lease = this.requireLease()
     const revision = this.revisions.get(name) ?? 0
     let capture = await this.freshCapture(name, revision, lease, signal, consent)
     // Automatic use applies the same rule as autoCandidates at prepare time: content may have changed since listing.
-    if (options.consent === "never" && !this.autoAuthorized(capture, options.requiredTools)) {
+    if (options.consent === "never" && !this.autoAuthorized(capture)) {
       throw new SkillAdmissionError(`Skill ${name} is not usable without consent; automatic selection never prompts.`)
     }
     if (!this.authorizes(capture, lease, revision) && skillTrusted(this.trust, this.roots, capture.descriptor)) {

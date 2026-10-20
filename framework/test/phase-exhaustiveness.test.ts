@@ -74,6 +74,12 @@ describe("P6a S1 stage tables and evidence gates", () => {
     const { EXECUTION_ROLES, WORKFLOW_READ_ONLY_ROLES, CONFIG_MODEL_ROLES } = await import("../src/hosts/types.ts")
     for (const role of WORKFLOW_READ_ONLY_ROLES) expect(roleInputLimit(role)).toBe(8192)
     for (const role of CONFIG_MODEL_ROLES) expect(roleInputLimit(role)).toBe(role === "main" ? 8192 : 5120)
+    // Claude/Codex main and read-only workflow roles get the larger estimate; workers stay at their limit.
+    for (const engine of ["claude", "codex"] as const) {
+      expect(roleInputLimit("main", engine)).toBe(16384)
+      for (const role of WORKFLOW_READ_ONLY_ROLES) expect(roleInputLimit(role, engine)).toBe(16384)
+      expect(roleInputLimit("worker", engine)).toBe(5120)
+    }
     expect(EXECUTION_ROLES.length as number).toBe(CONFIG_MODEL_ROLES.length + WORKFLOW_READ_ONLY_ROLES.length)
     // policy identity itself is asserted byte-for-byte by test/policy-identity.test.ts (legacy-policy-ids.json)
   })

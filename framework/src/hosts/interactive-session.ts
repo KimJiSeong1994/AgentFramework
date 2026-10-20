@@ -20,8 +20,13 @@ import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, skillInstructionBu
 import type { WorkflowEnvelope } from "../workflows/types.ts"
 import { PROTECTED_WORKFLOWS, resolveSkillRoots } from "../skills/roots.ts"
 import { chatIntentMode, chatWorktreeMode } from "../config.ts"
-import { classifyIntent, hasIntentForcePrefix, INTENT_CLASSIFIER, type IntentClass } from "../modes/detect.ts"
+import { classifyIntent, hasIntentForcePrefix, INTENT_CLASSIFIER, isFollowUp, type IntentClass } from "../modes/detect.ts"
 import { claimPreparedSkillInvocation, SkillSession, type AutoSkillCandidate, type PreparedSkillInvocation, type SkillCatalog } from "../skills/session.ts"
+import { readCapturedFile } from "../skills/capture.ts"
+import type { SkillCapture } from "../skills/types.ts"
+
+/** Largest bundled skill file the model may read through the skill tool (it still has to fit the input budget). */
+const SKILL_RESOURCE_MAX_BYTES = 32 * 1024
 import { readSkillTrust, type SkillTrustLookup } from "../skills/trust.ts"
 import { createAutoSkillSelector, type AutoSkillSelection } from "../routing/router.ts"
 import { recordSkillToolLoad, recordSkillToolTurn } from "../telemetry/routing.ts"
@@ -1065,7 +1070,11 @@ export async function runInteractiveSession(
     let skillPolicy: SkillTrustLookup | undefined
     let autoSkillEnabled = true
     let autoSkillCandidates: readonly AutoSkillCandidate[] = []
-    let autoSkillRequiredTools: readonly string[] = []
+    // Conversation context for follow-ups, reset with the skill session (session switch): whether an exchange exists the
+    // next message can point back at, the previous user message, and the skills delivered in the previous turn.
+    let priorTurn = false
+    let previousUserText = ""
+    let previousTurnSkills: readonly string[] = []
     let autoCandidateGeneration = 0
     let autoCandidateWork: Promise<void> = Promise.resolve()
     async function bindSkillSession(store: SessionStore): Promise<void> {
@@ -1073,6 +1082,12 @@ export async function runInteractiveSession(
       skillSession = undefined
       latestSkillCatalog = undefined
       autoSkillCandidates = []
+      try {
+        // A restored session already has exchanges the first message may point back at.
+        priorTurn = replaySession(worktree, store.sessionID, { order: "desc", limit: 64 }).records.some(record => record.kind === "assistant")
+      } catch { priorTurn = false }
+      previousUserText = ""
+      previousTurnSkills = []
       try {
         const roots = await resolveSkillRoots({ projectRoot: worktree, homeDirectory: homedir() })
         const trust = deps.skillPolicy()
@@ -1114,11 +1129,8 @@ export async function runInteractiveSession(
       const policy = skillPolicy
       const runtime = attachedRuntime
       if (!policy || policy.auto.mode === "off" || !runtime) return
-      const main = runtime.policy.resolve("main").tools
-      const required = main.allowed.filter(tool => !main.denied.includes(tool))
-      autoSkillRequiredTools = required
       const current = () => generation === autoCandidateGeneration && target === skillSession && target.store === sessionStore && !abort.signal.aborted
-      autoCandidateWork = target.autoCandidates(policy.auto, skillInstructionBudget(runtime.config.delegate.verify_allow), required, abort.signal)
+      autoCandidateWork = target.autoCandidates(policy.auto, skillInstructionBudget(runtime.config.delegate.verify_allow), abort.signal)
         .then(candidates => { if (current()) autoSkillCandidates = candidates }, () => {
           if (current()) visibleWrite("Automatic skill candidates unavailable; explicit /skill: invocation still works.\n")
         })
@@ -2959,7 +2971,7 @@ export async function runInteractiveSession(
       let outbound = message
       let intentClass: IntentClass | undefined
       if (!message.startsWith("/") && chatIntentMode(selection.runtime.config) === "offer") {
-        const intent = classifyIntent(message)
+        const intent = classifyIntent(message, { priorTurn, skillNames: autoSkillCandidates.map(candidate => candidate.name) })
         intentClass = intent.class
         if (intent.force) outbound = intent.body
         const options = intent.force ? [] : intentOptions(intent.class)
@@ -3031,6 +3043,8 @@ export async function runInteractiveSession(
       let preparedSkill: PreparedSkillInvocation | undefined
       let skillTool: SkillToolProvider | undefined
       const loadedSkills: Array<{ name: string; contentHash: string }> = []
+      // Instruction text of skills captured this turn, so a plan made in this turn can carry them to its workers.
+      const skillTexts = new Map<string, string>()
       // One skill_turn record per turn that offered the skill tool, written exactly once when the turn ends.
       let finishSkillTurn: (outcome: "completed" | "failed" | "cancelled", failure?: string) => void = () => {}
       let dispatched = false
@@ -3095,8 +3109,31 @@ export async function runInteractiveSession(
           const runtime = turnSelection.runtime
           const sessionID = turnStore.sessionID
           const turnID = `turn-${requestSequence}`
-          const requiredTools = autoSkillRequiredTools
           const pendingHashes = new Map<string, string>()
+          // Captures of skills loaded this turn, so the model can read the files a skill bundles from the same snapshot.
+          const captures = new Map<string, SkillCapture>()
+          const describeFiles = (capture: SkillCapture): string => {
+            const files = capture.files.map(file => file.path).filter(path => path !== "SKILL.md").sort()
+            return files.length
+              ? `\n\nFiles bundled with this skill (read one with {"type":"tool","name":"skill","input":{"name":"${capture.name}","path":"<file>"}}):\n${files.slice(0, 40).map(path => `- ${path}`).join("\n")}${files.length > 40 ? `\n- … ${files.length - 40} more` : ""}`
+              : ""
+          }
+          // A follow-up keeps the previous turn's skills active: recaptured now (same consent rule and content check),
+          // placed in the input as already loaded. Anything else starts without them.
+          const sticky: Array<{ name: string; text: string }> = []
+          if (isFollowUp(outbound)) {
+            for (const name of previousTurnSkills) {
+              if (!catalog.some(candidate => candidate.name === name)) continue
+              try {
+                const prepared = await turnSkills.prepare(name, operationAbort.signal, { consent: "never" })
+                const claimed = claimPreparedSkillInvocation(prepared)
+                pendingHashes.set(name, prepared.contentHash)
+                captures.set(name, claimed.capture)
+                skillTexts.set(name, claimed.text)
+                sticky.push({ name, text: claimed.text + describeFiles(claimed.capture) })
+              } catch { /* Not reusable now (changed or no longer consent-free): the model can load it again. */ }
+            }
+          }
           const turnOffered: string[] = []
           const turnRefused: string[] = []
           const turnWithdrawn: string[] = []
@@ -3116,22 +3153,37 @@ export async function runInteractiveSession(
           }
           skillTool = catalog.length === 0 ? undefined : Object.freeze({
             catalog: Object.freeze(catalog.map(candidate => Object.freeze({ name: candidate.name, description: candidate.description }))),
-            query: outbound,
+            // Ranked against this message, the previous one and the skills it used, so a follow-up keeps its skills listed.
+            query: [outbound, previousUserText, ...previousTurnSkills].filter(Boolean).join("\n"),
+            sticky: Object.freeze(sticky),
             async load(name: string, signal: AbortSignal) {
               if (selection !== turnSelection || sessionStore !== turnStore || skillSession !== turnSkills || retainedSDKSessionID) {
                 recordSkillToolLoad(runtime, sessionID, turnID, name, "superseded")
                 return { ok: false as const, error: "Tool refused: the session changed during this turn." }
               }
               try {
-                const prepared = await turnSkills.prepare(name, signal, { consent: "never", requiredTools })
-                const text = claimPreparedSkillInvocation(prepared).text
+                const prepared = await turnSkills.prepare(name, signal, { consent: "never" })
+                const claimed = claimPreparedSkillInvocation(prepared)
                 pendingHashes.set(name, prepared.contentHash)
-                return { ok: true as const, text }
+                captures.set(name, claimed.capture)
+                skillTexts.set(name, claimed.text)
+                return { ok: true as const, text: claimed.text + describeFiles(claimed.capture) }
               } catch {
                 recordSkillToolLoad(runtime, sessionID, turnID, name, "refused")
                 turnRefused.push(name)
                 return { ok: false as const, error: "Tool refused: this skill is not usable without consent right now." }
               }
+            },
+            async readResource(name: string, path: string) {
+              const capture = captures.get(name)
+              if (!capture) return { ok: false as const, error: "Tool refused: load the skill first." }
+              const normalized = path.replace(/^\.\//u, "")
+              if (normalized === "SKILL.md") return { ok: false as const, error: "Tool refused: the instructions are already loaded." }
+              const bytes = readCapturedFile(capture, normalized)
+              if (!bytes) return { ok: false as const, error: "Tool refused: no such file in this skill." }
+              if (bytes.byteLength > SKILL_RESOURCE_MAX_BYTES) return { ok: false as const, error: `Tool refused: the file is larger than ${SKILL_RESOURCE_MAX_BYTES} bytes.` }
+              try { return { ok: true as const, text: new TextDecoder("utf-8", { fatal: true }).decode(bytes) } }
+              catch { return { ok: false as const, error: "Tool refused: the file is not UTF-8 text." } }
             },
             delivered(name: string) {
               const contentHash = pendingHashes.get(name)
@@ -3225,6 +3277,10 @@ export async function runInteractiveSession(
         // terminal.write persists the notice, so a full-screen transcript reload keeps it.
         terminal.write(`Skills used: ${loadedSkills.map(skill => terminalSafeText(skill.name)).join(", ")} (force: skips skills for one message; /skills auto off for this session)\n`)
       }
+      // The next message may point back at this exchange; its skills stay available to a follow-up.
+      priorTurn = true
+      previousUserText = outbound
+      previousTurnSkills = loadedSkills.map(skill => skill.name)
       if (turn.text) {
         assistantFact = persist("assistant", { text: turn.text })
         const assistantText = terminalSafeText(turn.text)
@@ -3265,8 +3321,19 @@ export async function runInteractiveSession(
         continue
       }
       if (abort.signal.aborted) return signalExit(receivedSignal)
-      const submitted = await selection.controller.importPlan(selection.sessionID, "", abort.signal, parsedPlan)
+      // Skills the model actually had while making this plan go with it to the workers (bounded and checked there).
+      const planSkills = loadedSkills.flatMap(skill => {
+        const instructions = skillTexts.get(skill.name)
+        return instructions === undefined ? [] : [{ name: skill.name, contentHash: skill.contentHash, instructions }]
+      })
+      const submitted = await selection.controller.importPlan(selection.sessionID, "", abort.signal, parsedPlan, planSkills.length ? { skills: planSkills } : undefined)
       if (abort.signal.aborted) return signalExit(receivedSignal)
+      if (submitted.skills?.skills.length) {
+        terminal.write(`Plan carries skills to its workers: ${submitted.skills.skills.map(skill => terminalSafeText(skill.name)).join(", ")}\n`)
+      }
+      if (submitted.skills?.dropped.length) {
+        terminal.write(`Skills not carried to workers: ${submitted.skills.dropped.map(skill => `${terminalSafeText(skill.name)} (${skill.reason})`).join(", ")}\n`)
+      }
       if (!submitted.result.ok) {
         const diagnostic = boundedTerminalDiagnostic(submitted.result.text)
         terminal.write(`[error] Plan submission failed${diagnostic ? `: ${diagnostic}` : ""}; no execution was started.\n`)

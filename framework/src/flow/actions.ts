@@ -5,6 +5,7 @@ import {
   type FlowTx, type Workflow,
 } from "./state.ts"
 import { readJson } from "../state/store.ts"
+import type { PlanSkills } from "../state/ledger.ts"
 import { applyEventIn, flowLimits, type FlowResult } from "./runtime.ts"
 import { canonicalPlanJson, canonicalPlanSha, coercePlan, planMdPath, renderPlanMd, validatePlan, type Plan, type ReviewView } from "./plan.ts"
 import { runPlanReview } from "./review.ts"
@@ -12,7 +13,7 @@ import { LinuxAdmissionRefused, type ExecutionRuntime, type PlanSubmissionAdmiss
 import type { FlowEvent } from "./machine.ts"
 import { planArtifactRefs, verifyArtifact } from "../workflows/artifacts.ts"
 
-export type PlanSubmission = { result: FlowResult; planSha: string; renderedPlan?: string }
+export type PlanSubmission = { result: FlowResult; planSha: string; renderedPlan?: string; skills?: PlanSkills }
 
 function workflowRefusal(runtime: ExecutionRuntime, wf: Workflow): string | undefined {
   return workflowEngineRefusal(wf, runtime.host.identity.engine)

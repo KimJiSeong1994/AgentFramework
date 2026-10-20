@@ -19,6 +19,7 @@ const BUDGET_EVIDENCE = {
   output: "reactive",
   vendorContext: "unobserved",
   mainLimit: 8192,
+  vendorMainLimit: 16384,
   workerLimit: 5120,
 } as const
 const commonProfile = "estimated-input-reactive-output-v1" as const
@@ -187,11 +188,12 @@ describe("required control status checks", () => {
     delete missing.workerLimit
     const extra = { ...BUDGET_EVIDENCE, exact: true }
     const wrongValue = { ...BUDGET_EVIDENCE, mainLimit: 8191 }
+    const wrongVendorValue = { ...BUDGET_EVIDENCE, vendorMainLimit: 32768 }
     let invoked = false
     const getter = { ...BUDGET_EVIDENCE }
     Object.defineProperty(getter, "mainLimit", { get() { invoked = true; return 8192 } })
     const inherited = Object.create(BUDGET_EVIDENCE)
-    for (const evidence of [missing, extra, wrongValue, getter, inherited]) {
+    for (const evidence of [missing, extra, wrongValue, wrongVendorValue, getter, inherited]) {
       expect(() => assertHostAdmission(preflight(controls, true, [], evidence as Preflight["budgetEvidence"]), commonProfile))
         .toThrow("host incompatible")
     }

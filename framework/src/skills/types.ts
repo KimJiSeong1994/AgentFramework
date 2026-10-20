@@ -17,6 +17,8 @@ export type LocalSkillDescriptor = Readonly<{
   name: string
   description: string
   allowedTools?: readonly SkillToolName[]
+  /** Frontmatter `disable-model-invocation: true`: explicit `/skill:` only, never an automatic candidate. */
+  disableModelInvocation?: true
 }>
 
 export type ProtectedWorkflowDescriptor = Readonly<{

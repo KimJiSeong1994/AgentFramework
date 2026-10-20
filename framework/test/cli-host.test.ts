@@ -758,6 +758,52 @@ describe("common CLI execution host", () => {
     expect(subject.prompts).toHaveLength(0)
   })
 
+  test("carried CJK plan skills are omitted whole against the full worker and native input budget", async () => {
+    for (const engine of ["local", "codex", "claude"] as const) {
+      const subject = harness({ engine, responses: [JSON.stringify({ type: "final", text: "done" })] })
+      subject.request.planSkills = [{ name: "korean", instructions: "한".repeat(6000) }]
+      expect(await (await subject.host.prepare(subject.request)).run()).toMatchObject({ status: "completed" })
+      const prompt = subject.prompts.at(-1)!
+      expect(prompt).toContain(subject.request.text)
+      expect(prompt).not.toContain("한")
+      expect(prompt).toContain(SKILL_DROPPED_RESULT)
+      expect(estimatedTokens(prompt) + estimateTokens(subject.request.policy.nativeContext?.instructions ?? "")).toBeLessThanOrEqual(WORKER_INPUT_LIMIT)
+    }
+  })
+
+  test("a nearly full worker task runs even when a plan-skill omission notice cannot fit", async () => {
+    const probe = harness({ taskText: "", responses: [JSON.stringify({ type: "final", text: "probe" })] })
+    expect(await (await probe.host.prepare(probe.request)).run()).toMatchObject({ status: "completed" })
+    const taskText = "x".repeat((WORKER_INPUT_LIMIT - estimatedTokens(probe.prompts[0]!) - 1) * 4)
+    const subject = harness({ taskText, responses: [JSON.stringify({ type: "final", text: "done" })] })
+    subject.request.planSkills = [{ name: "optional", instructions: "Keep this optional reference whole." }]
+    expect(await (await subject.host.prepare(subject.request)).run()).toMatchObject({ status: "completed" })
+    expect(subject.prompts[0]).toContain(taskText)
+    expect(subject.prompts[0]).not.toContain("Keep this optional reference whole.")
+    expect(estimatedTokens(subject.prompts[0]!)).toBeLessThanOrEqual(WORKER_INPUT_LIMIT)
+  })
+
+  test("carried plan skills fit whole initially and drop whole for later tool exchanges", async () => {
+    const instructions = "Plan reference instruction. ".repeat(20)
+    const probe = harness({ taskText: "", responses: [JSON.stringify({ type: "final", text: "probe" })] })
+    probe.request.planSkills = [{ name: "reference", instructions }]
+    expect(await (await probe.host.prepare(probe.request)).run()).toMatchObject({ status: "completed" })
+    expect(probe.prompts[0]).toContain(instructions)
+    const taskText = "x".repeat((WORKER_INPUT_LIMIT - estimatedTokens(probe.prompts[0]!) - 1) * 4)
+    writeFileSync(join(root, "payload.txt"), "some result")
+    const subject = harness({ taskText, responses: [
+      JSON.stringify({ type: "tool", name: "read", input: { path: "payload.txt" } }),
+      JSON.stringify({ type: "final", text: "done" }),
+    ] })
+    subject.request.planSkills = [{ name: "reference", instructions }]
+    expect(await (await subject.host.prepare(subject.request)).run()).toMatchObject({ status: "completed" })
+    expect(subject.prompts[0]).toContain(instructions)
+    expect(subject.prompts[1]).not.toContain(instructions)
+    expect(subject.prompts[1]).toContain(SKILL_DROPPED_RESULT)
+    expect(subject.prompts.every(prompt => estimatedTokens(prompt) <= WORKER_INPUT_LIMIT)).toBe(true)
+    expect(subject.prompts[1]).toContain(taskText)
+  })
+
   test("history truncation makes monotonic progress and prunes exchanges without dropping the task", async () => {
     const probe = harness({ taskText: "", responses: [JSON.stringify({ type: "final", text: "probe" })] })
     const probeHandle = await probe.host.prepare(probe.request)
@@ -1195,6 +1241,45 @@ describe("host-provided skill tool", () => {
     expect(await (await subject.host.prepare({ ...subject.request, skillTool })).run()).toEqual({ status: "completed", text: "done" })
     expect(loads).toBe(1)
     expect(subject.prompts[2]).toContain("not usable now")
+  })
+
+  test("sticky skills are in the input as already loaded; a reload is answered from the turn, not loaded again", async () => {
+    const loads: string[] = []
+    const delivered: string[] = []
+    const skillTool: SkillToolProvider = {
+      catalog: [{ name: "wiki-helper", description: "Compile wiki pages" }, { name: "other", description: "Other" }],
+      sticky: [{ name: "wiki-helper", text: "STICKY_RULE" }, { name: "not-listed", text: "NEVER" }],
+      async load(name) { loads.push(name); return { ok: true, text: "x" } },
+      delivered(name) { delivered.push(name) },
+    }
+    const subject = harness({ role: "main", responses: [call("wiki-helper"), JSON.stringify({ type: "final", text: "done" })] })
+    expect(await (await subject.host.prepare({ ...subject.request, skillTool })).run()).toEqual({ status: "completed", text: "done" })
+    expect(subject.prompts[0]).toContain("still active from an earlier turn")
+    expect(subject.prompts[0]).toContain("STICKY_RULE")
+    expect(subject.prompts[0]).not.toContain("NEVER")
+    expect(subject.prompts[1]).toContain("Skill already loaded in this turn")
+    expect(loads).toEqual([])
+    expect(delivered).toEqual(["wiki-helper"])
+  })
+
+  test("a loaded skill's bundled file is read through the skill tool; before loading it is refused", async () => {
+    const reads: string[] = []
+    const skillTool: SkillToolProvider = {
+      catalog: [{ name: "wiki-helper", description: "Compile wiki pages" }],
+      async load() { return { ok: true, text: "See references/style.md" } },
+      async readResource(name, path) { reads.push(`${name}:${path}`); return { ok: true, text: "STYLE_RULE" } },
+    }
+    const read = (path: string) => JSON.stringify({ type: "tool", name: "skill", input: { name: "wiki-helper", path } })
+    const subject = harness({ role: "main", responses: [read("references/style.md"), call("wiki-helper"), read("references/style.md"), JSON.stringify({ type: "final", text: "done" })] })
+    expect(await (await subject.host.prepare({ ...subject.request, skillTool })).run()).toEqual({ status: "completed", text: "done" })
+    expect(subject.prompts[1]).toContain("load the skill first")
+    expect(subject.prompts[3]).toContain("STYLE_RULE")
+    expect(reads).toEqual(["wiki-helper:references/style.md"])
+    // Traversal and absolute paths are refused by input validation before any read.
+    for (const path of ["../x.md", "/etc/passwd", "a/../../b"]) {
+      const bad = harness({ role: "main", responses: [call("wiki-helper"), read(path)] })
+      expect(await (await bad.host.prepare({ ...bad.request, skillTool })).run()).toMatchObject({ status: "failed" })
+    }
   })
 
   test("other roles, an empty catalog and no provider offer no skill tool, and a skill call fails closed", async () => {

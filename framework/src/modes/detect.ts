@@ -248,11 +248,36 @@ function wordCount(text: string): number {
   return text.split(/\s+/u).filter(Boolean).length
 }
 
+/** Conversation context the classifier may use; all optional, so a context-free call behaves as before. */
+export type IntentContext = {
+  /** The session already has an earlier exchange the message can refer to. */
+  priorTurn?: boolean
+  /** Skill names the model may load this turn; naming one is a concrete anchor. */
+  skillNames?: readonly string[]
+}
+
+// Pointers to what was just said: a follow-up that is complete given the conversation, not an under-specified request.
+const BACK_REFERENCE = [
+  compile("(?:^|[\\s(])(?:그거|그걸|그것|그건|이거|이걸|이것|저거|그\\s*내용|이\\s*내용|방금|아까|위\\s*(?:내용|것|거)|앞\\s*(?:내용|것|거)|말한\\s*대로|이어서|계속|다시|같은\\s*식으로|그대로|그걸로|그럼)"),
+  compile("\\b(?:it|that|this|those|these|same|above|previous|earlier|again|instead|as\\s+well|too)\\b"),
+]
+const SKILL_WORD = compile("\\bskills?\\b|스킬")
+
+/**
+ * Whether a message continues the previous exchange (points back at it and is not open-ended). Used to keep skills
+ * from the previous turn active; the same rule anchors the intent offer.
+ */
+export function isFollowUp(text: string): boolean {
+  const clean = sanitizeForDetection(unwrapWholeQuote((text ?? "").replace(/\r\n?/g, "\n"))).trim()
+  if (!clean || clean.startsWith("/")) return false
+  return BACK_REFERENCE.some(re => re.test(clean)) && !UNCERTAIN.some(({ re }) => re.test(clean))
+}
+
 /**
  * Classify one CLI chat line. Slash commands are `explicit` and never reach the offers. Everything that carries no
  * ambiguity signal falls to `implement`, i.e. today's behavior (a planning conversation).
  */
-export function classifyIntent(text: string): IntentClassification {
+export function classifyIntent(text: string, context: IntentContext = {}): IntentClassification {
   const raw = (text ?? "").replace(/\r\n?/g, "\n")
   const signals: string[] = []
   const stripped = unwrapWholeQuote(raw)
@@ -282,7 +307,16 @@ export function classifyIntent(text: string): IntentClassification {
   const anchor = ANCHORS.find(({ re }) => re.test(body))
   if (anchor) { signals.push(`anchor:${anchor.label}`); return result("implement") }
 
+  // A short request that names an available skill, or points back at the previous exchange, is anchored by that
+  // skill or exchange: the model has the context the offer would ask for.
+  const lower = clean.toLowerCase()
+  const namedSkill = (context.skillNames ?? []).find(name => name.length >= 3 && lower.includes(name.toLowerCase()))
+  if (namedSkill) { signals.push(`anchor:skill:${namedSkill}`); return result("implement") }
+  if (SKILL_WORD.test(clean)) { signals.push("anchor:skill-word"); return result("implement") }
+
   const uncertain = UNCERTAIN.find(({ re }) => re.test(clean))
+  // "make it better" points back but is still open-ended: uncertainty keeps the offer.
+  if (!uncertain && context.priorTurn && BACK_REFERENCE.some(re => re.test(clean))) { signals.push("anchor:follow-up"); return result("implement") }
   if (uncertain) signals.push(uncertain.label)
   if (imperative || uncertain) {
     if (imperative && !uncertain && wordCount(clean) >= DETAILED_WORDS) { signals.push("detailed"); return result("implement") }
