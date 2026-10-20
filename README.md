@@ -80,7 +80,9 @@ bun scripts/otter-wiki.ts lint      # 링크·해시 무결성
 **Windows**: otter는 POSIX 소유권·권한 검사에 기대므로 WSL2(기본 Ubuntu) 안에서 실행됨
 - 준비: 관리자 PowerShell에서 `wsl --install` → 재부팅 → Ubuntu를 한 번 열어 사용자 생성
 - 설치: `irm …/install.ps1 | iex`. WSL 안에서 `install.sh`를 돌리고 `%LOCALAPPDATA%\otter\bin\otter.cmd`를 만들어 사용자 PATH에 추가 → PowerShell·cmd·Windows Terminal에서 `otter`
-- 엔진 CLI(`codex`/`claude`/`ollama`)와 로그인은 **WSL 안에** 있어야 함
+- 엔진 CLI(`codex`/`claude`/`ollama`)와 로그인은 **WSL 안에** 있어야 함. Windows에 설치한 `codex.exe`/`claude.exe`의 로그인은 WSL에서 쓸 수 없어 무시함
+- `otter`는 WSL 로그인 셸(`~/.profile`·`~/.bashrc`)을 읽어 nvm·npm·설치 프로그램으로 넣은 CLI를 찾음. 확인: `otter auth`
+- 로그인: `otter login codex`는 Windows 기본 브라우저를 열고, 안 열리면 출력된 URL을 Windows에서 열면 됨. localhost에 못 돌아오면 `otter login codex device`(코드 입력 방식)
 - 프로젝트는 WSL 파일시스템(`\\wsl$\Ubuntu\home\<you>\...`)에 두는 것을 권장. `C:\` 드라이브(`/mnt/c`)는 파일 접근이 느림
 - 배포판 지정 `$env:OTTER_DISTRO='Ubuntu-24.04'`, 제거 `$env:OTTER_UNINSTALL='1'; irm …/install.ps1 | iex`
 

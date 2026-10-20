@@ -15,7 +15,7 @@ import { executionRunDirectory } from "../state/store.ts"
 import { defaultUpdateCheck, updateNoticeText, type UpdateNotice } from "./update-check.ts"
 import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
 import { inputColorSupported, inputLine, renderInput, type InputPresentation } from "./cli-input.ts"
-import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
+import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
 import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus, type CliToolDisplay } from "./cli-progress.ts"
 import { formatDuration, type WorkflowProgress } from "../tui/progress.ts"
 import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, skillInstructionBudget, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
@@ -1412,6 +1412,7 @@ export async function runInteractiveSession(
         engine = AUTH_ENGINES[picked]!
       }
       let argv: string[]
+      let hint: string | undefined
       if (command === "/login") {
         const methods: readonly LoginMethod[] = engine === "codex" ? ["browser", "device", "api-key"] : ["browser", "console"]
         let method = rest[1] as LoginMethod | undefined
@@ -1430,6 +1431,7 @@ export async function runInteractiveSession(
           method = methods[picked]!
         }
         argv = loginArgv(engine, method)
+        hint = loginHint(engine, method)
       } else {
         const confirm = await chooseFrom(terminal, `Sign out of ${engine}? This removes the ${engine} CLI's saved sign-in for every program that uses it.`,
           ["Keep signed in", `Sign out of ${engine}`], ["Nothing changes.", `Runs ${engine} ${logoutArgv(engine).join(" ")}.`], "Escape keeps you signed in.", signal)
@@ -1447,7 +1449,7 @@ export async function runInteractiveSession(
       let run: AuthRun | undefined
       let failure: string | undefined
       try {
-        process.stderr.write(`\n$ ${engine} ${argv.join(" ")}\n`)
+        process.stderr.write(`\n$ ${engine} ${argv.join(" ")}\n${hint ? `${hint}\n` : ""}`)
         run = await deps.auth.run(engine, argv, worktree)
       } catch (error) {
         failure = boundedTerminalDiagnostic(error instanceof Error ? error.message : String(error))

@@ -1,0 +1,13 @@
+#!/bin/sh
+# BROWSER for otter under WSL: open a URL in the Windows default browser (vendor sign-in pages).
+url=${1:?usage: otter-wsl-browser <url>}
+if command -v wslview >/dev/null 2>&1; then exec wslview "$url"; fi
+for explorer in explorer.exe /mnt/c/Windows/explorer.exe; do
+  if command -v "$explorer" >/dev/null 2>&1 || [ -x "$explorer" ]; then
+    # explorer.exe exits non-zero even when it opened the page.
+    "$explorer" "$url" || true
+    exit 0
+  fi
+done
+echo "otter: no Windows browser found; open this URL yourself: $url" >&2
+exit 1

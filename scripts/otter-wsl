@@ -1,0 +1,37 @@
+#!/bin/sh
+# Windows launcher target: %LOCALAPPDATA%\otter\bin\otter.cmd runs `wsl.exe --exec /bin/sh <this file> <launcher> args…`.
+#
+# `wsl.exe --exec` starts a program with no shell, so ~/.profile and ~/.bashrc never run: engine CLIs installed with
+# nvm, npm's global prefix or a vendor installer (~/.local/bin, ~/.nvm/…, ~/.bun/bin) are not on PATH, and `/login`,
+# `/auth` and model calls cannot find codex/claude (or find a Windows .exe that does not share the WSL sign-in). This
+# script re-runs itself once through the user's interactive login shell to load that environment, then starts otter.
+set -eu
+
+launcher=${1:?usage: otter-wsl <otter launcher> [args...]}
+
+if [ "${OTTER_WSL_ENV:-}" != 1 ]; then
+  OTTER_WSL_ENV=1
+  export OTTER_WSL_ENV
+  shell=${SHELL:-}
+  case "$shell" in /*) [ -x "$shell" ] || shell=/bin/sh ;; *) shell=/bin/sh ;; esac
+  # -l loads the profile; -i also loads ~/.bashrc / ~/.zshrc past their non-interactive early return (where nvm lives).
+  # -i needs a terminal on stdin (otherwise the shell warns "no job control"), so piped runs use the profile only.
+  if [ -t 0 ]; then flags=-lic; else flags=-lc; fi
+  exec "$shell" "$flags" 'exec /bin/sh "$0" "$@"' "$0" "$@"
+fi
+shift
+
+# Common per-user install locations, after whatever the user's shell already set.
+for dir in "$HOME/.local/bin" "$HOME/.bun/bin" "$HOME/.npm-global/bin"; do
+  case ":$PATH:" in *":$dir:"*) ;; *) [ -d "$dir" ] && PATH="$PATH:$dir" ;; esac
+done
+export PATH
+
+# Vendor sign-in opens a browser. WSL has none of its own; open the Windows default browser unless one is configured.
+if [ -z "${BROWSER:-}" ]; then
+  here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+  BROWSER="$here/otter-wsl-browser"
+  export BROWSER
+fi
+
+exec "$launcher" "$@"

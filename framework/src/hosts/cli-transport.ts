@@ -137,15 +137,36 @@ function executableName(engine: CliEngine): string {
   }
 }
 
-/** Absolute real path of the engine CLI on PATH (the same lookup a transport run uses); throws when absent. */
+/** Whether a PATH entry may supply an engine CLI; under WSL, Windows drive mounts (/mnt/<letter>/…) never do. */
+export function usablePathEntry(entry: string, wsl: boolean): boolean {
+  if (entry.length === 0 || entry.includes("\0")) return false
+  return !(wsl && /^\/mnt\/[a-z](?:\/|$)/iu.test(entry))
+}
+
+let wslKernel: boolean | undefined
+/** Running inside WSL (Windows drives are mounted under /mnt/<letter>). */
+export function insideWsl(): boolean {
+  if (wslKernel === undefined) {
+    try { wslKernel = process.platform === "linux" && /microsoft/iu.test(readFileSync("/proc/sys/kernel/osrelease", "utf8")) }
+    catch { wslKernel = false }
+  }
+  return wslKernel
+}
+
+/**
+ * Absolute real path of the engine CLI on PATH (the same lookup a transport run uses); throws when absent. Under WSL the
+ * Windows PATH entries (/mnt/c/…) are skipped: a Windows codex/claude keeps its sign-in on the Windows side, so it would
+ * report "not signed in" (or fail to start) even when the user signed in.
+ */
 export function findExecutable(engine: CliEngine): string {
   const pathValue = process.env.PATH
   if (typeof pathValue !== "string" || pathValue.length === 0 || pathValue.includes("\0")) {
     throw new Error(SAFE_ERRORS.executable)
   }
   const name = executableName(engine)
+  const wsl = insideWsl()
   for (const entry of pathValue.split(delimiter)) {
-    if (entry.length === 0 || entry.includes("\0")) continue
+    if (!usablePathEntry(entry, wsl)) continue
     try {
       const candidate = resolve(entry, name)
       if (!statSync(candidate).isFile()) continue
