@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { projectConfigPath, userConfigPath } from "../src/config.ts"
-import { clearCombo, clearComboRole, clearDefaultModel, readCombo, readDefaultModel, saveComboRole, saveDefaultModel, validateComboRoutes, validateDefaultModel } from "../src/hosts/default-model.ts"
+import { clearCombo, clearComboRole, clearDefaultModel, fileComboStore, readCombo, readDefaultModel, saveCombo, saveComboRole, saveDefaultModel, validateComboRoutes, validateDefaultModel } from "../src/hosts/default-model.ts"
 
 let root: string
 let worktree: string
@@ -175,6 +175,55 @@ describe("chat.combo", () => {
     const after = readFileSync(userConfigPath(), "utf8")
     expect(after).toContain("// keep me")
     expect(after).toContain('"default_model"')
+  })
+
+  test("replace removes stale routes while preserving unrelated settings and comments", () => {
+    put(userConfigPath(), '{\n  // keep me\n  "memory": { "engine": "off" },\n  "chat": {\n    // keep the default\n    "default_model": { "engine": "local", "model": "g" },\n    "combo": { "planner": { "engine": "claude", "model": "opus" }, "worker": { "engine": "local", "model": "old" } }\n  }\n}\n')
+    const routes = { critic: { engine: "claude" as const, model: "sonnet" } }
+    expect(fileComboStore.replace(routes)).toBe(userConfigPath())
+    expect(readCombo(worktree)).toEqual({ state: "configured", routes, sources: { critic: "user" } })
+    expect(readDefaultModel(worktree)).toMatchObject({ state: "configured", value: { engine: "local", model: "g" } })
+    const saved = readFileSync(userConfigPath(), "utf8")
+    expect(saved).toContain("// keep me")
+    expect(saved).toContain("// keep the default")
+    expect(saved).toContain('"memory": { "engine": "off" }')
+    expect(statSync(userConfigPath()).mode & 0o777).toBe(0o600)
+    saveCombo({})
+    expect(readCombo(worktree)).toEqual({ state: "unset" })
+  })
+
+  test("replace preserves project overrides and null suppression without editing the project", () => {
+    const project = '{ "chat": { "combo": { "planner": { "engine": "claude", "model": "opus" }, "worker": null } } }'
+    put(projectConfigPath(worktree), project)
+    saveCombo({
+      planner: { engine: "local", model: "user-planner" },
+      worker: { engine: "local", model: "user-worker" },
+      critic: { engine: "claude", model: "sonnet" },
+    })
+    expect(readCombo(worktree)).toEqual({
+      state: "configured",
+      routes: { planner: { engine: "claude", model: "opus" }, critic: { engine: "claude", model: "sonnet" } },
+      sources: { planner: "project", critic: "user" },
+    })
+    expect(readFileSync(projectConfigPath(worktree), "utf8")).toBe(project)
+    put(projectConfigPath(worktree), '{ "chat": { "combo": null } }')
+    saveCombo({ planner: { engine: "claude", model: "sonnet" } })
+    expect(readCombo(worktree)).toEqual({ state: "unset" })
+  })
+
+  test("replace validates the whole map before writing and refuses invalid JSONC", () => {
+    const original = '{ "chat": { "combo": { "worker": { "engine": "local", "model": "original" } } } }'
+    put(userConfigPath(), original)
+    expect(() => saveCombo({
+      planner: { engine: "claude", model: "opus" },
+      critic: { engine: "codex", model: "gpt-typo" },
+    })).toThrow("critic.model")
+    expect(readFileSync(userConfigPath(), "utf8")).toBe(original)
+    expect(() => saveCombo({ main: { engine: "local", model: "x" } })).toThrow("main")
+    expect(readFileSync(userConfigPath(), "utf8")).toBe(original)
+    put(userConfigPath(), "{ broken")
+    expect(() => saveCombo({ planner: { engine: "claude", model: "opus" } })).toThrow("invalid-jsonc")
+    expect(readFileSync(userConfigPath(), "utf8")).toBe("{ broken")
   })
 
   test("save refuses invalid input and invalid JSONC without writing", () => {

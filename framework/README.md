@@ -161,11 +161,28 @@ user's route for that role, a partial project route (for example only `engine`) 
 project `null` removes the user's route. Model IDs must match `[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}`,
 and a Codex route must name a bundled Codex slug. A route equal to the main selection is dropped.
 
-In chat, `/model combo` (or the `combo` entry at the end of the `/model` engine list) opens a menu: pick a
+In chat, `/model combo` (or the `combo` entry at the end of the `/model` engine list) offers recommended
+templates and **Custom settings**. The GJC-inspired templates are:
+
+| Template | Planning | Execution | Architecture / review |
+| --- | --- | --- | --- |
+| `astra-fable` | Codex GPT-6 Astra | Codex GPT-6 Luna | Claude Fable |
+| `astra-fable-opus` | Claude Opus | Codex GPT-6 Luna | Claude Fable |
+| `opus-codex` | Claude Sonnet | Codex GPT-5.6 Terra | Codex GPT-6 Sol |
+
+Each template covers all routable roles; the preview shows the complete assignment. The main model stays
+at the current `/model` selection (Astra pairs with `astra-fable-opus`, Opus with `opus-codex`).
+These templates require both Codex and Claude; `/auth` checks sign-in and `/login <engine>` signs in.
+They use Otter's bundled Codex slugs and native Claude aliases, rather than a live account model list.
+Existing session preflight checks still apply. Saving a template atomically replaces user role routes, preserves unrelated settings,
+and respects project overrides. After saving, the custom editor opens for further changes.
+`/model combo presets` lists templates without changing anything; `/model combo preset <name>` saves one directly.
+
+**Custom settings**, also available through `/model combo custom`, lets you pick a
 role (each shows its current route or "main model"), then an
 engine (or "Use the main model" to remove the route), then a model from the same discovered list `/model`
 uses (or enter a native ID). Each pick is saved immediately and the menu returns to the role list; it also
-offers "Apply to a new session" (once a model is selected), "Clear all routes" and "Done". The full-screen
+offers "Recommended combos", "Apply to a new session" (once a model is selected), "Clear all routes" and "Done". The full-screen
 TUI shows filterable pickers; readline shows numbered menus. Typed forms do the same without the menu:
 `/model combo show` shows the effective routes, the source of each, and whether the current session uses them.
 `/model combo <role> <local|codex|claude> <native-id>` saves a
