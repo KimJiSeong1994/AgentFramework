@@ -37,14 +37,15 @@ describe("shared interactive actions", () => {
   test("contextual help does not promise work Resume in read-only history", () => {
     const readOnly = interactiveActions("read-only")
     expect(readOnly.some(action => action.id === "continue")).toBe(false)
-    expect(interactiveHelp("read-only")).toContain("/resume <sid>")
+    expect(interactiveHelp("read-only")).toContain("/resume [sid]")
     expect(interactiveHelp("read-only")).toContain("(local)")
   })
 
   test("unselected completion is actionable and never inserts skill placeholders", () => {
     const commands = commandInsertions("/", "unselected")
     expect(commands).toContain("/model")
-    expect(commands).not.toContain("/sessions")
+    expect(commands).toContain("/sessions")
+    expect(commands).toContain("/resume")
     expect(commands).not.toContain("/plan")
     expect(commandInsertions("/", "chat").join(" ")).not.toContain("<name>")
   })

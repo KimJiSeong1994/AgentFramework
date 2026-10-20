@@ -27,9 +27,10 @@ const LOCAL_CANCELLED_NOTICE = "Ollama model discovery was cancelled."
 const LOCAL_LIST_NOTICE = "Installed IDs are from the current Ollama runtime and may change; enter a native model ID explicitly if needed."
 const LOCAL_PARTIAL_NOTICE = "Some invalid Ollama list entries were omitted; enter a native model ID explicitly if needed."
 const CODEX_NOTICE = `Pinned Codex ${CODEX_VERSION} bundled model slugs are shown; this list does not check account availability.`
-const CLAUDE_NOTICE = "Sonnet, Opus, and Haiku are native Claude CLI aliases, not a fetched account-availability list; enter a native model ID explicitly if needed."
+const CLAUDE_NOTICE = "Fable, Sonnet, Opus, and Haiku are native Claude CLI aliases, not a fetched account-availability list; enter a native model ID explicitly if needed."
 
 const CLAUDE_ALIASES = [
+  { id: "fable", label: "Fable (Claude CLI alias)" },
   { id: "sonnet", label: "Sonnet (Claude CLI alias)" },
   { id: "opus", label: "Opus (Claude CLI alias)" },
   { id: "haiku", label: "Haiku (Claude CLI alias)" },

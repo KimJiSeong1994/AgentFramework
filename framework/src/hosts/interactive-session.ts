@@ -50,7 +50,7 @@ import { runOperatorShell, type ShellResult, type ShellSnapshot } from "./operat
 import { fileMemoryStore, memoryCommand, type MemoryCommandStore } from "./memory-command.ts"
 
 export type CliEngine = CliRuntimeOptions["engine"]
-export type InteractiveArgs = { worktree: string; engine?: CliEngine; model?: string }
+export type InteractiveArgs = { worktree: string; engine?: CliEngine; model?: string; resume?: string | true; continue?: boolean; newSession?: boolean }
 export type InteractiveExit = { code: number }
 /** `interrupt` is Escape: it stops running work only; `cancel` is the explicit /cancel that may also stop a workflow. */
 export type TerminalControl = "cancel" | "interrupt" | "pause" | "shutdown" | "quit" | "disconnect" | "suspend"
@@ -235,17 +235,32 @@ export { validModelID } from "./default-model.ts"
 
 export function parseInteractiveArgs(argv: string[], cwd = process.cwd()): InteractiveArgs {
   const fields: Record<string, string> = {}
-  const allowed = new Set(["--worktree", "--engine", "--model"])
+  const allowed = new Set(["--worktree", "--engine", "--model", "--resume", "--continue", "--new"])
   for (let index = 0; index < argv.length; index++) {
     const flag = argv[index]!
-    if (!allowed.has(flag)) throw new InteractiveLaunchError("unknown chat option; use --worktree, --engine, or --model")
+    if (!allowed.has(flag)) throw new InteractiveLaunchError("unknown chat option; use --worktree, --engine, --model, --resume [ID], --continue, or --new")
     if (Object.hasOwn(fields, flag)) throw new InteractiveLaunchError(`duplicate ${flag} option`)
+    if (flag === "--continue" || flag === "--new") {
+      fields[flag] = "true"
+      continue
+    }
+    if (flag === "--resume" && (argv[index + 1] === undefined || argv[index + 1]!.startsWith("--"))) {
+      fields[flag] = ""
+      continue
+    }
     const value = argv[index + 1]
     if (value === undefined || value === "" || value.startsWith("--")) {
       throw new InteractiveLaunchError(`missing value for ${flag}`)
     }
     fields[flag] = value
     index++
+  }
+  const restoring = Object.hasOwn(fields, "--resume") || Object.hasOwn(fields, "--continue")
+  if (["--resume", "--continue", "--new"].filter(flag => Object.hasOwn(fields, flag)).length > 1) {
+    throw new InteractiveLaunchError("choose only one of --resume, --continue, or --new")
+  }
+  if (restoring && (fields["--engine"] !== undefined || fields["--model"] !== undefined)) {
+    throw new InteractiveLaunchError("restoring uses the saved model; omit --engine and --model, then switch with /model")
   }
   const engine = fields["--engine"]
   if (engine !== undefined && engine !== "local" && engine !== "codex" && engine !== "claude") {
@@ -259,7 +274,15 @@ export function parseInteractiveArgs(argv: string[], cwd = process.cwd()): Inter
     worktree: fields["--worktree"] ?? cwd,
     ...(engine ? { engine } : {}),
     ...(model ? { model } : {}),
+    ...(Object.hasOwn(fields, "--resume") ? { resume: fields["--resume"] || true as const } : {}),
+    ...(fields["--continue"] ? { continue: true } : {}),
+    ...(fields["--new"] ? { newSession: true } : {}),
   }
+}
+
+function sessionLabel(session: ReturnType<typeof inspectSessions>[number]): string {
+  const when = session.lastActivityAt ? new Date(session.lastActivityAt).toLocaleString() : "time unknown"
+  return terminalSafeText(`${session.summary ?? "Untitled conversation"} · ${session.engine} ${session.model ?? "model unknown"} · ${when} · ${session.sessionID}${session.corrupt ? ` · unavailable: ${boundedTerminalDiagnostic(session.corrupt)}` : ""}`)
 }
 
 function defaultGitTopLevel(directory: string): string | undefined {
@@ -1374,11 +1397,56 @@ export async function runInteractiveSession(
     let model: string | undefined
     let startupDiscovery: InteractiveViewFacts["discovery"] = "not-observed"
     let startupModelScope: "session" | "default" = "session"
+    let startupSession: (NonNullable<ReturnType<typeof readSessionMetadata>> & { sessionID: string }) | undefined
+    function selectStartupSession(sessionID: string): void {
+      const saved = readSessionMetadata(worktree, sessionID)
+      if (!saved || !["local", "codex", "claude"].includes(saved.engine) || !saved.model) {
+        throw new InteractiveLaunchError("No compatible saved CLI session; use /sessions to choose another session.")
+      }
+      const replay = replaySession(worktree, sessionID, { limit: 1 })
+      if (!replay.complete) throw new InteractiveLaunchError("Incomplete saved session; restore refused.")
+      startupSession = { ...saved, sessionID }
+      engine = saved.engine as CliEngine
+      model = saved.model
+    }
+    const startupCandidates = () => inspectSessions(worktree).filter(session =>
+      session.corrupt || (["local", "codex", "claude"].includes(session.engine) && session.model))
+    async function chooseStartupSession(): Promise<void> {
+      const sessions = startupCandidates()
+      if (!sessions.length) {
+        terminal.write("No saved CLI sessions in this worktree. Start a new conversation with /model.\n")
+        return
+      }
+      const labels = sessions.map(sessionLabel)
+      const picked = await withProgressSuspended(() => chooseFrom(terminal, "Previous sessions", [...labels, "Start a new conversation"],
+        [...labels, "Choose a model or use your default."], "Choose a previous session; Escape starts a new conversation.", abort.signal))
+      if (picked === undefined || picked === null || picked === sessions.length) return
+      const captured = sessions[picked]
+      if (!captured) throw new InteractiveLaunchError("Invalid saved session selection")
+      if (captured.corrupt) throw new InteractiveLaunchError(`Saved session ${captured.sessionID} is unavailable: ${boundedTerminalDiagnostic(captured.corrupt)}`)
+      selectStartupSession(captured.sessionID)
+      if (startupSession!.engine !== captured.engine || startupSession!.model !== captured.model) {
+        throw new InteractiveLaunchError("The selected session changed; restore refused.")
+      }
+    }
+    if (typeof args.resume === "string") selectStartupSession(args.resume)
+    else if (args.continue) {
+      const latest = startupCandidates()[0]
+      if (!latest) throw new InteractiveLaunchError("No saved CLI sessions in this worktree; start a new conversation with otter.")
+      if (latest.corrupt) throw new InteractiveLaunchError(`Latest saved session ${latest.sessionID} is unavailable: ${boundedTerminalDiagnostic(latest.corrupt)}. Use --resume to choose another session.`)
+      selectStartupSession(latest.sessionID)
+    } else if (args.resume || (!args.newSession && !args.engine && !args.model && terminal.fullscreen && terminal.choose &&
+      startupCandidates().length > 0)) {
+      await chooseStartupSession()
+    }
+    if (abort.signal.aborted) return signalExit(receivedSignal)
     // Explicit flags win; a persisted default applies only when neither flag was given.
     const configuredDefault: DefaultModelLookup = args.engine === undefined && args.model === undefined
       ? deps.defaultModel.read(worktree)
       : { state: "unset" }
-    if (args.engine !== undefined && args.model !== undefined) {
+    if (startupSession) {
+      // The retained selection and routes take precedence over today's defaults.
+    } else if (args.engine !== undefined && args.model !== undefined) {
       engine = args.engine
       model = args.model
     } else if (configuredDefault.state === "configured") {
@@ -1401,7 +1469,7 @@ export async function runInteractiveSession(
         const input = await withProgressSuspended(() => readInput(
           terminal,
           selectionTitle,
-          "/model choose | /help | /quit",
+          "/model choose | /sessions resume | /help | /quit",
           "You> ",
           abort.signal,
         ))
@@ -1419,6 +1487,19 @@ export async function runInteractiveSession(
         }
         const [command, ...commandArgs] = message.split(/\s+/u)
         if (command === "/quit" && commandArgs.length === 0) return { code: 0 }
+        if ((command === "/sessions" && commandArgs.length === 0) || (command === "/resume" && commandArgs.length <= 1)) {
+          try {
+            if (commandArgs[0]) selectStartupSession(commandArgs[0])
+            else await chooseStartupSession()
+            if (startupSession) break selection
+          } catch (error) {
+            startupSession = undefined
+            engine = undefined
+            model = undefined
+            terminal.write(`Session restore refused: ${boundedTerminalDiagnostic(String(error))}\n`)
+          }
+          continue
+        }
         if (command === "/help" && hasInteractiveAction("unselected", "help")) {
           if (commandArgs.length === 0) await presentHelp(terminal, "unselected", abort.signal)
           else terminal.write("Usage: /help\n")
@@ -1522,14 +1603,14 @@ export async function runInteractiveSession(
     terminal.actionContext?.("chat")
 
     terminal.write("\nNative CLI limitations: input size is estimated and output limits are reactive; these are not strict guarantees. No process or filesystem containment is claimed.\n\n")
-    const initialSessionID = defaultSessionID(deps.randomUUID())
+    const initialSessionID = startupSession?.sessionID ?? defaultSessionID(deps.randomUUID())
     const initialProgress = scopedProgress()
-    const startupCombo = comboRoutesFor(deps.combo.read(worktree), engine, model)
+    const startupCombo = startupSession ? { routes: startupSession.routes ?? {}, invalid: undefined } : comboRoutesFor(deps.combo.read(worktree), engine, model)
     if (startupCombo.invalid !== undefined) startupNotices.push(`Combo ignored: ${boundedTerminalDiagnostic(startupCombo.invalid)}. No role routes are applied; every role uses ${engine} / ${model}.`)
     const initialRoutes = startupCombo.routes
     const initialRuntime = deps.createRuntime({ worktree, engine, model, progress: initialProgress.sink, ...(Object.keys(initialRoutes).length ? { routes: initialRoutes } : {}) })
     initialRuntime.linuxAdmission?.assertBootEpoch()
-    await deps.admitRuntime(initialRuntime)
+    if (!startupSession) await deps.admitRuntime(initialRuntime)
     if (abort.signal.aborted) return signalExit(receivedSignal)
     sessionStore = attachAdmission(initialRuntime, initialSessionID, { engine, model, ...(Object.keys(initialRoutes).length ? { routes: initialRoutes } : {}) })
     initialProgress.bind(sessionStore)
@@ -1541,7 +1622,7 @@ export async function runInteractiveSession(
       sessionID: initialSessionID,
       runtime: initialRuntime,
       controller: deps.createController(initialRuntime),
-      conversation: deps.createConversation(initialRuntime, initialSessionID),
+      conversation: deps.createConversation(initialRuntime, initialSessionID, startupSession ? restoredConversation(initialSessionID) : undefined),
     }
     let requestObservation: RequestObservation = { state: "not-observed" }
     let discoveryObservation: InteractiveViewFacts["discovery"] = startupDiscovery
@@ -1594,6 +1675,14 @@ export async function runInteractiveSession(
     terminal.bindSession?.(initialSessionID)
     terminal.bindView?.(currentViewIdentity())
     terminal.transcriptSource?.(options => replaySession(worktree, initialSessionID, options))
+    if (startupSession) {
+      terminal.write(`Restored session ${initialSessionID}. Previous conversation and model restored; use /continue to resume.\n`)
+      const retainedWorkflow = readSessionCommitted(worktree, initialSessionID)
+      if (retainedWorkflow) {
+        terminal.write(terminalSafeText(`[workflow] ${retainedWorkflow.wf.id} ${retainedWorkflow.wf.phase} · ${retainedWorkflow.path} · sha256 ${retainedWorkflow.sha256}\n`))
+        terminal.write(terminalSafeText(`[artifacts] ${incompleteArtifactSummary(worktree, retainedWorkflow.wf) ?? "all verified"}\n`))
+      }
+    }
     if (startupModelScope === "default") saveDefaultModel({ engine, model })
     for (const notice of startupNotices.splice(0)) terminal.write(terminalSafeText(`${notice}\n`))
     publishView()
@@ -2319,15 +2408,16 @@ export async function runInteractiveSession(
         state: session.corrupt ? "corrupt" : session.sessionID === retainedSDKSessionID ? "read-only" : session.held ? "held" : "retained",
         ...(session.corrupt ? { detail: boundedTerminalDiagnostic(session.corrupt) } : {}),
       }))
-      const labels = candidates.map(candidate =>
-        `${candidate.current ? "current · " : ""}${candidate.sessionID} · ${candidate.engine} ${candidate.model ?? "model unknown"} · ${candidate.state}`)
+      const labels = candidates.map((candidate, index) =>
+        `${candidate.current ? "current · " : ""}${sessionLabel(inspected[index]!)} · ${candidate.state}`)
       const origin: ViewIdentity = sessionStore
         ? { mode: "writable", sessionID: selection.sessionID, epoch: sessionStore.epoch }
         : { mode: "retained-read-only", sessionID: currentSessionID }
       const chosen = terminal.choose
         ? await terminal.choose("Retained sessions", labels, abort.signal, { kind: "generic-list", rows: labels, origin })
-        : undefined
-      if (chosen === undefined) return true
+        : await chooseFrom(terminal, "Retained sessions", labels, labels, "Choose a session; empty input returns.", abort.signal)
+      if (abort.signal.aborted) return false
+      if (chosen === undefined || chosen === null) return true
       const candidate = candidates[chosen]
       if (!candidate) {
         terminal.write("Session restore refused: captured selection is no longer valid.\n")
@@ -2460,7 +2550,7 @@ export async function runInteractiveSession(
           await presentHelp(terminal, "read-only", abort.signal)
           continue
         }
-        if (command === "/sessions" && commandArgs.length === 0) {
+        if ((command === "/sessions" || command === "/resume") && commandArgs.length === 0) {
           if (!await chooseRetainedSession()) return signalExit(receivedSignal)
           continue
         }
@@ -2516,7 +2606,7 @@ export async function runInteractiveSession(
         await presentHelp(terminal, actionContext, abort.signal)
         continue
       }
-      if (command === "/sessions" && commandArgs.length === 0) {
+      if ((command === "/sessions" || command === "/resume") && commandArgs.length === 0) {
         if (!await chooseRetainedSession()) return signalExit(receivedSignal)
         continue
       }

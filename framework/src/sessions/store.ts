@@ -35,7 +35,7 @@ export type SessionClearHoldProof = { authorized: true; reason: string }
 export type SessionOpenMetadata = { engine: string; model?: string; routes?: ComboRoutes }
 export type ReplayOptions = { offset?: number; limit?: number; query?: string; order?: "asc" | "desc"; kind?: TranscriptKind }
 export type ReplayResult = { records: TranscriptRecord[]; relatedRecords?: TranscriptRecord[]; complete: boolean; recoveryNotice?: string; nextOffset?: number; totalRecords?: number }
-export type InspectedSession = { sessionID: string; engine: string; model?: string; routes?: ComboRoutes; held: boolean; corrupt?: string }
+export type InspectedSession = { sessionID: string; engine: string; model?: string; routes?: ComboRoutes; held: boolean; lastActivityAt?: number; summary?: string; corrupt?: string }
 export type SessionAttachmentInspection =
   | { state: "attached"; epoch: string; sessionID: string; worktree: string; bootID: string; pid: number; processStart: string; identity: "live" | "dead" | "ambiguous" }
   | { state: "released"; epoch: string; sessionID: string; worktree: string; workflowID: string | null; revision: number | null; releaseEvidence: string }
@@ -80,7 +80,7 @@ type SegmentManifest = { name: string; firstSeq: number; lastSeq: number; bytes:
 type Manifest = { version: 1; lastSeq: number; segments: SegmentManifest[] }
 type FileRead = { text: string; stat: fs.Stats }
 type ScannedSegment = SegmentManifest & { number: number; fullBytes: number; manifestBoundaryBytes?: number; path: string }
-type ScanResult = { expected: Manifest; lastSeq: number; totalRecords: number; problem?: string; trailing?: { name: string; path: string; validBytes: number; bytes: Buffer }; manifestPresent: boolean; manifestNeedsUpdate: boolean }
+type ScanResult = { lastActivityAt?: number; expected: Manifest; lastSeq: number; totalRecords: number; problem?: string; trailing?: { name: string; path: string; validBytes: number; bytes: Buffer }; manifestPresent: boolean; manifestNeedsUpdate: boolean }
 
 const MAX_SEGMENT_BYTES = 1024 * 1024
 const MAX_EVENT_ID_BYTES = 16 * 1024
@@ -215,11 +215,12 @@ function readRegularFile(path: string, maxBytes?: number): FileRead {
   }
 }
 
-function readRegularBytes(path: string): Buffer {
+function readRegularBytes(path: string): { bytes: Buffer; stat: fs.Stats } {
   const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | noFollow)
   try {
-    if (!fs.fstatSync(fd).isFile()) throw new Error(`session file is not regular: ${path}`)
-    return fs.readFileSync(fd)
+    const stat = fs.fstatSync(fd)
+    if (!stat.isFile()) throw new Error(`session file is not regular: ${path}`)
+    return { bytes: fs.readFileSync(fd), stat }
   } finally {
     fs.closeSync(fd)
   }
@@ -720,6 +721,7 @@ function scanTranscript(dir: string, onRecord?: (record: TranscriptRecord) => vo
   const scanned: ScannedSegment[] = []
   let expectedSeq = 1
   let totalRecords = 0
+  let lastActivityAt: number | undefined
   let trailing: ScanResult["trailing"]
   let problem: string | undefined
 
@@ -727,7 +729,9 @@ function scanTranscript(dir: string, onRecord?: (record: TranscriptRecord) => vo
     const file = files[index]!
     let bytes: Buffer
     try {
-      bytes = readRegularBytes(file.path)
+      const read = readRegularBytes(file.path)
+      bytes = read.bytes
+      lastActivityAt = Math.max(lastActivityAt ?? 0, read.stat.mtimeMs)
     } catch (error) {
       problem = error instanceof Error ? error.message : String(error)
       break
@@ -787,7 +791,7 @@ function scanTranscript(dir: string, onRecord?: (record: TranscriptRecord) => vo
   const expectedManifest: Manifest = { version: 1, lastSeq, segments: expectedSegments }
   if (manifest && manifest.segments.length === 0 && manifest.lastSeq !== 0) problem ??= "transcript manifest sequence is corrupt"
   const manifestNeedsUpdate = !parsedManifest.present || !manifest || !isDeepStrictEqual(manifest, expectedManifest)
-  return { expected: expectedManifest, lastSeq, totalRecords, ...(problem ? { problem } : {}), ...(trailing && !problem ? { trailing } : {}), manifestPresent: parsedManifest.present, manifestNeedsUpdate }
+  return { expected: expectedManifest, lastSeq, totalRecords, ...(lastActivityAt === undefined ? {} : { lastActivityAt }), ...(problem ? { problem } : {}), ...(trailing && !problem ? { trailing } : {}), manifestPresent: parsedManifest.present, manifestNeedsUpdate }
 }
 
 function recoverTranscript(dir: string): ScanResult {
@@ -1213,11 +1217,20 @@ export function inspectSessions(worktree: string): InspectedSession[] {
     assertDirectory(directory, true)
     let metadata: SessionMetadata | null = null
     let corrupt: string | undefined
+    let transcriptActivityAt: number | undefined
+    let summary: string | undefined
     try { metadata = readSessionMetadataAt(directory) }
     catch (error) { corrupt = error instanceof Error ? error.message : String(error) }
     if (!metadata && !corrupt) corrupt = "session metadata is missing"
     try {
-      const scan = scanTranscript(directory)
+      const scan = scanTranscript(directory, record => {
+        if (summary !== undefined || record.kind !== "user") return
+        const text = (record.data.text as string).replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, " ").trim()
+        if (!text) return
+        const characters = Array.from(text)
+        summary = characters.length > 120 ? `${characters.slice(0, 119).join("")}…` : text
+      })
+      transcriptActivityAt = scan.lastActivityAt
       if (scan.problem) corrupt ??= scan.problem
       else if (scan.trailing) corrupt ??= "incomplete trailing transcript row"
       else if (scan.manifestNeedsUpdate) corrupt ??= "transcript manifest requires recovery"
@@ -1225,16 +1238,20 @@ export function inspectSessions(worktree: string): InspectedSession[] {
     try {
       if (safeLockFile(lockPath(directory))) lockAndStat(lockPath(directory))
     } catch (error) { corrupt ??= error instanceof Error ? error.message : String(error) }
+    const activity = [metadata?.createdAt, metadata?.updatedAt, ...(corrupt ? [] : [transcriptActivityAt])]
+      .filter((value): value is number => value !== undefined)
     result.push({
       sessionID: entry.name,
       engine: metadata?.engine ?? "",
       ...(metadata?.model === undefined ? {} : { model: metadata.model }),
       ...(metadata?.routes ? { routes: metadata.routes } : {}),
       held: metadata?.held ?? true,
+      ...(activity.length ? { lastActivityAt: Math.max(...activity) } : {}),
+      ...(!corrupt && summary ? { summary } : {}),
       ...(corrupt ? { corrupt } : {}),
     })
   }
-  return result.sort((a, b) => a.sessionID.localeCompare(b.sessionID))
+  return result.sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) || a.sessionID.localeCompare(b.sessionID))
 }
 
 export function replaySession(worktree: string, sid: string, options: ReplayOptions = {}): ReplayResult {

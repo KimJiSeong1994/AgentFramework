@@ -47,7 +47,14 @@ const CLI_USAGE = `Usage:
 
 Interactive chat:
   otter
+  otter --continue                 Resume the most recent saved CLI session in this worktree
+  otter --resume [ID]              Choose a saved session, or open one by ID
+  otter --new                      Start fresh without the startup session picker
   otter chat [--worktree PATH] [--engine local|codex|claude] [--model ID]
+
+Saved conversations are retained across restarts. The TUI offers previous sessions at startup.
+/sessions and /resume [ID] work before model selection too. Restored sessions keep their saved
+model and conversation; /continue performs the existing explicit work-resume checks.
 
 Bare 'otter' and 'otter chat' start Otter's interactive terminal in the current Git worktree,
 or in the canonical worktree selected by --worktree. Choose an engine from the menu, or
@@ -770,7 +777,7 @@ function failCli(error: unknown, command?: string): void {
 
 function main(argv: string[]): void {
   const interactiveRequested = argv.length === 0 || argv[0] === "chat" ||
-    ["--worktree", "--engine", "--model"].includes(argv[0]!)
+    ["--worktree", "--engine", "--model", "--resume", "--continue", "--new"].includes(argv[0]!)
   if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h") ||
     interactiveRequested && argv.some((arg) => arg === "--help" || arg === "-h")) {
     console.log(CLI_USAGE)

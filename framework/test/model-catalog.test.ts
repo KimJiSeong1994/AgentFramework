@@ -191,6 +191,7 @@ test("Claude options are explicitly labeled native aliases rather than entitleme
   const catalog = await discoverModels("claude", "/worktree-is-not-needed-for-static-metadata")
 
   expect(catalog.models).toEqual([
+    { id: "fable", label: "Fable (Claude CLI alias)" },
     { id: "sonnet", label: "Sonnet (Claude CLI alias)" },
     { id: "opus", label: "Opus (Claude CLI alias)" },
     { id: "haiku", label: "Haiku (Claude CLI alias)" },
