@@ -484,7 +484,8 @@ Model names are native identifiers and examples, not a promise of account availa
 Models must follow Otter's JSON tool protocol and produce valid plans; malformed replies
 are refused, never executed through a fallback. Selecting an installed local model does
 not establish that it can complete the planning/execution workflow.
-The worktree defaults to the current Git worktree; `--worktree PATH` selects another.
+The worktree defaults to the current Git worktree; outside a repository the current folder is used as is (an
+approved plan then has no plan worktree and asks before running in place). `--worktree PATH` selects another.
 The terminal requires a TTY and uses existing vendor authentication. Model discovery
 does not start Ollama, inspect credentials, install a model, or rewrite global
 configuration. A manually entered local ID is not proof of installation; subsequent
