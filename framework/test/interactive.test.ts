@@ -229,6 +229,7 @@ function harness(options: HarnessOptions = {}) {
     cwd: wt.worktree,
     terminal,
     gitTopLevel: () => Object.hasOwn(options, "gitTopLevel") ? options.gitTopLevel : wt.worktree,
+    checkUpdate: async () => undefined,
     createRuntime: ({ worktree, engine, model, progress, routes }) => {
       calls.events.push("runtime")
       if (options.failRuntimeFor?.(engine, model)) throw new TypeError("fixture runtime setup failed")
@@ -1289,8 +1290,73 @@ describe("interactive terminal", () => {
       expect(h.calls.defaultModelWrites).toEqual([])
       throw AdmissionRefusal.hostIncompatible()
     }
-    await expect(launchInteractive({ worktree: wt.worktree }, h.deps)).rejects.toBeInstanceOf(AdmissionRefusal)
+    expect((await launchInteractive({ worktree: wt.worktree }, h.deps)).code).toBe(0)
     expect(h.calls.defaultModelWrites).toEqual([])
+  })
+
+  test.each([
+    ["selected in the picker", {}, ["/model codex gpt-5-codex"]],
+    ["from --engine/--model", { engine: "codex" as const, model: "gpt-5-codex" }, []],
+    ["from the saved default", {}, []],
+  ] as const)("a signed-out engine at startup (%s) shows a sign-in notice and returns to model selection", async (_label, flags, selectLines) => {
+    const h = harness({
+      auth: { codex: "signed-out" },
+      lines: [...selectLines, "/model local native", "hello", "/quit"],
+      ...(Object.keys(flags).length || selectLines.length ? {} : { defaultModel: { state: "configured", value: { engine: "codex", model: "gpt-5-codex" }, source: "user" } as const }),
+    })
+    h.deps.admitRuntime = async runtime => {
+      if (h.calls.runtimes.at(-1)?.engine === "codex") throw AdmissionRefusal.hostIncompatible()
+      void runtime
+    }
+    const result = await launchInteractive({ worktree: wt.worktree, ...flags }, h.deps)
+    expect(result.code).toBe(0)
+    const output = h.calls.output.join("")
+    expect(output).toContain("Cannot start codex / gpt-5-codex. codex is not signed in; run /login codex.")
+    expect(h.calls.runtimes.map(runtime => runtime.engine)).toEqual(["codex", "local"])
+    expect(h.calls.turnBindings).toMatchObject([{ engine: "local", model: "native", text: "hello" }])
+  })
+
+  test("after a startup refusal, /login then choosing the same model starts the session", async () => {
+    const h = harness({ auth: { codex: "signed-out", afterRun: "signed-in" }, lines: ["/login codex browser", "/model codex gpt-5-codex", "hello", "/quit"] })
+    h.deps.admitRuntime = async () => {
+      if (h.calls.authRuns.length === 0) throw AdmissionRefusal.hostIncompatible()
+    }
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.output.join("")).toContain("run /login codex")
+    expect(h.calls.authRuns).toEqual([{ engine: "codex", argv: ["login"] }])
+    expect(h.calls.turnBindings).toMatchObject([{ engine: "codex", model: "gpt-5-codex", text: "hello" }])
+  })
+
+  test("an update found after startup is announced once without blocking the conversation", async () => {
+    let release!: (notice: { current: string; latest: string; ref: string }) => void
+    const pending = new Promise<{ current: string; latest: string; ref: string }>(resolve => { release = resolve })
+    const h = harness({ lines: ["hello", "/quit"], beforeRead: prompt => { if (prompt.includes("You>") && h.calls.turns.length === 1) release({ current: "aaaaaaa", latest: "bbbbbbb", ref: "master" }) } })
+    h.deps.checkUpdate = () => pending
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.turns).toEqual(["hello"])
+    expect(h.calls.output.join("").split("Update available: a newer otter is on master (aaaaaaa -> bbbbbbb). Run: otter update")).toHaveLength(2)
+  })
+
+  test("full-screen: an update found during model selection is recorded once into the new session so the rebuilt transcript keeps it", async () => {
+    const h = harness({ fullscreen: true, scopeChoice: 0, lines: ["/model local native", "/quit"] })
+    h.deps.checkUpdate = async () => ({ current: "aaaaaaa", latest: "bbbbbbb", ref: "master" })
+    await launchInteractive({ worktree: wt.worktree }, h.deps)
+    const saved = replaySession(wt.worktree, h.calls.sessionIDs[0]!).records.filter(record => JSON.stringify(record).includes("Update available"))
+    expect(saved).toHaveLength(1)
+    expect(h.calls.output.join("").split("Update available")).toHaveLength(2)
+  })
+
+  test("a failing update check is silent", async () => {
+    const h = harness({ lines: ["/quit"] })
+    h.deps.checkUpdate = () => Promise.reject(new Error("network down"))
+    expect((await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).code).toBe(0)
+    expect(h.calls.output.join("")).not.toContain("Update available")
+  })
+
+  test("a startup failure that is not an admission refusal still ends the launch", async () => {
+    const h = harness({ lines: ["/quit"] })
+    h.deps.admitRuntime = async () => { throw new Error("unexpected fixture failure") }
+    await expect(launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)).rejects.toThrow("unexpected fixture failure")
   })
 
   test("canceling the model picker after choosing another engine keeps the selected session", async () => {
@@ -2314,7 +2380,7 @@ describe("interactive terminal", () => {
     expect(h.calls.output.join("")).toContain("current selection and conversation are unchanged")
   })
 
-  test("default startup admission rejects an incompatible native host before conversation", async () => {
+  test("default startup admission refuses an incompatible native host before conversation and returns to selection", async () => {
     const h = harness({ lines: ["/quit"] })
     const factory = h.deps.createRuntime!
     h.deps.createRuntime = options => Object.assign(factory(options), {
@@ -2324,8 +2390,8 @@ describe("interactive terminal", () => {
       },
     }) as unknown as ExecutionRuntime
     delete h.deps.admitRuntime
-    await expect(launchInteractive({ worktree: wt.worktree, engine: "local", model: "model" }, h.deps))
-      .rejects.toBeInstanceOf(AdmissionRefusal)
+    expect((await launchInteractive({ worktree: wt.worktree, engine: "local", model: "model" }, h.deps)).code).toBe(0)
+    expect(h.calls.output.join("")).toContain("Cannot start local / model.")
     expect(h.calls.sessionIDs).toEqual([])
   })
 

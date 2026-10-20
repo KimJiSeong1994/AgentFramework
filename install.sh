@@ -4,8 +4,9 @@
 #   gh api repos/KimJiSeong1994/AgentFramework/contents/install.sh -H "Accept: application/vnd.github.raw" | bash
 #
 # It clones (or updates) this repository into $OTTER_HOME, installs the runtime dependencies with bun, and writes a
-# `otter` launcher into $OTTER_BIN_DIR. Re-running it updates in place. `install.sh --uninstall` removes what it created
-# and keeps your config (~/.config/otter) and session state (~/.local/state/otter).
+# `otter` launcher into $OTTER_BIN_DIR. Re-running it (or `otter update`) updates in place; interactive starts notify when a
+# newer version is on the branch. `install.sh --uninstall` removes what it created and keeps your config
+# (~/.config/otter) and session state (~/.local/state/otter).
 #
 # Environment:
 #   OTTER_REPO            git URL to install from (default: https://github.com/KimJiSeong1994/AgentFramework.git)
@@ -104,6 +105,8 @@ fetch_source() {
     die "could not fetch $REPO ($REF). For a private repository sign in first (gh auth login), or use an SSH URL: OTTER_REPO=git@github.com:KimJiSeong1994/AgentFramework.git"
   fi
   git -C "$DIR" checkout -q --force --detach FETCH_HEAD
+  # Read by `otter update` and the startup update notice: what to follow and where the launcher lives.
+  printf 'repo=%s\nref=%s\nbin=%s\n' "$REPO" "$REF" "$BIN_DIR" > "$DIR/.git/otter-installer"
   say "source at $(git -C "$DIR" rev-parse --short HEAD)"
 }
 

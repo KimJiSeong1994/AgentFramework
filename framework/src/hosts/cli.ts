@@ -28,6 +28,7 @@ import { assertSDKSessionQuiescent, readSDKResumeIdentity } from "../sessions/sd
 import { captureSDKSessionLifetime } from "../sessions/sdk-transcript.ts"
 import { assertNever, isCancelPending, stopDisplay } from "../workflows/types.ts"
 import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, logoutArgv, runVendorAuth, type AuthEngine, type LoginMethod } from "./engine-auth.ts"
+import { updateCli } from "./update-check.ts"
 
 const COMMANDS = new Set(["status", "import", "approve", "reject", "run", "resume", "pause", "cancel"])
 const COMMON_RECOVERY_COMMANDS = new Set(["approve", "reject", "resume", "pause", "cancel", "run"])
@@ -98,6 +99,12 @@ Engine sign-in (the vendor CLI keeps the credential; otter never reads or stores
   login    <codex|claude> [browser|device|console|api-key]   run the vendor's own sign-in
   logout   <codex|claude>                            run the vendor's own sign-out
   In chat: /auth, /login [engine], /logout [engine]; a failed model request names a signed-out engine.
+
+Updates (installs made by install.sh / install.ps1):
+  update   [--check]                                 install the latest otter in place; --check only reports
+  Interactive starts check in the background at most once a day and only notify ("Update available ... Run: otter update").
+  Disable with "update": { "check": false } in ~/.config/otter/otter.jsonc or OTTER_NO_UPDATE_CHECK=1.
+  Source checkouts are never checked; update them with git.
 
 Commands:
   status   --worktree PATH [--session ID] [--json] [--detail] [--watch [--interval 1..60]]
@@ -782,6 +789,10 @@ function main(argv: string[]): void {
   if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h") ||
     interactiveRequested && argv.some((arg) => arg === "--help" || arg === "-h")) {
     console.log(CLI_USAGE)
+    return
+  }
+  if (argv[0] === "update") {
+    updateCli(argv.slice(1)).then(code => { process.exitCode = code }).catch(failCli)
     return
   }
   if (argv[0] === "harness") {
