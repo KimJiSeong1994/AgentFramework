@@ -84,7 +84,11 @@ describe("TUI command and skill palette", () => {
   })
 
   test("skills appear only where they can be invoked; commands follow the context", () => {
-    expect(palette(catalog, "/rev", "unselected")).toBeUndefined()
+    // Before model selection "/rev" offers no skill (the `review` skill is hidden); only commands such as /resume match.
+    const unselected = palette(catalog, "/rev", "unselected")
+    expect(unselected?.rows.some(row => row.kind === "skill")).toBe(false)
+    expect(unselected?.rows.every(row => row.kind === "command")).toBe(true)
+    expect(palette(catalog, "/rev", "chat")?.rows.some(row => row.kind === "skill" && row.name === "review")).toBe(true)
     expect(palette(catalog, "/mo", "unselected")?.rows.map(row => row.label)).toEqual(["/model", "/memory"])
     expect(palette(catalog, "/", "read-only")!.rows.some(row => row.kind === "skill")).toBe(false)
   })

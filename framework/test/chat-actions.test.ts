@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { allowedByRules, clearAllowRules, commandRule, describeAction, readAllowRules, refusedCommand, runCapturedCommand, saveAllowRule } from "../src/hosts/chat-actions.ts"
+import { allowedByRules, clearAllowRules, commandRule, coveredByGrant, describeAction, grantDirectory, readAllowRules, readOnlyCommand, refusedCommand, runCapturedCommand, saveAllowRule } from "../src/hosts/chat-actions.ts"
 
 describe("refused commands never reach the human", () => {
   test.each([
@@ -73,6 +73,33 @@ describe("always-allow rules", () => {
   })
 })
 
+describe("read-only commands run without asking", () => {
+  test.each(["git status", "git diff --stat", "git log -5 --oneline", "git show HEAD", "git branch", "git branch -a", "ls -la src",
+    "cat README.md", "head -20 a.ts", "wc -l a.ts", "rg TODO src", "grep -rn foo .", "pwd", "bun --version", "node -v"])("%s", command => {
+    expect(readOnlyCommand(command)).toBe(true)
+  })
+  test.each(["git push", "git branch -D main", "git checkout x", "cat a > b", "ls; rm -rf x", "cat $(id)", "grep x a | sh",
+    "find . -delete", "rg x -o out", "env", "printenv", "rm a", "bun test", "sed -i s/a/b/ f", "git stash"])("%s still asks", command => {
+    expect(readOnlyCommand(command)).toBe(false)
+  })
+})
+
+describe("this-turn folder grants", () => {
+  test("the grant is the deepest shared folder; it covers writes under it and never commands or escapes", () => {
+    expect(grantDirectory({ tool: "edit", path: "src/a/x.ts", oldText: "a", newText: "b" })).toBe("src/a")
+    expect(grantDirectory({ tool: "multiedit", edits: [{ path: "src/a/x.ts", oldText: "a", newText: "b" }, { path: "src/b/y.ts", oldText: "a", newText: "b" }] })).toBe("src")
+    expect(grantDirectory({ tool: "write", path: "README.md", content: "x" })).toBe(".")
+    expect(grantDirectory({ tool: "bash", command: "ls", interactive: false, timeoutMs: 1 })).toBeUndefined()
+    const grants = new Set(["src"])
+    expect(coveredByGrant({ tool: "write", path: "src/new/z.ts", content: "x" }, grants)).toBe(true)
+    expect(coveredByGrant({ tool: "write", path: "srcx/z.ts", content: "x" }, grants)).toBe(false)
+    expect(coveredByGrant({ tool: "write", path: "src/../etc/x", content: "x" }, grants)).toBe(false)
+    expect(coveredByGrant({ tool: "multiedit", edits: [{ path: "src/a.ts", oldText: "a", newText: "b" }, { path: "test/b.ts", oldText: "a", newText: "b" }] }, grants)).toBe(false)
+    expect(coveredByGrant({ tool: "bash", command: "ls", interactive: false, timeoutMs: 1 }, new Set(["."]))).toBe(false)
+    expect(coveredByGrant({ tool: "write", path: "x.ts", content: "x" }, new Set())).toBe(false)
+  })
+})
+
 describe("what the human sees", () => {
   test("an edit shows removed and added lines; a write shows its content; a command shows itself and its limit", () => {
     expect(describeAction({ tool: "edit", path: "a.ts", oldText: "x = 1\n", newText: "x = 2\ny = 3\n" }))
@@ -81,6 +108,8 @@ describe("what the human sees", () => {
     expect(describeAction({ tool: "bash", command: "bun test", interactive: false, timeoutMs: 120_000 }))
       .toEqual({ title: "Run: bun test", preview: ["$ bun test", "Time limit 120s."] })
     expect(describeAction({ tool: "bash", command: "vim x", interactive: true, timeoutMs: 120_000 }).title).toBe("Run (interactive): vim x")
+    expect(describeAction({ tool: "multiedit", edits: [{ path: "a.ts", oldText: "x", newText: "y" }, { path: "b.ts", oldText: "p", newText: "q" }] }))
+      .toEqual({ title: "Edit 2 files (2 changes): a.ts, b.ts", preview: ["@ a.ts", "- x", "+ y", "@ b.ts", "- p", "+ q"] })
     const long = describeAction({ tool: "write", path: "big.txt", content: Array.from({ length: 100 }, (_, i) => `l${i}`).join("\n") }, 5)
     expect(long.preview).toHaveLength(6)
     expect(long.preview.at(-1)).toBe("… 95 more line(s)")

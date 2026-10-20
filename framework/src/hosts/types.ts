@@ -43,7 +43,7 @@ export type BudgetEvidence = {
   /** Main and read-only workflow roles on the local (Ollama) engine. */
   mainLimit: 8192
   /** Main and read-only workflow roles on the Claude/Codex CLIs, whose models take far larger inputs. */
-  vendorMainLimit: 16384
+  vendorMainLimit: 49152
   workerLimit: 5120
 }
 export type HostIdentity = {
@@ -105,6 +105,8 @@ export type ExecutionRequest = {
 export type ChatAction =
   | Readonly<{ tool: "write"; path: string; content: string }>
   | Readonly<{ tool: "edit"; path: string; oldText: string; newText: string }>
+  /** Several exact-text edits, possibly across files, approved together and applied all-or-nothing. */
+  | Readonly<{ tool: "multiedit"; edits: ReadonlyArray<Readonly<{ path: string; oldText: string; newText: string }>> }>
   | Readonly<{ tool: "bash"; command: string; interactive: boolean; timeoutMs: number }>
 
 export type ChatActionDecision = Readonly<{ allow: true }> | Readonly<{ allow: false; reason: string }>
@@ -116,7 +118,9 @@ export type ChatActionDecision = Readonly<{ allow: true }> | Readonly<{ allow: f
 export type ActionGate = Readonly<{
   approve(action: ChatAction, signal: AbortSignal): Promise<ChatActionDecision>
   /** Run an approved command in the worktree; interactive commands get the real terminal and return no output. */
-  run(action: Extract<ChatAction, { tool: "bash" }>, signal: AbortSignal): Promise<{ ok: boolean; text: string }>
+  run(action: Extract<ChatAction, { tool: "bash" }>, signal: AbortSignal): Promise<{ ok: boolean; text: string; exitCode?: number | null }>
+  /** The turn used its tool rounds: the human decides whether it may use `rounds` more. Without this the turn fails. */
+  extendRounds?(used: number, rounds: number, signal: AbortSignal): Promise<boolean>
 }>
 
 /**

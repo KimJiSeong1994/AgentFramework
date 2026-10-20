@@ -6,6 +6,7 @@ import { dirname, join } from "node:path"
 import { launchInteractive, parseInteractiveArgs, validModelID, type InteractiveDependencies, type Terminal } from "../src/hosts/interactive.ts"
 import type { TerminalControl } from "../src/hosts/interactive-session.ts"
 import type { ShellResult } from "../src/hosts/operator-shell.ts"
+import { createChatCheckpoints } from "../src/hosts/chat-checkpoint.ts"
 import type { ModelCatalog } from "../src/hosts/model-catalog.ts"
 import type { ChoicePresentation, InteractiveViewFacts, TranscriptText } from "../src/hosts/interactive-view.ts"
 import { newWorkflow, withFlowTransaction, workflowPath } from "../src/flow/state.ts"
@@ -89,6 +90,8 @@ type HarnessOptions = {
   chatExecute?: "ask" | "auto-edit" | "plan"
   onGate?: (gate: ActionGate) => Promise<void>
   allowRules?: string[]
+  /** What the session-history step reports when a session ends (default: nothing). */
+  closedLine?: string
   /** User skill policy (default: no trust, automatic selection off) and the automatic selector (default: abstain). */
   skillPolicy?: SkillTrustLookup
   selectSkill?: (input: AutoSkillSelectInput) => Promise<AutoSkillSelection> | AutoSkillSelection
@@ -143,7 +146,8 @@ function harness(options: HarnessOptions = {}) {
     authRuns: Array<{ engine: string; argv: readonly string[] }>
     authStatusChecks: string[]
     autoSelections: Array<{ text: string; mode: string; candidates: string[] }>
-  } = { autoSelections: [], authRuns: [], authStatusChecks: [], prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), shellRuns: [], gates: [], chatRuns: [], allowRules: [...(options.allowRules ?? [])], choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [], defaultModel: options.defaultModel ?? { state: "unset" }, defaultModelWrites: [], combo: options.combo ?? { state: "unset" }, comboWrites: [] }
+    closedSessions: string[]
+  } = { closedSessions: [], autoSelections: [], authRuns: [], authStatusChecks: [], prompts: [], output: [], events: [], turns: [], runtimes: [], sessionIDs: [], turnBindings: [], discoveries: [], validationAttempts: [], runCount: 0, controllerStatusCalls: 0, controllerCancelCalls: 0, signalListeners: new Map(), shellRuns: [], gates: [], chatRuns: [], allowRules: [...(options.allowRules ?? [])], choices: [], actionContexts: [], drafts: [], viewFacts: [], skillCatalogs: [], catalogSessions: [], progressSinks: [], boundSessions: [], transcriptSources: [], queueAdmissions: [], controllerCreations: 0, conversationRestores: [], defaultModel: options.defaultModel ?? { state: "unset" }, defaultModelWrites: [], combo: options.combo ?? { state: "unset" }, comboWrites: [] }
   let boundSessionID: string | undefined
 
   let releaseRun: (() => void) | undefined
@@ -250,6 +254,9 @@ function harness(options: HarnessOptions = {}) {
       save: rule => { calls.allowRules.push(rule); return "/fixture/otter.jsonc" },
       clear: () => { const count = calls.allowRules.length; calls.allowRules.length = 0; return count },
     },
+    sessionClosed: (worktree, sessionID) => { calls.closedSessions.push(sessionID); return options.closedLine },
+    // Real checkpoints snapshot the worktree with git; only the /undo test opts into them.
+    createCheckpoints: () => ({ beforeEffect: async () => {}, endTurn: async () => {}, list: () => [], undo: async () => undefined, dispose: () => {} }),
     // The real runner hands the test process's terminal to the command; the fixture runs it captured instead.
     runShell: async (command, cwd) => {
       calls.events.push("runShell")
@@ -1389,7 +1396,7 @@ describe("interactive terminal", () => {
 
   test("chat execution: the default asks before each action, Allow once runs it, Deny returns the denial to the model", async () => {
     const decisions: Array<{ allow: boolean; reason?: string }> = []
-    const results: Array<{ ok: boolean; text: string }> = []
+    const results: Array<{ ok: boolean; text: string; exitCode?: number | null }> = []
     const h = harness({
       chatExecute: "ask", lines: ["fix the test", "/quit"],
       choose: async (title, values) => { expect(values).toContain("Deny"); return title.includes("edit") ? values.indexOf("Deny") : 0 },
@@ -1405,7 +1412,7 @@ describe("interactive terminal", () => {
     expect(h.calls.gates[0]).toBeDefined()
     expect(decisions).toEqual([{ allow: true }, { allow: false, reason: "denied" }])
     expect(h.calls.chatRuns).toEqual([{ command: "bun test test/foo.test.ts", interactive: false, cwd: realpathSync(wt.worktree) }])
-    expect(results).toEqual([{ ok: true, text: "exit 0\nfixture output" }])
+    expect(results).toEqual([{ ok: true, text: "exit 0\nfixture output", exitCode: 0 }])
     const asked = h.calls.choices.map(choice => choice.title)
     expect(asked).toEqual(["Allow otter to run: bun test test/foo.test.ts?", "Allow otter to edit a.ts (-1 / +1)?"])
     expect(h.calls.choices[0]!.values).toEqual(["Allow once", "Always allow `bun test`", "Deny"])
@@ -1447,17 +1454,113 @@ describe("interactive terminal", () => {
       onGate: async gate => {
         const signal = new AbortController().signal
         decisions.push(await gate.approve({ tool: "write", path: "n.md", content: "x" }, signal))
-        decisions.push(await gate.approve({ tool: "bash", command: "ls", interactive: false, timeoutMs: 1000 }, signal))
+        decisions.push(await gate.approve({ tool: "bash", command: "make build", interactive: false, timeoutMs: 1000 }, signal))
       },
     })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
     expect(decisions).toEqual([{ allow: true }, { allow: true }])
-    expect(h.calls.choices.map(choice => choice.title)).toEqual(["Allow otter to run: ls?"])
+    expect(h.calls.choices.map(choice => choice.title)).toEqual(["Allow otter to run: make build?"])
     expect(h.calls.output.join("")).toContain("Write n.md (1 line) (auto-edit)")
 
     const plan = harness({ chatExecute: "plan", lines: ["go", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, plan.deps)
     expect(plan.calls.gates).toEqual([undefined])
+  })
+
+  test("chat execution: read-only commands run without asking; a folder grant lasts for its turn only", async () => {
+    const decisions: Array<{ allow: boolean; reason?: string }> = []
+    let gates = 0
+    const h = harness({
+      chatExecute: "ask", lines: ["first", "second", "/quit"],
+      choose: async (_title, values) => { const grant = values.findIndex(value => value.startsWith("Allow edits in")); return grant >= 0 ? grant : values.indexOf("Deny") },
+      onGate: async gate => {
+        const signal = new AbortController().signal
+        const edit = (path: string) => ({ tool: "edit" as const, path, oldText: "a", newText: "b" })
+        if (gates++ === 0) {
+          decisions.push(await gate.approve({ tool: "bash", command: "git status", interactive: false, timeoutMs: 1000 }, signal))
+          decisions.push(await gate.approve(edit("src/a.ts"), signal)) // asked: grant src/
+          decisions.push(await gate.approve(edit("src/deep/b.ts"), signal)) // covered by the grant
+          decisions.push(await gate.approve(edit("test/c.ts"), signal)) // outside: asked again (grant test/ chosen)
+        } else {
+          decisions.push(await gate.approve(edit("src/a.ts"), signal)) // a new turn: asked again
+        }
+      },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(decisions).toEqual([{ allow: true }, { allow: true }, { allow: true }, { allow: true }, { allow: true }])
+    expect(h.calls.choices.map(choice => choice.title)).toEqual([
+      "Allow otter to edit src/a.ts (-1 / +1)?", "Allow otter to edit test/c.ts (-1 / +1)?", "Allow otter to edit src/a.ts (-1 / +1)?",
+    ])
+    expect(h.calls.choices[0]!.values).toEqual(["Allow once", "Allow edits in src/ for this turn", "Deny"])
+    const out = h.calls.output.join("")
+    expect(out).toContain("Read-only, allowed: Run: git status")
+    expect(out).toContain("Edit src/deep/b.ts (-1 / +1) (allowed for this turn under src)")
+    expect(out).toContain("Edits in src/ are allowed until this turn ends.")
+  })
+
+  test("/undo puts back what an approved turn changed, asks first, and says when there is nothing to undo", async () => {
+    const target = join(wt.worktree, "notes.md")
+    writeFileSync(target, "original\n")
+    const h = harness({
+      chatExecute: "ask", lines: ["/undo", "change notes", "/undo list", "/undo", "/undo", "/quit"],
+      choose: async title => title.startsWith("Undo the changes") ? 0 : 0,
+      onGate: async gate => {
+        const decision = await gate.approve({ tool: "write", path: "notes.md", content: "changed by the model\n" }, new AbortController().signal)
+        if (decision.allow) writeFileSync(target, "changed by the model\n")
+      },
+    })
+    h.deps.createCheckpoints = createChatCheckpoints
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(readFileSync(target, "utf8")).toBe("original\n")
+    const out = h.calls.output.join("")
+    expect(out).toContain("Nothing to undo: no turn of this session changed files through otter.")
+    expect(out).toMatch(/Turns that can be undone \(newest first; \/undo <turn>\):\n  1\) .* · change notes/u)
+    expect(out).toContain("Restored 1 file(s): notes.md.")
+    expect(h.calls.choices.some(choice => choice.title.startsWith("Undo the changes of turn 1)"))).toBe(true)
+    // The second /undo has nothing left.
+    expect(out.split("Nothing to undo").length).toBe(3)
+  }, 30_000)
+
+  test("session history: a session's end is recorded (and its line shown); /history and /facts read the digests", async () => {
+    const h = harness({ lines: ["hello", "/history", "/facts", "/history no_such_session", "/quit"], closedLine: "Session history captured (fixture)." })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.closedSessions).toEqual([h.calls.sessionIDs[0]])
+    const out = h.calls.output.join("")
+    expect(out).toContain("No session history yet: a digest is written when a session ends.")
+    expect(out).toContain("No session history yet: facts appear after sessions that run commands or change files.")
+    expect(out).toContain("No digest for that session (digests are written when a session ends).")
+    expect(out).toContain("Session history captured (fixture).")
+  })
+
+  test("/wiki explains a project without a wiki; /wiki ingest needs chat execution and queues the integration turn", async () => {
+    const none = harness({ lines: ["/wiki", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, none.deps)
+    expect(none.calls.output.join("")).toContain("This project has no wiki")
+
+    const knowledge = join(wt.worktree, "knowledge")
+    mkdirSync(join(knowledge, "wiki", "reports"), { recursive: true })
+    mkdirSync(join(knowledge, "raw", "documents"), { recursive: true })
+    mkdirSync(join(knowledge, "wiki", "sources"), { recursive: true })
+    writeFileSync(join(knowledge, "AGENTS.md"), "# rules\n")
+    const doc = "# Note\n\nhello\n"
+    const id = createHash("sha256").update(doc).digest("hex")
+    writeFileSync(join(knowledge, "raw", "documents", `${id}.md`), doc)
+    writeFileSync(join(knowledge, "wiki", "sources", `documents-${id}.md`), "# Note source\n")
+    writeFileSync(join(knowledge, "wiki", "index.md"), `# Index\n\n- [Log](log.md)\n- [Report](reports/tool-outcomes.md)\n- [Note](sources/documents-${id}.md)\n`)
+    writeFileSync(join(knowledge, "wiki", "log.md"), `# Log\n\n## [2026-10-20T00:00:00Z] register | Note\n\n- source_id: ${id}\n`)
+    writeFileSync(join(knowledge, "wiki", "reports", "tool-outcomes.md"), "# report\n")
+
+    const readOnly = harness({ chatExecute: "plan", lines: ["/wiki", "/wiki ingest", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, readOnly.deps)
+    const shown = readOnly.calls.output.join("")
+    expect(shown).toContain("Wiki: 1 source(s), 0 integrated, 1 pending.")
+    expect(shown).toContain("/wiki ingest needs chat execution")
+
+    const acting = harness({ chatExecute: "ask", lines: ["/wiki ingest", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, acting.deps)
+    expect(acting.calls.turns[0]).toContain("Integrate the pending wiki sources (knowledge/wiki/sources/documents-")
+    expect(acting.calls.turns[0]).toContain("Do not edit knowledge/raw")
+    expect(acting.calls.output.join("")).toMatch(/Wiki lint after ingest: (no problems|\d+ problem)/u)
   })
 
   test("chat execution in readline: a numbered menu; empty input denies; /permissions shows the mode and rules", async () => {

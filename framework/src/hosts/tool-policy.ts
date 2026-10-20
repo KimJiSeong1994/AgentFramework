@@ -129,8 +129,10 @@ export function createExecutionPolicy(config: Readonly<OtterConfig>, options: Ex
           callInputs.set(key, event.input)
           while (callInputs.size > 1000) callInputs.delete(callInputs.keys().next().value!)
           if (request.role === "reviewer" && !REVIEW_TOOLS.includes(event.name)) return { allow: false, reason: `otter: reviewer tool ${event.name} is not read-only` }
-          if (planningOnlyMain && request.role === "main" && !policy.tools.allowed.includes(event.name)) return { allow: false, reason: `otter: tool ${event.name} is not allowed for planning-only main` }
-          if (!policy.tools.allowed.includes(event.name) || policy.tools.denied.includes(event.name)) return { allow: false, reason: `otter: tool ${event.name} is not allowed for ${request.role}` }
+          // The chat's multiedit (several edits approved together) is decided as `edit`; elsewhere multiedit is its own tool.
+          const policyName = planningOnlyMain && request.role === "main" && event.name === "multiedit" ? "edit" : event.name
+          if (planningOnlyMain && request.role === "main" && !policy.tools.allowed.includes(policyName)) return { allow: false, reason: `otter: tool ${event.name} is not allowed for planning-only main` }
+          if (!policy.tools.allowed.includes(policyName) || policy.tools.denied.includes(policyName)) return { allow: false, reason: `otter: tool ${event.name} is not allowed for ${request.role}` }
           if (!config.disabled_hooks.includes("guard.repeat")) {
             const check = repeat.check(event.sessionID, event.name, event.input, event.callID)
             if (check.blocked) return { allow: false, reason: repeatBlockMessage(event.name, check.count, check.lastError) }

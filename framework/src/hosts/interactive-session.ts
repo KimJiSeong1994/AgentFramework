@@ -49,13 +49,17 @@ import { startRefusal } from "../workflows/registry.ts"
 import { ModelRequestError } from "../workflows/turn.ts"
 import { beginExecutionActivity } from "./runtime.ts"
 import { settled, type ExecutionRunStatus } from "./run-state.ts"
-import { EXECUTION_ROLES, LinuxAdmissionRefused, type ActionGate, type ChatAction, type ComboRoutes, type ExecutionRole, type ExecutionRuntime, type SkillToolProvider, type VerifyRunObservation } from "./types.ts"
+import { EXECUTION_ROLES, LinuxAdmissionRefused, type ActionGate, type ChatAction, type ChatActionDecision, type ComboRoutes, type ExecutionRole, type ExecutionRuntime, type SkillToolProvider, type VerifyRunObservation } from "./types.ts"
 import type { AskPrompt, ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
 import { commandInsertion, interactiveActions, interactiveHelp, type InteractiveContext } from "./interactive-actions.ts"
 import { fileComboStore, fileDefaultModelStore, validateComboRoutes, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
 import { COMBO_PRESETS, comboPresetSummary } from "./combo-presets.ts"
 import { runTerminalShell, type ShellResult } from "./operator-shell.ts"
-import { allowedByRules, clearAllowRules, commandRule, describeAction, readAllowRules, refusedCommand, runCapturedCommand, runInteractiveCommand, saveAllowRule, type CommandResult } from "./chat-actions.ts"
+import { actionPaths, allowedByRules, clearAllowRules, commandRule, coveredByGrant, describeAction, grantDirectory, readAllowRules, readOnlyCommand, refusedCommand, runCapturedCommand, runInteractiveCommand, saveAllowRule, type CommandResult } from "./chat-actions.ts"
+import { createChatCheckpoints, type ChatCheckpoints } from "./chat-checkpoint.ts"
+import { closeSessionHistory, projectHasWiki, renderFacts, worktreeFacts } from "../sessions/history.ts"
+import { lintWiki, statusWiki } from "../wiki/wiki.ts"
+import { describeDigest, readSessionDigest, readSessionDigests } from "../sessions/digest.ts"
 import { fileMemoryStore, memoryCommand, type MemoryCommandStore } from "./memory-command.ts"
 
 export type CliEngine = CliRuntimeOptions["engine"]
@@ -129,6 +133,13 @@ export type InteractiveDependencies = {
   runChatCommand: (action: Extract<ChatAction, { tool: "bash" }>, cwd: string, signal: AbortSignal) => Promise<CommandResult>
   /** Saved "Always allow" command rules (user config only) and saving a new one. */
   chatAllow: { read: () => string[]; save: (rule: string) => string; clear: () => number }
+  /** Per-turn worktree checkpoints behind `/undo`. */
+  createCheckpoints: (worktree: string, label: () => string) => ChatCheckpoints
+  /**
+   * A chat session ended or was replaced: write its digest and, for a project with a wiki and `wiki.auto_capture`, capture
+   * the wiki. Returns one line for the user, or nothing. Must never throw or block long.
+   */
+  sessionClosed: (worktree: string, sessionID: string) => string | undefined
   /** Background update check for installer-managed copies; must never reject (a failure is "no notice"). */
   checkUpdate: () => Promise<UpdateNotice | undefined>
   createRuntime: (options: RuntimeOptions) => ExecutionRuntime
@@ -446,6 +457,8 @@ export function defaultDependencies(): InteractiveDependencies {
       ? runInteractiveCommand(action.command, cwd)
       : runCapturedCommand(action.command, cwd, action.timeoutMs, signal),
     chatAllow: { read: () => readAllowRules(), save: saveAllowRule, clear: clearAllowRules },
+    createCheckpoints: createChatCheckpoints,
+    sessionClosed: closeSessionHistory,
     checkUpdate: defaultUpdateCheck,
     createRuntime: (options) => createCliRuntime(options),
     admitRuntime: async (runtime) => {
@@ -1065,6 +1078,25 @@ export async function runInteractiveSession(
    * for, right before its effect. Refused commands never reach the human; "Always allow" saves a command rule to the user
    * config; auto-edit applies file edits without asking. Every decision and command run is recorded in the session.
    */
+  /** Session history after a session ends or is replaced: digest + optional wiki capture; one line, never fatal. */
+  function recordClosedSession(sessionID: string, write: (text: string) => void = text => terminal.write(text)): void {
+    if (!signalWorktree) return
+    let line: string | undefined
+    try { line = deps.sessionClosed(signalWorktree, sessionID) } catch { line = undefined }
+    if (line) { try { write(terminalSafeText(`${line}\n`)) } catch { /* the terminal may be closing */ } }
+  }
+  /** Folders the human allowed edits in for the current turn only ("Allow edits in <dir>/ for this turn"). */
+  const turnGrants = new Set<string>()
+  /** A chat message a command prepared for the next turn (`/wiki ingest`), sent as if the user typed it. */
+  let queuedChatMessage: string | undefined
+  /** Run the wiki lint after the next turn (the `/wiki ingest` turn). */
+  let wikiLintAfterTurn = false
+  let checkpointStore: ChatCheckpoints | undefined
+  let checkpointTurnLabel = ""
+  const chatCheckpoints = (root: string): ChatCheckpoints => {
+    checkpointStore ??= deps.createCheckpoints(root, () => checkpointTurnLabel)
+    return checkpointStore
+  }
   function chatActionGate(runtime: ExecutionRuntime): ActionGate | undefined {
     const mode = chatExecuteMode(runtime.config)
     if (mode === "plan") return undefined
@@ -1072,40 +1104,72 @@ export async function runInteractiveSession(
     const mainTools = runtime.policy?.resolve("main").tools.allowed ?? []
     if (!mainTools.includes("bash") || !mainTools.includes("edit")) return undefined
     const note = (text: string) => terminal.write(terminalSafeText(`${text}\n`))
+    type Decided = { decision: ChatActionDecision; how: "asked" | "rule" | "read-only" | "auto-edit" | "grant" | "denied" | "refused" }
+    const decide = async (action: ChatAction, signal: AbortSignal): Promise<Decided> => {
+      const { title, preview } = describeAction(action)
+      if (action.tool === "bash") {
+        const refused = refusedCommand(action.command)
+        if (refused) {
+          note(`Refused (${refused}): ${action.command}. Run it yourself with !<command> if you mean it.`)
+          return { how: "refused", decision: { allow: false, reason: `refused by Otter (${refused}); the user can run it with !<command>` } }
+        }
+        if (!action.interactive && readOnlyCommand(action.command)) {
+          note(`Read-only, allowed: ${title}`)
+          return { how: "read-only", decision: { allow: true } }
+        }
+        if (allowedByRules(action.command, deps.chatAllow.read())) {
+          note(`Allowed by your rule: ${title}`)
+          return { how: "rule", decision: { allow: true } }
+        }
+      } else if (mode === "auto-edit") {
+        note(`${title} (auto-edit)`)
+        return { how: "auto-edit", decision: { allow: true } }
+      } else if (coveredByGrant(action, turnGrants)) {
+        note(`${title} (allowed for this turn under ${[...turnGrants].join(", ")})`)
+        return { how: "grant", decision: { allow: true } }
+      }
+      const rule = action.tool === "bash" ? commandRule(action.command) : undefined
+      const folder = grantDirectory(action)
+      const folderLabel = folder ? `Allow edits in ${folder === "." ? "the whole worktree" : `${folder}/`} for this turn` : undefined
+      const labels = ["Allow once", ...(rule ? [`Always allow \`${rule}\``] : []), ...(folderLabel ? [folderLabel] : []), "Deny"]
+      note([title, ...preview.map(line => `  ${line}`)].join("\n"))
+      progress.suspend()
+      let picked: number | undefined
+      try { picked = await chooseDecision(terminal, `Allow otter to ${title.charAt(0).toLowerCase()}${title.slice(1)}?`, labels, signal) }
+      finally { terminal.resume?.(); progress.resume() }
+      if (signal.aborted || picked === undefined || labels[picked] === "Deny") {
+        note(`Denied: ${title}`)
+        return { how: "denied", decision: { allow: false, reason: picked === undefined ? "no decision (dismissed)" : "denied" } }
+      }
+      if (rule && labels[picked] === `Always allow \`${rule}\``) {
+        try { note(`Saved rule \`${rule}\` to ${deps.chatAllow.save(rule)}; /permissions lists or clears rules.`) }
+        catch (error) { note(`Rule not saved: ${boundedTerminalDiagnostic(String(error))}`) }
+      }
+      if (folder && labels[picked] === folderLabel) {
+        turnGrants.add(folder)
+        note(`Edits in ${folder === "." ? "the whole worktree" : `${folder}/`} are allowed until this turn ends.`)
+      }
+      note(`Allowed: ${title}`)
+      return { how: "asked", decision: { allow: true } }
+    }
     return {
       async approve(action, signal) {
-        const { title, preview } = describeAction(action)
-        if (action.tool === "bash") {
-          const refused = refusedCommand(action.command)
-          if (refused) {
-            note(`Refused (${refused}): ${action.command}. Run it yourself with !<command> if you mean it.`)
-            return { allow: false, reason: `refused by Otter (${refused}); the user can run it with !<command>` }
-          }
-          if (allowedByRules(action.command, deps.chatAllow.read())) {
-            note(`Allowed by your rule: ${title}`)
-            return { allow: true }
-          }
-        } else if (mode === "auto-edit") {
-          note(`${title} (auto-edit)`)
-          return { allow: true }
-        }
+        const { decision, how } = await decide(action, signal)
+        // Structured record for the session digest: tool, decision, written paths, a command's rule prefix. No contents.
         const rule = action.tool === "bash" ? commandRule(action.command) : undefined
-        const labels = ["Allow once", ...(rule ? [`Always allow \`${rule}\``] : []), "Deny"]
-        note([title, ...preview.map(line => `  ${line}`)].join("\n"))
-        progress.suspend()
-        let picked: number | undefined
-        try { picked = await chooseDecision(terminal, `Allow otter to ${title.charAt(0).toLowerCase()}${title.slice(1)}?`, labels, signal) }
-        finally { terminal.resume?.(); progress.resume() }
-        if (signal.aborted || picked === undefined || labels[picked] === "Deny") {
-          note(`Denied: ${title}`)
-          return { allow: false, reason: picked === undefined ? "no decision (dismissed)" : "denied" }
+        try {
+          persist("action", { tool: action.tool, decision: how, paths: actionPaths(action).slice(0, 64).map(path => path.slice(0, 1024)),
+            ...(rule ? { rule } : {}) })
+        } catch { /* persist marks the session failed itself */ }
+        // The turn's checkpoint is taken before its first effect, whichever way that effect was allowed.
+        if (decision.allow) {
+          try {
+            const checkpoints = chatCheckpoints(runtime.worktree)
+            if (action.tool === "bash") await checkpoints.beforeEffect({ tool: "bash" })
+            else for (const path of actionPaths(action)) await checkpoints.beforeEffect({ tool: "edit", path })
+          } catch { note("Checkpoint not taken: /undo cannot restore this turn.") }
         }
-        if (rule && picked === 1) {
-          try { note(`Saved rule \`${rule}\` to ${deps.chatAllow.save(rule)}; /permissions lists or clears rules.`) }
-          catch (error) { note(`Rule not saved: ${boundedTerminalDiagnostic(String(error))}`) }
-        }
-        note(`Allowed: ${title}`)
-        return { allow: true }
+        return decision
       },
       async run(action, signal) {
         const id = `shell:${deps.randomUUID()}`
@@ -1140,7 +1204,16 @@ export async function runInteractiveSession(
           persist("shell", { command: action.command.slice(0, 8192), status: shell.status, exitCode: shell.exitCode, signal: shell.signal,
             durationMs: shell.durationMs, lines, totalLines: lines.length }, id)
         } catch { /* persist marks the session failed itself */ }
-        return { ok: result.ok, text: result.text }
+        return { ok: result.ok, text: result.text, exitCode: result.exitCode }
+      },
+      async extendRounds(used, rounds, signal) {
+        progress.suspend()
+        let picked: number | undefined
+        try { picked = await chooseDecision(terminal, `otter used ${used} tool calls this turn. Allow ${rounds} more?`, [`Continue (${rounds} more)`, "Stop here"], signal) }
+        finally { terminal.resume?.(); progress.resume() }
+        const granted = !signal.aborted && picked === 0
+        note(granted ? `Allowed ${rounds} more tool calls this turn.` : "Stopped: the turn ends at its tool-call limit.")
+        return granted
       },
     }
   }
@@ -1255,7 +1328,7 @@ export async function runInteractiveSession(
       const runtime = attachedRuntime
       if (!policy || policy.auto.mode === "off" || !runtime) return
       const current = () => generation === autoCandidateGeneration && target === skillSession && target.store === sessionStore && !abort.signal.aborted
-      autoCandidateWork = target.autoCandidates(policy.auto, skillInstructionBudget(runtime.config.delegate.verify_allow), abort.signal)
+      autoCandidateWork = target.autoCandidates(policy.auto, skillInstructionBudget(runtime.config.delegate.verify_allow, "", runtime.host.identity.engine), abort.signal)
         .then(candidates => { if (current()) autoSkillCandidates = candidates }, () => {
           if (current()) visibleWrite("Automatic skill candidates unavailable; explicit /skill: invocation still works.\n")
         })
@@ -2431,6 +2504,7 @@ export async function runInteractiveSession(
             terminal.write("Session switch refused: attachment release is not proven.\n")
             return true
           }
+          recordClosedSession(sessionStore.sessionID)
           skillSession?.close()
           skillSession = undefined
           latestSkillCatalog = undefined
@@ -2542,6 +2616,7 @@ export async function runInteractiveSession(
             terminal.write("Session switch refused: attachment release is not proven.\n")
             return true
           }
+          recordClosedSession(sessionStore.sessionID)
           skillSession?.close()
           skillSession = undefined
           latestSkillCatalog = undefined
@@ -2730,7 +2805,8 @@ export async function runInteractiveSession(
       const promptTitle = retainedSDKSessionID
         ? `Retained SDK session ${retainedSDKSessionID} · read-only history`
         : `${selection.engine} · ${selection.model}`
-      const deferredCommand = workflowHost.takeDeferredCommand()
+      const deferredCommand = workflowHost.takeDeferredCommand() ?? queuedChatMessage
+      queuedChatMessage = undefined
       const text = deferredCommand ?? await withProgressSuspended(() => readInput(
         terminal, promptTitle,
         retainedSDKSessionID ? "Read-only history · /resume or /new to switch · /quit exit"
@@ -2888,6 +2964,102 @@ export async function runInteractiveSession(
           `Change it with "chat": { "execute": "ask" | "auto-edit" | "plan" } in ~/.config/otter/otter.jsonc; it applies to the next model selection or /new.`,
           rules.length ? `Always-allowed commands: ${rules.map(rule => `\`${rule}\``).join(", ")} (/permissions clear removes them).` : "No always-allowed commands.",
         ].join("\n") + "\n"))
+        continue
+      }
+      // Undo what the chat model changed in a turn (checkpointed before its first effect). Never touches the model.
+      if (command === "/undo") {
+        const turns = checkpointStore?.list() ?? []
+        if (commandArgs.length > 1 || (commandArgs[0] !== undefined && commandArgs[0] !== "list" && !/^\d+$/u.test(commandArgs[0]))) {
+          terminal.write("Usage: /undo [list | <turn>]\n")
+          continue
+        }
+        if (!turns.length) { terminal.write("Nothing to undo: no turn of this session changed files through otter.\n"); continue }
+        const describe = (turn: (typeof turns)[number]) => `${turn.id}) ${new Date(turn.at).toLocaleTimeString()} · ${turn.label || "(turn)"}`
+        if (commandArgs[0] === "list") {
+          terminal.write(terminalSafeText(`Turns that can be undone (newest first; /undo <turn>):\n${turns.map(turn => `  ${describe(turn)}`).join("\n")}\n`))
+          continue
+        }
+        const target = commandArgs[0] === undefined ? turns[0] : turns.find(turn => String(turn.id) === commandArgs[0])
+        if (!target) { terminal.write("No such turn; /undo list shows the turns that can be undone.\n"); continue }
+        const confirm = await withProgressSuspended(() => chooseDecision(terminal, `Undo the changes of turn ${describe(target)}?`, ["Undo", "Keep"], abort.signal))
+        terminal.resume?.()
+        if (abort.signal.aborted) return signalExit(receivedSignal)
+        if (confirm !== 0) { terminal.write("Kept: nothing was undone.\n"); continue }
+        try {
+          const result = await checkpointStore!.undo(target.id)
+          if (!result) { terminal.write("That turn can no longer be undone.\n"); continue }
+          terminal.write(terminalSafeText([
+            result.restored.length ? `Restored ${result.restored.length} file(s): ${result.restored.slice(0, 10).join(", ")}${result.restored.length > 10 ? ", …" : ""}.` : "No file needed restoring.",
+            ...(result.skipped.length ? [`Left as they are (changed again after that turn): ${result.skipped.slice(0, 10).join(", ")}${result.skipped.length > 10 ? ", …" : ""}.`] : []),
+            ...(result.partial ? ["Commands that turn ran outside Git could not be undone."] : []),
+          ].join("\n") + "\n"))
+        } catch (error) {
+          terminal.write(terminalSafeText(`Undo failed; files were left as they are: ${boundedTerminalDiagnostic(error instanceof Error ? error.message : String(error))}\n`))
+        }
+        continue
+      }
+      // Session history (state directory, outside the worktree): no model call.
+      if (command === "/history") {
+        if (commandArgs.length > 1) { terminal.write("Usage: /history [<count> | <session-id>]\n"); continue }
+        const arg = commandArgs[0]
+        if (arg && !/^\d+$/u.test(arg)) {
+          const digest = readSessionDigest(worktree, arg)
+          if (!digest) { terminal.write("No digest for that session (digests are written when a session ends).\n"); continue }
+          const tools = Object.entries(digest.tools).map(([tool, count]) => `${tool} ${count.succeeded}/${count.succeeded + count.failed + count.denied}`).join(", ")
+          terminal.write(terminalSafeText([
+            describeDigest(digest),
+            `Session ${digest.sessionID}${digest.complete ? "" : " (transcript partly unreadable)"}`,
+            ...(Object.keys(digest.routes).length ? [`Combo: ${Object.entries(digest.routes).map(([role, route]) => `${role}=${route.engine}/${route.model}`).join(", ")}`] : []),
+            ...(tools ? [`Tools (succeeded/all): ${tools}`] : []),
+            ...(digest.files.length ? [`Files: ${digest.files.slice(0, 20).join(", ")}${digest.files.length > 20 ? ", …" : ""}`] : []),
+            ...(digest.commands.length ? ["Commands:", ...digest.commands.slice(0, 20).map(run => `  ${run.rule} · ${run.status === "complete" ? "ok" : run.status}${run.exitCode !== null ? ` (exit ${run.exitCode})` : ""} · ${(run.durationMs / 1000).toFixed(1)}s`)] : []),
+            ...(digest.workflows.length ? [`Workflows: ${digest.workflows.map(workflow => `${workflow.id} (${workflow.stage})`).join(", ")}`] : []),
+            `Reopen it with /resume ${digest.sessionID}.`,
+          ].join("\n") + "\n"))
+          continue
+        }
+        const digests = readSessionDigests(worktree, arg ? Math.min(Number(arg), 100) : 10)
+        terminal.write(terminalSafeText(digests.length
+          ? `Recent sessions (newest first; /history <session-id> for details):\n${digests.map(digest => `  ${digest.sessionID} · ${describeDigest(digest)}`).join("\n")}\n`
+          : "No session history yet: a digest is written when a session ends.\n"))
+        continue
+      }
+      if (command === "/facts") {
+        if (commandArgs.length) { terminal.write("Usage: /facts\n"); continue }
+        terminal.write(terminalSafeText(`${renderFacts(worktreeFacts(worktree)).join("\n")}\n`))
+        continue
+      }
+      // Wiki: show what is captured but not yet integrated; `/wiki ingest` asks the model to integrate it (each wiki
+      // edit is approved like any chat action), then lint runs.
+      if (command === "/wiki") {
+        if (commandArgs.length > 1 || (commandArgs[0] !== undefined && commandArgs[0] !== "ingest" && commandArgs[0] !== "lint")) {
+          terminal.write("Usage: /wiki [ingest | lint]\n")
+          continue
+        }
+        if (!projectHasWiki(worktree)) { terminal.write("This project has no wiki (knowledge/AGENTS.md, knowledge/wiki/index.md, knowledge/wiki/log.md).\n"); continue }
+        if (commandArgs[0] === "lint") {
+          const problems = lintWiki(worktree)
+          terminal.write(terminalSafeText(problems.length ? `Wiki lint found ${problems.length} problem(s):\n${problems.slice(0, 20).map(problem => `  - ${problem}`).join("\n")}\n` : "Wiki lint: no problems.\n"))
+          continue
+        }
+        let status: ReturnType<typeof statusWiki>
+        try { status = statusWiki(worktree) }
+        catch (error) { terminal.write(terminalSafeText(`Wiki status unavailable: ${boundedTerminalDiagnostic(String(error))}\n`)); continue }
+        if (commandArgs[0] !== "ingest") {
+          terminal.write(terminalSafeText([
+            `Wiki: ${status.sources} source(s), ${status.compiled} integrated, ${status.pending.length} pending.`,
+            ...status.pending.slice(0, 10).map(item => `  - ${item.kind}: ${item.summary}`),
+            ...(status.problems.length ? [`Problems: ${status.problems.slice(0, 5).join("; ")}`] : []),
+            status.pending.length ? "/wiki ingest asks otter to integrate them (you approve each wiki edit)." : "Nothing to integrate.",
+          ].join("\n") + "\n"))
+          continue
+        }
+        if (!status.pending.length) { terminal.write("Nothing to integrate: every source is already linked from an ingest log entry.\n"); continue }
+        if (!chatActionGate(selection.runtime)) { terminal.write("/wiki ingest needs chat execution (chat.execute \"ask\" or \"auto-edit\"); this session is read-only.\n"); continue }
+        const listed = status.pending.slice(0, 5).map(item => item.summary).join(", ")
+        const skill = latestSkillCatalog?.entries.some(entry => entry.descriptor.name === "llm-wiki" && entry.classification !== "unavailable") ? "/skill:llm-wiki " : ""
+        queuedChatMessage = `${skill}Integrate the pending wiki sources (${listed}) following knowledge/AGENTS.md: read each source page and its raw file, update or add concepts/ and entities/ pages with source links, keep index.md descriptions accurate, and append one ingest entry to wiki/log.md per integrated source. Do not edit knowledge/raw or the generated reports. Then summarise what changed.`
+        wikiLintAfterTurn = true
         continue
       }
       // Config-only: selecting the memory engine never dispatches a model or touches the session.
@@ -3217,6 +3389,9 @@ export async function runInteractiveSession(
       const turnWorkflowSnapshot = JSON.stringify(readAnyWorkflowChecked(worktree))
       const turnSkills = skillSession
       const userFact = persist("user", { text: outbound })
+      checkpointTurnLabel = outbound.replace(/\s+/gu, " ").trim().slice(0, 80)
+      const actionGate = chatActionGate(turnSelection.runtime)
+      progress.mainActs(actionGate !== undefined)
       progress.waiting()
       operationAbort = new AbortController()
       const requestID = `${turnStore?.epoch ?? "read-only"}:request:${++requestSequence}`
@@ -3288,7 +3463,7 @@ export async function runInteractiveSession(
           // Model-chosen skills: the main model sees the consent-free catalog and may load entries with the `skill` tool
           // as the conversation calls for them. A load never prompts (consent "never") and is re-checked against the
           // current content and the role's tools; protected workflows are never in the catalog.
-          const budget = skillInstructionBudget(turnSelection.runtime.config.delegate.verify_allow, outbound)
+          const budget = skillInstructionBudget(turnSelection.runtime.config.delegate.verify_allow, outbound, turnSelection.runtime.host.identity.engine)
           const catalog = autoSkillCandidates.filter(candidate => candidate.bytes <= budget)
           const runtime = turnSelection.runtime
           const sessionID = turnStore.sessionID
@@ -3397,7 +3572,6 @@ export async function runInteractiveSession(
         dispatched = true
         requestObservation = { state: "in-progress", operationID: requestID }
         publishView()
-        const actionGate = chatActionGate(turnSelection.runtime)
         turn = skillInvocation
           ? await turnSelection.conversation.turn(outbound, operationAbort.signal, skillInvocation, undefined, actionGate)
           : skillTool || actionGate
@@ -3454,6 +3628,18 @@ export async function runInteractiveSession(
       } finally {
         operationAbort = undefined
         abort.signal.removeEventListener("abort", cancelTurn)
+        // The turn's effects are settled: close its checkpoint and drop folder grants (they last one turn).
+        turnGrants.clear()
+        if (checkpointStore) await checkpointStore.endTurn().catch(() => undefined)
+        if (wikiLintAfterTurn) {
+          wikiLintAfterTurn = false
+          try {
+            const problems = lintWiki(worktree)
+            terminal.write(terminalSafeText(problems.length
+              ? `Wiki lint after ingest: ${problems.length} problem(s):\n${problems.slice(0, 10).map(problem => `  - ${problem}`).join("\n")}\nAsk otter to fix them, or /undo the ingest.\n`
+              : "Wiki lint after ingest: no problems.\n"))
+          } catch (error) { terminal.write(terminalSafeText(`Wiki lint unavailable: ${boundedTerminalDiagnostic(String(error))}\n`)) }
+        }
       }
       progress.responseReceived()
       if (abort.signal.aborted) return signalExit(receivedSignal)
@@ -3552,6 +3738,8 @@ export async function runInteractiveSession(
     throw error
   } finally {
     sessionEnded = true
+    checkpointStore?.dispose()
+    checkpointStore = undefined
     skillSession?.close()
     skillSession = undefined
     terminal.skillCatalog?.({ entries: [], refusals: [] })
@@ -3560,6 +3748,7 @@ export async function runInteractiveSession(
         const drafts = terminal.draftSnapshot?.()
         if (drafts && !persistenceFailed) persist("notice", drafts)
         await detachAdmission(attachedRuntime, sessionStore.sessionID, sessionStore.epoch, receivedSignal ?? "terminal_exit")
+        if (!persistenceFailed) recordClosedSession(sessionStore.sessionID, visibleWrite)
       } catch (error) {
         visibleWrite(persistenceFailed
           ? "Session cleanup remains held after transcript persistence failed.\n"

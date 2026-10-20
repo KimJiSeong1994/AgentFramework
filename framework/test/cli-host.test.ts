@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { SKILL_CATALOG_LIMIT, SKILL_DROPPED_RESULT, createCliHost, fitHistory } from "../src/hosts/cli-host.ts"
+import { SKILL_CATALOG_LIMIT, SKILL_DROPPED_RESULT, createCliHost, fitHistory, type CliToolOutcomeFact } from "../src/hosts/cli-host.ts"
 import type { CliTransportHandle, CliTransportOptions } from "../src/hosts/cli-transport.ts"
 import type { ActionGate, ChatAction, ComboRoutes, ExecutionPolicy, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole, SkillToolProvider } from "../src/hosts/types.ts"
 import type { ExecutionRunStore, ExecutionRunStatus } from "../src/hosts/run-state.ts"
@@ -58,6 +58,7 @@ type HarnessOptions = {
   deferTransportRun?: boolean
   beforeOutput?: () => void
   observeActivity?: (activity: CliHostActivity) => void
+  recordOutcome?: (fact: CliToolOutcomeFact) => void
   tools?: readonly string[]
 }
 
@@ -225,7 +226,7 @@ function harness(options: HarnessOptions = {}) {
     }
     return transport
   }
-  const host = createCliHost({ engine, model, policy, runs, createTransport, observeActivity: options.observeActivity })
+  const host = createCliHost({ engine, model, policy, runs, createTransport, observeActivity: options.observeActivity, recordOutcome: options.recordOutcome })
   const request: ExecutionRequest = {
     executionID,
     supervisorSessionID: OWNER,
@@ -1299,12 +1300,13 @@ describe("chat execution through the action gate", () => {
   const CHAT_TOOLS = ["read", "list", "glob", "grep", "memory", "write", "edit", "bash"]
   const final = (text: string) => JSON.stringify({ type: "final", text })
   const bash = (command: string, extra: Record<string, unknown> = {}) => JSON.stringify({ type: "tool", name: "bash", input: { command, ...extra } })
-  function gate(decide: (action: ChatAction) => boolean, output = "exit 0\nok") {
+  function gate(decide: (action: ChatAction) => boolean, output = "exit 0\nok", extra: Partial<ActionGate> = {}) {
     const approvals: ChatAction[] = []
     const runs: string[] = []
     const value: ActionGate = {
       async approve(action) { approvals.push(action); return decide(action) ? { allow: true } : { allow: false, reason: "denied" } },
       async run(action) { runs.push(action.command); return { ok: true, text: output } },
+      ...extra,
     }
     return { value, approvals, runs }
   }
@@ -1340,6 +1342,71 @@ describe("chat execution through the action gate", () => {
     const refused = harness({ role: "main", tools: CHAT_TOOLS, responses: [bash("rm -rf build"), final("ok")] })
     expect(await (await refused.host.prepare({ ...refused.request, actionGate: denied.value })).run()).toEqual({ status: "completed", text: "ok" })
     expect(denied.runs).toEqual([])
+  })
+
+  test("multiedit is approved once as a whole and applies all edits or none; knowledge/raw is never written", async () => {
+    writeFileSync(join(root, "m1.ts"), "const a = 1\nconst b = 2\n")
+    writeFileSync(join(root, "m2.ts"), "export const c = 3\n")
+    const multiedit = (edits: Array<{ path: string; oldText: string; newText: string }>) => JSON.stringify({ type: "tool", name: "multiedit", input: { edits } })
+    const allowed = gate(() => true)
+    const run = harness({ role: "main", tools: CHAT_TOOLS, responses: [
+      multiedit([{ path: "m1.ts", oldText: "const a = 1", newText: "const a = 10" }, { path: "m1.ts", oldText: "const b = 2", newText: "const b = 20" }, { path: "m2.ts", oldText: "c = 3", newText: "c = 30" }]),
+      multiedit([{ path: "m1.ts", oldText: "const a = 10", newText: "X" }, { path: "m2.ts", oldText: "missing", newText: "Y" }]),
+      multiedit([{ path: "knowledge/raw/x.json", oldText: "a", newText: "b" }]),
+      toolWrite("KNOWLEDGE/Raw/y.json", "{}"),
+      final("edited"),
+    ] })
+    expect(await (await run.host.prepare({ ...run.request, actionGate: allowed.value })).run()).toEqual({ status: "completed", text: "edited" })
+    expect(allowed.approvals[0]).toEqual({ tool: "multiedit", edits: [
+      { path: "m1.ts", oldText: "const a = 1", newText: "const a = 10" }, { path: "m1.ts", oldText: "const b = 2", newText: "const b = 20" }, { path: "m2.ts", oldText: "c = 3", newText: "c = 30" },
+    ] })
+    expect(readFileSync(join(root, "m1.ts"), "utf8")).toBe("const a = 10\nconst b = 20\n")
+    expect(readFileSync(join(root, "m2.ts"), "utf8")).toBe("export const c = 30\n")
+    expect(run.prompts[1]).toContain("Edited 2 file(s) with 3 change(s)")
+    // The second batch had one non-matching edit: nothing changed, including the edit that would have matched.
+    expect(run.prompts[2]).toContain("edit 2 (m2.ts) text must match exactly once; nothing was changed")
+    expect(readFileSync(join(root, "m1.ts"), "utf8")).toBe("const a = 10\nconst b = 20\n")
+    expect(run.prompts[3]).toContain("knowledge/raw/ is immutable")
+    expect(run.prompts[4]).toContain("knowledge/raw/ is immutable")
+    expect(existsSync(join(root, "KNOWLEDGE"))).toBe(false)
+    expect(run.prompts[0]).toContain("- multiedit: allowed")
+
+    // Not offered without a gate or to other roles.
+    const worker = harness({ role: "worker", responses: [final("x")] })
+    await (await worker.host.prepare(worker.request)).run()
+    expect(worker.prompts[0]).not.toContain("- multiedit: allowed")
+  })
+
+  test("every executed tool reaches the outcome history with its exit code; a denied call never ran and is not recorded", async () => {
+    const facts: CliToolOutcomeFact[] = []
+    const subject = gate(action => action.tool !== "write", "exit 2\nfailed", { run: async () => ({ ok: false, text: "exit 2\nfailed", exitCode: 2 }) })
+    const run = harness({ role: "main", tools: CHAT_TOOLS, recordOutcome: fact => facts.push(fact),
+      responses: [JSON.stringify({ type: "tool", name: "read", input: { path: "seed.txt" } }), bash("bun test"), toolWrite("x.md", "x"), final("done")] })
+    writeFileSync(join(root, "seed.txt"), "seed\n")
+    expect(await (await run.host.prepare({ ...run.request, actionGate: subject.value })).run()).toEqual({ status: "completed", text: "done" })
+    expect(facts.map(fact => [fact.tool, fact.ok, fact.exitCode])).toEqual([["read", true, undefined], ["bash", false, 2]])
+    for (const fact of facts) {
+      expect(fact.sessionID).toBe(OWNER)
+      expect(fact.finishedAt).toBeGreaterThanOrEqual(fact.startedAt)
+      expect(Object.keys(fact).sort()).toEqual(["callID", "finishedAt", "ok", "sessionID", "startedAt", "tool", ...(fact.exitCode !== undefined ? ["exitCode"] : [])].sort())
+    }
+  })
+
+  test("at the tool-call limit chat asks to continue; granted rounds keep the turn going, a refusal ends it", async () => {
+    const reads = Array.from({ length: 25 }, () => JSON.stringify({ type: "tool", name: "list", input: { path: "." } }))
+    const asked: Array<[number, number]> = []
+    const granting = gate(() => true, undefined, { extendRounds: async (used: number, rounds: number) => { asked.push([used, rounds]); return true } })
+    const run = harness({ role: "main", tools: CHAT_TOOLS, responses: [...reads, final("listed")] })
+    expect(await (await run.host.prepare({ ...run.request, actionGate: granting.value })).run()).toEqual({ status: "completed", text: "listed" })
+    expect(asked).toEqual([[24, 24]])
+
+    const refusing = gate(() => true, undefined, { extendRounds: async () => false })
+    const stopped = harness({ role: "main", tools: CHAT_TOOLS, responses: [...reads, final("listed")] })
+    expect(await (await stopped.host.prepare({ ...stopped.request, actionGate: refusing.value })).run()).toEqual({ status: "failed", error: "Otter tool round limit reached" })
+
+    // Without a gate (workers, workflows) the limit is final.
+    const worker = harness({ role: "worker", responses: [...reads, final("listed")] })
+    expect(await (await worker.host.prepare(worker.request)).run()).toEqual({ status: "failed", error: "Otter tool round limit reached" })
   })
 
   test("without a gate main has no write, edit or bash, and other roles never get bash even with a gate", async () => {

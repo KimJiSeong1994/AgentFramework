@@ -1681,7 +1681,7 @@ describe("plan skills carried to workers", () => {
     f.runtime.host.preflight = async () => ({
       compatible: true,
       controls: { ...SYNTHETIC_CONTROL_STATUSES, estimatedInput: "supported", reactiveOutput: "supported" },
-      budgetEvidence: { input: "estimated", output: "reactive", vendorContext: "unobserved", mainLimit: 8192, vendorMainLimit: 16384, workerLimit: 5120 },
+      budgetEvidence: { input: "estimated", output: "reactive", vendorContext: "unobserved", mainLimit: 8192, vendorMainLimit: 49152, workerLimit: 5120 },
       problems: [],
     })
     const submitted = await f.controller.importPlan(SESSION, save(), undefined, undefined, { skills: [skill("alpha")] })
