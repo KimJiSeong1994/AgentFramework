@@ -376,6 +376,7 @@ describe("exclusive application input ownership", () => {
 
   test("first Ctrl+C preserves picker ownership and the exact draft/cursor; second requests shutdown", async () => {
     const app = new TuiApp()
+    app.resume = () => {}
     const internal = app as unknown as AppInput
     const actions: string[] = []
     app.controls(action => actions.push(action))
@@ -502,6 +503,7 @@ describe("exclusive application input ownership", () => {
 
   test.each([[80, 24], [120, 40]] as const)("approval document paging follows the shared viewport and preserves bounded decision focus at %ix%i", async (columns, rows) => {
     const app = new TuiApp()
+    app.resume = () => {}
     const internal = app as unknown as AppInput
     internal.dimensions = () => ({ columns, rows })
     const frames: string[] = []
@@ -538,6 +540,7 @@ describe("exclusive application input ownership", () => {
 
   test("filtering chooses original indexes without changing the composer or selecting on paste", async () => {
     const app = new TuiApp()
+    app.resume = () => {}
     const internal = app as unknown as AppInput
     internal.dimensions = () => ({ columns: 80, rows: 24 })
     const frames: string[] = []

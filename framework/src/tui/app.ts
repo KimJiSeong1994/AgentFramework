@@ -1162,6 +1162,9 @@ export class TuiApp implements Terminal {
       : undefined
     this.lastSubmittedDraft = undefined
     this.lastSubmittedCursor = undefined
+    // A chooser can be the first interaction (the `otter --resume` session picker): take the terminal like readInput does, or
+    // stdin is never read, nothing holds the event loop and the process exits silently before the picker is drawn.
+    this.resume()
     return new Promise(resolve => {
       const abort = () => finish(undefined)
       const finish = (index: number | undefined) => {
@@ -1210,6 +1213,7 @@ export class TuiApp implements Terminal {
     this.lastSubmittedDraft = undefined
     this.lastSubmittedCursor = undefined
     const initial = prompt.recommended !== undefined && prompt.recommended >= 0 && prompt.recommended < prompt.options.length ? prompt.recommended : 0
+    this.resume()
     return new Promise(resolve => {
       const abort = () => finish(undefined)
       const finish = (answer: AskAnswer | undefined) => {
