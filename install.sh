@@ -55,7 +55,7 @@ git_auth() {
 check_platform() {
   local os arch
   os="$(uname -s)"; arch="$(uname -m)"
-  case "$os" in Darwin|Linux) ;; *) die "unsupported OS: $os (macOS and Linux are supported)" ;; esac
+  case "$os" in Darwin|Linux) ;; *) die "unsupported OS: $os (macOS and Linux are supported; on Windows use install.ps1, which installs into WSL2)" ;; esac
   case "$arch" in arm64|aarch64|x86_64|amd64) ;; *) die "unsupported CPU architecture: $arch" ;; esac
 }
 

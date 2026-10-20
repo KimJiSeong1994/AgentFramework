@@ -9,7 +9,14 @@
 - 필요한 스킬은 알아서 꺼내 쓰되, 실행은 사람 승인 뒤에만 함
 
 ```sh
+# macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/KimJiSeong1994/AgentFramework/master/install.sh | bash
+otter
+```
+
+```powershell
+# Windows (PowerShell, WSL2 사용)
+irm https://raw.githubusercontent.com/KimJiSeong1994/AgentFramework/master/install.ps1 | iex
 otter
 ```
 
@@ -68,6 +75,13 @@ bun scripts/otter-wiki.ts lint      # 링크·해시 무결성
 - 엔진(`ollama`/`codex`/`claude`) 하나 이상이 PATH에 있어야 함
 - 로그인 `otter login codex|claude`, 상태 `otter auth`(대화 중 `/login`·`/auth`·`/logout`)
 - 재실행하면 업데이트, 제거는 `~/.local/share/otter/AgentFramework/install.sh --uninstall`
+
+**Windows**: otter는 POSIX 소유권·권한 검사에 기대므로 WSL2(기본 Ubuntu) 안에서 실행됨
+- 준비: 관리자 PowerShell에서 `wsl --install` → 재부팅 → Ubuntu를 한 번 열어 사용자 생성
+- 설치: `irm …/install.ps1 | iex`. WSL 안에서 `install.sh`를 돌리고 `%LOCALAPPDATA%\otter\bin\otter.cmd`를 만들어 사용자 PATH에 추가 → PowerShell·cmd·Windows Terminal에서 `otter`
+- 엔진 CLI(`codex`/`claude`/`ollama`)와 로그인은 **WSL 안에** 있어야 함
+- 프로젝트는 WSL 파일시스템(`\\wsl$\Ubuntu\home\<you>\...`)에 두는 것을 권장. `C:\` 드라이브(`/mnt/c`)는 파일 접근이 느림
+- 배포판 지정 `$env:OTTER_DISTRO='Ubuntu-24.04'`, 제거 `$env:OTTER_UNINSTALL='1'; irm …/install.ps1 | iex`
 
 ## 사용
 
