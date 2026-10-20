@@ -18,6 +18,8 @@ import { statusLines } from "./status-view.ts"
 import { formatDuration, progressState, renderProgress, type WorkflowProgress } from "./progress.ts"
 import { resolveTheme, type ThemeName } from "./theme.ts"
 import { WorkspaceLabel } from "./workspace.ts"
+import { copyText } from "./clipboard.ts"
+import { selectionOverlay, selectionText, type SelectionPoint } from "./selection.ts"
 
 const SPINNER_INTERVAL_MS = 120
 const UNICODE_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -47,6 +49,8 @@ type AskState = {
 }
 
 const CUSTOM_ANSWER_LIMIT = 2000
+/** Transcript rows one mouse-wheel notch scrolls. */
+const WHEEL_ROWS = 3
 
 function documentRows(document: string, columns: number): Array<{ text: string; sourceLine: number; sourceOffset: number }> {
   return document.split("\n").flatMap((line, sourceLine) => {
@@ -107,6 +111,19 @@ export class TuiApp implements Terminal {
   private readFailure = false
   private themeName: ThemeName = "neutral"
   private asciiChrome = false
+  private clipboard = copyText
+  private copying = false
+  private renderedFrame = ""
+  private renderedTranscript: readonly string[] = []
+  private dragSelection?: {
+    anchor: SelectionPoint
+    focus: SelectionPoint
+    frame: string
+    rows: readonly string[]
+    transcript: TranscriptModel
+    columns: number
+    height: number
+  }
   private workflowProgress?: WorkflowProgress
   private readonly workspace = new WorkspaceLabel()
   queueAdmission(allowed: boolean): void { this.queueAllowed = allowed && !this.readFailure }
@@ -340,6 +357,26 @@ export class TuiApp implements Terminal {
     return { pageRows: Math.max(1, viewportRows), maximumOffset: Math.max(0, visualRows - viewportRows) }
   }
 
+  /** Scrolls the transcript by `rows` (a page by default); at either edge it pages the stored conversation. */
+  private scrollTranscript(direction: "older" | "newer", rows?: number): void {
+    const { pageRows, maximumOffset } = this.transcriptScrollBounds()
+    const step = rows ?? pageRows
+    this.scrollOffset = Math.min(this.scrollOffset, maximumOffset)
+    if (direction === "older") {
+      if (this.scrollOffset < maximumOffset) this.scrollOffset = Math.min(maximumOffset, this.scrollOffset + step)
+      else if (this.source && this.nextPageOffset !== undefined) {
+        this.pageOffset = this.nextPageOffset
+        this.reloadTranscript()
+      }
+    } else if (this.scrollOffset > 0) {
+      this.scrollOffset = Math.max(0, this.scrollOffset - step)
+    } else if (this.source && this.pageOffset > 0) {
+      this.pageOffset = Math.max(0, this.pageOffset - this.pageSize)
+      this.reloadTranscript()
+    }
+    this.draw()
+  }
+
   /** Content rows inside a bordered body panel; the composer is hidden there. */
   private panelRows(): number {
     return bodyPanelRows(this.dimensions())
@@ -393,7 +430,7 @@ export class TuiApp implements Terminal {
     if (prompt !== "You> " && prompt !== "History> ") return undefined
     const keys = this.separator()
     switch (this.interactionContext) {
-      case "chat": return ["Type a message", "/ commands", "! shell", "Ctrl+R history", "Ctrl+J newline", "Ctrl+C clear"].join(keys)
+      case "chat": return ["Type a message", "Drag to copy", "/ commands", "! shell", "Ctrl+R history", "Ctrl+J newline", "Ctrl+C clear"].join(keys)
       case "unselected": return ["Choose a model with /model", "/ commands", "! shell", "/quit exit"].join(keys)
       case "held": return ["Session held", "/status explains", "/ commands", "! shell"].join(keys)
       case "observer": return ["Another session owns the active workflow", "/model switch", "/status", "! shell"].join(keys)
@@ -449,12 +486,12 @@ export class TuiApp implements Terminal {
       sections: this.interactionContext === "observer"
         ? [
           { heading: "Observing", lines: ["Another session owns the active workflow;", "new chat waits until it is resolved.", "/resume <owner>  open it to continue or /cancel", "/model  switch model"] },
-          { heading: "Flow keys", lines: [["/ commands", "! shell"].join(keys), ["Ctrl+R history", "PgUp/PgDn scroll"].join(keys)] },
+          { heading: "Flow keys", lines: [["/ commands", "! shell"].join(keys), ["Ctrl+R history", "Wheel/PgUp scroll"].join(keys)] },
         ]
         : this.interactionContext === "held"
         ? [
           { heading: "Session held", lines: ["New chat waits until the active work is resolved.", "/status  why, and what to do", "/sessions  open another session"] },
-          { heading: "Flow keys", lines: [["/ commands", "! shell"].join(keys), ["Ctrl+R history", "PgUp/PgDn scroll"].join(keys)] },
+          { heading: "Flow keys", lines: [["/ commands", "! shell"].join(keys), ["Ctrl+R history", "Wheel/PgUp scroll"].join(keys)] },
         ]
         : this.interactionContext === "unselected"
         ? [
@@ -463,7 +500,7 @@ export class TuiApp implements Terminal {
         ]
         : [
           { heading: "Get started", lines: ["No messages yet.", "Type, then press Enter.", "/model  switch model", "/model default  keep it"] },
-          { heading: "Flow keys", lines: [["/ commands", "Ctrl+R history"].join(keys), ["Ctrl+J newline", "PgUp/PgDn scroll"].join(keys)] },
+          { heading: "Flow keys", lines: [["/ commands", "Ctrl+R history"].join(keys), ["Ctrl+J newline", "Wheel/PgUp scroll"].join(keys)] },
         ],
     }
   }
@@ -471,6 +508,16 @@ export class TuiApp implements Terminal {
   private draw(): void {
     this.syncSpinner()
     if (this.suspended || this.closed) return
+    const drag = this.dragSelection
+    if (drag) {
+      const dimensions = this.dimensions()
+      if (drag.transcript === this.transcript && dimensions.columns === drag.columns && dimensions.rows === drag.height &&
+          !this.choice && !this.askState && !this.detailsVisible && !this.readFailure && this.pending?.kind !== "selection") {
+        this.driver.write(drag.frame + selectionOverlay(drag.rows, drag.anchor, drag.focus) + "\x1b[?25l")
+        return
+      }
+      this.dragSelection = undefined
+    }
     let lines = this.transcript.lines(this.transcriptQuery)
     let panel: NonNullable<Parameters<typeof renderFrame>[0]["panel"]> | undefined
     let screen = this.pending?.kind === "selection" ? this.pending.title : "Chat"
@@ -671,7 +718,8 @@ export class TuiApp implements Terminal {
     if (home && !panel) screen = "Home"
     if (panel?.placement === "body") composerVisible = false
     if (!composerVisible) { draft = ""; cursor = 0; prompt = "" }
-    this.driver.write(renderFrame({ ...this.dimensions(), transcript: panel?.placement === "body" ? [] : lines,
+    this.renderedFrame = renderFrame({ ...this.dimensions(), transcript: panel?.placement === "body" ? [] : lines,
+      onTranscriptRows: rows => { this.renderedTranscript = rows },
       header: {
         screen,
         ...(this.viewFacts ? { selection: selectionLabel(this.viewFacts.selection) } : {}),
@@ -699,10 +747,11 @@ export class TuiApp implements Terminal {
       theme: resolveTheme(this.themeName),
       ascii: this.asciiChrome,
       ...(this.spinnerGlyph() !== undefined ? { spinner: this.spinnerGlyph()! } : {}),
-    }))
+    })
+    this.driver.write(this.renderedFrame)
   }
 
-  private askInput(ask: AskState, event: InputEvent): void {
+  private askInput(ask: AskState, event: Exclude<InputEvent, { type: "mouse" }>): void {
     if (event.type === "key" && event.key === "ctrl+d") { this.control?.("quit"); return }
     if (event.type === "key" && event.key === "ctrl+c") {
       if (this.overlayControls.handle(event) === "shutdown") this.control?.("shutdown")
@@ -739,7 +788,72 @@ export class TuiApp implements Terminal {
     this.draw()
   }
 
+  private async copyAnswer(): Promise<void> {
+    if (this.copying || this.closed || this.suspended) return
+    const transcript = this.transcript
+    const answer = transcript.items.findLast(item => item.kind === "text" && item.provenance === "assistant" && item.text.trim())
+    if (!answer || answer.kind !== "text") {
+      transcript.append("No assistant answer to copy in this transcript page.")
+      this.draw()
+      return
+    }
+    await this.copyToClipboard(answer.text, "Answer")
+  }
+
+  private async copyToClipboard(text: string, label: string): Promise<void> {
+    if (this.copying || this.closed || this.suspended || !text.trim()) return
+    const transcript = this.transcript
+    this.copying = true
+    try {
+      const destination = await this.clipboard(text, sequence => {
+        if (this.closed || this.suspended) throw new Error("Terminal unavailable")
+        this.driver.write(sequence)
+      })
+      if (!this.closed && this.transcript === transcript) {
+        transcript.append(destination === "native" ? `${label} copied to clipboard.` :
+          "Copy request sent to terminal (requires OSC 52 clipboard support).")
+      }
+    } catch {
+      if (!this.closed && this.transcript === transcript) transcript.append("Could not copy the answer. Try selecting text with Shift+drag and your terminal's Copy command.")
+    } finally {
+      this.copying = false
+      this.draw()
+    }
+  }
+
+  private mouseInput(event: Extract<InputEvent, { type: "mouse" }>): void {
+    if (this.closed || this.suspended || this.readFailure || this.choiceSettled || this.choice || this.askState ||
+        this.detailsVisible || this.editor.searchState || this.pending?.kind === "selection" || !this.usable()) return
+    const point = { x: event.x, y: event.y }
+    if (event.action === "down") {
+      this.dragSelection = undefined
+      if (this.copying || !this.renderedFrame || event.y > this.renderedTranscript.length) return
+      const { columns, rows } = this.dimensions()
+      this.dragSelection = { anchor: point, focus: point, frame: this.renderedFrame,
+        rows: this.renderedTranscript, transcript: this.transcript, columns, height: rows }
+      return
+    }
+    const drag = this.dragSelection
+    if (!drag) return
+    drag.focus = point
+    if (event.action === "move") {
+      this.draw()
+      return
+    }
+    this.dragSelection = undefined
+    const moved = drag.anchor.x !== point.x || drag.anchor.y !== point.y
+    const text = moved ? selectionText(drag.rows, drag.anchor, point) : ""
+    if (text.trim()) void this.copyToClipboard(text, "Selected text")
+    this.draw()
+  }
+
   private input(event: InputEvent): void {
+    if (event.type === "mouse") {
+      this.mouseInput(event)
+      return
+    }
+    // Keyboard and wheel input resume the live view and cancel an unfinished selection.
+    if (this.dragSelection) this.dragSelection = undefined
     if (this.readFailure) {
       if (event.type === "key" && event.key === "ctrl+d") this.control?.("quit")
       else if (event.type === "key" && event.key === "ctrl+c" && this.overlayControls.handle(event) === "shutdown") this.control?.("shutdown")
@@ -752,22 +866,24 @@ export class TuiApp implements Terminal {
     }
     const suggestions = this.palette()
     const overlayVisible = !!this.choice || !!this.askState || !!this.editor.searchState || !!suggestions || this.detailsVisible
-    if (!overlayVisible && this.usable() && event.type === "key" && (event.key === "pageUp" || event.key === "pageDown" || event.key === "pageup" || event.key === "pagedown")) {
-      const { pageRows, maximumOffset } = this.transcriptScrollBounds()
-      this.scrollOffset = Math.min(this.scrollOffset, maximumOffset)
-      if (event.key.toLowerCase() === "pageup") {
-        if (this.scrollOffset < maximumOffset) this.scrollOffset = Math.min(maximumOffset, this.scrollOffset + pageRows)
-        else if (this.source && this.nextPageOffset !== undefined) {
-          this.pageOffset = this.nextPageOffset
-          this.reloadTranscript()
-        }
-      } else if (this.scrollOffset > 0) {
-        this.scrollOffset = Math.max(0, this.scrollOffset - pageRows)
-      } else if (this.source && this.pageOffset > 0) {
-        this.pageOffset = Math.max(0, this.pageOffset - this.pageSize)
-        this.reloadTranscript()
+    if (event.type === "key" && event.key === "ctrl+y" && !this.choice && !this.askState &&
+        !this.editor.searchState && !this.detailsVisible && this.pending?.kind !== "selection" &&
+        interactiveActions(this.interactionContext).some(action => action.id === "copy")) {
+      void this.copyAnswer()
+      return
+    }
+    if (event.type === "key" && (event.key === "wheelUp" || event.key === "wheelDown")) {
+      // The mouse wheel scrolls the conversation; in an overlay it moves the selection. It never recalls input history.
+      if (!this.usable()) return
+      if (!overlayVisible) {
+        this.scrollTranscript(event.key === "wheelUp" ? "older" : "newer", WHEEL_ROWS)
+        return
       }
-      this.draw()
+      if (this.editor.searchState) return
+      event = { type: "key", key: event.key === "wheelUp" ? "up" : "down" }
+    }
+    if (!overlayVisible && this.usable() && event.type === "key" && (event.key === "pageUp" || event.key === "pageDown" || event.key === "pageup" || event.key === "pagedown")) {
+      this.scrollTranscript(event.key.toLowerCase() === "pageup" ? "older" : "newer")
       return
     }
     if (event.type === "key" && event.key === "ctrl+z") { this.control?.("suspend"); return }
@@ -929,7 +1045,10 @@ export class TuiApp implements Terminal {
           this.draw()
           return
         }
-        if (localAction.id === "details") {
+        if (localAction.id === "copy") {
+          if (command === "/copy") void this.copyAnswer()
+          else this.transcript.append("Usage: /copy (copies the latest assistant answer in this transcript page)")
+        } else if (localAction.id === "details") {
           this.detailsVisible = !this.detailsVisible
         } else if (localAction.id === "ascii") {
           this.asciiChrome = !this.asciiChrome
@@ -1123,7 +1242,7 @@ export class TuiApp implements Terminal {
     this.transcript.append({ ...value, text: value.text.replace(/\r\n/g, "\n") })
     this.draw()
   }
-  suspend(): void { this.driver.handoff(); this.suspended = true; this.syncSpinner() }
+  suspend(): void { this.dragSelection = undefined; this.driver.handoff(); this.suspended = true; this.syncSpinner() }
   resume(): void {
     if (this.closed) return
     this.choiceSettled = false

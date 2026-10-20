@@ -98,6 +98,13 @@ same preflight, and no fallback to another model if it is refused:
 { "chat": { "default_model": { "engine": "local", "model": "gemma4-26b-mtp:latest" } } }
 ```
 
+In the full-screen TUI, selecting a model with `/model` (including `/model <engine> <native-id>`)
+opens an **Apply model** picker: **This session only** uses it without changing the saved
+default; **Set as default** also saves it to user config for future launches. The first option
+is initially highlighted. Escape cancels the model change. Defaults are saved only after
+the selected model is successfully applied; a save failure leaves it active for this session
+and displays the error. Project configuration still takes precedence over the user default.
+
 In the composer, `/model default` shows the effective default, `/model default save`
 stores the current selection, `/model default <local|codex|claude> <native-id>` stores
 that model (and selects it if none is selected yet), and `/model default clear` removes
@@ -323,7 +330,23 @@ Enter submits; Shift+Enter (enhanced keyboard protocol) and Ctrl+J insert a
 newline. Legacy terminals that send the same bytes for Enter and Shift+Enter
 cannot distinguish them. Bracketed paste is one editing transaction and never
 submits. Tab/Enter on a focused completion inserts only. Up/Down navigate
-history at editor boundaries, and Ctrl+R searches submitted input. In the composer,
+history at editor boundaries, and Ctrl+R searches submitted input.
+
+To copy part of a reply, hold the left mouse button and drag across the visible transcript.
+The selected text is highlighted; releasing the button copies it to the clipboard automatically.
+No modifier key is needed. The view stays fixed during the drag so live output cannot shift the
+selection. The mouse wheel still scrolls the transcript; scroll to older text before selecting it.
+A click without dragging does not copy. Typing, scrolling, resizing, or switching sessions cancels
+an unfinished selection. The composer and approval/picker controls are excluded from selection.
+
+Ctrl+Y or `/copy` copies the latest assistant answer in the current transcript page,
+including its complete Markdown/code and line breaks, without the TUI borders or labels.
+Ctrl+Y preserves the draft and cursor. After searching or paging through history, copying
+uses the most recent assistant answer in that loaded page. Local clipboard utilities are
+used when available; otherwise an OSC 52 request is sent to the terminal (including over SSH),
+which requires terminal clipboard support. For a portion of visible text, terminals that
+support bypassing mouse reporting allow Shift+drag followed by the terminal's Copy command.
+In the composer,
 first Ctrl+C clears the draft; a second strictly less than 500ms later requests shutdown.
 Details and pickers own their input without editing the underlying draft; Ctrl+D
 and the double-Ctrl+C shutdown control remain available in these overlays.
@@ -382,7 +405,11 @@ denied and thrown calls; duplicate notifications for one call are not new calls.
 The TUI uses `/search <tool/status/task>` to filter this session's transcript,
 `/search` to clear the filter, `/expand <item number>` to show correlation and
 termination evidence, `/details` to toggle the bounded task/evidence panel, and
-PageUp/PageDown to scroll. The viewport identifies older/newer content, including
+PageUp/PageDown or the mouse wheel (three rows per notch) to scroll. The TUI enables SGR mouse reporting
+(`?1000`/`?1002`/`?1006`) so the wheel scrolls the conversation instead of the terminal turning it into Up/Down,
+which would recall submitted input; in an open list or palette the wheel moves the selection.
+Left-button drags highlight and copy transcript text on release; isolated clicks do not copy.
+The viewport identifies older/newer content, including
 retained pages; multiline drafts have a separate overflow row that does not overwrite
 their text or cursor. Help and completion share context-filtered command descriptors.
 Transcript text preserves user, assistant, notice, error, and canonical-plan
@@ -432,9 +459,10 @@ execution authority. Vendor account quotas still apply.
 All three engines use the same conversation → canonical plan → local human decision →
 serial execution controller. Main/reviewer file tools are read-only. Otter owns the JSON
 file-tool loop; native inference runs in a separate empty scratch directory rather than
-the source worktree. Codex admission is currently Darwin-only and pinned to CLI 0.159.3
-and an exact bundled model slug. An Otter-owned, hash-bound catalogue removes native patch,
-shell and code-mode tools; a named permission profile restricts residual filesystem
+the source worktree. Codex admission is currently Darwin-only and accepts CLI 0.159.3 or 0.163.0
+with an exact bundled model slug. The model metadata remains pinned to the 0.159.3 catalogue.
+An Otter-owned, hash-bound catalogue removes native patch, shell and code-mode tools, and native
+goal tools are explicitly disabled; a named permission profile restricts residual filesystem
 reads to the empty scratch workdir. The legacy `--sandbox` override is not used.
 Version and catalogue checks precede inference; unknown models or drift refuse without
 fallback. Unexpected native tool activity is an error. Workers do not receive a shell

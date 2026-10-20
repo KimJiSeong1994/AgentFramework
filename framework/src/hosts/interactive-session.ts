@@ -35,6 +35,7 @@ import { readSessionCommitted } from "../workflows/commit.ts"
 import { humanDecision } from "./operator.ts"
 import type { OperatorDecision } from "./operator.ts"
 import { AdmissionRefusal, assertHostAdmission } from "./required-controls.ts"
+import { CODEX_SUPPORTED_VERSIONS } from "./codex-profile.ts"
 import { boundedTerminalDiagnostic, terminalSafeText } from "./terminal-text.ts"
 import { createWorkflowHost, requestWorkflowStop, type WorkflowHost } from "./workflow-session.ts"
 import { startRefusal } from "../workflows/registry.ts"
@@ -442,6 +443,17 @@ function readInput(terminal: Terminal, title: string, hint: string, prompt: stri
   const rendered = renderInput(title, hint, prompt, terminal.presentation?.())
   terminal.write(rendered.chrome)
   return terminal.readLine(rendered.prompt, signal)
+}
+
+/** Full-screen model selection is explicit about whether it changes future launches. */
+async function chooseModelScope(terminal: Terminal, engine: CliEngine, model: string, signal: AbortSignal): Promise<"session" | "default" | null | undefined> {
+  if (!terminal.fullscreen || !terminal.choose) return "session"
+  const selected = await chooseFrom(terminal, `Apply model · ${engine} / ${model}`,
+    ["This session only", "Set as default"],
+    ["Use this model now; keep the saved startup default unchanged.", "Use this model now and save it as the default for future launches."],
+    "Enter applies the selected scope; Escape cancels the model change.", signal)
+  if (selected === null || selected === undefined) return selected
+  return selected === 0 ? "session" : selected === 1 ? "default" : null
 }
 
 /** `/model` engine step. With `combo`, a fourth entry opens the per-role combo menu instead of picking an engine. */
@@ -1099,25 +1111,26 @@ export async function runInteractiveSession(
      */
     // Notices that must outlive selection: the full-screen transcript reloads from the new session's history.
     const startupNotices: string[] = []
+    const saveDefaultModel = (value: { engine: CliEngine; model: string }, write = (text: string) => terminal.write(terminalSafeText(`${text}\n`))): boolean => {
+      try {
+        const path = deps.defaultModel.save(value)
+        const effective = deps.defaultModel.read(worktree)
+        const overridden = effective.state === "configured" && effective.source === "project" &&
+          (effective.value.engine !== value.engine || effective.value.model !== value.model)
+        write(`Saved default model ${value.engine} / ${value.model} to ${path}.${overridden ? ` This project's .otter/otter.jsonc still selects ${effective.value.engine} / ${effective.value.model}.` : ""}`)
+        return true
+      } catch (error) {
+        write(`Default model not saved: ${boundedTerminalDiagnostic(String(error))}`)
+        return false
+      }
+    }
     const defaultModelCommand = (rest: readonly string[], current: { engine: CliEngine; model: string } | undefined): { engine: CliEngine; model: string } | undefined => {
       let deferNext = false
       const write = (text: string) => {
         if (deferNext) startupNotices.push(text)
         else terminal.write(terminalSafeText(`${text}\n`))
       }
-      const save = (value: { engine: CliEngine; model: string }): boolean => {
-        try {
-          const path = deps.defaultModel.save(value)
-          const effective = deps.defaultModel.read(worktree)
-          const overridden = effective.state === "configured" && effective.source === "project" &&
-            (effective.value.engine !== value.engine || effective.value.model !== value.model)
-          write(`Saved default model ${value.engine} / ${value.model} to ${path}.${overridden ? ` This project's .otter/otter.jsonc still selects ${effective.value.engine} / ${effective.value.model}.` : ""}`)
-          return true
-        } catch (error) {
-          write(`Default model not saved: ${boundedTerminalDiagnostic(String(error))}`)
-          return false
-        }
-      }
+      const save = (value: { engine: CliEngine; model: string }): boolean => saveDefaultModel(value, write)
       if (rest.length === 0 || (rest.length === 1 && rest[0] === "show")) {
         write(`${describeDefault(deps.defaultModel.read(worktree))} Use /model default save, /model default <local|codex|claude> <native-id>, or /model default clear.`)
         return undefined
@@ -1272,6 +1285,13 @@ export async function runInteractiveSession(
       const out = states.filter(state => state.state === "signed-out").map(state => state.engine)
       return out.length ? `${out.join(" and ")} ${out.length === 1 ? "is" : "are"} not signed in; run ${out.map(engine => `/login ${engine}`).join(" or ")}.` : undefined
     }
+    const modelSwitchHint = async (engines: Iterable<CliEngine>): Promise<string | undefined> => {
+      const targets = [...engines]
+      const auth = await signInHint(targets)
+      return auth ?? (targets.includes("codex")
+        ? `Check Codex CLI compatibility: supported versions are ${CODEX_SUPPORTED_VERSIONS.join(", ")}. Run codex --version and otter doctor for diagnostics.`
+        : undefined)
+    }
     const engineSet = (anchor: CliEngine, routes: ComboRoutes): CliEngine[] => [anchor, ...Object.values(routes).map(route => route!.engine)]
     const authCommand = async (command: "/auth" | "/login" | "/logout", rest: readonly string[]): Promise<"aborted" | undefined> => {
       const write = (text: string) => visibleWrite(terminalSafeText(`${text}\n`))
@@ -1353,6 +1373,7 @@ export async function runInteractiveSession(
     let engine: CliEngine | undefined
     let model: string | undefined
     let startupDiscovery: InteractiveViewFacts["discovery"] = "not-observed"
+    let startupModelScope: "session" | "default" = "session"
     // Explicit flags win; a persisted default applies only when neither flag was given.
     const configuredDefault: DefaultModelLookup = args.engine === undefined && args.model === undefined
       ? deps.defaultModel.read(worktree)
@@ -1436,6 +1457,10 @@ export async function runInteractiveSession(
         }
         if (command === "/model" && hasInteractiveAction("unselected", "model")) {
           if (commandArgs.length === 2 && ["local", "codex", "claude"].includes(commandArgs[0]!) && validModelID(commandArgs[1]!)) {
+            const scope = await withProgressSuspended(() => chooseModelScope(terminal, commandArgs[0] as CliEngine, commandArgs[1]!, abort.signal))
+            if (scope === undefined || abort.signal.aborted) return signalExit(receivedSignal)
+            if (scope === null) continue
+            startupModelScope = scope
             engine = commandArgs[0] as CliEngine
             model = commandArgs[1]!
             break
@@ -1472,6 +1497,10 @@ export async function runInteractiveSession(
               terminal.write("Invalid model ID; enter a native model name without whitespace.\n")
               break
             }
+            const scope = await withProgressSuspended(() => chooseModelScope(terminal, nextEngine!, picked.value!, abort.signal))
+            if (scope === undefined || abort.signal.aborted) return signalExit(receivedSignal)
+            if (scope === null) break
+            startupModelScope = scope
             engine = nextEngine!
             model = picked.value
             startupDiscovery = picked.discovery
@@ -1565,6 +1594,7 @@ export async function runInteractiveSession(
     terminal.bindSession?.(initialSessionID)
     terminal.bindView?.(currentViewIdentity())
     terminal.transcriptSource?.(options => replaySession(worktree, initialSessionID, options))
+    if (startupModelScope === "default") saveDefaultModel({ engine, model })
     for (const notice of startupNotices.splice(0)) terminal.write(terminalSafeText(`${notice}\n`))
     publishView()
     await bindSkillSession(sessionStore)
@@ -1972,7 +2002,7 @@ export async function runInteractiveSession(
      * Change the model/routes under an active workflow in place: same session ID, same history, same workflow. Only at a
      * step boundary (the switch guard refuses while any execution or activity is unsettled) and never across engines.
      */
-    async function rebindSelection(wf: WorkflowEnvelope, nextEngine: CliEngine, nextModel: string, nextRoutes: ComboRoutes, discovery: InteractiveViewFacts["discovery"], comboNotice: string | undefined): Promise<boolean> {
+    async function rebindSelection(wf: WorkflowEnvelope, nextEngine: CliEngine, nextModel: string, nextRoutes: ComboRoutes, discovery: InteractiveViewFacts["discovery"], comboNotice: string | undefined, onSelected?: () => void): Promise<boolean> {
       if (nextEngine !== wf.engine) {
         terminal.write(terminalSafeText(`Model switch refused: the active workflow ${wf.id} runs on ${wf.engine}; pick another ${wf.engine} model, or finish/cancel the workflow to switch engines.\n`))
         return true
@@ -2012,13 +2042,14 @@ export async function runInteractiveSession(
         publishView()
         terminal.write(terminalSafeText(`Now using ${nextEngine} / ${nextModel}. Same session and workflow ${wf.id} continue; the next step uses this model.\n`))
         if (comboNotice) terminal.write(terminalSafeText(comboNotice))
+        onSelected?.()
       } catch (error) {
         if (!(error instanceof AdmissionRefusal) && !(error instanceof TypeError) && !(error instanceof Error && /^model rebind refused/.test(error.message))) throw error
         if (abort.signal.aborted) return false
         if (error instanceof Error && /^model rebind refused/.test(error.message)) terminal.write(terminalSafeText(`Model switch refused: ${boundedTerminalDiagnostic(error.message)}; the current selection and conversation are unchanged.\n`))
         else {
           const route = error instanceof AdmissionRefusal && error.comboRoutes ? ` Combo route unavailable: ${error.comboRoutes}.` : ""
-          const hint = await signInHint(engineSet(nextEngine, nextRoutes))
+          const hint = await modelSwitchHint(engineSet(nextEngine, nextRoutes))
           terminal.write(terminalSafeText(`Model switch failed; the current selection and conversation are unchanged.${route}${hint ? ` ${hint}` : ""}\n`))
         }
       } finally {
@@ -2034,6 +2065,7 @@ export async function runInteractiveSession(
       forceNew = false,
       discovery: InteractiveViewFacts["discovery"] = "not-observed",
       pinnedRoutes?: ComboRoutes,
+      onSelected?: () => void,
     ): Promise<boolean> {
       // /resume uses the pinned routes as stored. Every other new session (plain switch, /new, apply) derives its
       // routes from the current saved combo, normalized against the new anchor; an invalid combo is reported, not applied.
@@ -2050,11 +2082,12 @@ export async function runInteractiveSession(
         discoveryObservation = discovery
         publishView()
         terminal.write("Already using that engine, model and routes; conversation context is unchanged.\n")
+        onSelected?.()
         return true
       }
       if (!forceNew && !targetSessionID) {
         const workflow = rebindableWorkflow()
-        if (workflow) return rebindSelection(workflow, nextEngine, nextModel, nextRoutes, discovery, comboNotice)
+        if (workflow) return rebindSelection(workflow, nextEngine, nextModel, nextRoutes, discovery, comboNotice, onSelected)
       }
       const guard = acquireSwitchGuard(targetSessionID !== undefined || retainedSDKSessionID !== undefined)
       if (!guard.release) {
@@ -2136,6 +2169,7 @@ export async function runInteractiveSession(
           if (note) terminal.write(terminalSafeText(`${note}\n`))
         }
         if (comboNotice) terminal.write(terminalSafeText(comboNotice))
+        onSelected?.()
         if (nextStore.restored) {
           terminal.write("Restored session held. Drafts remain unsent; use /continue for an explicit Resume decision.\n")
           // Restore recomputes artifact state from disk: a tampered or missing artifact shows as incomplete, never as remembered-verified.
@@ -2155,12 +2189,20 @@ export async function runInteractiveSession(
         if (!(error instanceof AdmissionRefusal) && !(error instanceof TypeError)) throw error
         if (abort.signal.aborted) return false
         const route = error instanceof AdmissionRefusal && error.comboRoutes ? ` Combo route unavailable: ${error.comboRoutes}.` : ""
-        const hint = await signInHint(engineSet(nextEngine, nextRoutes))
+        const hint = await modelSwitchHint(engineSet(nextEngine, nextRoutes))
         terminal.write(terminalSafeText(`Model switch failed; the current selection and conversation are unchanged.${route}${hint ? ` ${hint}` : ""}\n`))
       } finally {
         guard.release()
       }
       return true
+    }
+
+    async function switchModelWithScope(nextEngine: CliEngine, nextModel: string, discovery: InteractiveViewFacts["discovery"] = "not-observed"): Promise<boolean> {
+      const scope = await withProgressSuspended(() => chooseModelScope(terminal, nextEngine, nextModel, abort.signal))
+      if (scope === undefined || abort.signal.aborted) return false
+      if (scope === null) return true
+      return switchSelection(nextEngine, nextModel, undefined, false, discovery, undefined,
+        scope === "default" ? () => { saveDefaultModel({ engine: nextEngine, model: nextModel }) } : undefined)
     }
 
     async function switchToRetainedSDKSession(sessionID: string): Promise<boolean> {
@@ -2685,7 +2727,7 @@ export async function runInteractiveSession(
             }
             if (picked.value === null) break
             if (picked.value === undefined) return signalExit(receivedSignal)
-            switched = await switchSelection(nextEngine, picked.value, undefined, false, picked.discovery)
+            switched = await switchModelWithScope(nextEngine, picked.value, picked.discovery)
             if (!switched) return signalExit(receivedSignal)
             break
           }
@@ -2697,7 +2739,7 @@ export async function runInteractiveSession(
           terminal.write("Usage: /model <local|codex|claude> <native-id>\n")
           continue
         }
-        if (!await switchSelection(commandArgs[0] as CliEngine, commandArgs[1]!)) return signalExit(receivedSignal)
+        if (!await switchModelWithScope(commandArgs[0] as CliEngine, commandArgs[1]!)) return signalExit(receivedSignal)
         continue
       }
       const explicitSkill = /^\/skill:([a-z0-9][a-z0-9_-]{0,63})(?:\s+([\s\S]*))?$/u.exec(message)

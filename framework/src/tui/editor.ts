@@ -189,6 +189,7 @@ export class Editor {
   }
 
   handle(event: InputEvent): "submit" | "cancel" | "shutdown" | "queue" | undefined {
+    if (event.type === "mouse") return undefined
     if (event.type === "text") {
       if (this.#historySearch) {
         this.#insert(normalizeEditorText(event.text).replace(/\n/g, ""))

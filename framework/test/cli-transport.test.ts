@@ -437,7 +437,7 @@ test.each([
   expect(result.error).toBeDefined()
 })
 
-test("Codex uses the owned restricted-read profile and requires completed native turn", async () => {
+test.each(["0.159.3", "0.163.0"])("Codex %s uses the owned restricted-read profile and requires completed native turn", async version => {
   setProcessPlatform("darwin")
   const expectedArgs = codexExpectedArgs()
   const prompt = "codex stdin fixture"
@@ -449,7 +449,7 @@ test("Codex uses the owned restricted-read profile and requires completed native
     chunks: codexOutput({ type: "item.completed", item: { id: "item_1", type: "agent_message", text: "codex answer" } }),
     marker,
     sourceRoot: sourceRoot(),
-    version: "codex-cli 0.159.3",
+    version: `codex-cli ${version}`,
     invocationMarker: join(resolve(marker, ".."), "codex-invocations.jsonl"),
     profileCatalog: { name: `codex-${createCodexProfile(CODEX_MODEL).version}-catalog.json`, contents: createCodexProfile(CODEX_MODEL).catalogJson },
   }))
@@ -560,7 +560,7 @@ test("Codex preflight checks the pinned version without inference and run rechec
   expect(existsSync(marker)).toBe(true)
 })
 
-test("Codex refuses an unexpected CLI version before launching inference", async () => {
+test.each(["0.159.2", "0.163.1", "0.164.0", "0.163.0-dev"])("Codex refuses unexpected CLI version %s before launching inference", async version => {
   setProcessPlatform("darwin")
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
@@ -570,7 +570,7 @@ test("Codex refuses an unexpected CLI version before launching inference", async
     chunks: ["must not be emitted"],
     marker,
     sourceRoot: sourceRoot(),
-    version: "codex-cli 0.159.2",
+    version: `codex-cli ${version}`,
   }))
   expect(() => createCliTransport(options("codex", { model: "unknown-codex-slug" }))).toThrow("unsupported Codex model profile")
   const result = await createCliTransport(options("codex", { prompt: "must not reach inference" })).run()

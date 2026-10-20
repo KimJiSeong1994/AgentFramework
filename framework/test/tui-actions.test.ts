@@ -457,6 +457,48 @@ describe("exclusive application input ownership", () => {
     app.close()
   })
 
+  test("the mouse wheel scrolls the conversation by three rows and never recalls submitted input", async () => {
+    const app = new TuiApp()
+    app.resume = () => {}
+    const internal = app as unknown as AppInput & { scrollOffset: number; editor: { cursor: number; history: string[] } }
+    internal.dimensions = () => ({ columns: 80, rows: 24 })
+    internal.driver.write = () => {}
+    internal.transcript.append({ provenance: "assistant", text: Array.from({ length: 60 }, (_, index) => `answer line ${index}`).join("\n") })
+    const pending = app.readInput({ title: "Chat", hint: "Enter send", prompt: "You> ", kind: "chat" }, new AbortController().signal)
+    internal.editor.history = ["earlier prompt"]
+    app.setDraft("typing")
+    internal.input({ type: "key", key: "wheelUp" })
+    internal.input({ type: "key", key: "wheelUp" })
+    expect(internal.scrollOffset).toBe(6)
+    internal.input({ type: "key", key: "wheelDown" })
+    expect(internal.scrollOffset).toBe(3)
+    expect(app.draftSnapshot().draft).toBe("typing")
+    for (let notch = 0; notch < 5; notch += 1) internal.input({ type: "key", key: "wheelDown" })
+    expect(internal.scrollOffset).toBe(0)
+    const { maximumOffset } = internal.transcriptScrollBounds()
+    for (let notch = 0; notch < 40; notch += 1) internal.input({ type: "key", key: "wheelUp" })
+    expect(internal.scrollOffset).toBe(maximumOffset)
+    expect(app.draftSnapshot().draft).toBe("typing")
+    app.close()
+    expect(await pending).toBeUndefined()
+  })
+
+  test("the mouse wheel moves the selection in an open palette instead of the transcript", async () => {
+    const app = new TuiApp()
+    app.resume = () => {}
+    const internal = app as unknown as AppInput & { scrollOffset: number; completionIndex: number }
+    internal.driver.write = () => {}
+    internal.transcript.append({ provenance: "assistant", text: Array.from({ length: 60 }, (_, index) => `answer line ${index}`).join("\n") })
+    const pending = app.readInput({ title: "Chat", hint: "Enter send", prompt: "You> ", kind: "chat" }, new AbortController().signal)
+    internal.input({ type: "text", text: "/" })
+    expect(internal.palette()?.rows.length ?? 0).toBeGreaterThan(1)
+    internal.input({ type: "key", key: "wheelDown" })
+    expect(internal.completionIndex).toBe(1)
+    expect(internal.scrollOffset).toBe(0)
+    app.close()
+    expect(await pending).toBeUndefined()
+  })
+
   test.each([[80, 24], [120, 40]] as const)("approval document paging follows the shared viewport and preserves bounded decision focus at %ix%i", async (columns, rows) => {
     const app = new TuiApp()
     const internal = app as unknown as AppInput

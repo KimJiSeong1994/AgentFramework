@@ -6,7 +6,8 @@
  * dependency or a copied GJC module. Provenance: framework/src/tui/ATTRIBUTION.
  */
 
-export type InputEvent = { type: "key"; key: string } | { type: "text"; text: string } | { type: "paste"; text: string }
+export type InputEvent = { type: "key"; key: string } | { type: "text"; text: string } | { type: "paste"; text: string } |
+  { type: "mouse"; action: "down" | "move" | "up"; x: number; y: number }
 
 const PASTE_START = "\x1b[200~"
 const PASTE_END = "\x1b[201~"
@@ -176,6 +177,7 @@ function parseKittyCsiU(body: string): InputEvent | undefined {
 }
 
 function parseCsiKey(body: string, final: string): InputEvent | undefined {
+  if (body.startsWith("<")) return parseSgrMouse(body, final)
   if (final === "u") return parseKittyCsiU(body)
   if (final === "Z") return key("shift+tab")
 
@@ -267,6 +269,22 @@ function partialSuffixLength(value: string, marker: string): number {
     if (value.endsWith(marker.slice(0, length))) return length
   }
   return 0
+}
+
+/** SGR mouse reports retain 1-based terminal coordinates for left-button selection. */
+function parseSgrMouse(body: string, final: string): InputEvent | undefined {
+  if (final !== "M" && final !== "m") return undefined
+  const match = /^<(\d+);(\d+);(\d+)$/.exec(body)
+  if (!match) return undefined
+  const button = Number(match[1])
+  const x = Number(match[2])
+  const y = Number(match[3])
+  if (![button, x, y].every(Number.isSafeInteger) || button > 255 || x < 1 || y < 1) return undefined
+  if (button === 0) return { type: "mouse", action: final === "M" ? "down" : "up", x, y }
+  if (button === 32 && final === "M") return { type: "mouse", action: "move", x, y }
+  if (final !== "M") return undefined
+  const wheel = button & ~(4 | 8 | 16)
+  return wheel === 64 ? key("wheelUp") : wheel === 65 ? key("wheelDown") : undefined
 }
 
 function findCsiFinal(value: string): number {

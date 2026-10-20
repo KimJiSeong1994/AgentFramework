@@ -36,6 +36,8 @@ describe("exclusive raw terminal lifecycle", () => {
     const count = t.events.length
     t.input.emit("data", Buffer.from("\r"))
     expect(t.events).toHaveLength(count)
+    expect(t.output.frames[0]).toContain("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+    expect(t.output.frames.at(-1)).toContain("\x1b[?1006l\x1b[?1002l\x1b[?1000l")
     expect(t.output.frames.at(-1)).toContain("\x1b[?2004l")
     expect(t.output.frames.at(-1)).toContain("\x1b[<u")
     expect(t.output.frames.at(-1)).toContain("\x1b[?25h")
@@ -85,5 +87,6 @@ describe("exclusive raw terminal lifecycle", () => {
     expect(t.input.isRaw).toBe(false)
     expect(t.disconnected()).toBe(1)
     expect(t.input.listenerCount("data")).toBe(0)
+    expect(t.output.frames.at(-1)).toContain("\x1b[?1002l")
   })
 })

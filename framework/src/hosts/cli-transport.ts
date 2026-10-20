@@ -6,7 +6,7 @@ import { TextDecoder } from "node:util"
 import { createHash } from "node:crypto"
 import { createVendorProcess, type VendorProcessHandle, type VendorProcessResult } from "./vendor-process.ts"
 import type { ExecutionCancelResult, ExecutionReconciliation } from "./types.ts"
-import { CODEX_INSTRUCTIONS, CODEX_VERSION, codexProfileArgv, createCodexProfile } from "./codex-profile.ts"
+import { CODEX_INSTRUCTIONS, CODEX_VERSION, CODEX_SUPPORTED_VERSIONS, codexProfileArgv, createCodexProfile } from "./codex-profile.ts"
 
 export type CliEngine = "local" | "codex" | "claude"
 
@@ -827,11 +827,11 @@ type CodexProbeResult = {
   error?: string
 }
 
-function exactCodexVersion(result: VendorProcessResult): boolean {
+function supportedCodexVersion(result: VendorProcessResult): boolean {
   if (result.status !== "completed" || result.code !== 0 || !result.captureComplete ||
       result.stdout.truncated || result.stderr.truncated || result.stderr.text.trim().length > 0) return false
   const output = result.stdout.text.trim()
-  return output === `codex-cli ${CODEX_VERSION}`
+  return CODEX_SUPPORTED_VERSIONS.some(version => output === `codex-cli ${version}`)
 }
 
 /** Creates an inert, single-use native CLI transport backed by an owned process group. */
@@ -915,7 +915,7 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
     if (!result.quiescent) {
       return { compatible: false, quiescent: false, cancelled: result.status === "cancelled", error: SAFE_ERRORS.process }
     }
-    const versionMatches = exactCodexVersion(result)
+    const versionMatches = supportedCodexVersion(result)
     if (!cleanupScratch()) return { compatible: false, quiescent: true, cancelled: result.status === "cancelled", error: SAFE_ERRORS.cleanup }
     processHandle = undefined
     activeProcessKind = undefined

@@ -24,6 +24,7 @@ const all: readonly InteractiveAction[] = [
   { id: "skills", syntax: "/skills [grants|revoke <name>|auto [on|off]]", summary: "inspect skills, consent grants and automatic selection", contexts: ["chat", "held", "read-only"] },
   { id: "skill", syntax: "/skill:<name> [request]", summary: "invoke a discovered skill explicitly", contexts: ["chat"] },
   { id: "search", syntax: "/search <tool/status/task>", summary: "filter this session transcript", contexts: ["chat", "busy", "held", "read-only"], local: true },
+  { id: "copy", syntax: "/copy", summary: "copy the latest assistant answer in this transcript page (Ctrl+Y in TUI)", contexts: ["chat", "busy", "held", "read-only"], local: true },
   { id: "expand", syntax: "/expand <item number>", summary: "toggle evidence for a tool item or full output for $<shell number>", contexts: ["chat", "busy", "held", "read-only"], local: true },
   { id: "details", syntax: "/details", summary: "toggle the local task/evidence panel", contexts: ["chat", "busy", "held", "read-only"], local: true },
   { id: "theme", syntax: "/theme <neutral|light|dark>", summary: "set the process-local palette", contexts: ["chat", "busy", "held", "read-only", "unselected"], local: true },

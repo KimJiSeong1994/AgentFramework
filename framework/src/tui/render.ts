@@ -889,12 +889,15 @@ export function renderFrame(input: {
   notice?: string
   /** Muted hint shown after the prompt while the draft is empty (color only); never part of the draft. */
   placeholder?: string
+  /** Plain physical transcript rows, indexed from the top of the rendered screen. */
+  onTranscriptRows?: (rows: readonly string[]) => void
 }): string {
   const columns = terminalDimension(input.columns)
   const rows = terminalDimension(input.rows)
   const frameLines = Array<string>(rows).fill("")
 
   if (columns < MIN_COLUMNS || rows < MIN_ROWS) {
+    input.onTranscriptRows?.([])
     frameLines[0] = clipToWidth(input.ascii ? `Terminal too small: resize to at least ${MIN_SIZE_LABEL}` : resizeNotice, columns)
     return makeFrame(frameLines, { line: 0, column: 0 })
   }
@@ -942,6 +945,7 @@ export function renderFrame(input: {
   const endVisibleTranscriptRow = Math.min(visualTranscriptRows, firstVisibleTranscriptRow + bodyRows)
   const visible = displayRows.slice(firstVisibleTranscriptRow, endVisibleTranscriptRow)
   const leadingBlank = visible[0]?.role === "blank" ? 1 : 0
+  input.onTranscriptRows?.(bodyPanel ? [] : visible.slice(leadingBlank).map(transcriptRowText))
   const firstShown = displayRows[firstVisibleTranscriptRow + leadingBlank]
   const continuedSpeaker = firstShown && firstShown.role === "continuation" ? firstShown.speaker : undefined
   const styled = (text: string, styles: readonly SemanticToken[]): string => {
