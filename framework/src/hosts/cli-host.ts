@@ -43,12 +43,15 @@ import {
 const CONTROL_PROFILE = "estimated-input-reactive-output-v1" as const
 const MAIN_INPUT_LIMIT = 8192
 /**
- * Claude/Codex main turns: room for loaded skills, their files and tool results beside the bounded conversation window
- * (plan-conversation caps the history itself). Still an Otter estimate, far under the vendors' own context.
+ * Claude/Codex main turns: room for the larger vendor conversation window (plan-conversation
+ * VENDOR_PLAN_CONVERSATION_CHARS), loaded skills, their files and tool results. Still an Otter estimate, far under the
+ * vendors' own context.
  */
-const VENDOR_MAIN_INPUT_LIMIT = 16384
+const VENDOR_MAIN_INPUT_LIMIT = 49152
 const WORKER_INPUT_LIMIT = 5120
 const MAX_TOOL_ROUNDS = 24
+/** Chat only: how many times the human may grant another MAX_TOOL_ROUNDS when a turn reaches its limit. */
+const MAX_ROUND_EXTENSIONS = 3
 const MAX_NATIVE_RESPONSE_BYTES = 256 * 1024
 const MAX_TOTAL_OUTPUT_BYTES = 16 * 1024 * 1024
 const MAX_EXECUTION_MS = 24 * 60 * 60 * 1000
@@ -78,7 +81,20 @@ const TOOL_SCHEMAS: Record<CliToolName, string> = {
   skill: '{"name": one name from the Available skills list, "path"?: a file the loaded skill lists, relative to its directory}; without path returns that skill\'s instructions and its file list; with path returns that file (only after loading the skill). Load a skill when the conversation needs what its description covers, then follow it within this role\'s tools and restrictions',
   write: '{"path": relative nonempty string ≤2048 UTF-8 bytes, "content": NUL-free string ≤64 KiB}',
   edit: '{"path": relative nonempty string ≤2048 UTF-8 bytes, "oldText": nonempty exact NUL-free string ≤64 KiB, "newText": NUL-free string ≤64 KiB}',
+  multiedit: '{"edits": array of 1..20 {"path", "oldText", "newText"} like edit}; several changes, across files, shown to the user as one diff and approved once; applied only if every oldText occurs exactly once (in order per file), otherwise nothing changes',
   bash: '{"command": one shell command line run with /bin/sh -c in the worktree, nonblank ≤4096 characters, "interactive"?: true only when it needs the user\'s keyboard (output is then not returned), "timeoutSeconds"?: integer 1..600 (default 120)}; the user approves or denies it first; returns the exit status and the output tail',
+}
+
+/** A terminal tool fact handed to the tool-outcome history (no arguments, no bodies). */
+export type CliToolOutcomeFact = {
+  sessionID: string
+  callID: string
+  tool: string
+  ok: boolean
+  startedAt: number
+  finishedAt: number
+  /** Commands only: the process exit code (null when it ended by a signal). */
+  exitCode?: number | null
 }
 
 /** `ignoredCalls`: further tool calls in the same reply that were not run (only the first call runs). */
@@ -102,6 +118,11 @@ export type CliHostOptions = {
   observeActivity?: (activity: CliHostActivity) => void
   /** Display-only tool target/duration for the live transcript; separate so `observeActivity` stays content-free. */
   observeToolDisplay?: (display: CliToolDisplay) => void
+  /**
+   * One terminal tool fact for the shared tool-outcome history (knowledge/AGENTS.md allow-list only: identity, tool,
+   * status and basis, timing; never arguments or bodies). Called for every executed tool; denied calls never ran.
+   */
+  recordOutcome?: (outcome: CliToolOutcomeFact) => void
   /** A transport factory keeps native inference replaceable in deterministic host fixtures. */
   createTransport?: CliTransportFactory
   /**
@@ -479,6 +500,9 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
   }
   const observeToolDisplay = (display: CliToolDisplay): void => {
     try { options.observeToolDisplay?.(display) } catch { /* Display observers never affect host outcomes. */ }
+  }
+  const recordOutcome = (outcome: CliToolOutcomeFact): void => {
+    try { options.recordOutcome?.(outcome) } catch { /* History is observational and never affects host outcomes. */ }
   }
 
   type Target = { engine: CliEngine; model: string }
@@ -859,7 +883,11 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             try { skillProvider?.delivered?.(sticky.name) } catch { /* Display/audit only. */ }
           }
 
-          for (turn = 0; turn < MAX_TOOL_ROUNDS + 1; turn++) {
+          // Chat with a human present may grant more rounds when the limit is reached; everything else stops at the limit.
+          const turnGate = request.role === "main" ? request.actionGate : undefined
+          let roundLimit = MAX_TOOL_ROUNDS
+          let extensions = 0
+          for (turn = 0; turn < roundLimit + 1; turn++) {
             if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
             if (Date.now() >= request.deadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed before the next model turn" })
             assertFixedPolicy(request)
@@ -1046,18 +1074,32 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             observeActivity({ kind: "tool-started" as const, ...activity })
             observeToolDisplay({ executionID: activity.executionID, callID, phase: "started", ...(startDetail ? { detail: startDetail } : {}) })
             let terminalActivitySent = false
-            const finishTool = (outcome: "succeeded" | "failed" | "denied", ok: boolean, result?: CliToolOutput): void => {
+            const finishTool = (outcome: "succeeded" | "failed" | "denied", ok: boolean, result?: CliToolOutput, exitCode?: number | null): void => {
               if (terminalActivitySent) return
               terminalActivitySent = true
+              if (outcome !== "denied") {
+                recordOutcome({ sessionID: request.supervisorSessionID, callID, tool: name, ok: outcome === "succeeded",
+                  startedAt: toolStartedAt, finishedAt: Date.now(), ...(exitCode !== undefined ? { exitCode } : {}) })
+              }
               const resultDetail = result === undefined ? undefined
                 : result.ok ? { resultLines: result.text.length === 0 ? 0 : result.text.split("\n").length } : { error: result.error }
               observeActivity({ kind: "tool-finished" as const, ...activity, outcome, ok })
               observeToolDisplay({ executionID: activity.executionID, callID, phase: "finished", durationMs: Math.max(0, Date.now() - toolStartedAt),
                 ...(resultDetail ? { detail: validatedToolDetail(resultDetail) } : {}) })
             }
-            if (toolCalls >= MAX_TOOL_ROUNDS) {
-              finishTool("denied", false)
-              return setFinal({ status: "failed", error: "Otter tool round limit reached" })
+            if (toolCalls >= roundLimit) {
+              let granted = false
+              if (turnGate?.extendRounds && extensions < MAX_ROUND_EXTENSIONS) {
+                const extendSignal = AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))])
+                try { granted = await turnGate.extendRounds(toolCalls, MAX_TOOL_ROUNDS, extendSignal) } catch { granted = false }
+              }
+              if (!granted || cancelled) {
+                finishTool("denied", false)
+                if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+                return setFinal({ status: "failed", error: "Otter tool round limit reached" })
+              }
+              extensions++
+              roundLimit += MAX_TOOL_ROUNDS
             }
             try { validateCliToolInput(name, envelope.input) }
             catch (error) {
@@ -1154,9 +1196,11 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             }
             const event = { type: "tool-before" as const, sessionID: callSession, callID, toolID: `otter:${name}`, name, input: envelope.input }
             const gate = request.role === "main" ? request.actionGate : undefined
-            if (!request.policy.tools.allowed.includes(name) || request.policy.tools.denied.includes(name) || !available.includes(name) ||
-                (request.role === "reviewer" && (name === "write" || name === "edit")) ||
-                (request.role === "main" && !gate && (name === "write" || name === "edit" || name === "bash"))) {
+            // multiedit is a batch of edits: the role policy decides it as `edit`.
+            const policyName = name === "multiedit" ? "edit" : name
+            if (!request.policy.tools.allowed.includes(policyName) || request.policy.tools.denied.includes(policyName) || !available.includes(name) ||
+                (request.role === "reviewer" && (name === "write" || name === "edit" || name === "multiedit")) ||
+                (request.role === "main" && !gate && (name === "write" || name === "edit" || name === "multiedit" || name === "bash"))) {
               finishTool("denied", false)
               return setFinal({ status: "failed", error: "Otter tool denied by role policy before effects" })
             }
@@ -1242,21 +1286,24 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             }
             // Chat execution: the local human decides each write, edit and command right before its effect. A denial
             // is the tool result (the turn goes on, so the model can adjust); it is never an execution failure.
-            if (gate && (name === "write" || name === "edit" || name === "bash")) {
+            if (gate && (name === "write" || name === "edit" || name === "multiedit" || name === "bash")) {
               const action: ChatAction = name === "bash"
                 ? { tool: "bash", command: envelope.input.command as string, interactive: envelope.input.interactive === true,
                     timeoutMs: ((envelope.input.timeoutSeconds as number | undefined) ?? DEFAULT_BASH_TIMEOUT_SECONDS) * 1000 }
                 : name === "write" ? { tool: "write", path: envelope.input.path as string, content: envelope.input.content as string }
-                  : { tool: "edit", path: envelope.input.path as string, oldText: envelope.input.oldText as string, newText: envelope.input.newText as string }
+                  : name === "multiedit" ? { tool: "multiedit", edits: envelope.input.edits as Array<{ path: string; oldText: string; newText: string }> }
+                    : { tool: "edit", path: envelope.input.path as string, oldText: envelope.input.oldText as string, newText: envelope.input.newText as string }
               const gateSignal = AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))])
               let gated: CliToolOutput | undefined
               let deniedByUser = false
+              let commandExit: number | null | undefined
               try {
                 const decision = await gate.approve(action, gateSignal)
                 deniedByUser = !decision.allow
                 if (!decision.allow) gated = { ok: false, error: `The user denied this action: ${decision.reason}` }
                 else if (action.tool === "bash") {
                   const ran = await gate.run(action, gateSignal)
+                  commandExit = ran.exitCode
                   gated = ran.ok ? { ok: true, text: safeToolText(ran.text) } : { ok: false, error: safeToolText(ran.text) }
                 }
               } catch {
@@ -1268,7 +1315,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               }
               if (gated !== undefined) {
                 // A command that ran and exited non-zero failed; only a human denial reads as denied.
-                finishTool(gated.ok ? "succeeded" : deniedByUser ? "denied" : "failed", gated.ok, gated)
+                finishTool(gated.ok ? "succeeded" : deniedByUser ? "denied" : "failed", gated.ok, gated, commandExit)
                 const gatedEvent = { type: "tool-result" as const, sessionID: callSession, callID, toolID: `otter:${name}`, name,
                   ...(gated.ok ? { result: gated.text } : { error: gated.error }) }
                 let gatedTransformed: ReturnType<ExecutionPolicyHandlers["toolResult"]>

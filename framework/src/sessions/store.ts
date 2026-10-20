@@ -12,7 +12,7 @@ import { consumeValidatedResumeProof } from "./admission.ts"
 import { validateComboRoutes } from "../hosts/default-model.ts"
 import type { ComboRoutes } from "../hosts/types.ts"
 
-export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "model-rebind" | "shell" | "verify"
+export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "model-rebind" | "shell" | "verify" | "action"
 export type TranscriptRecord = { seq: number; kind: TranscriptKind; eventID: string; data: Record<string, unknown> }
 export type SessionMetadata = {
   version: 1
@@ -87,7 +87,7 @@ const MAX_EVENT_ID_BYTES = 16 * 1024
 const MAX_TOOL_TEXT_BYTES = 4096
 const noFollow = fs.constants.O_NOFOLLOW ?? 0
 const directoryOnly = fs.constants.O_DIRECTORY ?? 0
-const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice", "carried-context", "model-rebind", "shell", "verify"])
+const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice", "carried-context", "model-rebind", "shell", "verify", "action"])
 /** Bounds for a persisted operator shell run (see hosts/operator-shell.ts). */
 export const MAX_SHELL_LINES = 200
 export const MAX_SHELL_OUTPUT_BYTES = 64 * 1024
@@ -613,6 +613,19 @@ function validateKindData(kind: TranscriptKind, data: Record<string, unknown>): 
         lines.length > MAX_SHELL_LINES || bytes > MAX_SHELL_OUTPUT_BYTES || !Number.isSafeInteger(data.totalLines) ||
         (data.totalLines as number) < lines.length) {
       throw new TypeError("shell transcript data must be {command,status,exitCode,signal,durationMs,lines,totalLines}")
+    }
+    return
+  }
+  if (kind === "action") {
+    // A chat action's decision (write/edit/multiedit/bash): which tool, how it was decided, the worktree-relative paths it
+    // writes and a command's rule prefix. Never file contents, edit text or a full command line (the session-digest
+    // allow-list in knowledge/AGENTS.md).
+    const paths = data.paths
+    if (!(exactKeys(data, ["tool", "decision", "paths"]) || exactKeys(data, ["tool", "decision", "paths", "rule"])) || !["write", "edit", "multiedit", "bash"].includes(data.tool as string) ||
+        !["asked", "rule", "read-only", "auto-edit", "grant", "denied", "refused"].includes(data.decision as string) ||
+        !Array.isArray(paths) || paths.length > 64 || !paths.every(path => boundedString(path, 1024)) ||
+        (data.rule !== undefined && !boundedString(data.rule, 256))) {
+      throw new TypeError("action transcript data must be {tool,decision,paths[,rule]}")
     }
     return
   }

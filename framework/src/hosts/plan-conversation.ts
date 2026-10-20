@@ -7,10 +7,22 @@ import type { Terminal } from "./interactive-session.ts"
 import type { PreparedSkillInvocation } from "../skills/session.ts"
 import { bindSkillInvocation, finishSkillInvocation, skillInvocationAudit } from "../skills/context.ts"
 import { cancelMemoryPrefetch, currentMemoryConfig, startMemoryPrefetch } from "../wiki/recall.ts"
+import { FACTS_PROMPT_CHARS, factsPromptBlock, worktreeFacts } from "../sessions/history.ts"
 
+/** Conversation window for a local (Ollama) or OpenCode chat model, and the floor every engine gets. */
 export const MAX_PLAN_CONVERSATION_CHARS = 24_000
+/**
+ * Conversation window for a Claude/Codex chat model. It stays inside the host's vendor main-input estimate
+ * (cli-host VENDOR_MAIN_INPUT_LIMIT tokens at ~4 characters per token) with room for tools and skills.
+ */
+export const VENDOR_PLAN_CONVERSATION_CHARS = 96_000
 export const MAX_PLAN_CONVERSATION_TURNS = 24
 export const PLAN_RESPONSE_RESERVE_CHARS = 8_000
+
+/** The conversation window for a chat model on `engine`. */
+export function planConversationChars(engine: string | undefined): number {
+  return engine === "codex" || engine === "claude" ? VENDOR_PLAN_CONVERSATION_CHARS : MAX_PLAN_CONVERSATION_CHARS
+}
 
 export type ConversationMessage = { role: "user" | "assistant"; text: string }
 export type ConversationTurn = { text: string; plan?: unknown; skill?: Readonly<Record<string, string>> }
@@ -44,42 +56,53 @@ function mainPromptFor(runtime: ExecutionRuntime): MainPrompt {
   return tools.includes("bash") && tools.includes("edit") ? PLAN_CHAT_PROMPT : PLAN_MAIN_PROMPT
 }
 
-function promptPrefix(prompt: MainPrompt, verifyAllow: unknown, skillInstructions?: string): string {
+function promptPrefix(prompt: MainPrompt, verifyAllow: unknown, skillInstructions?: string, facts = ""): string {
   const skill = skillInstructions === undefined ? "" :
     `\nActive skill instructions (captured bytes; base role and execution approval restrictions still apply):\n${skillInstructions}\n`
-  return `${prompt.text}\nAllowed verification patterns: ${JSON.stringify(verifyAllow)}${skill}\nConversation:\n`
+  return `${prompt.text}\nAllowed verification patterns: ${JSON.stringify(verifyAllow)}${facts ? `\n${facts}` : ""}${skill}\nConversation:\n`
+}
+
+/**
+ * Project facts for the acting chat model: commands that pass or keep failing here, from earlier session digests
+ * (deterministic, bounded to FACTS_PROMPT_CHARS, reference data). A read-only planning chat does not carry them.
+ */
+function turnFacts(runtime: ExecutionRuntime, prompt: MainPrompt): string {
+  if (prompt !== PLAN_CHAT_PROMPT) return ""
+  try { return factsPromptBlock(worktreeFacts(runtime.worktree)) } catch { return "" }
 }
 
 /**
  * Characters left for skill instructions when `message` is sent with no prior history. Automatic selection skips a
  * skill larger than this so an oversized skill never fails the turn; explicit `/skill:` invocations still refuse.
  */
-export function skillInstructionBudget(verifyAllow: unknown, message = ""): number {
+export function skillInstructionBudget(verifyAllow: unknown, message = "", engine?: string): number {
   // The longer prompt bounds both modes, so a skill admitted here fits whichever prompt the turn uses.
   const prompt = PLAN_CHAT_PROMPT.text.length > PLAN_MAIN_PROMPT.text.length ? PLAN_CHAT_PROMPT : PLAN_MAIN_PROMPT
   const base = `${promptPrefix(prompt, verifyAllow, "")}${JSON.stringify([{ role: "user", text: message }])}`
-  return Math.max(0, MAX_PLAN_CONVERSATION_CHARS - PLAN_RESPONSE_RESERVE_CHARS - base.length)
+  // Room for the project-facts block a turn may carry, so an admitted skill still fits.
+  return Math.max(0, planConversationChars(engine) - PLAN_RESPONSE_RESERVE_CHARS - base.length - FACTS_PROMPT_CHARS - 1)
 }
 
-function fitsConversationBudget(requestText: string): boolean {
-  return requestText.length + PLAN_RESPONSE_RESERVE_CHARS <= MAX_PLAN_CONVERSATION_CHARS
+function fitsConversationBudget(requestText: string, limit: number): boolean {
+  return requestText.length + PLAN_RESPONSE_RESERVE_CHARS <= limit
 }
 
 function selectWindow(
   history: readonly ConversationMessage[],
   pending: ConversationMessage,
   prefix: string,
+  limit = MAX_PLAN_CONVERSATION_CHARS,
 ): { messages: ConversationMessage[]; requestText: string } | undefined {
   let messages = [pending]
   let requestText = `${prefix}${JSON.stringify(messages)}`
-  if (!fitsConversationBudget(requestText)) return undefined
+  if (!fitsConversationBudget(requestText, limit)) return undefined
 
   let start = history.length
   let includedPairs = 0
   while (start >= 2 && includedPairs < MAX_PLAN_CONVERSATION_TURNS - 1) {
     const candidate = [history[start - 2]!, history[start - 1]!, ...messages]
     const candidateRequestText = `${prefix}${JSON.stringify(candidate)}`
-    if (!fitsConversationBudget(candidateRequestText)) break
+    if (!fitsConversationBudget(candidateRequestText, limit)) break
     messages = candidate
     requestText = candidateRequestText
     start -= 2
@@ -119,7 +142,8 @@ export function createPlanConversation(
      * own during the turn; it is ignored when an explicit skill is bound.
      */
     async turn(text: string, signal?: AbortSignal, skill?: SkillConversationInvocation, skillTool?: SkillToolProvider, actionGate?: ActionGate): Promise<ConversationTurn> {
-      if (typeof text !== "string" || !text.trim() || text.length > MAX_PLAN_CONVERSATION_CHARS) {
+      const limit = planConversationChars(runtime.host.identity.engine)
+      if (typeof text !== "string" || !text.trim() || text.length > limit) {
         throw new Error("conversation message is empty or too large")
       }
       if (busy) throw new Error("conversation already has an active turn")
@@ -128,7 +152,8 @@ export function createPlanConversation(
       const mainPrompt = mainPromptFor(runtime)
       // Read-only mode never carries a gate, whatever the caller passes.
       const gate = mainPrompt === PLAN_CHAT_PROMPT ? actionGate : undefined
-      let window = selectWindow(history, pending, promptPrefix(mainPrompt, runtime.config.delegate.verify_allow))
+      const facts = turnFacts(runtime, mainPrompt)
+      let window = selectWindow(history, pending, promptPrefix(mainPrompt, runtime.config.delegate.verify_allow, undefined, facts), limit)
       if (!window) throw new Error("conversation message is too large for the reserved context budget")
       const workflow = activeWorkflow(runtime.worktree)
       if (workflow?.sessionID === sessionID) {
@@ -153,11 +178,11 @@ export function createPlanConversation(
         let audit: Readonly<Record<string, string>> | undefined
         const result = await runWorkflowTurn(runtime, binding, {
           title, text: window.requestText, label: "planning", cancelCause: "planning conversation cancelled",
-          budget: { maxChars: MAX_PLAN_CONVERSATION_CHARS, reserveChars: PLAN_RESPONSE_RESERVE_CHARS },
+          budget: { maxChars: limit, reserveChars: PLAN_RESPONSE_RESERVE_CHARS },
           bind(request) {
             const bound = skill ? bindSkillInvocation(skill.prepared, request, runtime.policy, skill.terminal) : undefined
             if (!bound) return { handlers: runtime.policy.handlers(request), ...(skillTool && skillTool.catalog.length ? { skillTool } : {}), ...(gate ? { actionGate: gate } : {}) }
-            window = selectWindow(history, pending, promptPrefix(mainPrompt, runtime.config.delegate.verify_allow, bound.instructions))
+            window = selectWindow(history, pending, promptPrefix(mainPrompt, runtime.config.delegate.verify_allow, bound.instructions, facts), limit)
             if (!window) { finishSkillInvocation(bound.context); throw new Error("skill instructions exceed the reserved conversation context budget") }
             audit = skillInvocationAudit(bound.context)
             return { handlers: bound.handlers, skillContext: bound.context, text: window.requestText, ...(gate ? { actionGate: gate } : {}) }

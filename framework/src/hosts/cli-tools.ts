@@ -17,7 +17,9 @@ import { FdTree, fdStatKind, type FdDirectory, type FdEntry } from "../skills/fd
 import type { OtterConfig } from "../config.ts"
 import { memoryToolText } from "../wiki/recall.ts"
 
-export const CLI_TOOL_NAMES = ["read", "list", "glob", "grep", "memory", "skill", "write", "edit", "bash"] as const
+export const CLI_TOOL_NAMES = ["read", "list", "glob", "grep", "memory", "skill", "write", "edit", "multiedit", "bash"] as const
+/** Upper bound on the edits one `multiedit` call may carry. */
+export const MAX_MULTIEDIT_EDITS = 20
 /** Upper bounds for a chat `bash` call: the command text and its time limit. */
 export const MAX_BASH_COMMAND_CHARS = 4096
 export const DEFAULT_BASH_TIMEOUT_SECONDS = 120
@@ -137,6 +139,14 @@ export function validateCliToolInput(name: string, input: unknown): asserts inpu
       if (!hasExactKeys(input, ["path", "oldText", "newText"]) || !path(input.path) ||
           !boundedString(input.oldText, MAX_WRITE_BYTES) || input.oldText.length === 0 ||
           !boundedString(input.newText, MAX_WRITE_BYTES)) throw new CliToolInputError()
+      return
+    case "multiedit":
+      if (!hasExactKeys(input, ["edits"]) || !Array.isArray(input.edits) || input.edits.length === 0 || input.edits.length > MAX_MULTIEDIT_EDITS ||
+          !input.edits.every(edit => typeof edit === "object" && edit !== null && !Array.isArray(edit) &&
+            hasExactKeys(edit as Record<string, unknown>, ["path", "oldText", "newText"]) && path(edit.path) &&
+            boundedString(edit.oldText, MAX_WRITE_BYTES) && (edit.oldText as string).length > 0 && boundedString(edit.newText, MAX_WRITE_BYTES))) {
+        throw new CliToolInputError()
+      }
       return
     case "bash":
       if (!hasExactKeys(input, ["command"], ["interactive", "timeoutSeconds"]) || typeof input.command !== "string" ||
@@ -361,6 +371,15 @@ function writeAll(fd: number, value: string, beforeEffect?: () => void): void {
   fsyncSync(fd)
 }
 
+/**
+ * knowledge/raw/ holds immutable wiki sources: only `scripts/otter-wiki.ts` writes there (knowledge/AGENTS.md). The
+ * OpenCode guard blocks it for host tools; this blocks it for otter's own file tools, any letter case.
+ */
+function wikiRawPath(relativePath: string): boolean {
+  const segments = relativePath.split(/[\\/]+/).filter(part => part && part !== ".").map(part => part.toLowerCase())
+  return segments[0] === "knowledge" && segments[1] === "raw"
+}
+
 function writeTarget(
   root: string,
   relativePath: string,
@@ -370,6 +389,7 @@ function writeTarget(
   beforeEffect?: () => void,
 ): CliToolOutput {
   if (!relativePath) return publicFailure(new Error("path"))
+  if (wikiRawPath(relativePath)) return { ok: false, error: "Tool refused: knowledge/raw/ is immutable; only the wiki CLI writes there." }
   let fd: number
   let creating = false
   try {
@@ -414,6 +434,52 @@ function writeTarget(
   } finally {
     closeSync(fd)
   }
+}
+
+/**
+ * Several exact-text edits applied all-or-nothing: every file is read and every edit checked (each old text must occur
+ * exactly once, applied in order per file) before anything is written. A file named twice gets its edits in order.
+ */
+function multiEditTargets(
+  root: string,
+  edits: ReadonlyArray<{ path: string; oldText: string; newText: string }>,
+  identity: RootIdentity,
+  beforeEffect?: () => void,
+): CliToolOutput {
+  const planned = new Map<string, string>()
+  for (const [index, edit] of edits.entries()) {
+    let relativePath: string
+    try { relativePath = normalizeToolPath(edit.path) } catch (error) { return publicFailure(error) }
+    if (!relativePath) return publicFailure(new Error("path"))
+    if (wikiRawPath(relativePath)) return { ok: false, error: "Tool refused: knowledge/raw/ is immutable; only the wiki CLI writes there. Nothing was changed." }
+    let current = planned.get(relativePath)
+    if (current === undefined) {
+      try { current = readTarget(root, relativePath, identity, MAX_READ_BYTES).toString("utf8") }
+      catch { return { ok: false, error: `Tool refused: edit ${index + 1} target is unavailable; nothing was changed.` } }
+    }
+    const first = current.indexOf(edit.oldText)
+    if (first < 0 || current.indexOf(edit.oldText, first + edit.oldText.length) >= 0) {
+      return { ok: false, error: `Tool refused: edit ${index + 1} (${relativePath}) text must match exactly once; nothing was changed.` }
+    }
+    const next = current.slice(0, first) + edit.newText + current.slice(first + edit.oldText.length)
+    if (Buffer.byteLength(next, "utf8") > MAX_READ_BYTES) return publicFailure(new Error("size"))
+    planned.set(relativePath, next)
+  }
+  const written: string[] = []
+  for (const [relativePath, content] of planned) {
+    let fd: number
+    try { fd = openScopedTarget(root, relativePath, constants.O_RDWR | constants.O_NONBLOCK, identity) }
+    catch (error) { return written.length ? { ok: false, error: `Tool failed after editing ${written.join(", ")}: ${relativePath} became unavailable.` } : publicFailure(error) }
+    try {
+      const stat = fstatSync(fd)
+      if (!stat.isFile() || stat.nlink !== 1) throw new Error("type")
+      writeAll(fd, content, beforeEffect)
+      written.push(relativePath)
+    } catch (error) {
+      return written.length ? { ok: false, error: `Tool failed after editing ${written.join(", ")}: ${relativePath} could not be written.` } : publicFailure(error)
+    } finally { closeSync(fd) }
+  }
+  return { ok: true, text: `Edited ${planned.size} file(s) with ${edits.length} change(s); every old text occurred once.` }
 }
 
 function parseIgnoreRules(root: string, base: string, identity: RootIdentity): IgnoreRule[] {
@@ -767,6 +833,7 @@ function executeFileTool(
     case "memory": return { ok: false, error: "Tool refused: memory recall is asynchronous." }
     case "skill": return { ok: false, error: "Tool refused: skill loading is host-provided." }
     case "bash": return { ok: false, error: "Tool refused: commands run through the host approval gate." }
+    case "multiedit": return multiEditTargets(root, input.edits as Array<{ path: string; oldText: string; newText: string }>, identity, beforeEffect)
     case "write": return writeTarget(root, normalizeToolPath(input.path as string), identity, input.content as string, undefined, beforeEffect)
     case "edit": return writeTarget(root, normalizeToolPath(input.path as string), identity, input.newText as string, input.oldText as string, beforeEffect)
   }
@@ -800,6 +867,8 @@ export function createCliTools(options: CliToolsOptions): CliTools {
   // `skill` is not a role-policy tool: the host offers it only with a request-scoped skill provider (main role).
   const available = CLI_TOOL_NAMES.filter(name => name === "skill" ? options.skillTool === true
     : name === "bash" ? gatedMain && options.allowed.includes(name) && !options.denied.includes(name)
+    // multiedit is the approved-chat batch of `edit`: same permission as edit, offered only to gated main.
+    : name === "multiedit" ? gatedMain && options.allowed.includes("edit") && !options.denied.includes("edit")
     : options.allowed.includes(name) && !options.denied.includes(name) && !(readOnly && (name === "write" || name === "edit")))
   const availableSet = new Set<string>(available)
   return {

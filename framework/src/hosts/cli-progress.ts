@@ -113,6 +113,8 @@ export type CliProgressSink = {
 }
 
 export type CliProgressPresenter = CliProgressSink & {
+  /** The chat model may edit and run commands: its lines read "Agent" instead of "Planning". */
+  mainActs: (acting: boolean) => void
   waiting: () => void
   responseReceived: () => void
   tasks: (tasks: readonly CliProgressTask[], totalCount?: number) => void
@@ -172,9 +174,9 @@ function status(value: unknown): value is CliTaskStatus {
   return typeof value === "string" && TASK_STATUSES.includes(value as CliTaskStatus)
 }
 
-function roleName(role: ExecutionRole): string {
+function roleName(role: ExecutionRole, mainLabel = "Planning"): string {
   switch (role) {
-    case "main": return "Planning"
+    case "main": return mainLabel
     case "worker": return "Worker"
     case "reviewer": return "Reviewer"
     case "data-analyst": return "Data analyst"
@@ -251,6 +253,8 @@ export function createCliProgressPresenter(
   let suspended = false
   let planningWaitActive = false
   let planningResponseReported = false
+  // "Planning" for a read-only chat model; "Agent" once it may edit and run commands (chat.execute ask/auto-edit).
+  let mainLabel = "Planning"
 
   const output = (line: string): void => {
     if (suspended) {
@@ -300,7 +304,7 @@ export function createCliProgressPresenter(
     const activity = validatedHostActivity(value)
     if (!activity) return
     try { observe?.(activity) } catch { /* Observers are observational and never change execution. */ }
-    const label = roleName(activity.role)
+    const label = roleName(activity.role, mainLabel)
     const keySuffix = `${activity.execution}:${activity.role}`
     if (activity.kind === "model-started") {
       if (activity.role === "main" && (planningWaitActive || !mainModelLines)) return
@@ -312,7 +316,7 @@ export function createCliProgressPresenter(
       if (activity.role === "main") planningWaitActive = false
       if (activity.status === "completed") {
         if (activity.role === "main") {
-          if (mainModelLines && !planningResponseReported) output("[activity] Planning model response received.")
+          if (mainModelLines && !planningResponseReported) output(`[activity] ${mainLabel} model response received.`)
           planningResponseReported = true
         } else once(`model-returned:${keySuffix}`, `[activity] ${label} model response received.`)
       } else {
@@ -382,17 +386,18 @@ export function createCliProgressPresenter(
   return {
     queue,
     host,
+    mainActs(acting: boolean) { mainLabel = acting ? "Agent" : "Planning" },
     waiting() {
       if (planningWaitActive) return
       planningWaitActive = true
       planningResponseReported = false
-      if (mainModelLines) output("[progress] Waiting for the planning model.")
+      if (mainModelLines) output(`[progress] Waiting for the ${mainLabel.toLowerCase()} model.`)
     },
     responseReceived() {
       planningWaitActive = false
       if (planningResponseReported) return
       planningResponseReported = true
-      if (mainModelLines) output("[activity] Planning model response received.")
+      if (mainModelLines) output(`[activity] ${mainLabel} model response received.`)
     },
     tasks(values, requestedTotal = values.length) {
       const accepted: CliProgressTask[] = []

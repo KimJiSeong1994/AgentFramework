@@ -6,6 +6,7 @@ import {
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path"
 import { containsSecret } from "../security/secrets.ts"
 import { listToolOutcomes, type ToolOutcome } from "../telemetry/outcomes.ts"
+import { digestDirectory, readSessionDigests, type SessionDigest } from "../sessions/digest.ts"
 import { isRoutingSnapshot, readRoutingLogs, type RoutingEvent, type RoutingSnapshot } from "../telemetry/routing-reader.ts"
 import { listSkillObservations, validateSkillObservationSnapshot, type SkillObservationList } from "../telemetry/skills.ts"
 import {
@@ -751,6 +752,88 @@ export function captureWiki(worktree: string) {
   } finally { unlinkSync(lock) }
 }
 
+// -- Session digests ----------------------------------------------------------------------------------------------
+// A snapshot of the session digests (sessions/digest.ts) not captured before, as an immutable raw source with its
+// deterministic source page, plus the regenerated project-facts report. Called automatically when a chat session ends
+// (wiki.auto_capture) and harmless to repeat: with no new digest nothing is written.
+export const SESSION_DIGEST_SNAPSHOT_KIND = "session-digest-snapshot"
+const MAX_DIGESTS_PER_SNAPSHOT = 200
+
+function capturedDigestMarker(worktree: string): string {
+  return join(digestDirectory(worktree), ".captured.json")
+}
+
+function readCapturedDigests(worktree: string): Set<string> {
+  try {
+    const value: unknown = JSON.parse(readFileSync(capturedDigestMarker(worktree), "utf8"))
+    return new Set(Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [])
+  } catch { return new Set() }
+}
+
+function isSessionDigestSnapshot(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false
+  const data = value as Record<string, unknown>
+  return data.schemaVersion === 1 && data.kind === SESSION_DIGEST_SNAPSHOT_KIND && Array.isArray(data.digests) &&
+    (data.digests as unknown[]).every(digest => !!digest && typeof digest === "object" && (digest as Record<string, unknown>).kind === "session-digest")
+}
+
+export type SessionDigestCapture = { created: boolean; source?: string; sessions: number }
+
+export function captureSessionDigests(worktree: string, factsReport?: (digests: SessionDigest[]) => string): SessionDigestCapture {
+  const root = realpathSync(worktree)
+  const all = readSessionDigests(root)
+  const captured = readCapturedDigests(root)
+  const fresh = all.filter(digest => !captured.has(digest.sessionID)).sort((a, b) => a.endedAt - b.endedAt).slice(0, MAX_DIGESTS_PER_SNAPSHOT)
+  if (!fresh.length) return { created: false, sessions: 0 }
+  const lock = acquireLock(root)
+  try {
+    const raw = safeDirectory(root, ["knowledge", "raw", "session-digests"])
+    const wiki = safeDirectory(root, ["knowledge", "wiki"])
+    const sources = safeDirectory(root, ["knowledge", "wiki", "sources"])
+    const reports = safeDirectory(root, ["knowledge", "wiki", "reports"])
+    const index = join(wiki, "index.md")
+    const log = join(wiki, "log.md")
+    safeFile(index); safeFile(log)
+    if (!existsSync(index) || !existsSync(log) || !existsSync(join(root, "knowledge", "AGENTS.md"))) throw new Error("Wiki schema, index and log must exist before capture")
+    const content = JSON.stringify({ schemaVersion: 1, kind: SESSION_DIGEST_SNAPSHOT_KIND, coverage: { included: fresh.length, available: all.length, limit: MAX_DIGESTS_PER_SNAPSHOT }, digests: fresh }, null, 2) + "\n"
+    if (containsSecret(content)) throw new Error("session digest snapshot matched a secret pattern; not captured")
+    const sourceId = digest(content)
+    const rawPath = join(raw, `${sourceId}.json`)
+    const created = createOnly(rawPath, content)
+    if (!created && readFileSync(rawPath, "utf8") !== content) throw new Error("Immutable raw session-digest source hash mismatch; refusing overwrite")
+    const pageName = `session-digests-${sourceId}.md`
+    const commands = fresh.reduce((total, item) => total + item.commands.length, 0)
+    const failed = fresh.reduce((total, item) => total + item.commands.filter(command => command.status !== "complete").length, 0)
+    const files = new Set(fresh.flatMap(item => item.files))
+    const span = `${new Date(fresh[0]!.endedAt).toISOString().slice(0, 10)} ~ ${new Date(fresh.at(-1)!.endedAt).toISOString().slice(0, 10)}`
+    createOnly(join(sources, pageName), ["# 세션 다이제스트 원본", "",
+      "> 결정적 요약입니다. 대화 내용·파일 내용·명령 전문·출력은 담지 않습니다(knowledge/AGENTS.md 허용 목록).", "",
+      `[불변 원본](../../raw/session-digests/${sourceId}.json) · [인덱스](../index.md) · [프로젝트 사실](../reports/project-facts.md)`, "",
+      `- source_id: ${sourceId}`, `- 세션: ${fresh.length}개 (${span})`, `- 실행한 명령: ${commands}건, 실패·시간 초과·취소 ${failed}건`,
+      `- 변경된 파일: ${files.size}개`, "- 근거 범위: 승인된 동작의 도구·경로와 명령 규칙 접두사·종료 상태. 작업의 정확성이나 실패 원인은 이 자료만으로 판단하지 않습니다.", "",
+      "## 지식 통합", "", "ingest 때 반복해서 통과·실패하는 명령과 자주 바뀌는 파일을 기존 개념·엔티티 페이지와 대조하고, 출처 링크와 함께 기록합니다.", ""].join("\n"))
+    const reportPath = join(reports, "project-facts.md")
+    if (factsReport) replaceDerived(reportPath, factsReport(all))
+    const indexText = readFileSync(index, "utf8")
+    let nextIndex = indexText.trimEnd()
+    if (!indexText.includes(`](sources/${pageName})`)) nextIndex += `\n\n- [세션 다이제스트 ${sourceId.slice(0, 12)}](sources/${pageName}) — ${fresh.length}개 세션, ${span}.`
+    if (factsReport && !indexText.includes("](reports/project-facts.md)")) nextIndex += "\n- [프로젝트 사실](reports/project-facts.md) — 반복해서 통과·실패하는 명령과 자주 바뀌는 파일(자동 집계)."
+    if (nextIndex !== indexText.trimEnd()) replaceDerived(index, `${nextIndex}\n`)
+    const logged = parseLog(readFileSync(log, "utf8")).some(entry => entry.op === "capture" && hasSourceId(entry, sourceId))
+    if (!logged) {
+      writeFileSync(log, `\n## [${new Date().toISOString()}] capture | 세션 다이제스트\n\n- source_id: ${sourceId}\n- kind: session-digests\n- [원본 요약](sources/${pageName}); ${fresh.length}개 세션.\n- 의미적 ingest는 아직 실행하지 않았습니다.\n`, { flag: "a", mode: 0o600 })
+    }
+    // Mark the digests captured only after every write succeeded.
+    for (const item of fresh) captured.add(item.sessionID)
+    mkdirSync(digestDirectory(root), { recursive: true, mode: 0o700 })
+    const marker = capturedDigestMarker(root)
+    const temporary = `${marker}.${process.pid}.tmp`
+    writeFileSync(temporary, JSON.stringify([...captured].sort()), { mode: 0o600 })
+    renameSync(temporary, marker)
+    return { created, source: relative(root, rawPath), sessions: fresh.length }
+  } finally { unlinkSync(lock) }
+}
+
 // -- Register -----------------------------------------------------------------------------------------------------
 const DOCUMENT_EXTS = [".md", ".txt"]
 const MAX_REGISTER_BYTES = 131072
@@ -861,7 +944,7 @@ export function registerWiki(worktree: string, file: string, opts: { title?: str
 }
 
 // -- Status ---------------------------------------------------------------------------------------------------------
-export type PendingItem = { sourceId: string; kind: "documents" | "tool-runs" | "routing" | "skill-runs"; source: string; summary: string; title: string; registeredAt: string | null }
+export type PendingItem = { sourceId: string; kind: "documents" | "tool-runs" | "routing" | "skill-runs" | "session-digests"; source: string; summary: string; title: string; registeredAt: string | null }
 export type WikiStatus = { sources: number; compiled: number; pending: PendingItem[]; problems: string[]; locked?: true }
 
 /** Read-only: never creates or modifies any wiki file. */
@@ -881,6 +964,7 @@ export function statusWiki(worktree: string): WikiStatus {
     [join(knowledge, "raw", "tool-runs"), "tool-runs", "tool-runs"],
     [join(knowledge, "raw", "routing"), "routing", "routing"],
     [join(knowledge, "raw", "skill-runs"), "skill-runs", "skill-runs"],
+    [join(knowledge, "raw", "session-digests"), "session-digests", "session-digests"],
   ] as const) {
     if (kind === "skill-runs") {
       let skillFiles: SkillRawFile[]
@@ -1022,9 +1106,10 @@ export function lintWiki(worktree: string): string[] {
   const toolRunsDir = join(rawDir, "tool-runs")
   const routingDir = join(rawDir, "routing")
   const documentsDir = join(rawDir, "documents")
+  const sessionDigestsDir = join(rawDir, "session-digests")
   const sourcesDir = join(knowledge, "wiki", "sources")
   const indexed = new Set<string>()
-  const knownRawIds = new Map<string, { id: string; kind: "documents" | "tool-runs" | "routing" | "skill-runs"; ext: string }>()
+  const knownRawIds = new Map<string, { id: string; kind: "documents" | "tool-runs" | "routing" | "skill-runs" | "session-digests"; ext: string }>()
   for (const path of files) {
     const underRaw = contained(rawDir, path)
     if (path.endsWith(".md") && !underRaw) {
@@ -1055,6 +1140,15 @@ export function lintWiki(worktree: string): string[] {
       const id = digestBytes(bytes)
       if (path !== join(dirname(path), `${id}${ext}`)) problems.push(`Raw source integrity mismatch: ${relative(root, path)}`)
       else knownRawIds.set(`documents\0${id}`, { id, kind: "documents", ext })
+    } else if (underRaw && contained(sessionDigestsDir, path)) {
+      if (extname(path) !== ".json") { problems.push(`Disallowed raw source extension: ${relative(root, path)}`); continue }
+      const bytes = readFileSync(path)
+      const id = digestBytes(bytes)
+      if (path !== join(sessionDigestsDir, `${id}.json`)) problems.push(`Raw source integrity mismatch: ${relative(root, path)}`)
+      else knownRawIds.set(`session-digests\0${id}`, { id, kind: "session-digests", ext: ".json" })
+      try {
+        if (!isSessionDigestSnapshot(JSON.parse(bytes.toString("utf8")))) problems.push(`Invalid session digest snapshot schema: ${relative(root, path)}`)
+      } catch { problems.push(`Invalid session digest snapshot JSON: ${relative(root, path)}`) }
     } else if (underRaw && contained(routingDir, path)) {
       if (extname(path) !== ".json") { problems.push(`Disallowed raw source extension: ${relative(root, path)}`); continue }
       const bytes = readFileSync(path)
@@ -1088,12 +1182,12 @@ export function lintWiki(worktree: string): string[] {
     const pagePath = join(sourcesDir, `${info.kind}-${info.id}.md`)
     if (!files.includes(pagePath)) problems.push(`Raw source without matching source page: ${info.kind}/${info.id}${info.ext}`)
   }
-  const sourcePageRe = /^(documents|tool-runs|routing|skill-runs)-([0-9a-f]{64})\.md$/
+  const sourcePageRe = /^(documents|tool-runs|routing|skill-runs|session-digests)-([0-9a-f]{64})\.md$/
   if (existsSync(sourcesDir)) {
     for (const entryName of readdirSync(sourcesDir).sort()) {
       const match = sourcePageRe.exec(entryName)
       if (!match) continue
-      const [, kind, id] = match as unknown as [string, "documents" | "tool-runs" | "routing" | "skill-runs", string]
+      const [, kind, id] = match as unknown as [string, "documents" | "tool-runs" | "routing" | "skill-runs" | "session-digests", string]
       const info = knownRawIds.get(`${kind}\0${id}`)
       if (!info || info.kind !== kind) problems.push(`Source page without matching raw source: ${entryName}`)
     }

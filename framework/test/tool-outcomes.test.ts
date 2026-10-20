@@ -6,7 +6,7 @@ import { createToolAfterHook } from "../src/hooks/tool-after.ts"
 import { createToolBeforeHook } from "../src/hooks/tool-before.ts"
 import { clearToolObservations, readToolObservations, recordToolObservation } from "../src/hosts/tool-observation.ts"
 import { EMPTY_MODE, readModeState, writeModeState } from "../src/state/store.ts"
-import { listToolOutcomes, recordToolOutcome, toolOutcomePath } from "../src/telemetry/outcomes.ts"
+import { listToolOutcomes, recordCliToolOutcome, recordToolOutcome, toolOutcomePath } from "../src/telemetry/outcomes.ts"
 import { admitFixtureSession, fakeClient, makeDeps, releaseFixtureSession, tempWorktree } from "./guards-helpers.ts"
 import { createNativeToolFixture } from "./native-tool-fixture.ts"
 import { DEFAULT_CONFIG } from "../src/config.ts"
@@ -254,6 +254,28 @@ describe("tool outcome recording", () => {
     expect(bounded.rows).toHaveLength(2)
     expect(bounded.rows).toEqual(all.rows.slice(0, 2))
     expect(listToolOutcomes(wt.worktree, 0).rows).toEqual([])
+  })
+})
+
+describe("otter CLI host tool outcomes", () => {
+  test("share the table with OpenCode parts: success, tool failure, command exit codes, and duplicates", () => {
+    const fact = { sessionID: "cli_session", startedAt: 100, finishedAt: 160 }
+    expect(recordCliToolOutcome(wt.worktree, { ...fact, callID: "c1", tool: "read", ok: true })).toBe(true)
+    expect(recordCliToolOutcome(wt.worktree, { ...fact, callID: "c2", tool: "edit", ok: false })).toBe(true)
+    expect(recordCliToolOutcome(wt.worktree, { ...fact, callID: "c3", tool: "bash", ok: false, exitCode: 2 })).toBe(true)
+    expect(recordCliToolOutcome(wt.worktree, { ...fact, callID: "c4", tool: "bash", ok: true, exitCode: 0 })).toBe(true)
+    expect(recordCliToolOutcome(wt.worktree, { ...fact, callID: "c4", tool: "bash", ok: true, exitCode: 0 })).toBe(false)
+    // A command stopped by a signal has no exit code: a tool error, never a success.
+    expect(recordCliToolOutcome(wt.worktree, { ...fact, callID: "c5", tool: "bash", ok: false, exitCode: null })).toBe(true)
+    const rows = listToolOutcomes(wt.worktree).rows.sort((a, b) => a.callID.localeCompare(b.callID))
+    expect(rows.map(row => [row.callID, row.tool, row.status, row.basis, row.durationMs])).toEqual([
+      ["c1", "read", "success", "completed", 60],
+      ["c2", "edit", "failure", "tool_error", 60],
+      ["c3", "bash", "failure", "exit_code", 60],
+      ["c4", "bash", "success", "exit_code", 60],
+      ["c5", "bash", "failure", "tool_error", 60],
+    ])
+    for (const row of rows) expect(row.sessionID).toBe("cli_session")
   })
 })
 

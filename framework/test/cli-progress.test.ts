@@ -58,6 +58,24 @@ describe("CLI progress presenter", () => {
     expect(rendered).toContain("[final] Workflow wf_20261011_abcd stuck; done 1, failed 1, cancelled 0.")
   })
 
+  test("a chat model that may act reads as Agent, not Planning; switching back restores Planning", () => {
+    const { output, progress } = capture()
+    progress.mainActs(true)
+    progress.waiting()
+    progress.host({ kind: "tool-started", role: "main", execution: 1, taskID: "chat", executionID: "e1", callID: "c1", tool: "bash" })
+    progress.host({ kind: "tool-finished", role: "main", execution: 1, taskID: "chat", executionID: "e1", callID: "c1", tool: "bash", outcome: "succeeded", ok: true })
+    progress.responseReceived()
+    progress.mainActs(false)
+    progress.waiting()
+    expect(output).toEqual([
+      "[progress] Waiting for the agent model.\n",
+      "[activity] Agent started bash tool.\n",
+      "[activity] Agent finished bash tool.\n",
+      "[activity] Agent model response received.\n",
+      "[progress] Waiting for the planning model.\n",
+    ])
+  })
+
   test("does not expose untrusted diagnostics, content, or invalid terminal text", () => {
     const { output, progress } = capture()
     const secret = "prompt credential \u001b[31mraw tool output"

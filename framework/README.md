@@ -95,7 +95,7 @@ Every execution is approved by the local human, one action at a time or one plan
 
 | `chat.execute` | Chat model tools | Approval |
 | --- | --- | --- |
-| `"ask"` (default) | `read list glob grep memory` + `write edit bash` | every write, edit and command |
+| `"ask"` (default) | `read list glob grep memory` + `write edit multiedit bash` | every write, edit and command (read-only commands run without asking) |
 | `"auto-edit"` | same | commands only; file edits apply and are noted |
 | `"plan"` | `read list glob grep memory` | none (read-only; the model points to `/plan` and `!<command>`) |
 
@@ -112,8 +112,42 @@ Every execution is approved by the local human, one action at a time or one plan
 - "Always allow" saves a command rule (the first two words, e.g. `bun test`) to `chat.allow` in the user config only;
   a project config cannot pre-approve commands. Commands that chain, pipe, redirect or substitute never match or offer a
   rule. `/permissions` shows the mode and rules; `/permissions clear` removes them.
-- Writes stay inside the worktree and never touch `.git/`, `.otter/` or `.gjc/` (the existing file-tool scope). Each
-  command run is recorded as a shell card in the session; approvals and denials are recorded as notices.
+- Writes stay inside the worktree and never touch `.git/`, `.otter/`, `.gjc/` or `knowledge/raw/` (immutable wiki
+  sources). Each command run is recorded as a shell card; each decision as an `action` record (tool, how it was decided,
+  written paths, a command's rule prefix — never contents).
+- **Read-only commands** run without asking (still shown and recorded): `git status|diff|log|show|blame|ls-files`,
+  plain `git branch`/`git remote`, `ls`, `cat`, `head`, `tail`, `wc`, `rg`/`grep`, `pwd`, `which`, `<tool> --version`.
+  Chaining, pipes, redirection, substitution, `find -delete/-exec`, `-o/--output` and `env`/`printenv` always ask.
+- **This-turn folder grant**: the approval offers "Allow edits in `<dir>`/ for this turn" (the deepest folder holding
+  every written path); later writes under it in the same turn are allowed and noted. Never for commands; not saved.
+- **`multiedit`** (gated main only): up to 20 exact-text edits across files, previewed as one diff and approved once,
+  applied only if every old text occurs exactly once (in order per file); otherwise nothing changes.
+- **`/undo [list | <turn>]`**: before a turn's first effect the worktree is captured (private Git snapshot: index,
+  HEAD and objects untouched; outside Git only written/edited files are backed up) and again when the turn ends. `/undo`
+  restores the files the turn changed, skips files changed again afterwards and lists them; the last 10 turns are kept.
+- **Tool-call limit**: at 24 tool calls a chat turn asks to continue (24 more, at most 3 times) instead of failing;
+  workers and workflow roles keep the hard limit.
+- **Context**: Claude/Codex chat uses a 96,000-character conversation window (vendor main input estimate 49,152
+  tokens); local and OpenCode keep 24,000 characters (8,192 tokens).
+
+### Session history (`/history`, `/facts`, `/wiki`)
+
+- Every executed CLI tool (codex/claude/local) joins `tool-outcomes.sqlite` like OpenCode tool events (identity, tool,
+  status/basis, timing; a command's exit code decides its basis; denied calls never ran and are not recorded).
+- When a chat session ends or is replaced, a deterministic **session digest** is written to
+  `$XDG_STATE_HOME/otter/<worktree-key>/digests/<sessionID>.json` (outside the worktree): turns, tool and decision
+  counts, written paths, commands as rule prefixes with status/exit/duration, workflow stages, outcome. Never message
+  text, file contents, edit text, full command lines or output. `/history [<count> | <session-id>]` lists or shows them.
+- **Project facts** (`/facts`) are deterministic aggregates of the last 50 digests: commands that keep passing,
+  commands that keep failing, files changed in several sessions. An acting chat turn carries them as a bounded
+  (600-character) reference block, labelled as data to verify, never instructions.
+- **Auto-capture**: in a project with a wiki (`knowledge/AGENTS.md`, `wiki/index.md`, `wiki/log.md`) and
+  `wiki.auto_capture` (default true; `"wiki": { "auto_capture": false }` turns it off), new digests are captured at
+  session end into `knowledge/raw/session-digests/<sha>.json` + `wiki/sources/session-digests-<sha>.md`, the
+  regenerated `wiki/reports/project-facts.md`, an index link and a capture log entry. Nothing is written when there is
+  no new digest; a held wiki lock skips the capture (the digest stays and is captured next time).
+- `/wiki` shows pending sources; `/wiki ingest` (chat execution only) asks the model to integrate them following
+  `knowledge/AGENTS.md` (each wiki edit approved), then runs the wiki lint; `/wiki lint` runs it alone.
 
 To skip `/model` on every launch, set a default. With neither `--engine` nor `--model`,
 `otter` starts with `chat.default_model` from `~/.config/otter/otter.jsonc` (a project's

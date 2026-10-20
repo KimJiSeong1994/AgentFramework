@@ -1,5 +1,6 @@
 import { realpathSync, statSync } from "node:fs"
 import { chatExecuteMode, loadConfig } from "../config.ts"
+import { recordCliToolOutcome } from "../telemetry/outcomes.ts"
 import { createCliHost } from "./cli-host.ts"
 import { createCodexProfile } from "./codex-profile.ts"
 import type { CliEngine, CliTransportHandle, CliTransportOptions } from "./cli-transport.ts"
@@ -63,6 +64,8 @@ export function createCliRuntime(options: CliRuntimeOptions): ExecutionRuntime {
       policy,
       runs,
       loadMemory: () => currentMemoryConfig(worktree),
+      // Every executed CLI tool joins the shared tool-outcome history the wiki captures (the OpenCode hook did this alone).
+      recordOutcome: outcome => { recordCliToolOutcome(worktree, outcome) },
       ...(options.progress ? { observeActivity: options.progress.host } : {}),
       ...(options.progress?.toolDisplay ? { observeToolDisplay: options.progress.toolDisplay } : {}),
       ...(options.createTransport ? { createTransport: options.createTransport } : {}),

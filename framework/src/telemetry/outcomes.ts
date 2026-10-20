@@ -201,6 +201,24 @@ export function recordToolOutcome(worktree: string, part: unknown): boolean {
   }
 }
 
+/**
+ * Append one terminal tool fact from the otter CLI host (codex/claude/local engines). It goes through the same projection
+ * and identity rules as an OpenCode tool part, so both engines share one history: identity, tool, status/basis and timing
+ * only (a command's exit code decides its basis); arguments and bodies never reach this function.
+ */
+export function recordCliToolOutcome(worktree: string, fact: {
+  sessionID: string; callID: string; tool: string; ok: boolean; startedAt: number; finishedAt: number; exitCode?: number | null
+}): boolean {
+  return recordToolOutcome(worktree, {
+    type: "tool", id: `otter-cli:${fact.sessionID}:${fact.callID}`, sessionID: fact.sessionID, callID: fact.callID, tool: fact.tool,
+    state: {
+      status: fact.ok || typeof fact.exitCode === "number" ? "completed" : "error",
+      time: { start: fact.startedAt, end: fact.finishedAt },
+      ...(typeof fact.exitCode === "number" ? { metadata: { exitCode: fact.exitCode } } : {}),
+    },
+  })
+}
+
 /** Read a bounded newest-first view without creating or modifying the database. */
 export function listToolOutcomes(worktree: string, limit = DEFAULT_LIMIT): { rows: ToolOutcome[]; totalCount: number } {
   const path = toolOutcomePath(worktree)

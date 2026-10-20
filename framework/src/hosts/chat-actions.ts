@@ -51,6 +51,29 @@ export function commandRule(command: string): string | undefined {
 }
 
 /**
+ * Read-only commands that run without asking (each run is still shown and recorded): inspecting the repository and files.
+ * Only a plain command qualifies: chaining, pipes, redirection or substitution fall back to asking, and options that write
+ * or execute (`find -delete/-exec`, `git branch -d`, `sed -i` ...) are not on the list.
+ */
+const READ_ONLY: readonly RegExp[] = [
+  /^git (status|diff|log|show|blame|ls-files|rev-parse|describe)(\s|$)/u,
+  /^git branch(\s+(-a|-r|-v|-vv|--list|--show-current|--all|--remotes|--verbose))*\s*$/u,
+  /^git remote( -v)?\s*$/u,
+  /^(ls|pwd|wc|head|tail|cat|stat|file|du|df|tree|which|whereis|uname|date|env|printenv|echo)(\s|$)/u,
+  /^(rg|grep|egrep|fgrep)(\s|$)/u,
+  /^[A-Za-z0-9._-]+ --?(version|v)\s*$/u,
+]
+const READ_ONLY_REFUSED = /(^|\s)(-delete|-exec|-execdir|-ok|-fprint|--output|-o)(\s|=|$)/u
+
+/** True when the command only reads (and so runs without asking); false means the human decides as usual. */
+export function readOnlyCommand(command: string): boolean {
+  const trimmed = command.trim()
+  if (!trimmed || /[;&|<>`$(){}\\\n]/u.test(trimmed) || READ_ONLY_REFUSED.test(trimmed)) return false
+  if (/^(env|printenv)(\s|$)/u.test(trimmed)) return false // may print credentials; ask instead
+  return READ_ONLY.some(pattern => pattern.test(trimmed))
+}
+
+/**
  * Whether a saved rule covers this command. A rule is a word prefix (`bun test` covers `bun test foo.test.ts`; `make`
  * covers `make install`), and only for a command without chaining, pipes, redirection or substitution.
  */
@@ -89,6 +112,37 @@ export function clearAllowRules(): number {
   return count
 }
 
+/** Worktree-relative paths an action writes (empty for commands). */
+export function actionPaths(action: ChatAction): string[] {
+  if (action.tool === "bash") return []
+  if (action.tool === "multiedit") return [...new Set(action.edits.map(edit => edit.path))]
+  return [action.path]
+}
+
+/**
+ * The directory a "this turn" grant covers: the deepest folder holding every path the action writes (`.` for the root).
+ * Undefined for commands, which are never granted by folder.
+ */
+export function grantDirectory(action: ChatAction): string | undefined {
+  const paths = actionPaths(action)
+  if (!paths.length) return undefined
+  const parts = paths.map(path => path.replace(/\\/gu, "/").replace(/^\.\//u, "").split("/").slice(0, -1))
+  const shared: string[] = []
+  for (let index = 0; parts.every(segments => index < segments.length && segments[index] === parts[0]![index]); index++) shared.push(parts[0]![index]!)
+  return shared.length ? shared.join("/") : "."
+}
+
+/** Whether a granted folder covers every path this action writes. */
+export function coveredByGrant(action: ChatAction, directories: ReadonlySet<string>): boolean {
+  const paths = actionPaths(action)
+  if (!paths.length || !directories.size) return false
+  return paths.every(path => {
+    const normalized = path.replace(/\\/gu, "/").replace(/^\.\//u, "")
+    if (normalized.split("/").includes("..")) return false
+    return [...directories].some(directory => directory === "." || normalized.startsWith(`${directory}/`))
+  })
+}
+
 /** One-line title and a bounded preview the human reads before deciding. */
 export function describeAction(action: ChatAction, maxLines = 40): { title: string; preview: string[] } {
   const clip = (lines: string[]) => lines.length > maxLines ? [...lines.slice(0, maxLines), `… ${lines.length - maxLines} more line(s)`] : lines
@@ -101,6 +155,16 @@ export function describeAction(action: ChatAction, maxLines = 40): { title: stri
   if (action.tool === "write") {
     const lines = action.content.replace(/\n$/u, "").split("\n")
     return { title: `Write ${action.path} (${lines.length} line${lines.length === 1 ? "" : "s"})`, preview: clip(lines.map(line => `+ ${line}`)) }
+  }
+  if (action.tool === "multiedit") {
+    const files = [...new Set(action.edits.map(edit => edit.path))]
+    const preview = action.edits.flatMap(edit => [
+      `@ ${edit.path}`,
+      ...edit.oldText.replace(/\n$/u, "").split("\n").map(line => `- ${line}`),
+      ...edit.newText.replace(/\n$/u, "").split("\n").map(line => `+ ${line}`),
+    ])
+    return { title: `Edit ${files.length} file${files.length === 1 ? "" : "s"} (${action.edits.length} change${action.edits.length === 1 ? "" : "s"}): ${files.slice(0, 3).join(", ")}${files.length > 3 ? ", …" : ""}`,
+      preview: clip(preview) }
   }
   const removed = action.oldText.replace(/\n$/u, "").split("\n").map(line => `- ${line}`)
   const added = action.newText.replace(/\n$/u, "").split("\n").map(line => `+ ${line}`)
