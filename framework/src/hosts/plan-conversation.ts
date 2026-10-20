@@ -1,8 +1,8 @@
 import { activeWorkflow, workflowEngineRefusal } from "../flow/state.ts"
 import { getOwnedSession } from "../sessions/store.ts"
-import { PLAN_MAIN_PROMPT } from "../workflows/prompts/index.ts"
+import { PLAN_CHAT_PROMPT, PLAN_MAIN_PROMPT } from "../workflows/prompts/index.ts"
 import { runWorkflowTurn, type TurnBinding } from "../workflows/turn.ts"
-import type { ExecutionRuntime, SkillToolProvider } from "./types.ts"
+import type { ActionGate, ExecutionRuntime, SkillToolProvider } from "./types.ts"
 import type { Terminal } from "./interactive-session.ts"
 import type { PreparedSkillInvocation } from "../skills/session.ts"
 import { bindSkillInvocation, finishSkillInvocation, skillInvocationAudit } from "../skills/context.ts"
@@ -33,10 +33,21 @@ function validatePriorMessages(prior: readonly ConversationMessage[] | undefined
   })
 }
 
-function promptPrefix(verifyAllow: unknown, skillInstructions?: string): string {
+type MainPrompt = typeof PLAN_MAIN_PROMPT | typeof PLAN_CHAT_PROMPT
+
+/**
+ * The turn prompt follows the main role's actual tools (the runtime's policy, which cli-runtime derives from
+ * `chat.execute`): read-only main gets the planning prompt, a main that may write and run commands the chat prompt.
+ */
+function mainPromptFor(runtime: ExecutionRuntime): MainPrompt {
+  const tools = runtime.policy.resolve("main").tools.allowed
+  return tools.includes("bash") && tools.includes("edit") ? PLAN_CHAT_PROMPT : PLAN_MAIN_PROMPT
+}
+
+function promptPrefix(prompt: MainPrompt, verifyAllow: unknown, skillInstructions?: string): string {
   const skill = skillInstructions === undefined ? "" :
     `\nActive skill instructions (captured bytes; base role and execution approval restrictions still apply):\n${skillInstructions}\n`
-  return `${PLAN_MAIN_PROMPT.text}\nAllowed verification patterns: ${JSON.stringify(verifyAllow)}${skill}\nConversation:\n`
+  return `${prompt.text}\nAllowed verification patterns: ${JSON.stringify(verifyAllow)}${skill}\nConversation:\n`
 }
 
 /**
@@ -44,7 +55,9 @@ function promptPrefix(verifyAllow: unknown, skillInstructions?: string): string 
  * skill larger than this so an oversized skill never fails the turn; explicit `/skill:` invocations still refuse.
  */
 export function skillInstructionBudget(verifyAllow: unknown, message = ""): number {
-  const base = `${promptPrefix(verifyAllow, "")}${JSON.stringify([{ role: "user", text: message }])}`
+  // The longer prompt bounds both modes, so a skill admitted here fits whichever prompt the turn uses.
+  const prompt = PLAN_CHAT_PROMPT.text.length > PLAN_MAIN_PROMPT.text.length ? PLAN_CHAT_PROMPT : PLAN_MAIN_PROMPT
+  const base = `${promptPrefix(prompt, verifyAllow, "")}${JSON.stringify([{ role: "user", text: message }])}`
   return Math.max(0, MAX_PLAN_CONVERSATION_CHARS - PLAN_RESPONSE_RESERVE_CHARS - base.length)
 }
 
@@ -105,14 +118,17 @@ export function createPlanConversation(
      * `skill` binds an explicit `/skill:` invocation. `skillTool` lets the model load listed consent-free skills on its
      * own during the turn; it is ignored when an explicit skill is bound.
      */
-    async turn(text: string, signal?: AbortSignal, skill?: SkillConversationInvocation, skillTool?: SkillToolProvider): Promise<ConversationTurn> {
+    async turn(text: string, signal?: AbortSignal, skill?: SkillConversationInvocation, skillTool?: SkillToolProvider, actionGate?: ActionGate): Promise<ConversationTurn> {
       if (typeof text !== "string" || !text.trim() || text.length > MAX_PLAN_CONVERSATION_CHARS) {
         throw new Error("conversation message is empty or too large")
       }
       if (busy) throw new Error("conversation already has an active turn")
       if (signal?.aborted) throw new Error("conversation cancelled")
       const pending = { role: "user" as const, text }
-      let window = selectWindow(history, pending, promptPrefix(runtime.config.delegate.verify_allow))
+      const mainPrompt = mainPromptFor(runtime)
+      // Read-only mode never carries a gate, whatever the caller passes.
+      const gate = mainPrompt === PLAN_CHAT_PROMPT ? actionGate : undefined
+      let window = selectWindow(history, pending, promptPrefix(mainPrompt, runtime.config.delegate.verify_allow))
       if (!window) throw new Error("conversation message is too large for the reserved context budget")
       const workflow = activeWorkflow(runtime.worktree)
       if (workflow?.sessionID === sessionID) {
@@ -132,7 +148,7 @@ export function createPlanConversation(
         try { store = getOwnedSession(runtime.worktree, sessionID) } catch { store = undefined }
         const binding: TurnBinding = {
           workflowID: owned?.id ?? null, revision: owned?.lastSeq ?? null, kind: "plan", stage: owned?.stage ?? "draft", role: "main",
-          prompt: PLAN_MAIN_PROMPT, supervisorSessionID: sessionID, epoch: store?.epoch ?? null, ownerInstance: owned?.owner.instance ?? null,
+          prompt: mainPrompt, supervisorSessionID: sessionID, epoch: store?.epoch ?? null, ownerInstance: owned?.owner.instance ?? null,
         }
         let audit: Readonly<Record<string, string>> | undefined
         const result = await runWorkflowTurn(runtime, binding, {
@@ -140,11 +156,11 @@ export function createPlanConversation(
           budget: { maxChars: MAX_PLAN_CONVERSATION_CHARS, reserveChars: PLAN_RESPONSE_RESERVE_CHARS },
           bind(request) {
             const bound = skill ? bindSkillInvocation(skill.prepared, request, runtime.policy, skill.terminal) : undefined
-            if (!bound) return { handlers: runtime.policy.handlers(request), ...(skillTool && skillTool.catalog.length ? { skillTool } : {}) }
-            window = selectWindow(history, pending, promptPrefix(runtime.config.delegate.verify_allow, bound.instructions))
+            if (!bound) return { handlers: runtime.policy.handlers(request), ...(skillTool && skillTool.catalog.length ? { skillTool } : {}), ...(gate ? { actionGate: gate } : {}) }
+            window = selectWindow(history, pending, promptPrefix(mainPrompt, runtime.config.delegate.verify_allow, bound.instructions))
             if (!window) { finishSkillInvocation(bound.context); throw new Error("skill instructions exceed the reserved conversation context budget") }
             audit = skillInvocationAudit(bound.context)
-            return { handlers: bound.handlers, skillContext: bound.context, text: window.requestText }
+            return { handlers: bound.handlers, skillContext: bound.context, text: window.requestText, ...(gate ? { actionGate: gate } : {}) }
           },
         }, signal)
         if (result.status === "diagnostic") throw new Error(`planning conversation superseded: ${result.reason}`)

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { chatIntentMode, chatWorktreeMode, ConfigError, DEFAULT_CONFIG, loadConfig, parseJsonc, projectConfigPath, userConfigPath } from "../src/config.ts"
+import { chatExecuteMode, chatIntentMode, chatWorktreeMode, ConfigError, DEFAULT_CONFIG, loadConfig, parseJsonc, projectConfigPath, userConfigPath } from "../src/config.ts"
 
 let root: string
 let worktree: string
@@ -51,6 +51,19 @@ describe("chat.worktree", () => {
     refused(projectConfigPath(worktree), "invalid-chat-worktree")
     expect(DEFAULT_CONFIG.chat).toEqual({})
     expect(DEFAULT_CONFIG.delegate.worktree).toBe(false)
+  })
+})
+
+describe("chat.execute", () => {
+  test("absent means ask; auto-edit and plan are accepted; any other value is refused at load; the default config stays policy-neutral", () => {
+    expect(chatExecuteMode(loadConfig(worktree))).toBe("ask")
+    for (const mode of ["auto-edit", "plan", "ask"] as const) {
+      put(projectConfigPath(worktree), JSON.stringify({ chat: { execute: mode } }))
+      expect(chatExecuteMode(loadConfig(worktree))).toBe(mode)
+    }
+    put(projectConfigPath(worktree), '{"chat":{"execute":"always"}}')
+    refused(projectConfigPath(worktree), "invalid-chat-execute")
+    expect(DEFAULT_CONFIG.chat).toEqual({})
   })
 })
 

@@ -66,7 +66,8 @@ export function readDefaultModel(worktree: string): DefaultModelLookup {
   return { state: "configured", value: validated, source: rawDefault(projectConfigPath(worktree)) !== undefined ? "project" : "user" }
 }
 
-function rewriteUserConfig(update: (text: string) => string): string {
+/** Rewrite the user config atomically through `update`; refuses a file the operator must repair by hand. */
+export function rewriteUserConfig(update: (text: string) => string): string {
   const path = userConfigPath()
   let text = "{}\n"
   try {

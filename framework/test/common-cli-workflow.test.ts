@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import { execFileSync } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { DEFAULT_CONFIG } from "../src/config.ts"
+import { chatExecuteMode, DEFAULT_CONFIG } from "../src/config.ts"
 import { stopHeartbeat } from "../src/flow/runtime.ts"
 import { eventsPath, planJsonPath, readWorkflow, workflowPath } from "../src/flow/state.ts"
 import { observeStopSettlement } from "../src/flow/runtime.ts"
@@ -93,7 +93,8 @@ async function pendingCommonWorkflow(routes?: ComboRoutes) {
     }
   }
   const runtime = createExecutionRuntime({ directory: root, worktree: root, config, log() {} }, ({ policy, runs }) =>
-    createCliHost({ engine, model, ...(routes ? { routes } : {}), policy, runs, createTransport: transportFactory }), { planningOnlyMain: true, ...(routes ? { routes: Object.fromEntries(Object.entries(routes).map(([role, r]) => [role, { model: { providerID: r.engine, modelID: r.model } }])) } : {}) })
+    // Same main policy as createCliRuntime (what the recovery CLI rebuilds): chat.execute decides whether main may act.
+    createCliHost({ engine, model, ...(routes ? { routes } : {}), policy, runs, createTransport: transportFactory }), { planningOnlyMain: true, chatExecuteMain: chatExecuteMode(config) !== "plan", ...(routes ? { routes: Object.fromEntries(Object.entries(routes).map(([role, r]) => [role, { model: { providerID: r.engine, modelID: r.model } }])) } : {}) })
   const sessionID = "common-recovery-session"
   const session = attachAdmission(runtime, sessionID, { engine, model, ...(routes ? { routes } : {}) })
   const controller = createForegroundController(runtime)

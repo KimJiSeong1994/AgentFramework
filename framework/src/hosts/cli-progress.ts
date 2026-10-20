@@ -57,6 +57,8 @@ export function cliToolDetail(name: CliToolName, input: unknown): CliToolDetail 
   const path = str(record.path)
   if (path) detail.path = path
   if (name === "glob" || name === "grep") { const pattern = str(record.pattern); if (pattern) detail.pattern = pattern }
+  // bash: the command line is the card's target (bounded by validatedToolDetail).
+  if (name === "bash") { const command = str(record.command); if (command) detail.pattern = command }
   if (name === "read") {
     const offset = int(record.startLine); const limit = int(record.maxLines)
     if (offset !== undefined) detail.offset = offset

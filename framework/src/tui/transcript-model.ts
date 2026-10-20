@@ -317,6 +317,7 @@ export function toolTarget(name: string, detail: CliToolDetail | undefined): str
     return detail.limit !== undefined ? `${path}:${first}-${first + detail.limit - 1}` : `${path}:${first}-`
   }
   if ((name === "glob" || name === "grep") && pattern) return path ? `${JSON.stringify(pattern)} in ${path}` : JSON.stringify(pattern)
+  if (name === "bash" && pattern) return `$ ${pattern}`
   if ((name === "write" || name === "edit") && path) {
     const counts = detail.added !== undefined || detail.removed !== undefined
       ? ` ⟦+${detail.added ?? 0} / -${detail.removed ?? 0}⟧` : ""

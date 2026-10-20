@@ -1,7 +1,9 @@
 import {
+  boundToolText as safeToolText,
   CLI_TOOL_NAMES,
   CliToolInputError,
   createCliTools,
+  DEFAULT_BASH_TIMEOUT_SECONDS,
   formatCliReadResult,
   validateCliToolInput,
   type CliToolName,
@@ -15,6 +17,7 @@ import { prefilterSkills } from "../routing/retrieve.ts"
 import { DEFAULT_CONFIG, type OtterConfig } from "../config.ts"
 import type {
   BudgetEvidence,
+  ChatAction,
   ExecutionHandle,
   ExecutionHost,
   ExecutionOutcome,
@@ -75,6 +78,7 @@ const TOOL_SCHEMAS: Record<CliToolName, string> = {
   skill: '{"name": one name from the Available skills list, "path"?: a file the loaded skill lists, relative to its directory}; without path returns that skill\'s instructions and its file list; with path returns that file (only after loading the skill). Load a skill when the conversation needs what its description covers, then follow it within this role\'s tools and restrictions',
   write: '{"path": relative nonempty string ≤2048 UTF-8 bytes, "content": NUL-free string ≤64 KiB}',
   edit: '{"path": relative nonempty string ≤2048 UTF-8 bytes, "oldText": nonempty exact NUL-free string ≤64 KiB, "newText": NUL-free string ≤64 KiB}',
+  bash: '{"command": one shell command line run with /bin/sh -c in the worktree, nonblank ≤4096 characters, "interactive"?: true only when it needs the user\'s keyboard (output is then not returned), "timeoutSeconds"?: integer 1..600 (default 120)}; the user approves or denies it first; returns the exit status and the output tail',
 }
 
 /** `ignoredCalls`: further tool calls in the same reply that were not run (only the first call runs). */
@@ -784,6 +788,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             allowed: request.policy.tools.allowed,
             denied: request.policy.tools.denied,
             skillTool: offered !== undefined,
+            actionGate: request.role === "main" && request.actionGate !== undefined,
             beforeEffect() {
               if (cancelled || Date.now() >= request.deadlineAt) throw new Error("execution is no longer active")
               const lease = checkLease(request, fixedLease)
@@ -1148,8 +1153,10 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               continue
             }
             const event = { type: "tool-before" as const, sessionID: callSession, callID, toolID: `otter:${name}`, name, input: envelope.input }
-            if (!request.policy.tools.allowed.includes(name) || request.policy.tools.denied.includes(name) ||
-                ((request.role === "main" || request.role === "reviewer") && (name === "write" || name === "edit"))) {
+            const gate = request.role === "main" ? request.actionGate : undefined
+            if (!request.policy.tools.allowed.includes(name) || request.policy.tools.denied.includes(name) || !available.includes(name) ||
+                (request.role === "reviewer" && (name === "write" || name === "edit")) ||
+                (request.role === "main" && !gate && (name === "write" || name === "edit" || name === "bash"))) {
               finishTool("denied", false)
               return setFinal({ status: "failed", error: "Otter tool denied by role policy before effects" })
             }
@@ -1232,6 +1239,49 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               finishTool("denied", false)
               if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
               return setFinal({ status: "failed", error: "Otter skill permission was not current at effect admission" })
+            }
+            // Chat execution: the local human decides each write, edit and command right before its effect. A denial
+            // is the tool result (the turn goes on, so the model can adjust); it is never an execution failure.
+            if (gate && (name === "write" || name === "edit" || name === "bash")) {
+              const action: ChatAction = name === "bash"
+                ? { tool: "bash", command: envelope.input.command as string, interactive: envelope.input.interactive === true,
+                    timeoutMs: ((envelope.input.timeoutSeconds as number | undefined) ?? DEFAULT_BASH_TIMEOUT_SECONDS) * 1000 }
+                : name === "write" ? { tool: "write", path: envelope.input.path as string, content: envelope.input.content as string }
+                  : { tool: "edit", path: envelope.input.path as string, oldText: envelope.input.oldText as string, newText: envelope.input.newText as string }
+              const gateSignal = AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))])
+              let gated: CliToolOutput | undefined
+              let deniedByUser = false
+              try {
+                const decision = await gate.approve(action, gateSignal)
+                deniedByUser = !decision.allow
+                if (!decision.allow) gated = { ok: false, error: `The user denied this action: ${decision.reason}` }
+                else if (action.tool === "bash") {
+                  const ran = await gate.run(action, gateSignal)
+                  gated = ran.ok ? { ok: true, text: safeToolText(ran.text) } : { ok: false, error: safeToolText(ran.text) }
+                }
+              } catch {
+                gated = { ok: false, error: "The action was not performed: approval or execution was interrupted." }
+              }
+              if (cancelled) {
+                finishTool("denied", false)
+                return setFinal({ status: "cancelled", error: cancelReason })
+              }
+              if (gated !== undefined) {
+                // A command that ran and exited non-zero failed; only a human denial reads as denied.
+                finishTool(gated.ok ? "succeeded" : deniedByUser ? "denied" : "failed", gated.ok, gated)
+                const gatedEvent = { type: "tool-result" as const, sessionID: callSession, callID, toolID: `otter:${name}`, name,
+                  ...(gated.ok ? { result: gated.text } : { error: gated.error }) }
+                let gatedTransformed: ReturnType<ExecutionPolicyHandlers["toolResult"]>
+                try { gatedTransformed = request.handlers.toolResult(gatedEvent) }
+                catch { return setFinal({ status: "failed", error: "Otter tool-result policy failed closed" }) }
+                const gatedResult = toolResultText(gated, gatedTransformed)
+                history[history.length - 1] = { assistant: canonicalAssistant, ok: gatedResult.ok, result: gatedResult.text + ignoredNote }
+                const fitted = fitHistory(basePrompt, history, inputLimit, nativeInstructionTokens)
+                if (!fitted) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
+                replaceHistory(fitted)
+                toolCalls++
+                continue
+              }
             }
             let output: CliToolOutput
             try {

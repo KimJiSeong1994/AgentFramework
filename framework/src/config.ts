@@ -131,6 +131,15 @@ export type OtterConfig = {
      * policy-baseline reason as `intent`; `delegate.worktree` (per-task, auto-merge) is a separate, unchanged switch.
      */
     worktree?: "plan" | "off"
+    /**
+     * What the chat model may do itself. Unset means "ask" (see `chatExecuteMode`): it may edit/write files in the
+     * worktree and run commands, each only after a local human approval; "auto-edit" applies file edits without asking
+     * (commands still ask); "plan" keeps it read-only (execution only through /plan). Unset in DEFAULT_CONFIG for the
+     * same policy-baseline reason as `intent`; the main role's tool set (and so its policy identity) follows the mode.
+     */
+    execute?: "ask" | "auto-edit" | "plan"
+    /** Command prefixes the user chose "Always allow" for. Read from the user config only; a project value is ignored. */
+    allow?: string[]
   }
   models: {
     /** provider/model ids; undefined = inherit OpenCode default */
@@ -398,11 +407,16 @@ export function projectConfigPath(worktree: string): string {
   return join(worktree, ".otter", "otter.jsonc")
 }
 
-export type ConfigErrorKind = "unreadable" | "not-a-file" | "invalid-jsonc" | "invalid-verifier-selector" | "invalid-chat-intent" | "invalid-chat-worktree"
+export type ConfigErrorKind = "unreadable" | "not-a-file" | "invalid-jsonc" | "invalid-verifier-selector" | "invalid-chat-intent" | "invalid-chat-worktree" | "invalid-chat-execute"
 
 /** Effective `chat.intent`: an absent key means the default, "offer". */
 export function chatIntentMode(config: { chat: { intent?: "offer" | "off" } }): "offer" | "off" {
   return config.chat.intent === "off" ? "off" : "offer"
+}
+
+/** Effective `chat.execute`: an absent key means the default, "ask" (every action needs a local approval). */
+export function chatExecuteMode(config: { chat: { execute?: "ask" | "auto-edit" | "plan" } }): "ask" | "auto-edit" | "plan" {
+  return config.chat.execute === "plan" || config.chat.execute === "auto-edit" ? config.chat.execute : "ask"
 }
 
 /** Effective `chat.worktree`: an absent key means the default, "plan". */
@@ -476,6 +490,10 @@ export function loadConfig(worktree: string): OtterConfig {
     if (Object.hasOwn(patch, "chat") && patch.chat && typeof patch.chat === "object" && !Array.isArray(patch.chat) &&
         Object.hasOwn(patch.chat, "worktree") && patch.chat.worktree !== "plan" && patch.chat.worktree !== "off") {
       throw new ConfigError(p, "invalid-chat-worktree")
+    }
+    if (Object.hasOwn(patch, "chat") && patch.chat && typeof patch.chat === "object" && !Array.isArray(patch.chat) &&
+        Object.hasOwn(patch.chat, "execute") && patch.chat.execute !== "ask" && patch.chat.execute !== "auto-edit" && patch.chat.execute !== "plan") {
+      throw new ConfigError(p, "invalid-chat-execute")
     }
     cfg = deepMerge(cfg, patch)
   }
