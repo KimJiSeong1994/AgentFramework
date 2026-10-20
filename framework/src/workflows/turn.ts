@@ -67,17 +67,62 @@ const MODEL_REQUEST_DIAGNOSTICS: Readonly<Record<ModelRequestFailureCategory, st
   empty_response: "The model returned no usable response after execution stopped. Review the draft, then submit it again manually.",
   response_budget: "The model response exceeded the configured response budget. Shorten the draft, then submit it again manually.",
 }
+/**
+ * Why a host execution failed, from its fixed failure string (never provider text). Lets a user and the telemetry tell
+ * a refused reply format from a budget, deadline or transport failure, which all surface as one model error.
+ */
+export type HostFailureReason =
+  | "malformed_response" | "unknown_tool" | "tool_input" | "tool_denied" | "tool_rounds" | "input_budget"
+  | "output_bound" | "deadline" | "transport" | "policy" | "other"
+
+const HOST_FAILURE_PATTERNS: ReadonlyArray<readonly [RegExp, HostFailureReason]> = [
+  [/^malformed CLI response/u, "malformed_response"],
+  [/^unknown Otter tool refused/u, "unknown_tool"],
+  [/^malformed Otter tool input|^Otter tool input or implementation failed/u, "tool_input"],
+  [/^Otter tool denied|^Otter pre-execution tool policy|^Otter skill (permission|context)/u, "tool_denied"],
+  [/^Otter tool round limit/u, "tool_rounds"],
+  [/input budget|^skill instructions exceeded/u, "input_budget"],
+  // "CLI inference turn failed or exceeded its output bound" is any non-completed CLI run (exit code, auth, crash), so it
+  // is a transport failure; only the host's own reactive cap is an output-bound failure.
+  [/^CLI inference transport|^CLI inference turn failed|^Codex version\/profile probe|^CLI host execution failed/u, "transport"],
+  [/^reactive output byte limit reached/u, "output_bound"],
+  [/deadline elapsed/u, "deadline"],
+  [/policy/u, "policy"],
+]
+
+export function hostFailureReason(error: unknown): HostFailureReason {
+  if (typeof error !== "string") return "other"
+  return HOST_FAILURE_PATTERNS.find(([pattern]) => pattern.test(error))?.[1] ?? "other"
+}
+
+const HOST_FAILURE_HINTS: Readonly<Partial<Record<HostFailureReason, string>>> = {
+  malformed_response: "The model's reply was not in the required tool/answer format.",
+  unknown_tool: "The model asked for a tool Otter does not provide.",
+  tool_input: "The model called a tool with invalid input.",
+  tool_denied: "A tool call was refused by the role policy.",
+  tool_rounds: "The model used too many tool rounds.",
+  input_budget: "The request did not fit the input budget.",
+  output_bound: "The model reply exceeded the output limit.",
+  deadline: "The request ran out of time.",
+  transport: "The model CLI did not complete the request.",
+}
+
 /** Issued only after settlement; the display diagnostic is fixed, not provider text. */
 export class ModelRequestError extends Error {
   readonly category: ModelRequestFailureCategory
   readonly diagnostic: string
+  /** Host failure reason when the execution failed; absent for empty or oversized completed replies. */
+  readonly reason?: HostFailureReason
 
-  constructor(category: ModelRequestFailureCategory, message: string) {
+  constructor(category: ModelRequestFailureCategory, message: string, reason?: HostFailureReason) {
     super(message)
     if (!Object.hasOwn(MODEL_REQUEST_DIAGNOSTICS, category)) throw new TypeError("invalid model request failure category")
     this.name = "ModelRequestError"
     this.category = category
-    this.diagnostic = MODEL_REQUEST_DIAGNOSTICS[category]
+    const hint = reason ? HOST_FAILURE_HINTS[reason] : undefined
+    // The fixed sentence stays first (UI and transcripts key on it); the reason follows.
+    this.diagnostic = hint ? `${MODEL_REQUEST_DIAGNOSTICS[category]} Reason: ${hint}` : MODEL_REQUEST_DIAGNOSTICS[category]
+    if (reason) this.reason = reason
   }
 }
 
@@ -301,7 +346,7 @@ async function dispatch(runtime: ExecutionRuntime, input: Dispatch): Promise<Tur
     if (outcome.status !== "completed" || typeof outcome.text !== "string" || !outcome.text.trim()) {
       if (input.summary && outcome.status === "completed") throw new SummaryUnusable("summary was empty")
       if (outcome.status === "failed") {
-        throw new ModelRequestError("model_failed", `${request.label} model did not complete a response`)
+        throw new ModelRequestError("model_failed", `${request.label} model did not complete a response`, hostFailureReason(outcome.error))
       }
       throw new ModelRequestError("empty_response", `${request.label} model did not complete a response`)
     }

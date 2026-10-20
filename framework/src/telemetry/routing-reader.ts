@@ -19,7 +19,10 @@ const reason = z.enum([
   "off", "duplicate", "input_bound", "sensitive_input", "busy", "invalid_endpoint", "no_candidates",
   "sensitive_metadata", "unavailable", "invalid_response", "invalid_distribution", "invalid_winner",
   "abstained", "candidate_changed", "aborted", "recommended", "invalid_config",
+  "backoff", "engine_off", "engine_missing", "invalid_model",
 ])
+/** Judging engine recorded on a decision: OpenJev (`jev-latest`) or the Claude/Codex/Ollama CLI classifier. */
+const judgeModel = z.enum(["jev-latest", "claude", "codex", "local"])
 
 const scoresSchema = z.object({
   choice: z.union([skillName, z.literal("none")]),
@@ -31,7 +34,7 @@ const scoresSchema = z.object({
 const thresholdsSchema = z.object({
   minProbability: z.number().finite().min(0.5).max(1),
   minMargin: z.number().finite().min(0).max(1),
-  timeoutMs: z.number().int().min(50).max(3000),
+  timeoutMs: z.number().int().min(50).max(15000),
 }).strip()
 
 const baseSchema = {
@@ -46,8 +49,8 @@ const decisionSchema = z.object({
   decisionID: identifier,
   sessionID: identifier,
   messageID: identifier,
-  model: z.literal("jev-latest"),
-  mode: z.enum(["off", "shadow", "suggest", "invalid"]),
+  model: judgeModel,
+  mode: z.enum(["off", "shadow", "suggest", "auto", "offer", "invalid"]),
   skill: skillName.nullable(),
   reason,
   elapsedMs: z.number().int().min(0).max(60000),
@@ -63,7 +66,7 @@ const decisionSchema = z.object({
   if (row.skill !== null && (!candidates.has(row.skill) || row.reason !== "recommended")) {
     ctx.addIssue({ code: "custom", message: "skill must be a recommended candidate", path: ["skill"] })
   }
-  if (row.reason === "recommended" && (row.skill === null || !["shadow", "suggest"].includes(row.mode) || !row.requestSent || !row.scores)) {
+  if (row.reason === "recommended" && (row.skill === null || !["shadow", "suggest", "auto", "offer"].includes(row.mode) || !row.requestSent || !row.scores)) {
     ctx.addIssue({ code: "custom", message: "recommendation is inconsistent with mode or skill", path: ["reason"] })
   }
   if (row.mode === "invalid" && row.reason !== "invalid_config") {
@@ -109,7 +112,34 @@ const appliedSchema = z.object({
   skill: skillName,
 }).strip()
 
-const eventSchema = z.union([decisionSchema, appliedSchema])
+const skillLoadSchema = z.object({
+  ...baseSchema,
+  event: z.literal("skill_tool_load"),
+  sessionID: identifier,
+  turnID: identifier,
+  skill: skillName,
+  outcome: z.enum(["loaded", "refused", "superseded", "withdrawn"]),
+}).strip()
+
+const skillList = z.array(skillName).max(64)
+const skillTurnSchema = z.object({
+  ...baseSchema,
+  event: z.literal("skill_turn"),
+  sessionID: identifier,
+  turnID: identifier,
+  offered: skillList,
+  catalogDropped: z.boolean(),
+  loaded: skillList,
+  refused: skillList,
+  withdrawn: skillList,
+  outcome: z.enum(["completed", "failed", "cancelled"]),
+  failure: identifier.optional(),
+}).strip().superRefine((row, ctx) => {
+  if (row.catalogDropped && row.offered.length > 0) ctx.addIssue({ code: "custom", message: "a dropped catalog offers nothing", path: ["offered"] })
+  if ((row.failure !== undefined) !== (row.outcome === "failed")) ctx.addIssue({ code: "custom", message: "failure reason only on failed turns", path: ["failure"] })
+})
+
+const eventSchema = z.union([decisionSchema, appliedSchema, skillLoadSchema, skillTurnSchema])
 export type RoutingEvent = z.infer<typeof eventSchema>
 
 const rejectionReasons = z.enum([
@@ -202,6 +232,11 @@ export function isRoutingSnapshot(value: unknown): value is RoutingSnapshot {
       }
     } else if (event.event === "advice_applied") {
       if (!hasExactKeys(event, ["schemaVersion", "eventID", "recordedAt", "event", "decisionID", "sessionID", "messageID", "skill"])) return false
+    } else if (event.event === "skill_tool_load") {
+      if (!hasExactKeys(event, ["schemaVersion", "eventID", "recordedAt", "event", "sessionID", "turnID", "skill", "outcome"])) return false
+    } else if (event.event === "skill_turn") {
+      const keys = ["schemaVersion", "eventID", "recordedAt", "event", "sessionID", "turnID", "offered", "catalogDropped", "loaded", "refused", "withdrawn", "outcome"]
+      if (!hasExactKeys(event, Object.hasOwn(event, "failure") ? [...keys, "failure"] : keys)) return false
     } else return false
   }
   return true
@@ -285,10 +320,24 @@ function projectEvent(data: unknown): RoutingEvent | null {
     const probabilities = Object.fromEntries(Object.entries(row.scores?.probabilities ?? {}).sort(([a], [b]) => compareText(a, b)))
     return {
       schemaVersion: 1, eventID: row.eventID, recordedAt: row.recordedAt, event: "decision", decisionID: row.decisionID,
-      sessionID: row.sessionID, messageID: row.messageID, model: "jev-latest", mode: row.mode, skill: row.skill,
+      sessionID: row.sessionID, messageID: row.messageID, model: row.model, mode: row.mode, skill: row.skill,
       reason: row.reason, elapsedMs: row.elapsedMs, requestSent: row.requestSent,
       candidates: [...row.candidates].sort(), thresholds: row.thresholds && { ...row.thresholds },
       scores: row.scores && { choice: row.scores.choice, probabilities, confidence: row.scores.confidence, margin: row.scores.margin },
+    }
+  }
+  if (row.event === "skill_tool_load") {
+    return {
+      schemaVersion: 1, eventID: row.eventID, recordedAt: row.recordedAt, event: "skill_tool_load",
+      sessionID: row.sessionID, turnID: row.turnID, skill: row.skill, outcome: row.outcome,
+    }
+  }
+  if (row.event === "skill_turn") {
+    return {
+      schemaVersion: 1, eventID: row.eventID, recordedAt: row.recordedAt, event: "skill_turn", sessionID: row.sessionID,
+      turnID: row.turnID, offered: [...row.offered], catalogDropped: row.catalogDropped, loaded: [...row.loaded],
+      refused: [...row.refused], withdrawn: [...row.withdrawn], outcome: row.outcome,
+      ...(row.failure !== undefined ? { failure: row.failure } : {}),
     }
   }
   return {

@@ -1,0 +1,62 @@
+{
+  "schema": "otter-skill-load-eval.v1",
+  "recordedAt": "2026-10-19T15:13:03.996Z",
+  "engine": "claude",
+  "model": "claude-haiku-5-5",
+  "reps": 1,
+  "cases": 87,
+  "excluded": [
+    "plan"
+  ],
+  "noneEvery": 2,
+  "catalog": [],
+  "skillAuto": "auto",
+  "metrics": {
+    "recall": {
+      "num": 32,
+      "den": 47,
+      "value": 0.681
+    },
+    "recallExcludingPlan": {
+      "num": 32,
+      "den": 47,
+      "value": 0.681
+    },
+    "recallEndToEnd": {
+      "num": 32,
+      "den": 53,
+      "value": 0.604
+    },
+    "precision": {
+      "num": 32,
+      "den": 32,
+      "value": 1
+    },
+    "noneFalsePositive": {
+      "num": 0,
+      "den": 32,
+      "value": 0
+    },
+    "wrongSkill": 0,
+    "failedTurns": {
+      "num": 8,
+      "den": 87,
+      "value": 0.092
+    },
+    "p50Ms": 10004
+  },
+  "failures": {
+    "malformed_response": 5,
+    "output_bound": 3
+  },
+  "perSkill": {
+    "computer-use": "1/5",
+    "find-skills": "5/5",
+    "llm-wiki": "11/11",
+    "orca-cli": "5/7",
+    "orchestration": "2/4",
+    "typesafe-ai": "7/7",
+    "ulw": "1/8"
+  },
+  "falsePositives": []
+}

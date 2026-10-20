@@ -81,6 +81,33 @@ export function recordSkillToolLoad(deps: CoreDeps, sessionID: string, turnID: s
   }))
 }
 
+export type SkillTurnRecord = {
+  sessionID: string
+  turnID: string
+  /** Skills listed to the model this turn (after ranking and budget); empty when the catalog was dropped. */
+  offered: readonly string[]
+  catalogDropped: boolean
+  loaded: readonly string[]
+  refused: readonly string[]
+  withdrawn: readonly string[]
+  outcome: "completed" | "failed" | "cancelled"
+  /** Host failure reason for a failed turn (fixed vocabulary, never provider text). */
+  failure?: string
+}
+
+/**
+ * One `otter chat` turn that offered the skill tool: what was listed, what the model loaded, and how the turn ended.
+ * Lets a report find skills that are listed but never loaded, loads that do not fit, and failures by reason.
+ */
+export function recordSkillToolTurn(deps: CoreDeps, record: SkillTurnRecord): void {
+  bestEffort(deps, () => append(deps, record.sessionID, {
+    event: "skill_turn", sessionID: identifier(record.sessionID), turnID: identifier(record.turnID),
+    offered: record.offered.map(identifier), catalogDropped: record.catalogDropped,
+    loaded: record.loaded.map(identifier), refused: record.refused.map(identifier), withdrawn: record.withdrawn.map(identifier),
+    outcome: identifier(record.outcome), ...(record.failure ? { failure: identifier(record.failure) } : {}),
+  }))
+}
+
 /** Emitted only after the hook actually inserts advice; recommendation is not evidence of skill execution. */
 export function recordRoutingAdvice(deps: CoreDeps, sessionID: string, messageID: string, decisionID: string, skill: string): void {
   bestEffort(deps, () => append(deps, sessionID, {

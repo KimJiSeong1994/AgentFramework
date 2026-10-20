@@ -222,7 +222,22 @@ function summarizeRouting(snapshot: RoutingSnapshot) {
   }
   const rejected = new Map<string, number>()
   for (const item of snapshot.rejected) rejected.set(item.reason, (rejected.get(item.reason) ?? 0) + 1)
-  return { decisions, applications, matchedApplications, unmatchedApplications, conflictingApplications, modes, reasons, rejected }
+  // otter chat skill tool: per skill, how often it was listed and how often the model actually loaded it.
+  const skillTurns = snapshot.events.filter((event): event is Extract<RoutingEvent, { event: "skill_turn" }> => event.event === "skill_turn")
+  const skills = new Map<string, { offered: number; loaded: number; refused: number; withdrawn: number }>()
+  const skill = (name: string) => { let row = skills.get(name); if (!row) skills.set(name, row = { offered: 0, loaded: 0, refused: 0, withdrawn: 0 }); return row }
+  const turnOutcomes = new Map<string, number>()
+  let droppedCatalogs = 0
+  for (const turn of skillTurns) {
+    for (const name of turn.offered) skill(name).offered++
+    for (const name of turn.loaded) skill(name).loaded++
+    for (const name of turn.refused) skill(name).refused++
+    for (const name of turn.withdrawn) skill(name).withdrawn++
+    if (turn.catalogDropped) droppedCatalogs++
+    const key = turn.outcome === "failed" ? `failed: ${turn.failure ?? "other"}` : turn.outcome
+    turnOutcomes.set(key, (turnOutcomes.get(key) ?? 0) + 1)
+  }
+  return { decisions, applications, matchedApplications, unmatchedApplications, conflictingApplications, modes, reasons, rejected, skillTurns, skills, turnOutcomes, droppedCatalogs }
 }
 
 function renderRoutingReport(snapshot: RoutingSnapshot, sourceName: string): string {
@@ -250,6 +265,15 @@ function renderRoutingReport(snapshot: RoutingSnapshot, sourceName: string): str
   for (const [mode, count] of [...summary.modes].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) lines.push(`| ${mode} | ${count} |`)
   lines.push("", "## Decisions by reason", "", "| Reason | Decisions |", "|---|---:|")
   for (const [reason, count] of [...summary.reasons].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) lines.push(`| ${reason} | ${count} |`)
+  lines.push("", "## Skill tool turns (otter chat)", "",
+    `- Turns that offered the skill tool: ${summary.skillTurns.length}; catalogs dropped for the input budget: ${summary.droppedCatalogs}.`,
+    "- Listed but never loaded skills are candidates for a clearer description; loads are model choices, not evidence that the answer was correct.",
+    "", "| Turn outcome | Turns |", "|---|---:|")
+  for (const [outcome, count] of [...summary.turnOutcomes].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) lines.push(`| ${outcome} | ${count} |`)
+  lines.push("", "| Skill | Listed | Loaded | Refused | Withdrawn |", "|---|---:|---:|---:|---:|")
+  for (const [name, row] of [...summary.skills].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+    lines.push(`| ${name} | ${row.offered} | ${row.loaded} | ${row.refused} | ${row.withdrawn} |`)
+  }
   lines.push("", "## Rejected input", "", "| Rejection reason | Count |", "|---|---:|")
   for (const [reason, count] of [...summary.rejected].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) lines.push(`| ${reason} | ${count} |`)
   if (!snapshot.events.length && coverage.scanned === 0 && coverage.invalidFiles === 0 && !coverage.truncated) {

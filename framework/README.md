@@ -583,6 +583,32 @@ Configured in the **user** config only:
   plus five more runs) a context-only follow-up ("그거 정리해서 배포용 문서로 써줘") loaded the release-notes skill in
   5/5 conversations and the unrelated turns loaded nothing (10/10). One of 15 turns failed with a malformed JSON
   envelope (an unescaped code block in the final text), a local-model formatting failure rather than a skill call.
+- **Load evaluation** (`bun scripts/otter-skill-load-eval.ts --engine local|claude|codex --model <id> [--exclude plan]
+  [--none-every N] [--shard i/n] [--reps N] [--journal f] [--out f]`) measures the decision that matters: whether the main
+  model in an ordinary chat turn loads the right skill, and only then. It runs the production plan-conversation and
+  cli-host path in a scratch worktree whose committed skills mirror this repository's, with the operator's home roots and
+  user `skill_trust`/`skill_auto`, the catalog from `SkillSession.autoCandidates`, and the real captured SKILL.md bytes.
+  It reports recall (completed and end-to-end), precision, `none` false positives, wrong-skill picks, per-skill recall
+  and failed turns by host reason. 2026-10-19, claude-haiku-5-5, 87 cases (no `plan`, every second `none`;
+  `artifacts/skill-load-eval/`): the catalog wording "check these descriptions before inspecting files or answering;
+  load every one that covers what the user wants done; not for a question that only asks what something is" raised
+  end-to-end recall from 27/53 to 32/53 with precision 32/32 and 0/32 `none` false positives (old wording 1/34, a
+  prompt injection). On gemma4 (30-case shard) loads went from 10/19 to 14/19 with the same false-positive count. A
+  rerun of the final code (`claude-final-2026-10-19.json`) gave 29/53, precision 29/30, 1/34 `none` false positives,
+  and 5/87 failed turns (4 CLI transport, 1 reply format), so expect a few cases of run-to-run spread.
+- **Reply format**: a strict whole-body envelope (optionally fenced, any fence language; a tool name may be the type,
+  `{"type":"skill","name":"x"}`) is read for every tool. From any other reply the host takes only **read-only** calls
+  (read, list, glob, grep, memory, skill) — wrapped in pseudo-XML (`<invoke_tool>…`), behind a sentence, or batched (the
+  first runs and the model is told the rest did not); a `write`/`edit` anywhere outside a strict envelope fails the reply,
+  so prose that quotes or narrates a write never performs it. A final whose text has unescaped quotes or raw line breaks
+  is repaired to final text only. The read-only main role keeps a plain-prose reply, or prose that merely mentions an
+  envelope, as its answer. Unknown tools, a final mixed with calls, several finals and malformed shapes fail closed. Before this, 32% of claude-haiku turns in the load evaluation failed on the reply format; after it, 5-9%.
+  A failed model turn now adds why after the fixed message (`… Reason: The model's reply was not in the required
+  tool/answer format.`, input budget, deadline, tool rounds, …).
+- **Telemetry**: each chat turn that offers the skill tool writes a `skill_turn` routing event (skills listed, loaded,
+  refused, withdrawn, catalog dropped, outcome and failure reason); loads also write `skill_tool_load`. The routing
+  reader and `otter wiki capture` report now include them ("Skill tool turns": per-skill listed vs loaded, turn outcomes
+  by reason) and accept Claude/Codex-judged decisions, which they used to reject.
 - **Router evaluation** (`bun scripts/otter-skill-route-eval.ts --engine auto|claude|codex|jev`) measures that selector.
   2026-10-19, 132 labeled cases (`artifacts/skill-route-eval/report-2026-10-19-{claude,codex}.json`): claude-haiku-5-5
   passed the gate (9 picks, all correct; 0/68 `none` false positives, 0 adversarial; p95 4.9 s) but is conservative

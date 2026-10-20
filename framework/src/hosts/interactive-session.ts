@@ -24,7 +24,7 @@ import { classifyIntent, hasIntentForcePrefix, INTENT_CLASSIFIER, type IntentCla
 import { claimPreparedSkillInvocation, SkillSession, type AutoSkillCandidate, type PreparedSkillInvocation, type SkillCatalog } from "../skills/session.ts"
 import { readSkillTrust, type SkillTrustLookup } from "../skills/trust.ts"
 import { createAutoSkillSelector, type AutoSkillSelection } from "../routing/router.ts"
-import { recordSkillToolLoad } from "../telemetry/routing.ts"
+import { recordSkillToolLoad, recordSkillToolTurn } from "../telemetry/routing.ts"
 import { attachAdmission, detachAdmission, effectiveHold, holdAdmission, rebindAdmissionModel, resumeAdmission } from "../sessions/admission.ts"
 import { canonicalRoutes, inspectSessions, MAX_CARRIED_MESSAGES, routesKey, MAX_SHELL_COMMAND_BYTES, MAX_SHELL_LINES, MAX_SHELL_OUTPUT_BYTES, readSessionMetadata, replaySession, type SessionStore, type ReplayOptions, type ReplayResult, type TranscriptKind } from "../sessions/store.ts"
 import { persistToolActivity } from "../tui/session-transcript.ts"
@@ -2865,6 +2865,8 @@ export async function runInteractiveSession(
       let preparedSkill: PreparedSkillInvocation | undefined
       let skillTool: SkillToolProvider | undefined
       const loadedSkills: Array<{ name: string; contentHash: string }> = []
+      // One skill_turn record per turn that offered the skill tool, written exactly once when the turn ends.
+      let finishSkillTurn: (outcome: "completed" | "failed" | "cancelled", failure?: string) => void = () => {}
       let dispatched = false
       const modelFailureMayReturnToComposer = (): boolean => {
         try {
@@ -2929,6 +2931,23 @@ export async function runInteractiveSession(
           const turnID = `turn-${requestSequence}`
           const requiredTools = autoSkillRequiredTools
           const pendingHashes = new Map<string, string>()
+          const turnOffered: string[] = []
+          const turnRefused: string[] = []
+          const turnWithdrawn: string[] = []
+          let turnCatalogDropped = false
+          let turnRecorded = false
+          // Set by the host's `offered` report: a turn that never reached a host execution (empty catalog, input budget
+          // refused before dispatch, a busy conversation) offered nothing and is not a skill-tool turn.
+          let turnReached = false
+          finishSkillTurn = (outcome, failure) => {
+            if (turnRecorded || !turnReached) return
+            turnRecorded = true
+            recordSkillToolTurn(runtime, {
+              sessionID, turnID, offered: turnOffered, catalogDropped: turnCatalogDropped,
+              loaded: loadedSkills.map(skill => skill.name), refused: turnRefused, withdrawn: turnWithdrawn, outcome,
+              ...(failure ? { failure } : {}),
+            })
+          }
           skillTool = catalog.length === 0 ? undefined : Object.freeze({
             catalog: Object.freeze(catalog.map(candidate => Object.freeze({ name: candidate.name, description: candidate.description }))),
             query: outbound,
@@ -2944,6 +2963,7 @@ export async function runInteractiveSession(
                 return { ok: true as const, text }
               } catch {
                 recordSkillToolLoad(runtime, sessionID, turnID, name, "refused")
+                turnRefused.push(name)
                 return { ok: false as const, error: "Tool refused: this skill is not usable without consent right now." }
               }
             },
@@ -2957,7 +2977,13 @@ export async function runInteractiveSession(
               const index = loadedSkills.findIndex(skill => skill.name === name)
               if (index < 0) return
               loadedSkills.splice(index, 1)
+              turnWithdrawn.push(name)
               recordSkillToolLoad(runtime, sessionID, turnID, name, "withdrawn")
+            },
+            offered(names: readonly string[], dropped: boolean) {
+              turnReached = true
+              turnOffered.splice(0, turnOffered.length, ...names)
+              turnCatalogDropped = dropped
             },
           })
         }
@@ -2975,14 +3001,20 @@ export async function runInteractiveSession(
             ? await turnSelection.conversation.turn(outbound, operationAbort.signal, undefined, skillTool)
             : await turnSelection.conversation.turn(outbound, operationAbort.signal)
         if (operationAbort.signal.aborted && !abort.signal.aborted) {
+          finishSkillTurn("cancelled")
           requestObservation = { state: "cancellation-unconfirmed", operationID: requestID }
           publishView()
           reportTurnCancellation()
           continue
         }
+        finishSkillTurn(abort.signal.aborted ? "cancelled" : "completed")
         requestObservation = { state: "completed", operationID: requestID }
         publishView()
       } catch (error) {
+        if (dispatched) {
+          if (operationAbort?.signal.aborted || abort.signal.aborted) finishSkillTurn("cancelled")
+          else finishSkillTurn("failed", error instanceof ModelRequestError ? error.reason ?? error.category : "other")
+        }
         if (dispatched && error instanceof ModelRequestError) {
           requestObservation = {
             state: "failed", operationID: requestID,

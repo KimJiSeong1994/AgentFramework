@@ -7,7 +7,7 @@ import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
 import { spawnSync } from "node:child_process"
 import { recordToolOutcome } from "../src/telemetry/outcomes.ts"
-import { recordRoutingAdvice, recordRoutingDecision, routingLogPath, type RoutingDecision } from "../src/telemetry/routing.ts"
+import { recordRoutingAdvice, recordRoutingDecision, recordSkillToolLoad, recordSkillToolTurn, routingLogPath, type RoutingDecision } from "../src/telemetry/routing.ts"
 import { stateRoot } from "../src/state/store.ts"
 import { readRoutingLogs } from "../src/telemetry/routing-reader.ts"
 import { createHash } from "node:crypto"
@@ -476,6 +476,29 @@ test("shadow abstention is reported as a decision, not as an application or exec
   expect(report).toContain("not evidence of skill execution")
 })
 
+
+test("otter chat skill-tool turns, loads and CLI-judged decisions are captured, not rejected", () => {
+  const deps = { worktree: root, log: () => { } } as never
+  recordDecision(routingDecision("offer-1", { mode: "offer", engine: "claude", thresholds: { minProbability: 0.95, minMargin: 0.2, timeoutMs: 15000 },
+    scores: { choice: "skill-one", probabilities: { "skill-one": 0.97, "skill-two": 0.02, none: 0.01 }, confidence: 0.97, margin: 0.95 } }))
+  recordSkillToolLoad(deps, "session-1", "turn-1", "skill-one", "loaded")
+  recordSkillToolTurn(deps, { sessionID: "session-1", turnID: "turn-1", offered: ["skill-one", "skill-two"], catalogDropped: false,
+    loaded: ["skill-one"], refused: [], withdrawn: [], outcome: "completed" })
+  recordSkillToolTurn(deps, { sessionID: "session-1", turnID: "turn-2", offered: ["skill-one", "skill-two"], catalogDropped: false,
+    loaded: [], refused: [], withdrawn: [], outcome: "failed", failure: "malformed_response" })
+  recordSkillToolTurn(deps, { sessionID: "session-1", turnID: "turn-3", offered: [], catalogDropped: true,
+    loaded: [], refused: [], withdrawn: [], outcome: "completed" })
+  const receipt = captureWiki(root)
+  const raw = JSON.parse(readFileSync(join(root, receipt.routing.source), "utf8"))
+  expect(raw.coverage).toMatchObject({ valid: 5, invalid: 0 })
+  expect(raw.events.find((event: { event: string }) => event.event === "decision")).toMatchObject({ model: "claude", mode: "offer" })
+  const report = readFileSync(join(root, receipt.routing.report), "utf8")
+  expect(report).toContain("Turns that offered the skill tool: 3; catalogs dropped for the input budget: 1.")
+  expect(report).toContain("| failed: malformed_response | 1 |")
+  expect(report).toContain("| skill-one | 2 | 1 | 0 | 0 |")
+  expect(report).toContain("| skill-two | 2 | 0 | 0 | 0 |")
+  expect(lintWiki(root)).toEqual([])
+})
 
 test("routing capture strips unknown text metadata and visibly rejects malformed, torn, and misfiled rows", () => {
   recordDecision(routingDecision("decision-sanitized"))

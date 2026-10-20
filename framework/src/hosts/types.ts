@@ -104,6 +104,8 @@ export type SkillToolProvider = Readonly<{
   delivered?(name: string): void
   /** Called when delivered instructions were later dropped whole to fit the input budget; they no longer apply. */
   withdrawn?(name: string): void
+  /** Called once per execution with the skills actually listed to the model, or `dropped` when the catalog did not fit. */
+  offered?(names: readonly string[], dropped: boolean): void
 }>
 
 export type ExecutionReference = {
