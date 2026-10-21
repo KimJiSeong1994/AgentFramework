@@ -71,49 +71,12 @@ bun scripts/otter-wiki.ts lint      # 링크·해시 무결성
 
 **모든 실행은 사람이 승인한다 — 한 동작씩 또는 계획 단위.**
 
-- **대화 중 직접 실행**(기본 `chat.execute: "ask"`): otter가 파일 수정(`edit`/`write`)과 명령 실행(`bash`)을 직접 요청 → 동작마다 [한 번 허용 | 항상 허용 | 거부]
-  - 수정은 diff, 명령은 명령줄과 시간 제한을 보여 주고 결과를 모델에게 돌려줌. 거부도 모델에게 전달돼 다른 방법을 찾음
-  - **되돌리기**: 턴의 첫 수정 전에 체크포인트 → `/undo`로 그 턴의 변경을 되돌림(최근 10턴, git 저장소면 명령이 만든 변경까지). 그 뒤 직접 고친 파일은 건드리지 않음
-  - **승인 줄이기**: `git status/diff/log`, `ls`, `cat`, `rg` 같은 읽기 전용 명령은 묻지 않고 실행(기록은 남음). "이 턴 동안 `<폴더>/` 수정 허용" 선택지. 여러 파일 수정은 `multiedit`로 한 번에 승인(전부 적용 또는 전부 미적용)
-  - 도구 사용이 한 턴에 24회에 닿으면 실패 대신 "계속할까요?"(최대 3번 연장)
-  - Claude/Codex는 대화창이 더 큼(입력 약 49k 토큰 추정, 대화 96k자). 로컬 모델은 그대로
-  - 대화형 명령(`vim`, 비밀번호 입력 등)은 승인 후 터미널을 넘겨줌(출력은 저장 안 됨)
-  - `sudo`, 강제 푸시, 루트/홈 삭제, 디스크 포맷 등은 승인해도 거부. 직접 하려면 `!명령어`
-  - "항상 허용"은 명령 앞부분(`bun test` 등) 규칙으로 사용자 설정에만 저장. 프로젝트 설정의 허용은 무시. `/permissions`로 보기·지우기
-  - 모드: `"ask"`(기본) · `"auto-edit"`(파일 수정은 묻지 않음, 명령은 물음) · `"plan"`(읽기 전용) — `~/.config/otter/otter.jsonc`의 `chat.execute`
-- **계획 단위 실행**: `/plan` → 사람이 `/approve` → 작업자가 실행. 자동 승인 없음, 원장(ledger)에 기록. 큰 작업용
-- **체크아웃 보호**: 계획은 작업 트리 `wf-<id>`에서 실행 → diff 요약 후 [적용 | 유지 | 버리기]. 끄기 `chat.worktree: "off"`
-- 작업 트리는 체크아웃 보호용이며 샌드박스(프로세스·파일시스템 격리)는 아님
-
-## 설치
-
-- macOS/Linux, `git` 필요. `bun`은 없으면 자동 설치
-- 엔진(`ollama`/`codex`/`claude`) 하나 이상이 PATH에 있어야 함
-- 로그인 `otter login codex|claude`, 상태 `otter auth`(대화 중 `/login`·`/auth`·`/logout`)
-- **엔진 CLI 업데이트**: `otter engines`(버전·설치 방식·otter 지원 여부), `otter engines update [codex|claude]`(대화 중 `/engines update`). 설치 방식(npm·bun·pnpm·Homebrew·공식 설치)에 맞는 명령을 보여 주고 **확인한 뒤에만** 실행. Codex는 otter가 검증한 최신 버전으로 고정(더 최신이면 다운그레이드라고 알려 줌), Claude는 벤더 stable 채널
-- **업데이트**: `otter update`(확인만 `otter update --check`). 새 버전이 나오면 `otter` 시작 시 `Update available … Run: otter update` 알림(하루 한 번 백그라운드 확인, 설치는 하지 않음). 끄기: `~/.config/otter/otter.jsonc`에 `"update": { "check": false }` 또는 `OTTER_NO_UPDATE_CHECK=1`
-- 제거는 `~/.local/share/otter/AgentFramework/install.sh --uninstall`
-
-**Windows**: otter는 POSIX 소유권·권한 검사에 기대므로 WSL2(기본 Ubuntu) 안에서 실행됨
-- 준비: 관리자 PowerShell에서 `wsl --install` → 재부팅 → Ubuntu를 한 번 열어 사용자 생성
-- 설치: `irm …/install.ps1 | iex`. WSL 안에서 `install.sh`를 돌리고 `%LOCALAPPDATA%\otter\bin\otter.cmd`를 만들어 사용자 PATH에 추가 → PowerShell·cmd·Windows Terminal에서 `otter`
-- 엔진 CLI(`codex`/`claude`/`ollama`)와 로그인은 **WSL 안에** 있어야 함. Windows에 설치한 `codex.exe`/`claude.exe`의 로그인은 WSL에서 쓸 수 없어 무시함
-- `otter`는 WSL 로그인 셸(`~/.profile`·`~/.bashrc`)을 읽어 nvm·npm·설치 프로그램으로 넣은 CLI를 찾음. 확인: `otter auth`
-- 로그인: `otter login codex`는 Windows 기본 브라우저를 열고, 안 열리면 출력된 URL을 Windows에서 열면 됨. localhost에 못 돌아오면 `otter login codex device`(코드 입력 방식)
-- 프로젝트는 WSL 파일시스템(`\\wsl$\Ubuntu\home\<you>\...`)에 두는 것을 권장. `C:\` 드라이브(`/mnt/c`)는 파일 접근이 느림
-- 배포판 지정 `$env:OTTER_DISTRO='Ubuntu-24.04'`, 제거 `$env:OTTER_UNINSTALL='1'; irm …/install.ps1 | iex`
-
-## 사용
-
-```sh
-otter                                      # 새 대화(기본 모델 또는 /model 선택)
-otter --engine codex --model gpt-5.6-sol   # 엔진·모델 지정
-otter --resume                             # 지난 세션 선택
-otter --continue                           # 최근 세션 이어가기
-otter status --worktree .                  # 엔진 없이 워크플로·원장 상태 확인
-```
-
-대화 중: `/model` · `/plan` · `/approve` · `/sessions` · `/resume` · `/memory` · `/skills` · `/login` · `/auth` · `/help`
+- **대화 중 직접 실행**(기본): 파일 수정·명령 실행을 동작마다 [한 번 허용 | 항상 허용 | 거부]. 수정은 diff, 명령은 명령줄을 보여 줌
+- **되돌리기**: `/undo`로 그 턴의 변경 복원(최근 10턴)
+- **승인 줄이기**: 읽기 전용 명령(`git status`, `ls`, `rg` 등)은 묻지 않음 · 이 턴 동안 폴더 단위 허용 · 여러 파일 수정은 한 번에 승인
+- **항상 거부**: `sudo`, 강제 푸시, 루트/홈 삭제 등. 직접 하려면 `!명령어`
+- **모드**: `chat.execute` = `"ask"`(기본) · `"auto-edit"`(수정은 묻지 않음) · `"plan"`(읽기 전용) · 규칙 관리 `/permissions`
+- **계획 단위 실행**: `/plan` → `/approve` → 작업 트리 `wf-<id>`에서 실행 → [적용 | 유지 | 버리기]. 큰 작업용 (샌드박스는 아님)
 
 ## 문서
 

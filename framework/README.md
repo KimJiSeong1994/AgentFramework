@@ -1547,6 +1547,24 @@ bypass a refusal. This gives cooperating current-protocol controllers one author
 of state-directory overrides; it does not discover unselected historical namespaces or prove
 that a terminated controller's descendants have stopped.
 
+## Install, uninstall and Windows
+
+- `install.sh` (macOS/Linux) needs `git`; it installs `bun` when missing, clones into `$OTTER_HOME/AgentFramework`
+  (default `~/.local/share/otter`) and writes the `otter` launcher to `$OTTER_BIN_DIR` (default `~/.local/bin`).
+  Uninstall with `~/.local/share/otter/AgentFramework/install.sh --uninstall` (config and session state are kept).
+- At least one engine CLI (`ollama`, `codex`, `claude`) must be on PATH. Sign in with `otter login codex|claude`,
+  check with `otter auth` (in chat `/login`, `/auth`, `/logout`).
+- **Windows** runs otter inside WSL2 (default Ubuntu), because otter relies on POSIX ownership and permission checks.
+  - Prepare: `wsl --install` in an administrator PowerShell, reboot, open Ubuntu once to create the user.
+  - `irm …/install.ps1 | iex` runs `install.sh` inside WSL and adds `%LOCALAPPDATA%\otter\bin\otter.cmd` to the user
+    PATH, so `otter` works from PowerShell, cmd and Windows Terminal. `$env:OTTER_DISTRO='Ubuntu-24.04'` picks a
+    distribution; `$env:OTTER_UNINSTALL='1'; irm …/install.ps1 | iex` removes it.
+  - Engine CLIs and their sign-in must live inside WSL; a Windows `codex.exe`/`claude.exe` sign-in is not usable there.
+    The launcher loads the WSL login shell (`~/.profile`, `~/.bashrc`) so nvm/npm-installed CLIs are found.
+  - `otter login codex` opens the Windows browser; if it does not, open the printed URL in Windows, and if the
+    localhost callback fails use `otter login codex device`.
+  - Keep projects on the WSL filesystem (`\\wsl$\Ubuntu\home\<you>\...`); `/mnt/c` is slow.
+
 ## Updates (installer-managed copies)
 
 Modeled on GJC's startup check. `install.sh` records `repo=`, `ref=` and `bin=` in
