@@ -97,6 +97,16 @@ describe("verify allowlist (second pass)", () => {
     expect(verifyCommandProblem("pytest -q test_a.py\nrm -rf /", ALLOW)).toMatch(/control character/)
     expect(verifyCommandProblem("pytest -q -k 'a or b' test_a.py", ALLOW)).toBeNull()
     expect(verifyCommandProblem("python3 -m pytest -q test_x.py && python3 -m mypy x.py", ALLOW)).toBeNull()
+    // tsc -p/--project names the project to type-check (compiler options, not code): allowed with a path inside the
+    // worktree, which is what a planner writes for a monorepo package. pytest/npm options stay refused.
+    expect(verifyCommandProblem("bun test ./framework/test && bunx tsc --noEmit -p framework/tsconfig.json", ALLOW)).toBeNull()
+    expect(verifyCommandProblem("npx tsc -p tsconfig.json", ALLOW)).toBeNull()
+    expect(verifyCommandProblem("tsc --project=framework", ALLOW)).toBeNull()
+    expect(verifyCommandProblem("bun x tsc --noEmit -p .", ALLOW)).toBeNull()
+    expect(verifyCommandProblem("bunx tsc -p ../other/tsconfig.json", ALLOW)).toMatch(/relative path inside the project/)
+    expect(verifyCommandProblem("tsc -p /etc/tsconfig.json", ALLOW)).toMatch(/relative path inside the project/)
+    expect(verifyCommandProblem("bunx tsc -p tsconfig.json --preload ./x.ts", ALLOW)).toMatch(/runner option .*--preload/)
+    expect(verifyCommandProblem("pytest -p framework test_a.py", ALLOW)).toMatch(/runner option .*-p/)
   })
 })
 

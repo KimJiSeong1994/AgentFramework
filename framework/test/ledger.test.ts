@@ -125,6 +125,8 @@ describe("ledger", () => {
     expect(protectedViolations(["pkg/other/test_rect.py"], ["src/test_rect.py"], task)).toEqual({ violations: [], suspicious: ["pkg/other/test_rect.py"] })
     // runner-autoloaded files are protected unless the task names them
     expect(protectedViolations(["conftest.py", "Makefile", "package.json", "src/x.py"], ["test_rect.py"], task).violations).toEqual(["conftest.py", "Makefile", "package.json"])
+    // tsc reads its tsconfig implicitly: a worker may not loosen the type check it is verified by.
+    expect(protectedViolations(["tsconfig.json", "framework/tsconfig.build.json", "src/x.ts"], [], task).violations).toEqual(["tsconfig.json", "framework/tsconfig.build.json"])
     expect(protectedViolations(["package.json"], [], { title: "add jest to package.json", detail: "" }).violations).toEqual([])
     // no file named in verify (pytest -q tests/, bun test): test-looking changes are violations
     expect(protectedViolations(["tests/test_a.py", "src/a.py", "x.test.ts", "b_test.go", "spec/c_spec.rb"], [], task).violations).toEqual(["tests/test_a.py", "x.test.ts", "b_test.go", "spec/c_spec.rb"])
