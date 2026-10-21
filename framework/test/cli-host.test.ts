@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SKILL_CATALOG_LIMIT, SKILL_DROPPED_RESULT, createCliHost, fitHistory, type CliToolOutcomeFact } from "../src/hosts/cli-host.ts"
+import { assertHostAdmission } from "../src/hosts/required-controls.ts"
 import type { CliTransportHandle, CliTransportOptions } from "../src/hosts/cli-transport.ts"
 import type { ActionGate, ChatAction, ComboRoutes, ExecutionPolicy, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole, SkillToolProvider } from "../src/hosts/types.ts"
 import type { ExecutionRunStore, ExecutionRunStatus } from "../src/hosts/run-state.ts"
@@ -1034,7 +1035,10 @@ describe("route-aware common CLI host", () => {
     const codex = routed({ failPreflightFor: "codex/gpt-5.6-sol" })
     const codexResult = await codex.host.preflight(codex.host.identity.profile)
     expect(codexResult.compatible).toBe(false)
-    expect(codexResult.controls.preExecutionToolPolicy).toBe("unsupported")
+    // A Codex route alone is that route's problem (named, so admission can say which route), not a host-wide control.
+    expect(codexResult.controls.preExecutionToolPolicy).toBe("supported")
+    expect(codexResult.problems.join(" ")).toContain("combo route for architect -> codex / gpt-5.6-sol is unavailable")
+    expect(() => assertHostAdmission(codexResult, "estimated-input-reactive-output-v1")).toThrow("combo route unavailable: architect -> codex / gpt-5.6-sol")
     expect(codexResult.problems.join(" ")).toContain("combo route for architect")
     expect(codex.requests).toEqual([])
   })
@@ -1081,6 +1085,8 @@ describe("route-aware common CLI host", () => {
     expect(reversedResult.problems).toHaveLength(1)
     expect(reversedResult.problems[0]).toContain("Codex native profile preflight")
     expect(reversedResult.problems[0]).not.toContain("combo route")
+    // The anchor's own Codex profile failing is a host-wide refusal.
+    expect(reversedResult.controls.preExecutionToolPolicy).toBe("unsupported")
     await expect(reversed.dispatch("worker")).resolves.toMatchObject({ status: "failed" })
     await expect(reversed.dispatch("architect")).resolves.toEqual({ status: "completed", text: "done codex/gpt-5.6-sol" })
   })

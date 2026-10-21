@@ -29,6 +29,8 @@ import { captureSDKSessionLifetime } from "../sessions/sdk-transcript.ts"
 import { assertNever, isCancelPending, stopDisplay } from "../workflows/types.ts"
 import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type LoginMethod } from "./engine-auth.ts"
 import { updateCli } from "./update-check.ts"
+import { describeEngine, engineInfo, planEngineUpdate, runEngineUpdate, UPDATABLE_ENGINES, type UpdatableEngine } from "./engine-update.ts"
+import { createInterface } from "node:readline"
 
 const COMMANDS = new Set(["status", "import", "approve", "reject", "run", "resume", "pause", "cancel"])
 const COMMON_RECOVERY_COMMANDS = new Set(["approve", "reject", "resume", "pause", "cancel", "run"])
@@ -109,6 +111,11 @@ Updates (installs made by install.sh / install.ps1):
   Interactive starts check in the background at most once a day and only notify ("Update available ... Run: otter update").
   Disable with "update": { "check": false } in ~/.config/otter/otter.jsonc or OTTER_NO_UPDATE_CHECK=1.
   Source checkouts are never checked; update them with git.
+
+Engine CLIs:
+  engines                                          codex/claude versions, install method, and the update that fits it
+  engines update [codex|claude] [--yes]            run that update after confirming the exact command (in chat: /engines)
+  Codex is pinned to the newest otter-supported version (may be a downgrade); Claude follows the vendor's stable channel.
 
 Commands:
   status   --worktree PATH [--session ID] [--json] [--detail] [--watch [--interval 1..60]]
@@ -799,6 +806,10 @@ function main(argv: string[]): void {
     updateCli(argv.slice(1)).then(code => { process.exitCode = code }).catch(failCli)
     return
   }
+  if (argv[0] === "engines") {
+    enginesCli(argv.slice(1)).then(code => { process.exitCode = code }).catch(failCli)
+    return
+  }
   if (argv[0] === "harness") {
     harnessCli(argv.slice(1)).then(text => { console.log(text) }).catch(error => failCli(error, "harness"))
     return
@@ -882,6 +893,44 @@ async function authCli(argv: readonly string[]): Promise<number> {
   const after = await authStatus(engine, cwd)
   console.log(describeAuth(after).replace(/\/login (\w+)/u, "otter login $1"))
   return command === "login" ? (after.state === "signed-in" ? 0 : 1) : (after.state === "signed-out" ? 0 : 1)
+}
+
+/**
+ * `otter engines` shows each vendor CLI, its version (Codex: whether otter supports it) and the update that fits its
+ * install method; `otter engines update [codex|claude] [--yes]` runs it after confirmation. Exit 0 = every requested
+ * engine ends up current or updated; 1 = something failed or needs a manual step; 2 = usage.
+ */
+async function enginesCli(argv: readonly string[]): Promise<number> {
+  const usage = "Usage: otter engines | otter engines update [codex|claude] [--yes]"
+  const yes = argv.includes("--yes")
+  const rest = argv.filter(arg => arg !== "--yes")
+  if (rest.length === 0) {
+    for (const engine of UPDATABLE_ENGINES) { const info = engineInfo(engine); console.log(describeEngine(info, planEngineUpdate(info))) }
+    return 0
+  }
+  if (rest[0] !== "update" || rest.length > 2 || (rest[1] !== undefined && !(UPDATABLE_ENGINES as readonly string[]).includes(rest[1]))) { console.error(usage); return 2 }
+  const targets = rest[1] ? [rest[1] as UpdatableEngine] : [...UPDATABLE_ENGINES]
+  let ok = true
+  for (const engine of targets) {
+    const plan = planEngineUpdate(engineInfo(engine))
+    if (plan.action === "current") { console.log(`${engine}: ${plan.summary}.`); continue }
+    if (plan.action === "manual") { console.log(`${engine}: ${plan.summary}`); ok = false; continue }
+    console.error(`${engine}: ${plan.summary}\n$ ${plan.argv.join(" ")}`)
+    if (!yes) {
+      if (!process.stdin.isTTY) { console.error("Not a terminal: re-run with --yes to confirm."); ok = false; continue }
+      const answer = await new Promise<string>(resolve => {
+        const rl = createInterface({ input: process.stdin, output: process.stderr })
+        rl.question("Run it? [y/N] ", value => { rl.close(); resolve(value) })
+      })
+      if (!/^y(es)?$/iu.test(answer.trim())) { console.log(`${engine}: skipped.`); continue }
+    }
+    const run = await runEngineUpdate(plan.argv)
+    const after = engineInfo(engine)
+    const succeeded = run.exitCode === 0 && after.version !== undefined && (engine !== "codex" || after.supported === true)
+    console.log(`${engine}: ${succeeded ? "updated" : "update did not finish"} — now ${after.version ?? "unknown"}${engine === "codex" ? (after.supported ? " (otter-supported)" : " (not otter-supported)") : ""}.`)
+    if (!succeeded) ok = false
+  }
+  return ok ? 0 : 1
 }
 
 if (import.meta.main) main(process.argv.slice(2))

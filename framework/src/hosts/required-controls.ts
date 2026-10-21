@@ -60,7 +60,8 @@ function validBudgetEvidence(value: unknown): boolean {
   }
 }
 
-const ROUTE_PROBLEM_RE = /^combo route for ([a-z]+(?:, [a-z]+)*) -> (local|codex|claude) \/ (\S+) is unavailable(?::|$)/
+// Role names include hyphens (data-analyst, ontology-evolver, answer-judge); every name is checked against EXECUTION_ROLES.
+const ROUTE_PROBLEM_RE = /^combo route for ([a-z]+(?:-[a-z]+)*(?:, [a-z]+(?:-[a-z]+)*)*) -> (local|codex|claude) \/ (\S+) is unavailable(?::|$)/
 
 /**
  * Host preflight problems are otherwise withheld from the operator. Only the combo-route subject (role names plus

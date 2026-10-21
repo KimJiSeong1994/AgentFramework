@@ -255,6 +255,8 @@ function harness(options: HarnessOptions = {}) {
       clear: () => { const count = calls.allowRules.length; calls.allowRules.length = 0; return count },
     },
     sessionClosed: (worktree, sessionID) => { calls.closedSessions.push(sessionID); return options.closedLine },
+    // Never read the machine's real Codex install; tests that care pin a version.
+    codexVersion: () => "0.140.0",
     // Real checkpoints snapshot the worktree with git; only the /undo test opts into them.
     createCheckpoints: () => ({ beforeEffect: async () => {}, endTurn: async () => {}, list: () => [], undo: async () => undefined, dispose: () => {} }),
     // The real runner hands the test process's terminal to the command; the fixture runs it captured instead.
@@ -1042,7 +1044,7 @@ describe("interactive terminal", () => {
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     const commands = h.calls.choices.find(choice => choice.title === "Commands")!.values
       .map(value => value.split(" ")[0])
-    expect(commands).toEqual(["/help", "/model", "/memory", "/login", "/sessions", "/resume", "/theme", "/ascii", "!", "/quit"])
+    expect(commands).toEqual(["/help", "/model", "/memory", "/login", "/sessions", "/resume", "/engines", "/theme", "/ascii", "!", "/quit"])
     expect(h.calls.runtimes).toEqual([])
     expect(h.calls.discoveries).toEqual([])
     expect(h.calls.turns).toEqual([])
@@ -1318,8 +1320,8 @@ describe("interactive terminal", () => {
     const output = h.calls.output.join("")
     expect(output).toContain("Model switch failed")
     if (auth === "signed-in") {
-      expect(output).toContain(`supported versions are ${CODEX_SUPPORTED_VERSIONS.join(", ")}`)
-      expect(output).toContain("codex --version and otter doctor")
+      // The fixture's Codex reports 0.140.0: the message names it, the supported versions, and the install command.
+      expect(output).toContain(`Codex CLI 0.140.0 is not a version otter supports (supported: ${CODEX_SUPPORTED_VERSIONS.join(", ")}); run /engines update codex, or install one with npm install -g @openai/codex@${CODEX_SUPPORTED_VERSIONS.at(-1)}.`)
     } else expect(output).toContain("codex is not signed in; run /login codex.")
     expect(h.calls.turnBindings).toMatchObject([{ engine: "local", model: "original", text: "hello" }])
     expect(h.calls.defaultModelWrites).toEqual([])
@@ -1884,6 +1886,75 @@ describe("interactive terminal", () => {
 
   const comboRoutes = { architect: { engine: "codex", model: "gpt-5.6-sol" } } as const
   const configuredCombo: ComboLookup = { state: "configured", routes: comboRoutes, sources: { architect: "user" } }
+
+  test("an unavailable combo route does not block the main model: its roles fall back, and the message names version and fix", async () => {
+    const mixed: ComboLookup = { state: "configured", sources: { worker: "user", reviewer: "user", planner: "user" },
+      routes: { worker: { engine: "codex", model: "gpt-6-luna" }, reviewer: { engine: "claude", model: "fable" }, planner: { engine: "codex", model: "gpt-6-luna" } } }
+    const h = harness({ lines: ["hello", "/quit"], combo: mixed })
+    h.deps.codexVersion = () => "0.150.0"
+    h.deps.admitRuntime = async () => {
+      const routes = h.calls.runtimes.at(-1)?.routes ?? {}
+      if (Object.values(routes).some(route => route?.engine === "codex")) throw AdmissionRefusal.hostIncompatible("planner, worker -> codex / gpt-6-luna")
+    }
+    await launchInteractive({ worktree: wt.worktree, engine: "claude", model: "opus" }, h.deps)
+    // Admitted on the second try with only the working route; the session pins what actually runs.
+    expect(h.calls.runtimes.map(runtime => runtime.routes ?? {})).toEqual([mixed.routes, { reviewer: { engine: "claude", model: "fable" } }])
+    expect(readSessionMetadata(wt.worktree, h.calls.sessionIDs[0]!)?.routes).toEqual({ reviewer: { engine: "claude", model: "fable" } })
+    expect(h.calls.turnBindings).toMatchObject([{ engine: "claude", model: "opus", text: "hello" }])
+    const out = h.calls.output.join("")
+    expect(out).toContain("Combo route unavailable: planner, worker -> codex / gpt-6-luna. For this session planner, worker use claude / opus instead.")
+    expect(out).toContain("Codex CLI 0.150.0 is not a version otter supports (supported: 0.159.3, 0.163.0); run /engines update codex, or install one with npm install -g @openai/codex@0.163.0.")
+    expect(out).toContain("/model combo apply restores the routes")
+    expect(out).not.toContain("Cannot start")
+  })
+
+  test("/engines lists the CLIs; /engines update confirms the exact command, runs it with the terminal and re-checks", async () => {
+    const runs: Array<readonly string[]> = []
+    let installed = "0.150.0"
+    const h = harness({ fullscreen: true, lines: ["/engines", "/engines update codex", "/engines update codex", "/engines update bogus", "/quit"],
+      choose: async (title, values) => { expect(title).toStartWith("Update codex?"); return runs.length === 0 ? 1 : 0 } })
+    h.deps.engines = {
+      info: engine => engine === "codex"
+        ? { engine, method: "npm", version: installed, path: "/x/codex", supported: installed === "0.163.0" }
+        : { engine, method: "npm", version: "2.1.301", path: "/x/claude" },
+      plan: info => info.engine === "codex" && info.version !== "0.163.0"
+        ? { engine: "codex", action: "run", argv: ["npm", "install", "-g", "@openai/codex@0.163.0"], target: "0.163.0", summary: `Codex CLI ${info.version} → 0.163.0 with npm` }
+        : { engine: info.engine, action: "current", summary: `${info.engine} is current` },
+      run: async argv => { runs.push(argv); installed = "0.163.0"; return { exitCode: 0, signal: null } },
+    }
+    await launchInteractive({ worktree: wt.worktree, engine: "claude", model: "opus" }, h.deps)
+    expect(runs).toEqual([["npm", "install", "-g", "@openai/codex@0.163.0"]])
+    const out = h.calls.output.join("")
+    expect(out).toContain("codex: 0.150.0 (not otter-supported) · npm")
+    expect(out).toContain("update: Codex CLI 0.150.0 → 0.163.0 with npm — npm install -g @openai/codex@0.163.0")
+    expect(out).toContain("codex: updated, now 0.163.0 (otter-supported). New sessions use it; /new or /model combo apply picks it up now.")
+    // Already current the second time: nothing runs, no prompt.
+    expect(out).toContain("codex: codex is current.")
+    expect(h.calls.choices).toHaveLength(1)
+    expect(out).toContain("Usage: /engines · /engines update [codex|claude]")
+  })
+
+  test("/engines update: keeping the version runs nothing", async () => {
+    const runs: Array<readonly string[]> = []
+    const h = harness({ fullscreen: true, lines: ["/engines update claude", "/quit"], choose: async () => 0 })
+    h.deps.engines = {
+      info: engine => ({ engine, method: "npm", version: "2.1.301", path: "/x" }),
+      plan: info => ({ engine: info.engine, action: "run", argv: ["npm", "install", "-g", "@anthropic-ai/claude-code@stable"], target: "stable", summary: "Claude Code 2.1.301 → stable" }),
+      run: async argv => { runs.push(argv); return { exitCode: 0, signal: null } },
+    }
+    await launchInteractive({ worktree: wt.worktree, engine: "claude", model: "opus" }, h.deps)
+    expect(runs).toEqual([])
+    expect(h.calls.output.join("")).toContain("claude: kept.")
+  })
+
+  test("when the main model itself is refused there is no fallback; the message says what Codex is installed", async () => {
+    const h = harness({ lines: ["/quit"] })
+    h.deps.codexVersion = () => undefined
+    h.deps.admitRuntime = async () => { throw AdmissionRefusal.hostIncompatible() }
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-6-luna" }, h.deps)
+    expect(h.calls.output.join("")).toContain("Cannot start codex / gpt-6-luna. The Codex CLI was not found or did not report a version (supported: 0.159.3, 0.163.0); run /engines update codex, or install one with npm install -g @openai/codex@0.163.0.")
+    expect(h.calls.sessionIDs).toEqual([])
+  })
 
   test("a configured combo passes routes to the runtime and the banner lists them", async () => {
     const h = harness({ lines: ["hello", "/quit"], combo: configuredCombo })

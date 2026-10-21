@@ -226,6 +226,11 @@ describe("required control status checks", () => {
       comboRoutes: "planner, critic -> claude / opus",
     })
     expect((named as Error).message).not.toContain("private vendor diagnostic")
+    // Hyphenated role names (the recommended combos route data-analyst, ontology-evolver, ...) are named too; dropping them
+    // left the refusal generic and the session blocked.
+    expect(refusal(["combo route for worker, data-analyst, ontology-evolver, simplifier -> codex / gpt-6-luna is unavailable: Codex native profile preflight is unavailable or mismatched; host admission is refused."]))
+      .toMatchObject({ comboRoutes: "worker, data-analyst, ontology-evolver, simplifier -> codex / gpt-6-luna" })
+    expect(refusal(["combo route for data-analyst-x -> codex / m is unavailable"])).toMatchObject({ message: "host incompatible: required control statuses unavailable" })
     // Forged subjects with unknown roles, control characters, or unlisted engines are never echoed.
     for (const forged of [
       "combo route for evil -> claude / opus is unavailable",

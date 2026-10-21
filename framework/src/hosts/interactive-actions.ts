@@ -21,6 +21,7 @@ const all: readonly InteractiveAction[] = [
   { id: "continue", syntax: "/continue", summary: "request proof-checked work Resume", contexts: ["held"] },
   { id: "pause", syntax: "/pause", summary: "request pause; it is not proof of stopped work", contexts: ["chat", "busy", "held"] },
   { id: "cancel", syntax: "/cancel", summary: "request cancellation; proof may remain unconfirmed", contexts: ["chat", "busy", "held"] },
+  { id: "engines", syntax: "/engines [update [codex|claude]]", summary: "codex/claude CLI versions and install method; update runs the fitting command after you confirm it", contexts: ["chat", "held", "read-only", "unselected"] },
   { id: "history", syntax: "/history [<count> | <session-id>]", summary: "recent sessions of this worktree: model, turns, files, commands and their results", contexts: ["chat", "held", "read-only", "observer"] },
   { id: "facts", syntax: "/facts", summary: "what earlier sessions showed: commands that pass, commands that keep failing, files that keep changing", contexts: ["chat", "held", "read-only", "observer"] },
   { id: "wiki", syntax: "/wiki [ingest | lint]", summary: "wiki sources waiting for integration; ingest asks otter to integrate them (each edit approved), lint checks the wiki", contexts: ["chat", "held"] },

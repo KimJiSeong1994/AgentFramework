@@ -43,6 +43,8 @@ import { humanDecision } from "./operator.ts"
 import type { OperatorDecision } from "./operator.ts"
 import { AdmissionRefusal, assertHostAdmission } from "./required-controls.ts"
 import { CODEX_SUPPORTED_VERSIONS } from "./codex-profile.ts"
+import { installedCodexVersion } from "./cli-transport.ts"
+import { describeEngine, engineInfo, planEngineUpdate, runEngineUpdate, UPDATABLE_ENGINES, type EngineInfo, type EngineUpdatePlan, type UpdatableEngine } from "./engine-update.ts"
 import { boundedTerminalDiagnostic, terminalSafeText } from "./terminal-text.ts"
 import { createWorkflowHost, requestWorkflowStop, type WorkflowHost } from "./workflow-session.ts"
 import { startRefusal } from "../workflows/registry.ts"
@@ -135,6 +137,10 @@ export type InteractiveDependencies = {
   chatAllow: { read: () => string[]; save: (rule: string) => string; clear: () => number }
   /** Per-turn worktree checkpoints behind `/undo`. */
   createCheckpoints: (worktree: string, label: () => string) => ChatCheckpoints
+  /** The installed Codex CLI version, for diagnostics only (undefined when unknown). */
+  codexVersion: () => string | undefined
+  /** Engine CLI inspection, update planning and the confirmed update run (`/engines`). */
+  engines: { info: (engine: UpdatableEngine) => EngineInfo; plan: (info: EngineInfo) => EngineUpdatePlan; run: (argv: readonly string[]) => Promise<{ exitCode: number | null; signal: string | null }> }
   /**
    * A chat session ended or was replaced: write its digest and, for a project with a wiki and `wiki.auto_capture`, capture
    * the wiki. Returns one line for the user, or nothing. Must never throw or block long.
@@ -458,6 +464,8 @@ export function defaultDependencies(): InteractiveDependencies {
       : runCapturedCommand(action.command, cwd, action.timeoutMs, signal),
     chatAllow: { read: () => readAllowRules(), save: saveAllowRule, clear: clearAllowRules },
     createCheckpoints: createChatCheckpoints,
+    codexVersion: installedCodexVersion,
+    engines: { info: engineInfo, plan: info => planEngineUpdate(info), run: runEngineUpdate },
     sessionClosed: closeSessionHistory,
     checkUpdate: defaultUpdateCheck,
     createRuntime: (options) => createCliRuntime(options),
@@ -1564,9 +1572,55 @@ export async function runInteractiveSession(
     const modelSwitchHint = async (engines: Iterable<CliEngine>): Promise<string | undefined> => {
       const targets = [...engines]
       const auth = await signInHint(targets)
-      return auth ?? (targets.includes("codex")
-        ? `Check Codex CLI compatibility: supported versions are ${CODEX_SUPPORTED_VERSIONS.join(", ")}. Run codex --version and otter doctor for diagnostics.`
-        : undefined)
+      return auth ?? (targets.includes("codex") ? codexCompatibilityHint() : undefined)
+    }
+    /** What is wrong with Codex and how to fix it: the installed version against the qualified ones. */
+    const codexCompatibilityHint = (): string => {
+      const supported = CODEX_SUPPORTED_VERSIONS.join(", ")
+      const latest = CODEX_SUPPORTED_VERSIONS.at(-1)!
+      let installed: string | undefined
+      try { installed = deps.codexVersion() } catch { installed = undefined }
+      if (installed && (CODEX_SUPPORTED_VERSIONS as readonly string[]).includes(installed)) {
+        return `Codex CLI ${installed} is supported but its profile check failed; run otter doctor for diagnostics.`
+      }
+      return `${installed ? `Codex CLI ${installed} is not a version otter supports` : "The Codex CLI was not found or did not report a version"} (supported: ${supported}); run /engines update codex, or install one with npm install -g @openai/codex@${latest}.`
+    }
+    /** Roles named in an admission refusal's combo-route detail (`worker, simplifier -> codex / m; reviewer -> claude / x`). */
+    const failedRouteRoles = (detail: string): Set<string> => new Set(detail.split("; ").flatMap(part => {
+      const roles = part.split(" -> ")[0] ?? ""
+      return roles.split(", ").map(role => role.trim()).filter(role => (EXECUTION_ROLES as readonly string[]).includes(role))
+    }))
+    /**
+     * Admit a runtime; when only combo routes are refused (the main model itself is fine), drop those roles' routes and
+     * admit again so the session starts on the main model for them. The caller pins the returned routes and shows the
+     * notice. A refusal of the main model, or of the retry, is thrown as before.
+     */
+    const admitWithRouteFallback = async (
+      engine: CliEngine, model: string, routes: ComboRoutes, progress: ReturnType<typeof scopedProgress>,
+    ): Promise<{ runtime: ExecutionRuntime; routes: ComboRoutes; notice?: string }> => {
+      const build = (current: ComboRoutes) => {
+        const runtime = deps.createRuntime({ worktree, engine, model, progress: progress.sink, ...(Object.keys(current).length ? { routes: current } : {}) })
+        runtime.linuxAdmission?.assertBootEpoch()
+        return runtime
+      }
+      const first = build(routes)
+      try {
+        await deps.admitRuntime(first)
+        return { runtime: first, routes }
+      } catch (error) {
+        if (!(error instanceof AdmissionRefusal) || !error.comboRoutes) throw error
+        const dropped = failedRouteRoles(error.comboRoutes)
+        if (!dropped.size) throw error
+        const kept = Object.fromEntries(Object.entries(routes).filter(([role]) => !dropped.has(role))) as ComboRoutes
+        const failedEngines = new Set(Object.entries(routes).filter(([role]) => dropped.has(role)).map(([, route]) => route!.engine))
+        const runtime = build(kept)
+        await deps.admitRuntime(runtime)
+        const why = failedEngines.has("codex") ? ` ${codexCompatibilityHint()}` : ""
+        return {
+          runtime, routes: kept,
+          notice: `Combo route unavailable: ${error.comboRoutes}. For this session ${[...dropped].join(", ")} use${dropped.size === 1 ? "s" : ""} ${engine} / ${model} instead.${why} After fixing it, /model combo apply restores the routes.`,
+        }
+      }
     }
     const engineSet = (anchor: CliEngine, routes: ComboRoutes): CliEngine[] => [anchor, ...Object.values(routes).map(route => route!.engine)]
     const authCommand = async (command: "/auth" | "/login" | "/logout", rest: readonly string[]): Promise<"aborted" | undefined> => {
@@ -1646,6 +1700,54 @@ export async function runInteractiveSession(
       const outcome = run!.signal ? `stopped by ${run!.signal}` : `exited ${run!.exitCode ?? "?"}`
       write(`${engine} ${argv.join(" ")} ${outcome}. Now ${describeAuth(after).replace(/^\w+: /u, "")}.`)
       persist("notice", { text: `Engine sign-in: ${engine} ${command === "/login" ? "login" : "logout"} ${outcome}; ${after.state}` })
+      return undefined
+    }
+    /**
+     * `/engines` lists the codex/claude CLIs (version, otter support, install method, planned update); `/engines update
+     * [codex|claude]` runs the update that fits the install method after the human confirms the exact command. The vendor
+     * tool gets the real terminal like a sign-in. Never while a turn runs; a running session keeps its current runtime.
+     */
+    const enginesUsage = "Usage: /engines · /engines update [codex|claude]"
+    const enginesCommand = async (rest: readonly string[]): Promise<"aborted" | undefined> => {
+      const write = (text: string) => visibleWrite(terminalSafeText(`${text}\n`))
+      if (rest.length === 0) {
+        write(["Engine CLIs (otter pins Codex to versions it qualified; Claude follows the vendor's stable channel):",
+          ...UPDATABLE_ENGINES.map(engine => { const info = deps.engines.info(engine); return `  ${describeEngine(info, deps.engines.plan(info))}` }),
+          "/engines update [codex|claude] runs the update after you confirm it."].join("\n"))
+        return undefined
+      }
+      if (rest[0] !== "update" || rest.length > 2 || (rest[1] !== undefined && !(UPDATABLE_ENGINES as readonly string[]).includes(rest[1]))) { write(enginesUsage); return undefined }
+      const targets = rest[1] ? [rest[1] as UpdatableEngine] : [...UPDATABLE_ENGINES]
+      for (const engine of targets) {
+        const plan = deps.engines.plan(deps.engines.info(engine))
+        if (plan.action !== "run") { write(`${engine}: ${plan.summary}${plan.action === "current" ? "." : ""}`); continue }
+        const confirm = await chooseFrom(terminal, `Update ${engine}? ${plan.summary}`, ["Keep the current version", `Run ${plan.argv.join(" ")}`],
+          ["Nothing changes.", "Runs the vendor package command in this terminal; it may ask for your password."], "Escape keeps the current version.", abort.signal)
+        if (confirm === undefined) return "aborted"
+        if (confirm !== 1) { write(`${engine}: kept.`); continue }
+        progress.suspend()
+        terminal.suspend?.()
+        const ignoreInterrupt = () => {}
+        if (sigintRegistered) deps.signals.off("SIGINT", onSigint)
+        deps.signals.on("SIGINT", ignoreInterrupt)
+        let run: { exitCode: number | null; signal: string | null }
+        try {
+          process.stderr.write(`\n$ ${plan.argv.join(" ")}\n`)
+          run = await deps.engines.run(plan.argv)
+        } finally {
+          deps.signals.off("SIGINT", ignoreInterrupt)
+          if (sigintRegistered) deps.signals.on("SIGINT", onSigint)
+          terminal.resume?.()
+          progress.resume()
+        }
+        const after = deps.engines.info(engine)
+        const succeeded = run.exitCode === 0 && after.version !== undefined && (engine !== "codex" || after.supported === true)
+        const now = `${after.version ?? "unknown"}${engine === "codex" ? (after.supported ? " (otter-supported)" : " (not otter-supported)") : ""}`
+        write(succeeded
+          ? `${engine}: updated, now ${now}. New sessions use it; /new or /model combo apply picks it up now.`
+          : `${engine}: the update did not finish (${run.signal ? `stopped by ${run.signal}` : `exit ${run.exitCode ?? "?"}`}); now ${now}.`)
+        persist("notice", { text: `Engine update: ${engine} ${succeeded ? "updated" : "not updated"} (${now})` })
+      }
       return undefined
     }
     let engine: CliEngine | undefined
@@ -1792,6 +1894,10 @@ export async function runInteractiveSession(
           if (await withProgressSuspended(() => authCommand(command, commandArgs)) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
           continue
         }
+        if (command === "/engines" && hasInteractiveAction("unselected", "engines")) {
+          if (await withProgressSuspended(() => enginesCommand(commandArgs)) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
+          continue
+        }
         if (command === "/model" && commandArgs[0] === "combo" && hasInteractiveAction("unselected", "model")) {
           const rest = commandArgs.slice(1)
           if (rest.length === 0 || (rest.length === 1 && rest[0] === "custom")) {
@@ -1870,9 +1976,15 @@ export async function runInteractiveSession(
     const startupCombo = startupSession ? { routes: startupSession.routes ?? {}, invalid: undefined } : comboRoutesFor(deps.combo.read(worktree), engine, model)
     initialRoutes = startupCombo.routes
     try {
-      initialRuntime = deps.createRuntime({ worktree, engine, model, progress: initialProgress.sink, ...(Object.keys(initialRoutes).length ? { routes: initialRoutes } : {}) })
-      initialRuntime.linuxAdmission?.assertBootEpoch()
-      if (!startupSession) await deps.admitRuntime(initialRuntime)
+      if (startupSession) {
+        initialRuntime = deps.createRuntime({ worktree, engine, model, progress: initialProgress.sink, ...(Object.keys(initialRoutes).length ? { routes: initialRoutes } : {}) })
+        initialRuntime.linuxAdmission?.assertBootEpoch()
+      } else {
+        const admitted = await admitWithRouteFallback(engine, model, initialRoutes, initialProgress)
+        initialRuntime = admitted.runtime
+        initialRoutes = admitted.routes
+        if (admitted.notice) startupNotices.push(admitted.notice)
+      }
     } catch (error) {
       // Same recoverable refusals as a mid-session model switch; anything else still ends the launch.
       if (startupSession || !(error instanceof AdmissionRefusal || error instanceof TypeError)) throw error
@@ -2395,9 +2507,10 @@ export async function runInteractiveSession(
           return true
         }
         const nextProgress = scopedProgress()
-        const runtime = deps.createRuntime({ worktree, engine: nextEngine, model: nextModel, progress: nextProgress.sink, ...(Object.keys(nextRoutes).length ? { routes: nextRoutes } : {}) })
-        runtime.linuxAdmission?.assertBootEpoch()
-        await deps.admitRuntime(runtime)
+        const admitted = await admitWithRouteFallback(nextEngine, nextModel, nextRoutes, nextProgress)
+        const runtime = admitted.runtime
+        nextRoutes = admitted.routes
+        if (admitted.notice) comboNotice = `${admitted.notice}\n${comboNotice ?? ""}`
         if (abort.signal.aborted) return false
         const controller = deps.createController(runtime)
         const conversation = deps.createConversation(runtime, selection.sessionID, prior.length ? prior : undefined)
@@ -2486,10 +2599,15 @@ export async function runInteractiveSession(
         if (!targetSessionID && usedSessionIDs.has(sessionID)) throw new Error("new conversation identity was not unique")
         const retained = targetSessionID ? readSessionMetadata(worktree, sessionID) : undefined
         const nextProgress = scopedProgress()
-        const runtime = deps.createRuntime({ worktree, engine: nextEngine, model: nextModel, progress: nextProgress.sink, ...(Object.keys(nextRoutes).length ? { routes: nextRoutes } : {}) })
-        if (!retained) {
-          runtime.linuxAdmission?.assertBootEpoch()
-          await deps.admitRuntime(runtime)
+        let runtime: ExecutionRuntime
+        if (retained) {
+          // A retained session keeps its pinned routes exactly; it is not admitted here.
+          runtime = deps.createRuntime({ worktree, engine: nextEngine, model: nextModel, progress: nextProgress.sink, ...(Object.keys(nextRoutes).length ? { routes: nextRoutes } : {}) })
+        } else {
+          const admitted = await admitWithRouteFallback(nextEngine, nextModel, nextRoutes, nextProgress)
+          runtime = admitted.runtime
+          nextRoutes = admitted.routes
+          if (admitted.notice) comboNotice = `${admitted.notice}\n${comboNotice ?? ""}`
         }
         if (abort.signal.aborted) return false
         const controller = deps.createController(runtime)
@@ -3181,6 +3299,10 @@ export async function runInteractiveSession(
       // Sign-in only touches the vendor CLI's own credential store; it works while held, never while a turn runs.
       if ((command === "/auth" || command === "/login" || command === "/logout") && hasInteractiveAction(actionContext, "auth")) {
         if (await withProgressSuspended(() => authCommand(command, commandArgs)) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
+        continue
+      }
+      if (command === "/engines" && hasInteractiveAction(actionContext, "engines")) {
+        if (await withProgressSuspended(() => enginesCommand(commandArgs)) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
         continue
       }
       if (command === "/model" && !modelAllowed) {
