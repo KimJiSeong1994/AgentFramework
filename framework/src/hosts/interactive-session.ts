@@ -44,7 +44,7 @@ import type { OperatorDecision } from "./operator.ts"
 import { AdmissionRefusal, assertHostAdmission } from "./required-controls.ts"
 import { CODEX_SUPPORTED_VERSIONS } from "./codex-profile.ts"
 import { installedCodexVersion } from "./cli-transport.ts"
-import { describeEngine, engineInfo, planEngineUpdate, runEngineUpdate, UPDATABLE_ENGINES, type EngineInfo, type EngineUpdatePlan, type UpdatableEngine } from "./engine-update.ts"
+import { describeEngine, describeUpdateFailure, engineInfo, planEngineUpdate, runEngineUpdate, UPDATABLE_ENGINES, verifyEngineUpdate, type EngineInfo, type EngineUpdatePlan, type UpdatableEngine } from "./engine-update.ts"
 import { boundedTerminalDiagnostic, terminalSafeText } from "./terminal-text.ts"
 import { createWorkflowHost, requestWorkflowStop, type WorkflowHost } from "./workflow-session.ts"
 import { startRefusal } from "../workflows/registry.ts"
@@ -140,7 +140,13 @@ export type InteractiveDependencies = {
   /** The installed Codex CLI version, for diagnostics only (undefined when unknown). */
   codexVersion: () => string | undefined
   /** Engine CLI inspection, update planning and the confirmed update run (`/engines`). */
-  engines: { info: (engine: UpdatableEngine) => EngineInfo; plan: (info: EngineInfo) => EngineUpdatePlan; run: (argv: readonly string[]) => Promise<{ exitCode: number | null; signal: string | null }> }
+  engines: {
+    info: (engine: UpdatableEngine) => EngineInfo
+    plan: (info: EngineInfo) => EngineUpdatePlan
+    run: (argv: readonly string[]) => Promise<{ exitCode: number | null; signal: string | null }>
+    /** After an update: what PATH runs now, and a newly installed copy that PATH does not reach yet. */
+    verify: (engine: UpdatableEngine) => { info: EngineInfo; shadowed?: { path: string; version: string } }
+  }
   /**
    * A chat session ended or was replaced: write its digest and, for a project with a wiki and `wiki.auto_capture`, capture
    * the wiki. Returns one line for the user, or nothing. Must never throw or block long.
@@ -465,7 +471,7 @@ export function defaultDependencies(): InteractiveDependencies {
     chatAllow: { read: () => readAllowRules(), save: saveAllowRule, clear: clearAllowRules },
     createCheckpoints: createChatCheckpoints,
     codexVersion: installedCodexVersion,
-    engines: { info: engineInfo, plan: info => planEngineUpdate(info), run: runEngineUpdate },
+    engines: { info: engineInfo, plan: info => planEngineUpdate(info), run: runEngineUpdate, verify: engine => verifyEngineUpdate(engine) },
     sessionClosed: closeSessionHistory,
     checkUpdate: defaultUpdateCheck,
     createRuntime: (options) => createCliRuntime(options),
@@ -1410,7 +1416,9 @@ export async function runInteractiveSession(
      * `/model combo` shows the effective routes; `<role> <engine> <id>` and `clear` edit user config only. Neither
      * changes the running session: a combo applies to new sessions, via `apply`. Returns "apply" for the caller.
      */
-    const comboCommand = (rest: readonly string[], current: { engine: CliEngine; model: string; routes: ComboRoutes } | undefined): "apply" | undefined => {
+    /** A chosen recommended combo: its routes are saved; the caller selects its main model and applies them in one step. */
+    type PresetChoice = { preset: (typeof COMBO_PRESETS)[number] }
+    const comboCommand = (rest: readonly string[], current: { engine: CliEngine; model: string; routes: ComboRoutes } | undefined): "apply" | PresetChoice | undefined => {
       const write = (text: string) => terminal.write(terminalSafeText(`${text}\n`))
       const show = (): void => {
         const lookup = deps.combo.read(worktree)
@@ -1436,9 +1444,9 @@ export async function runInteractiveSession(
       }
       if (rest.length === 1 && rest[0] === "show") { show(); return undefined }
       if (rest.length === 1 && rest[0] === "presets") {
-        write("Recommended combo templates (main stays the /model selection; requires Codex and Claude):")
+        write("Recommended combo templates (each sets the main model and the role routes; requires Codex and Claude):")
         for (const preset of COMBO_PRESETS) write(`${preset.id} — ${preset.description}\n${comboPresetSummary(preset)}`)
-        write("/model combo preset <name> replaces saved user routes; /model combo custom edits individual roles.")
+        write("/model combo preset <name> switches this session to it at once; /model combo custom edits individual roles.")
         return undefined
       }
       if (rest.length === 2 && rest[0] === "preset") {
@@ -1446,10 +1454,9 @@ export async function runInteractiveSession(
         if (!preset) { write(`Unknown combo preset. Choose: ${COMBO_PRESETS.map(candidate => candidate.id).join(", ")}.`); return undefined }
         try {
           const path = deps.combo.replace(preset.routes)
-          write(`Saved combo preset ${preset.id} to ${path}. User routes were replaced; project overrides still take precedence. Main stays the /model selection. ${current ? "Applying it to this session now; the conversation carries over." : "It applies when a model is selected."}`)
-          // A recommended combo takes effect at once: with a model selected, the caller re-binds the session under it.
-          if (current) return "apply"
-          show()
+          write(`Combo ${preset.id}: main ${preset.main.engine} / ${preset.main.model}, routes saved to ${path} (project overrides still take precedence). ${current ? "Switching this session now; the conversation carries over." : "Starting a session with it now."}`)
+          // A recommended combo is the whole multi-model setup: the caller selects its main model and applies the routes.
+          return { preset }
         } catch (error) { write(`Combo preset not saved: ${boundedTerminalDiagnostic(error instanceof Error ? error.message : String(error))}`) }
         return undefined
       }
@@ -1488,7 +1495,7 @@ export async function runInteractiveSession(
      * comboCommand, so validation and messages are identical to the typed form. Returns "apply" when the operator
      * chose to apply, undefined when they finished, and "aborted" when the turn was aborted.
      */
-    const comboPicker = async (current: { engine: CliEngine; model: string; routes: ComboRoutes } | undefined, custom = false): Promise<"apply" | "aborted" | undefined> => {
+    const comboPicker = async (current: { engine: CliEngine; model: string; routes: ComboRoutes } | undefined, custom = false): Promise<"apply" | "aborted" | PresetChoice | undefined> => {
       const signal = abort.signal
       const write = (text: string) => terminal.write(terminalSafeText(`${text}\n`))
       while (!signal.aborted) {
@@ -1506,12 +1513,12 @@ export async function runInteractiveSession(
         ]
         if (lookup.state === "invalid") write(`Combo is invalid and is not applied: ${boundedTerminalDiagnostic(lookup.reason)}.`)
         const main = current ? `main: ${current.engine} / ${current.model}` : "main: not selected yet"
-        const entries = custom ? roleLabels : COMBO_PRESETS.map(preset => `${preset.id} — ${preset.label}`)
+        const entries = custom ? roleLabels : COMBO_PRESETS.map(preset => `${preset.id} — ${preset.label} (main ${preset.main.model})`)
         const details = custom ? COMBO_ROLE_INFO.map(([, info]) => info) : COMBO_PRESETS.map(preset => preset.description)
         const picked = await chooseFrom(terminal, `${custom ? "Custom combo" : "Combo"} · ${main}`,
           [...entries, ...actions.map(action => action.label)],
           [...details, ...actions.map(action => action.detail)],
-          custom ? "Pick a role to customize; saved to ~/.config/otter/otter.jsonc." : "Choose a recommended combo to preview, or customize role routes. Main stays unchanged.", signal)
+          custom ? "Pick a role to customize; saved to ~/.config/otter/otter.jsonc." : "Choosing a recommended combo applies it to the session now (main model + role routes).", signal)
         if (picked === undefined) return "aborted"
         if (picked === null) return undefined
         const action = actions[picked - entries.length]
@@ -1520,18 +1527,12 @@ export async function runInteractiveSession(
         if (action?.id === "apply") return "apply"
         if (action?.id === "clear") { comboCommand(["clear"], current); continue }
         if (!custom) {
+          // A recommended combo is applied as chosen: no second confirmation and no detour into custom settings.
           const preset = COMBO_PRESETS[picked]
           if (!preset) continue
-          const summary = comboPresetSummary(preset)
-          write(`${preset.label}: ${preset.description}\n${summary}\nMain stays the /model selection. Requires Codex and Claude; check /auth or use /login <engine>.`)
-          const confirm = await chooseFrom(terminal, `Combo preset · ${preset.id}`, [current ? "Apply to this session" : "Save this combo", "Back"],
-            [current ? `${preset.description} Saved and applied now; the conversation carries over.` : preset.description, "Return without saving."],
-            current ? "Saves the combo and applies it to this session now; project overrides still win." : "Saves the combo; it applies when a model is selected. Project overrides still win.", signal)
-          if (confirm === undefined) return "aborted"
-          if (confirm === 0) {
-            if (comboCommand(["preset", preset.id], current) === "apply") return "apply"
-            custom = true
-          }
+          write(`${preset.label}: ${preset.description}\n${comboPresetSummary(preset)}`)
+          const outcome = comboCommand(["preset", preset.id], current)
+          if (outcome && typeof outcome === "object") return outcome
           continue
         }
         const role = COMBO_ROLE_INFO[picked]![0]
@@ -1721,10 +1722,12 @@ export async function runInteractiveSession(
       for (const engine of targets) {
         const plan = deps.engines.plan(deps.engines.info(engine))
         if (plan.action !== "run") { write(`${engine}: ${plan.summary}${plan.action === "current" ? "." : ""}`); continue }
-        const confirm = await chooseFrom(terminal, `Update ${engine}? ${plan.summary}`, ["Keep the current version", `Run ${plan.argv.join(" ")}`],
-          ["Nothing changes.", "Runs the vendor package command in this terminal; it may ask for your password."], "Escape keeps the current version.", abort.signal)
+        // Keep, then the recommended command, then alternatives (for example sudo): the human picks one exact command.
+        const confirm = await chooseFrom(terminal, `Update ${engine}? ${plan.summary}`, ["Keep the current version", ...plan.choices.map(choice => choice.label)],
+          ["Nothing changes.", ...plan.choices.map(choice => `${choice.note ? `${choice.note} ` : ""}Runs: ${choice.argv.join(" ")}`)], "Escape keeps the current version.", abort.signal)
         if (confirm === undefined) return "aborted"
-        if (confirm !== 1) { write(`${engine}: kept.`); continue }
+        const choice = confirm === null || confirm === 0 ? undefined : plan.choices[confirm - 1]
+        if (!choice) { write(`${engine}: kept.`); continue }
         progress.suspend()
         terminal.suspend?.()
         const ignoreInterrupt = () => {}
@@ -1732,20 +1735,25 @@ export async function runInteractiveSession(
         deps.signals.on("SIGINT", ignoreInterrupt)
         let run: { exitCode: number | null; signal: string | null }
         try {
-          process.stderr.write(`\n$ ${plan.argv.join(" ")}\n`)
-          run = await deps.engines.run(plan.argv)
+          process.stderr.write(`\n$ ${choice.argv.join(" ")}\n`)
+          run = await deps.engines.run(choice.argv)
         } finally {
           deps.signals.off("SIGINT", ignoreInterrupt)
           if (sigintRegistered) deps.signals.on("SIGINT", onSigint)
           terminal.resume?.()
           progress.resume()
         }
-        const after = deps.engines.info(engine)
-        const succeeded = run.exitCode === 0 && after.version !== undefined && (engine !== "codex" || after.supported === true)
+        const { info: after, shadowed } = deps.engines.verify(engine)
+        const succeeded = run.exitCode === 0 && !shadowed && after.version !== undefined && (engine !== "codex" || after.supported === true)
         const now = `${after.version ?? "unknown"}${engine === "codex" ? (after.supported ? " (otter-supported)" : " (not otter-supported)") : ""}`
+        const failed = run.exitCode !== 0 || run.signal !== null
+        const alternative = plan.choices[plan.choices.indexOf(choice) + 1]
+        const nextStep = failed && alternative ? ` Try: /engines update ${engine} and pick "${alternative.label}".` : ""
         write(succeeded
           ? `${engine}: updated, now ${now}. New sessions use it; /new or /model combo apply picks it up now.`
-          : `${engine}: the update did not finish (${run.signal ? `stopped by ${run.signal}` : `exit ${run.exitCode ?? "?"}`}); now ${now}.`)
+          : shadowed
+            ? `${engine}: installed ${shadowed.version} at ${shadowed.path}, but PATH still runs ${after.path ?? "an older copy"} (${after.version ?? "unknown"}). Put ${shadowed.path.replace(/\/[^/]+$/u, "")} first on PATH or remove the older copy, then open a new terminal.`
+            : `${engine}: the update did not finish (${describeUpdateFailure(choice.argv, run)}); now ${now}.${nextStep}`)
         persist("notice", { text: `Engine update: ${engine} ${succeeded ? "updated" : "not updated"} (${now})` })
       }
       return undefined
@@ -1900,11 +1908,17 @@ export async function runInteractiveSession(
         }
         if (command === "/model" && commandArgs[0] === "combo" && hasInteractiveAction("unselected", "model")) {
           const rest = commandArgs.slice(1)
-          if (rest.length === 0 || (rest.length === 1 && rest[0] === "custom")) {
-            if (await withProgressSuspended(() => comboPicker(undefined, rest[0] === "custom")) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
-          } else if (comboCommand(rest, undefined) === "apply") {
-            terminal.write("No model is selected yet; select one with /model, then run /model combo apply.\n")
+          const outcome = rest.length === 0 || (rest.length === 1 && rest[0] === "custom")
+            ? await withProgressSuspended(() => comboPicker(undefined, rest[0] === "custom")) : comboCommand(rest, undefined)
+          if (outcome === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
+          if (outcome && typeof outcome === "object") {
+            // A recommended combo starts the session on its main model with its routes (this session only).
+            startupModelScope = "session"
+            engine = outcome.preset.main.engine
+            model = outcome.preset.main.model
+            break
           }
+          if (outcome === "apply") terminal.write("No model is selected yet; select one with /model, then run /model combo apply.\n")
           continue
         }
         if (command === "/model" && hasInteractiveAction("unselected", "model")) {
@@ -1926,7 +1940,14 @@ export async function runInteractiveSession(
             const chosen = await withProgressSuspended(() => chooseEngine(terminal, abort.signal, { combo: true }))
             if (abort.signal.aborted) return signalExit(receivedSignal)
             if (chosen === "combo") {
-              if (await withProgressSuspended(() => comboPicker(undefined)) === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
+              const outcome = await withProgressSuspended(() => comboPicker(undefined))
+              if (outcome === "aborted" && abort.signal.aborted) return signalExit(receivedSignal)
+              if (outcome && typeof outcome === "object") {
+                startupModelScope = "session"
+                engine = outcome.preset.main.engine
+                model = outcome.preset.main.model
+                break selection
+              }
               continue
             }
             nextEngine = chosen
@@ -3284,11 +3305,13 @@ export async function runInteractiveSession(
         const outcome = rest.length === 0 || (rest.length === 1 && rest[0] === "custom")
           ? await withProgressSuspended(() => comboPicker(current, rest[0] === "custom")) : comboCommand(rest, current)
         if (outcome === "aborted") return !abort.signal.aborted
-        if (outcome === "apply") {
-          const derived = comboRoutesFor(deps.combo.read(worktree), selection.engine, selection.model)
+        if (outcome === "apply" || (outcome && typeof outcome === "object")) {
+          // A recommended combo also selects its main model; "apply" keeps the current main with the saved routes.
+          const target = outcome === "apply" ? { engine: selection.engine, model: selection.model } : outcome.preset.main
+          const derived = comboRoutesFor(deps.combo.read(worktree), target.engine, target.model)
           if (!modelAllowed) terminal.write("Combo not applied: model selection is unavailable while this session is held; resolve the active workflow first or recover execution ownership. The current session is unchanged.\n")
           else if (derived.invalid !== undefined) terminal.write(terminalSafeText(`Combo is invalid and was not applied: ${boundedTerminalDiagnostic(derived.invalid)}. The current session is unchanged.\n`))
-          else if (!await switchSelection(selection.engine, selection.model)) return false
+          else if (!await switchSelection(target.engine as CliEngine, target.model)) return false
         }
         return true
       }

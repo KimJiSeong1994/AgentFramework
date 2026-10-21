@@ -29,7 +29,7 @@ import { captureSDKSessionLifetime } from "../sessions/sdk-transcript.ts"
 import { assertNever, isCancelPending, stopDisplay } from "../workflows/types.ts"
 import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type LoginMethod } from "./engine-auth.ts"
 import { updateCli } from "./update-check.ts"
-import { describeEngine, engineInfo, planEngineUpdate, runEngineUpdate, UPDATABLE_ENGINES, type UpdatableEngine } from "./engine-update.ts"
+import { describeEngine, describeUpdateFailure, engineInfo, planEngineUpdate, runEngineUpdate, UPDATABLE_ENGINES, verifyEngineUpdate, type UpdatableEngine } from "./engine-update.ts"
 import { createInterface } from "node:readline"
 
 const COMMANDS = new Set(["status", "import", "approve", "reject", "run", "resume", "pause", "cancel"])
@@ -915,19 +915,31 @@ async function enginesCli(argv: readonly string[]): Promise<number> {
     const plan = planEngineUpdate(engineInfo(engine))
     if (plan.action === "current") { console.log(`${engine}: ${plan.summary}.`); continue }
     if (plan.action === "manual") { console.log(`${engine}: ${plan.summary}`); ok = false; continue }
-    console.error(`${engine}: ${plan.summary}\n$ ${plan.argv.join(" ")}`)
+    console.error(`${engine}: ${plan.summary}`)
+    plan.choices.forEach((choice, index) => console.error(`  ${index + 1}) ${choice.label}${choice.note ? ` — ${choice.note}` : ""}\n     $ ${choice.argv.join(" ")}`))
+    // --yes takes the recommended command (never an alternative such as sudo).
+    let choice = plan.choices[0]!
     if (!yes) {
-      if (!process.stdin.isTTY) { console.error("Not a terminal: re-run with --yes to confirm."); ok = false; continue }
+      if (!process.stdin.isTTY) { console.error("Not a terminal: re-run with --yes to run choice 1."); ok = false; continue }
       const answer = await new Promise<string>(resolve => {
         const rl = createInterface({ input: process.stdin, output: process.stderr })
-        rl.question("Run it? [y/N] ", value => { rl.close(); resolve(value) })
+        rl.question(`Run which? [1-${plan.choices.length}, Enter = keep] `, value => { rl.close(); resolve(value) })
       })
-      if (!/^y(es)?$/iu.test(answer.trim())) { console.log(`${engine}: skipped.`); continue }
+      const picked = Number.parseInt(answer.trim(), 10)
+      if (!Number.isInteger(picked) || picked < 1 || picked > plan.choices.length) { console.log(`${engine}: kept.`); continue }
+      choice = plan.choices[picked - 1]!
     }
-    const run = await runEngineUpdate(plan.argv)
-    const after = engineInfo(engine)
-    const succeeded = run.exitCode === 0 && after.version !== undefined && (engine !== "codex" || after.supported === true)
-    console.log(`${engine}: ${succeeded ? "updated" : "update did not finish"} — now ${after.version ?? "unknown"}${engine === "codex" ? (after.supported ? " (otter-supported)" : " (not otter-supported)") : ""}.`)
+    const run = await runEngineUpdate(choice.argv)
+    const { info: after, shadowed } = verifyEngineUpdate(engine)
+    const succeeded = run.exitCode === 0 && !shadowed && after.version !== undefined && (engine !== "codex" || after.supported === true)
+    const now = `${after.version ?? "unknown"}${engine === "codex" ? (after.supported ? " (otter-supported)" : " (not otter-supported)") : ""}`
+    if (succeeded) console.log(`${engine}: updated — now ${now}.`)
+    else if (shadowed) console.log(`${engine}: installed ${shadowed.version} at ${shadowed.path}, but PATH still runs ${after.path ?? "an older copy"} (${after.version ?? "unknown"}). Put ${shadowed.path.replace(/\/[^/]+$/u, "")} first on PATH or remove the older copy, then open a new terminal.`)
+    else {
+      const index = plan.choices.indexOf(choice)
+      const next = plan.choices[index + 1]
+      console.log(`${engine}: update did not finish (${describeUpdateFailure(choice.argv, run)}) — now ${now}.${next ? ` Try again and pick ${index + 2}) ${next.label}.` : ""}`)
+    }
     if (!succeeded) ok = false
   }
   return ok ? 0 : 1

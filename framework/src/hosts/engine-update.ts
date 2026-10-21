@@ -7,9 +7,9 @@
 // points to npm. Claude: no otter pin; npm installs follow the vendor's `stable` tag, other installs use the vendor's
 // own updater. Commands run without a shell (argv only) in the user's own environment, with the real terminal.
 import { spawn, spawnSync } from "node:child_process"
-import { realpathSync } from "node:fs"
+import { accessSync, constants, existsSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
-import { sep } from "node:path"
+import { isAbsolute, join, sep } from "node:path"
 import { CODEX_SUPPORTED_VERSIONS } from "./codex-profile.ts"
 import { findExecutable } from "./cli-transport.ts"
 
@@ -27,10 +27,23 @@ export type EngineInfo = Readonly<{
   supported?: boolean
 }>
 
+/** One way to run an update: the exact argv and how it is offered to the human. */
+export type UpdateChoice = Readonly<{ argv: readonly string[]; label: string; note?: string }>
+
 export type EngineUpdatePlan =
-  | Readonly<{ engine: UpdatableEngine; action: "run"; argv: readonly string[]; target: string; summary: string }>
+  /** `choices[0]` is the recommended command; later ones are alternatives (for example sudo), each confirmed by the human. */
+  | Readonly<{ engine: UpdatableEngine; action: "run"; choices: readonly UpdateChoice[]; target: string; summary: string }>
   | Readonly<{ engine: UpdatableEngine; action: "current"; summary: string }>
   | Readonly<{ engine: UpdatableEngine; action: "manual"; summary: string }>
+
+/** What the plan needs to know about the machine (injectable for tests). */
+export type UpdateEnvironment = Readonly<{
+  /** Whether `npm install -g` can write its global folder without sudo. */
+  npmGlobalWritable: () => boolean
+  /** The user-level prefix used when it cannot (binaries land in `<prefix>/bin`). */
+  userPrefix: string
+  brewVersion: (cask: string) => string | undefined
+}>
 
 const VERSION_RE: Record<UpdatableEngine, RegExp> = {
   codex: /^codex-cli (\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\s*$/u,
@@ -87,40 +100,119 @@ function packageInstall(method: "npm" | "bun" | "pnpm", spec: string): string[] 
   return method === "npm" ? ["npm", "install", "-g", spec] : method === "bun" ? ["bun", "add", "-g", spec] : ["pnpm", "add", "-g", spec]
 }
 
-/** The update for one engine: a confirmed command to run, "already current", or what to do by hand. */
-export function planEngineUpdate(info: EngineInfo, brewVersion: (cask: string) => string | undefined = brewCaskVersion): EngineUpdatePlan {
+/** The global npm folder, from `npm prefix -g` (undefined when npm is missing or silent). */
+export function npmGlobalPrefix(): string | undefined {
+  try {
+    const run = spawnSync("npm", ["prefix", "-g"], { encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "ignore"] })
+    const prefix = typeof run.stdout === "string" ? run.stdout.trim() : ""
+    return run.status === 0 && isAbsolute(prefix) ? prefix : undefined
+  } catch { return undefined }
+}
+
+/**
+ * Whether `npm install -g` can write without sudo: the global `lib/node_modules` (or, when it does not exist yet, the
+ * prefix's `lib`) is writable by this user. A root-owned global folder (Node from apt on Linux/WSL) is not.
+ */
+export function npmGlobalWritable(prefix = npmGlobalPrefix()): boolean {
+  if (!prefix || process.platform === "win32") return true
+  for (const candidate of [join(prefix, "lib", "node_modules"), join(prefix, "lib"), prefix]) {
+    if (!existsSync(candidate)) continue
+    try { accessSync(candidate, constants.W_OK); return true } catch { return false }
+  }
+  return false
+}
+
+export function defaultUpdateEnvironment(): UpdateEnvironment {
+  return { npmGlobalWritable: () => npmGlobalWritable(), userPrefix: join(homedir(), ".local"), brewVersion: brewCaskVersion }
+}
+
+/**
+ * npm install choices for `spec`: plain `-g` when the global folder is writable; otherwise a user-level install into
+ * `userPrefix` first (no sudo; binaries in `<userPrefix>/bin`, which otter's installer puts on PATH) and `sudo npm` as an
+ * alternative the human may pick.
+ */
+function npmChoices(spec: string, env: UpdateEnvironment): UpdateChoice[] {
+  if (env.npmGlobalWritable()) return [{ argv: ["npm", "install", "-g", spec], label: `npm install -g ${spec}` }]
+  return [
+    { argv: ["npm", "install", "-g", "--prefix", env.userPrefix, spec], label: `install for your user only (${env.userPrefix}/bin, no sudo)`,
+      note: "The global npm folder is not writable by you; this avoids sudo." },
+    { argv: ["sudo", "npm", "install", "-g", spec], label: `sudo npm install -g ${spec} (asks for your password)` },
+  ]
+}
+
+function managerChoices(method: "npm" | "bun" | "pnpm", spec: string, env: UpdateEnvironment): UpdateChoice[] {
+  if (method === "npm") return npmChoices(spec, env)
+  const argv = method === "bun" ? ["bun", "add", "-g", spec] : ["pnpm", "add", "-g", spec]
+  return [{ argv, label: argv.join(" ") }]
+}
+
+/** The update for one engine: confirmed command choices, "already current", or what to do by hand. */
+export function planEngineUpdate(info: EngineInfo, env: UpdateEnvironment = defaultUpdateEnvironment()): EngineUpdatePlan {
   const engine = info.engine
   if (engine === "codex") {
     const target = CODEX_SUPPORTED_VERSIONS.at(-1)!
-    const install = `npm install -g ${NPM_PACKAGE.codex}@${target}`
+    const spec = `${NPM_PACKAGE.codex}@${target}`
     if (info.method === "missing") {
-      return { engine, action: "run", argv: ["npm", "install", "-g", `${NPM_PACKAGE.codex}@${target}`], target, summary: `install Codex CLI ${target} (otter-supported) with npm` }
+      return { engine, action: "run", choices: npmChoices(spec, env), target, summary: `install Codex CLI ${target} (otter-supported) with npm` }
     }
     if (info.version === target) return { engine, action: "current", summary: `Codex CLI ${target} is the newest version otter supports` }
     const direction = info.version && compareVersions(info.version, target) > 0 ? `downgrade ${info.version} → ${target} (newer releases are not otter-qualified yet)` : `${info.version ?? "unknown version"} → ${target}`
     if (info.method === "npm" || info.method === "bun" || info.method === "pnpm") {
-      return { engine, action: "run", argv: packageInstall(info.method, `${NPM_PACKAGE.codex}@${target}`), target, summary: `Codex CLI ${direction} with ${info.method}` }
+      return { engine, action: "run", choices: managerChoices(info.method, spec, env), target, summary: `Codex CLI ${direction} with ${info.method}` }
     }
     if (info.method === "homebrew") {
-      const cask = brewVersion(BREW_CASK.codex)
+      const cask = env.brewVersion(BREW_CASK.codex)
       if (cask && (CODEX_SUPPORTED_VERSIONS as readonly string[]).includes(cask) && (!info.version || compareVersions(cask, info.version) > 0)) {
-        return { engine, action: "run", argv: ["brew", "upgrade", "--cask", BREW_CASK.codex], target: cask, summary: `Codex CLI ${info.version ?? "?"} → ${cask} with Homebrew` }
+        return { engine, action: "run", choices: [{ argv: ["brew", "upgrade", "--cask", BREW_CASK.codex], label: "brew upgrade --cask codex" }], target: cask, summary: `Codex CLI ${info.version ?? "?"} → ${cask} with Homebrew` }
       }
-      return { engine, action: "manual", summary: `Codex CLI is a Homebrew cask, which cannot install a specific version${cask ? ` (cask is ${cask})` : ""}. Switch to npm: brew uninstall --cask codex && ${install}` }
+      return { engine, action: "manual", summary: `Codex CLI is a Homebrew cask, which cannot install a specific version${cask ? ` (cask is ${cask})` : ""}. Switch to npm: brew uninstall --cask codex && npm install -g ${spec}` }
     }
-    return { engine, action: "manual", summary: `Codex CLI at ${info.path ?? "?"} was not installed by npm, bun, pnpm or Homebrew; reinstall it with ${install}` }
+    return { engine, action: "manual", summary: `Codex CLI at ${info.path ?? "?"} was not installed by npm, bun, pnpm or Homebrew; reinstall it with npm install -g ${spec}` }
   }
   // claude
+  const stable = `${NPM_PACKAGE.claude}@stable`
   if (info.method === "missing") {
-    return { engine, action: "run", argv: ["npm", "install", "-g", `${NPM_PACKAGE.claude}@stable`], target: "stable", summary: "install Claude Code (vendor stable channel) with npm" }
+    return { engine, action: "run", choices: npmChoices(stable, env), target: "stable", summary: "install Claude Code (vendor stable channel) with npm" }
+  }
+  if (info.method === "npm" && !env.npmGlobalWritable()) {
+    // The vendor's native installer needs no sudo and lands in ~/.local/bin; npm alternatives stay available.
+    return { engine, action: "run", target: "stable", summary: `Claude Code ${info.version ?? "?"} → vendor stable channel (global npm folder is not writable)`,
+      choices: [{ argv: [info.path ?? "claude", "install", "stable"], label: "claude install stable (native build in ~/.local/bin, no sudo)" }, ...npmChoices(stable, env)] }
   }
   if (info.method === "npm" || info.method === "bun" || info.method === "pnpm") {
-    return { engine, action: "run", argv: packageInstall(info.method, `${NPM_PACKAGE.claude}@stable`), target: "stable", summary: `Claude Code ${info.version ?? "?"} → vendor stable channel with ${info.method}` }
+    return { engine, action: "run", choices: managerChoices(info.method, stable, env), target: "stable", summary: `Claude Code ${info.version ?? "?"} → vendor stable channel with ${info.method}` }
   }
   if (info.method === "homebrew") {
-    return { engine, action: "run", argv: ["brew", "upgrade", "--cask", BREW_CASK.claude], target: "cask", summary: `Claude Code ${info.version ?? "?"} → current Homebrew cask` }
+    return { engine, action: "run", choices: [{ argv: ["brew", "upgrade", "--cask", BREW_CASK.claude], label: "brew upgrade --cask claude-code" }], target: "cask", summary: `Claude Code ${info.version ?? "?"} → current Homebrew cask` }
   }
-  return { engine, action: "run", argv: [info.path ?? "claude", "update"], target: "latest", summary: `Claude Code ${info.version ?? "?"} → the vendor's own updater (claude update)` }
+  return { engine, action: "run", choices: [{ argv: [info.path ?? "claude", "update"], label: "claude update" }], target: "latest", summary: `Claude Code ${info.version ?? "?"} → the vendor's own updater (claude update)` }
+}
+
+/**
+ * After an update: the installed version on PATH, and — when PATH still finds the old binary — the newly installed one
+ * that is shadowed (for example `~/.local/bin/codex` behind a root-owned `/usr/bin/codex`).
+ */
+export function verifyEngineUpdate(engine: UpdatableEngine, userPrefix = join(homedir(), ".local")): { info: EngineInfo; shadowed?: { path: string; version: string } } {
+  const info = engineInfo(engine)
+  const candidate = join(userPrefix, "bin", engine)
+  if (info.path && existsSync(candidate)) {
+    let real = candidate
+    try { real = realpathSync(candidate) } catch { /* keep */ }
+    if (real !== info.path) {
+      const version = versionOf(engine, candidate)
+      if (version && version !== info.version) return { info, shadowed: { path: candidate, version } }
+    }
+  }
+  return { info }
+}
+
+/** Why an update command failed, in words, from its exit status. */
+export function describeUpdateFailure(argv: readonly string[], run: { exitCode: number | null; signal: string | null }): string {
+  if (run.signal) return `stopped by ${run.signal}`
+  if (run.exitCode === null) return `${argv[0]} could not be started (not installed or not on PATH)`
+  if (argv[0] === "npm" && run.exitCode === 243) return "exit 243: npm could not write its global folder (permission denied, EACCES)"
+  if (run.exitCode === 127) return `exit 127: ${argv[0]} was not found`
+  return `exit ${run.exitCode}`
 }
 
 /** Numeric dotted-version comparison; pre-release suffixes sort before the release. */
@@ -155,6 +247,6 @@ export function runEngineUpdate(argv: readonly string[]): Promise<{ exitCode: nu
 export function describeEngine(info: EngineInfo, plan: EngineUpdatePlan): string {
   const head = info.method === "missing" ? `${info.engine}: not installed`
     : `${info.engine}: ${info.version ?? "version unknown"}${info.engine === "codex" ? (info.supported ? " (otter-supported)" : " (not otter-supported)") : ""} · ${info.method}`
-  const next = plan.action === "run" ? `update: ${plan.summary} — ${plan.argv.join(" ")}` : plan.action === "current" ? plan.summary : `update by hand: ${plan.summary}`
+  const next = plan.action === "run" ? `update: ${plan.summary} — ${plan.choices[0]!.argv.join(" ")}` : plan.action === "current" ? plan.summary : `update by hand: ${plan.summary}`
   return `${head}\n    ${next}`
 }
