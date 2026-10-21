@@ -1324,6 +1324,9 @@ describe("chat execution through the action gate", () => {
     expect(readFileSync(join(root, "notes.md"), "utf8")).toBe("hello\n")
     expect(allowed.approvals).toEqual([{ tool: "write", path: "notes.md", content: "hello\n" }])
     expect(subject.prompts[0]).toContain("- bash: allowed")
+    expect(subject.prompts[0]).toContain("File modification is available through the allowed Otter write/edit tools")
+    expect(subject.prompts[0]).toContain("Native filesystem restrictions do not mean that an allowed Otter write/edit tool is unavailable")
+    expect(subject.prompts[0]).toContain("does not grant native access or bypass approval")
     expect(subject.prompts[1]).toContain("Created file")
 
     const denied = gate(() => false)
@@ -1342,6 +1345,9 @@ describe("chat execution through the action gate", () => {
       { tool: "bash", command: "vim notes.md", interactive: true, timeoutMs: 120_000 },
     ])
     expect(subject.runs).toEqual(["bun test", "vim notes.md"])
+    expect(run.prompts[0]).toContain("Run requested commands and tests through the Otter bash tool")
+    expect(run.prompts[0]).not.toContain("Main and reviewer roles are read-only")
+    expect(run.prompts[0]).not.toContain("verification are controlled by the outer")
     expect(run.prompts[1]).toContain("1 failing test")
 
     const denied = gate(() => false)
@@ -1419,7 +1425,10 @@ describe("chat execution through the action gate", () => {
     const noGate = harness({ role: "main", tools: CHAT_TOOLS, responses: [bash("ls")] })
     expect(await (await noGate.host.prepare(noGate.request)).run()).toEqual({ status: "failed", error: "Otter tool denied by role policy before effects" })
     expect(noGate.prompts[0]).toContain("- bash: denied")
+    expect(noGate.prompts[0]).toContain("this role has no bash tool")
     expect(noGate.prompts[0]).toContain("- write: denied")
+    expect(noGate.prompts[0]).toContain("File modification is unavailable in this request")
+    expect(noGate.prompts[0]).not.toContain("File modification is available through")
     const noGateWrite = harness({ role: "main", tools: CHAT_TOOLS, responses: [toolWrite("x.md", "x")] })
     expect(await (await noGateWrite.host.prepare(noGateWrite.request)).run()).toMatchObject({ status: "failed" })
     expect(existsSync(join(root, "x.md"))).toBe(false)
