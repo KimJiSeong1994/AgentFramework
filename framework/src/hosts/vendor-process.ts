@@ -13,7 +13,17 @@ const ENV_ALLOWLIST = [
   "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
   "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
   "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+  // Where the OS keyring lives on Linux/WSL (Secret Service over the session bus): a CLI that stored its sign-in there
+  // cannot read it back without these, and otter would report a signed-in user as signed out. Locations, not secrets.
+  "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WSL_DISTRO_NAME", "WSL_INTEROP",
 ] as const
+
+/** Names (never values) of variables set in otter's environment that could change what a vendor CLI sees, for diagnosis. */
+const DIAGNOSTIC_ENV_NAME = /^(CODEX|CLAUDE|ANTHROPIC|OPENAI|AWS|GOOGLE|VERTEX|BEDROCK|DBUS|XDG|WSL|GNOME_KEYRING|KEYRING)[A-Z0-9_]*$/u
+export function unforwardedEnvironmentNames(): string[] {
+  const forwarded = new Set<string>(ENV_ALLOWLIST)
+  return Object.keys(process.env).filter(name => !forwarded.has(name) && DIAGNOSTIC_ENV_NAME.test(name) && process.env[name] !== "").sort()
+}
 
 /**
  * Credentials a vendor CLI would also accept from the environment. Otter never forwards them; a user who signed in only

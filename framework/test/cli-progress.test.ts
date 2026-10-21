@@ -76,6 +76,20 @@ describe("CLI progress presenter", () => {
     ])
   })
 
+  test("a workflow role names the engine and model it runs on; main and malformed routes stay plain", () => {
+    const { output, progress } = capture()
+    progress.host({ kind: "model-started", role: "planner", execution: 1, engine: "claude", model: "opus" })
+    progress.host({ kind: "model-started", role: "worker", execution: 2, engine: "codex", model: "gpt-5.6-luna" })
+    progress.host({ kind: "model-started", role: "critic", execution: 3, engine: "bash", model: "x" } as never)
+    progress.host({ kind: "model-started", role: "architect", execution: 4, engine: "claude", model: "bad model\u001b[31m" })
+    expect(output).toEqual([
+      "[activity] Planner model (claude / opus) is working.\n",
+      "[activity] Worker model (codex / gpt-5.6-luna) is working.\n",
+      "[activity] Critic model is working.\n",
+      "[activity] Architect model is working.\n",
+    ])
+  })
+
   test("does not expose untrusted diagnostics, content, or invalid terminal text", () => {
     const { output, progress } = capture()
     const secret = "prompt credential \u001b[31mraw tool output"

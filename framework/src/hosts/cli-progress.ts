@@ -31,7 +31,8 @@ export type CliToolDetail = {
 }
 
 export type CliHostActivity =
-  | { kind: "model-started"; role: ExecutionRole; execution: number }
+  /** `engine`/`model`: where this role actually runs (a combo route or the main model), shown so routing is visible. */
+  | { kind: "model-started"; role: ExecutionRole; execution: number; engine?: string; model?: string }
   | { kind: "model-returned"; role: ExecutionRole; execution: number; status: "completed" | "failed" | "cancelled" | "unresolved" | "incomplete" }
   | { kind: "tool-started"; role: ExecutionRole; execution: number; taskID: string; executionID: string; callID: string; tool: CliToolName }
   | { kind: "tool-finished"; role: ExecutionRole; execution: number; taskID: string; executionID: string; callID: string; tool: CliToolName; outcome: "succeeded" | "failed" | "denied"; ok: boolean }
@@ -198,8 +199,11 @@ function validatedHostActivity(value: unknown): CliHostActivity | undefined {
   const role = value.role as ExecutionRole
   const execution = value.execution
   switch (value.kind) {
-    case "model-started":
-      return Object.freeze({ kind: "model-started", role, execution })
+    case "model-started": {
+      const engine = value.engine === "local" || value.engine === "codex" || value.engine === "claude" ? value.engine : undefined
+      const model = typeof value.model === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(value.model) ? value.model : undefined
+      return Object.freeze({ kind: "model-started", role, execution, ...(engine && model ? { engine, model } : {}) })
+    }
     case "model-returned":
       if (typeof value.status === "string" && MODEL_STATUSES.includes(value.status as (typeof MODEL_STATUSES)[number])) {
         return Object.freeze({ kind: "model-returned", role, execution, status: value.status as (typeof MODEL_STATUSES)[number] })
@@ -308,7 +312,9 @@ export function createCliProgressPresenter(
     const keySuffix = `${activity.execution}:${activity.role}`
     if (activity.kind === "model-started") {
       if (activity.role === "main" && (planningWaitActive || !mainModelLines)) return
-      once(`model-started:${keySuffix}`, `[activity] ${label} model is working.`)
+      // A workflow role names the engine/model it runs on, so a combo route is visible as it happens.
+      const where = activity.role !== "main" && activity.engine && activity.model ? ` (${activity.engine} / ${activity.model})` : ""
+      once(`model-started:${keySuffix}`, `[activity] ${label} model${where} is working.`)
       return
     }
     if (activity.kind === "model-returned") {

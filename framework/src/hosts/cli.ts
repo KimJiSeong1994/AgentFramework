@@ -27,7 +27,7 @@ import { getOwnedSession, readSessionMetadata, sessionWasRebound } from "../sess
 import { assertSDKSessionQuiescent, readSDKResumeIdentity } from "../sessions/sdk-quiescence.ts"
 import { captureSDKSessionLifetime } from "../sessions/sdk-transcript.ts"
 import { assertNever, isCancelPending, stopDisplay } from "../workflows/types.ts"
-import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type LoginMethod } from "./engine-auth.ts"
+import { AUTH_ENGINES, authStatus, describeAuth, describeDiagnosis, diagnoseAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type LoginMethod } from "./engine-auth.ts"
 import { updateCli } from "./update-check.ts"
 import { describeEngine, describeUpdateFailure, engineInfo, planEngineUpdate, runEngineUpdate, UPDATABLE_ENGINES, verifyEngineUpdate, type UpdatableEngine } from "./engine-update.ts"
 import { createInterface } from "node:readline"
@@ -101,7 +101,7 @@ Enter sends, enhanced Shift+Enter/Ctrl+J inserts a newline, Escape cancels, and 
 strictly within 500ms requests shutdown. Busy turns can be queued with macOS Alt+Q / Linux Alt+Enter.
 
 Engine sign-in (the vendor CLI keeps the credential; otter never reads or stores one):
-  auth     [status]                                  show codex/claude sign-in status
+  auth     [status | --diagnose]                     show codex/claude sign-in status; --diagnose compares your shell with otter's model calls
   login    <codex|claude> [browser|device|console|api-key]   run the vendor's own sign-in
   logout   <codex|claude>                            run the vendor's own sign-out
   In chat: /auth, /login [engine], /logout [engine]; a failed model request names a signed-out engine.
@@ -866,9 +866,15 @@ export async function harnessCli(argv: readonly string[]): Promise<string> {
  * out (logout); 1 = not; 2 = usage.
  */
 async function authCli(argv: readonly string[]): Promise<number> {
-  const usage = "Usage: otter auth [status] | otter login <codex|claude> [browser|device|console|api-key] | otter logout <codex|claude>"
+  const usage = "Usage: otter auth [status | --diagnose] | otter login <codex|claude> [browser|device|console|api-key] | otter logout <codex|claude>"
   const cwd = process.cwd()
   const [command, engineArg, methodArg, ...extra] = argv
+  if (command === "auth" && (engineArg === "--diagnose" || engineArg === "diagnose") && methodArg === undefined) {
+    // Sign-in as your shell sees it vs as otter's model calls see it, and what differs (variable names only, no values).
+    const diagnoses = await Promise.all(AUTH_ENGINES.map(engine => diagnoseAuth(engine, cwd)))
+    for (const diagnosis of diagnoses) console.log(describeDiagnosis(diagnosis).join("\n").replace(/\/login (\w+)/gu, "otter login $1"))
+    return diagnoses.every(d => d.otter.state === "signed-in") ? 0 : 1
+  }
   if (command === "auth" && (engineArg === undefined || engineArg === "status") && methodArg === undefined) {
     const states = await Promise.all(AUTH_ENGINES.map(engine => authStatus(engine, cwd)))
     for (const state of states) console.log(describeAuth(state).replace(/\/login (\w+)/u, "otter login $1"))

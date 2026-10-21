@@ -1,9 +1,9 @@
 // Vendor CLI sign-in for the codex and claude engines. Otter never reads, stores, forwards or prints a credential:
 // status runs the vendor's own read-only status command and keeps only "signed in / not / unknown" plus the sign-in
 // method label, and login/logout hand the real terminal to the vendor's own interactive command.
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { findExecutable, insideWsl, type CliEngine } from "./cli-transport.ts"
-import { UNFORWARDED_CREDENTIAL_ENV, vendorProcessEnvironment } from "./vendor-process.ts"
+import { UNFORWARDED_CREDENTIAL_ENV, unforwardedEnvironmentNames, vendorProcessEnvironment } from "./vendor-process.ts"
 
 export type AuthEngine = Extract<CliEngine, "codex" | "claude">
 export const AUTH_ENGINES: readonly AuthEngine[] = ["codex", "claude"]
@@ -89,14 +89,14 @@ function unforwardedCredential(engine: AuthEngine): string | undefined {
  * Run the vendor status command without a terminal; bounded time and output. It runs with exactly the environment a model
  * call gets (vendorProcessEnvironment), so "signed in" here means a model call will find the same sign-in.
  */
-export async function authStatus(engine: AuthEngine, cwd: string): Promise<AuthState> {
+export async function authStatus(engine: AuthEngine, cwd: string, env: NodeJS.ProcessEnv = vendorProcessEnvironment()): Promise<AuthState> {
   let executable: string
   try { executable = findExecutable(engine) } catch { return { engine, state: "unknown", reason: `${engine} CLI not found on PATH` } }
-  const envOnly = unforwardedCredential(engine)
+  const envOnly = env === process.env ? undefined : unforwardedCredential(engine)
   return await new Promise<AuthState>(settle => {
     let output = ""
     let done = false
-    const child = spawn(executable, statusArgv(engine), { cwd, env: vendorProcessEnvironment(), stdio: ["ignore", "pipe", "pipe"] })
+    const child = spawn(executable, statusArgv(engine), { cwd, env, stdio: ["ignore", "pipe", "pipe"] })
     const finish = (value: AuthState) => {
       if (done) return
       done = true
@@ -110,6 +110,48 @@ export async function authStatus(engine: AuthEngine, cwd: string): Promise<AuthS
     child.on("error", () => finish({ engine, state: "unknown", reason: `${engine} status command could not start` }))
     child.on("close", code => finish(parseAuthStatus(engine, code, output)))
   })
+}
+
+export type AuthDiagnosis = Readonly<{
+  engine: AuthEngine
+  /** Resolved CLI and its `--version` line, when found. */
+  cli?: string
+  /** Sign-in as the user's own shell sees it (full environment). */
+  shell: AuthState
+  /** Sign-in as otter's model calls see it (the forwarded environment). */
+  otter: AuthState
+  /** Names of credential variables set in the shell that otter never forwards. */
+  credentialEnv: readonly string[]
+  /** Names of other possibly relevant variables set in the shell but not forwarded (keyring, cloud, vendor). */
+  unforwarded: readonly string[]
+}>
+
+/** Compare the sign-in the user's shell sees with the one otter's model calls see, and name what differs. */
+export async function diagnoseAuth(engine: AuthEngine, cwd: string): Promise<AuthDiagnosis> {
+  let cli: string | undefined
+  try {
+    const executable = findExecutable(engine)
+    const version = spawnSync(executable, ["--version"], { encoding: "utf8", timeout: 8000, stdio: ["ignore", "pipe", "ignore"] })
+    cli = `${executable} ${(typeof version.stdout === "string" ? version.stdout.trim().split("\n")[0] ?? "" : "").slice(0, 80)}`.trim()
+  } catch { cli = undefined }
+  const [shell, otter] = await Promise.all([authStatus(engine, cwd, process.env), authStatus(engine, cwd)])
+  const credentialEnv = UNFORWARDED_CREDENTIAL_ENV[engine].filter(name => typeof process.env[name] === "string" && process.env[name] !== "")
+  return { engine, ...(cli ? { cli } : {}), shell, otter, credentialEnv, unforwarded: unforwardedEnvironmentNames() }
+}
+
+/** Human lines for a diagnosis: both views, and why they differ when they do. */
+export function describeDiagnosis(d: AuthDiagnosis): string[] {
+  const view = (state: AuthState) => describeAuth(state).replace(/^\w+: /u, "")
+  const lines = [`${d.engine}${d.cli ? ` (${d.cli})` : ""}`, `  your shell:      ${view(d.shell)}`, `  otter (models):  ${view(d.otter)}`]
+  if (d.shell.state === d.otter.state) {
+    lines.push(d.otter.state === "signed-in" ? "  → consistent: model calls use this sign-in." : d.otter.state === "signed-out" ? `  → not signed in anywhere: /login ${d.engine}.` : "  → status could not be read; see the reason above.")
+    return lines
+  }
+  if (d.shell.state === "signed-in" && d.otter.state !== "signed-in") {
+    if (d.credentialEnv.length) lines.push(`  → your shell signs in through ${d.credentialEnv.join(", ")}, which otter never passes to the CLI. Sign in with /login ${d.engine} so the CLI stores it.`)
+    else lines.push(`  → otter cannot see this sign-in.${d.unforwarded.length ? ` Set in your shell but not passed to model calls: ${d.unforwarded.join(", ")}.` : ""} Please report this line.`)
+  } else lines.push("  → otter and your shell disagree; please report these lines.")
+  return lines
 }
 
 /**

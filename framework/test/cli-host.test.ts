@@ -302,15 +302,15 @@ describe("common CLI execution host", () => {
     expect(execution).toBeGreaterThan(0)
     expect(execution).toBeLessThanOrEqual(1_000_000)
     expect(activities).toEqual([
-      { kind: "model-started", role: "reviewer", execution },
+      { kind: "model-started", role: "reviewer", execution, engine: "local", model: "fixture-model" },
       { kind: "model-returned", role: "reviewer", execution, status: "completed" },
       { kind: "tool-started", role: "reviewer", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:1`, tool: "read" },
       { kind: "tool-finished", role: "reviewer", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:1`, tool: "read", outcome: "succeeded", ok: true },
-      { kind: "model-started", role: "reviewer", execution },
+      { kind: "model-started", role: "reviewer", execution, engine: "local", model: "fixture-model" },
       { kind: "model-returned", role: "reviewer", execution, status: "completed" },
       { kind: "tool-started", role: "reviewer", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:2`, tool: "read" },
       { kind: "tool-finished", role: "reviewer", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:2`, tool: "read", outcome: "failed", ok: false },
-      { kind: "model-started", role: "reviewer", execution },
+      { kind: "model-started", role: "reviewer", execution, engine: "local", model: "fixture-model" },
       { kind: "model-returned", role: "reviewer", execution, status: "completed" },
     ])
     const progress = JSON.stringify(activities)

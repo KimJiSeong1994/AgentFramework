@@ -991,7 +991,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               assertFixedPolicy(request)
             }
             let native: Awaited<ReturnType<CliTransportHandle["run"]>> | undefined
-            observeActivity({ kind: "model-started", role: request.role, execution: activityExecution })
+            observeActivity({ kind: "model-started", role: request.role, execution: activityExecution, engine: route.engine, model: route.model })
             try { native = await transport.run() }
             catch { native = undefined }
             const modelStatus = !native ? (cancelled ? "cancelled" : "unresolved") :

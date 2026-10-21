@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { authStatus, describeAuth, loginArgv, loginHint, logoutArgv, parseAuthStatus, runVendorAuth } from "../src/hosts/engine-auth.ts"
+import { authStatus, describeAuth, describeDiagnosis, diagnoseAuth, loginArgv, loginHint, logoutArgv, parseAuthStatus, runVendorAuth } from "../src/hosts/engine-auth.ts"
 import { usablePathEntry } from "../src/hosts/cli-transport.ts"
 
 describe("engine CLI lookup under WSL", () => {
@@ -112,6 +112,55 @@ describe("authStatus runs the vendor CLI found on PATH", () => {
       process.env.ANTHROPIC_API_KEY = "sk-ant-fixture"
       expect(await authStatus("codex", tmpdir())).toEqual({ engine: "codex", state: "signed-out", envOnly: "OPENAI_API_KEY" })
       expect(await authStatus("claude", tmpdir())).toEqual({ engine: "claude", state: "signed-out", envOnly: "ANTHROPIC_API_KEY" })
+    } finally {
+      for (const key of keys) {
+        if (saved[key] === undefined) delete process.env[key]
+        else process.env[key] = saved[key]
+      }
+    }
+  })
+
+  test("a keyring sign-in (Linux/WSL Secret Service) is visible to otter: the session bus location is forwarded", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "otter-auth-keyring-"))
+    // Signed in only when the CLI can reach the session bus, as a Secret Service store requires.
+    writeFileSync(join(bin, "codex"), "#!/bin/sh\nif [ -n \"$DBUS_SESSION_BUS_ADDRESS\" ] && [ -n \"$XDG_RUNTIME_DIR\" ]; then echo 'Logged in using ChatGPT'; exit 0; fi\necho 'Not logged in'; exit 1\n")
+    chmodSync(join(bin, "codex"), 0o755)
+    const keys = ["PATH", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"] as const
+    const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]))
+    try {
+      process.env.PATH = bin
+      process.env.DBUS_SESSION_BUS_ADDRESS = "unix:path=/run/user/1000/bus"
+      process.env.XDG_RUNTIME_DIR = "/run/user/1000"
+      expect(await authStatus("codex", tmpdir())).toMatchObject({ state: "signed-in", method: "ChatGPT" })
+    } finally {
+      for (const key of keys) {
+        if (saved[key] === undefined) delete process.env[key]
+        else process.env[key] = saved[key]
+      }
+    }
+  })
+
+  test("diagnosis compares the shell's view with otter's and names the cause (names only, never values)", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "otter-auth-diagnose-"))
+    writeFileSync(join(bin, "claude"), "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '2.1.301 (Claude Code)'; exit 0; fi\nif [ -n \"$ANTHROPIC_API_KEY\" ] || [ -n \"$CLAUDE_SECRET_STORE\" ]; then echo '{\"loggedIn\":true,\"authMethod\":\"api_key\"}'; else echo '{\"loggedIn\":false}'; fi\n")
+    chmodSync(join(bin, "claude"), 0o755)
+    const keys = ["PATH", "ANTHROPIC_API_KEY", "CLAUDE_SECRET_STORE"] as const
+    const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]))
+    try {
+      process.env.PATH = bin
+      process.env.ANTHROPIC_API_KEY = "sk-ant-secret-value"
+      const keyOnly = await diagnoseAuth("claude", tmpdir())
+      expect(keyOnly).toMatchObject({ shell: { state: "signed-in" }, otter: { state: "signed-out" }, credentialEnv: ["ANTHROPIC_API_KEY"] })
+      const keyLines = describeDiagnosis(keyOnly).join("\n")
+      expect(keyLines).toContain("your shell signs in through ANTHROPIC_API_KEY, which otter never passes to the CLI. Sign in with /login claude")
+      expect(keyLines).not.toContain("sk-ant-secret-value")
+      delete process.env.ANTHROPIC_API_KEY
+      process.env.CLAUDE_SECRET_STORE = "/secret/location"
+      const other = describeDiagnosis(await diagnoseAuth("claude", tmpdir())).join("\n")
+      expect(other).toMatch(/otter cannot see this sign-in\. Set in your shell but not passed to model calls: [A-Z0-9_, ]*CLAUDE_SECRET_STORE/u)
+      expect(other).not.toContain("/secret/location")
+      delete process.env.CLAUDE_SECRET_STORE
+      expect(describeDiagnosis(await diagnoseAuth("claude", tmpdir())).join("\n")).toContain("not signed in anywhere: /login claude.")
     } finally {
       for (const key of keys) {
         if (saved[key] === undefined) delete process.env[key]
