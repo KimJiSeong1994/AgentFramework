@@ -45,8 +45,9 @@ bun scripts/otter-wiki.ts lint      # 링크·해시 무결성
 
 - **엔진 무관**: Ollama(로컬)·Codex·Claude CLI 모두 같은 이력 형식. 대화 중 `/model`로 전환
 - **콤보**: planner / architect / critic / worker / reviewer 역할별로 엔진·모델 지정. 미지정 역할은 메인 모델
+- **어디에 적용되나**: 일반 대화는 메인 모델. 콤보 경로는 워크플로 역할(`/plan`, `/skill:ralplan`, `ultragoal`, `deep-interview`, `autoresearch`)에서 쓰이고, 실행 중인 역할의 엔진·모델이 화면에 표시됨(예: `ralplan · planner · claude / opus`)
 - **프리셋**: Codex×Claude 혼합 4종 — `astra-fable`, `astra-fable-opus`, `fable-opus-codex`, `opus-codex`(메인·계획·실행·설계·리뷰를 두 엔진에 나눠 배치). **고르면 바로 그 멀티 모델 구성으로 세션 적용**(확인 창·커스텀 화면 없음, 대화 이어짐)
-- **인증**: 각 CLI 공식 로그인 그대로 사용. otter는 인증 정보를 읽거나 저장하지 않음
+- **인증**: 각 CLI 공식 로그인 그대로 사용. otter는 인증 정보를 읽거나 저장하지 않음. 로그인했는데 인식되지 않으면 `otter auth --diagnose`(대화 중 `/auth diagnose`)
 - **콤보 경로가 안 될 때**: 예를 들어 지원하지 않는 Codex CLI 버전이면, 그 역할들만 메인 모델로 돌리고 세션은 그대로 시작. 안내에 설치된 버전·지원 버전·설치 명령(`npm install -g @openai/codex@0.163.0`)이 나옴. 고친 뒤 `/model combo apply`
 
 ```text

@@ -309,9 +309,15 @@ export class TuiApp implements Terminal {
     this.draw()
   }
   activity(activity: CliHostActivity): void {
+    // A workflow role's model call names where it runs (combo route or main); the live row shows it while it works.
+    if (activity.kind === "model-started" && activity.role !== "main" && activity.engine && activity.model) {
+      this.roleModel = `${activity.role} · ${activity.engine} / ${activity.model}`
+    } else if (activity.kind === "model-returned" && activity.role !== "main") this.roleModel = undefined
     this.transcript.activity(activity, activity.kind === "tool-started" || activity.kind === "tool-finished" ? this.ordinalFor(activity.executionID, activity.callID) : undefined)
     this.draw()
   }
+  /** `role · engine / model` of the workflow role whose model is running; cleared when it returns. */
+  private roleModel?: string
   taskSnapshot(tasks: readonly CliProgressTask[]): void { this.transcript.taskSnapshot(tasks); this.draw() }
   queueActivity(message: string, fields?: Record<string, unknown>): void {
     if (!fields || typeof fields.task !== "string") return
@@ -455,8 +461,8 @@ export class TuiApp implements Terminal {
     const step = this.transcript.liveStep
     const progress = this.workflowProgress
     const label = step?.label ?? this.transcript.liveTask ??
-      (progress ? `${progress.kind}${this.separator()}${progress.stage}` : undefined) ??
-      (this.requestStarted ? "Model request" : "Working")
+      (progress ? `${progress.kind}${this.separator()}${this.roleModel ?? progress.stage}` : undefined) ??
+      this.roleModel ?? (this.requestStarted ? "Model request" : "Working")
     const since = step?.startedAt ?? this.requestStarted?.at ?? this.busySince
     const esc = this.asciiChrome ? "[esc]" : "⟦esc⟧"
     return `${frame} ${label}${this.separator()}${formatDuration(Date.now() - since)} ${esc}`

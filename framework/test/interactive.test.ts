@@ -2059,6 +2059,16 @@ describe("interactive terminal", () => {
     expect(h.calls.runtimes).toHaveLength(1)
   })
 
+  test("the banner and /model combo show say where routes take effect: chat uses main, workflow roles use the routes", async () => {
+    const h = harness({ lines: ["/model combo show", "/quit"], combo: configuredCombo })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    const out = h.calls.output.join("")
+    expect(out.match(/Chat replies use the main model; the routes run the workflow roles/gu)?.length).toBe(2)
+    const plain = harness({ lines: ["/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, plain.deps)
+    expect(plain.calls.output.join("")).not.toContain("Chat replies use the main model")
+  })
+
   test("leaving the combo menu without choosing changes nothing", async () => {
     const h = harness({ fullscreen: true, lines: ["/model combo", "/quit"], combo: configuredCombo,
       choose: async (title, values) => title.startsWith("Combo · main") ? values.indexOf("Done") : undefined })
@@ -2253,7 +2263,7 @@ describe("interactive terminal", () => {
     const output = h.calls.output.join("")
     expect(output).toContain("The local engine (Ollama) needs no sign-in.")
     expect(output).toContain("codex sign-in methods: browser, device, api-key.")
-    expect(output).toContain("Usage: /auth · /login [codex|claude]")
+    expect(output).toContain("Usage: /auth [diagnose] · /login [codex|claude]")
     expect(h.calls.authRuns).toEqual([{ engine: "codex", argv: ["login"] }])
     expect(h.calls.runtimes).toEqual([])
   })

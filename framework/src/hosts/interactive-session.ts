@@ -15,7 +15,7 @@ import { executionRunDirectory } from "../state/store.ts"
 import { defaultUpdateCheck, updateNoticeText, type UpdateNotice } from "./update-check.ts"
 import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
 import { inputColorSupported, inputLine, renderInput, type InputPresentation } from "./cli-input.ts"
-import { AUTH_ENGINES, authStatus, describeAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
+import { AUTH_ENGINES, authStatus, describeAuth, describeDiagnosis, diagnoseAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
 import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus, type CliToolDisplay } from "./cli-progress.ts"
 import { formatDuration, type WorkflowProgress } from "../tui/progress.ts"
 import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, skillInstructionBudget, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
@@ -796,12 +796,16 @@ function routeLines(routes: ComboRoutes): string[] {
     .map(([role, route]) => `  Route ${role}: ${route.engine} / ${route.model}`)
 }
 
+/** Where a combo takes effect: chat turns run on the main model; routes are used by workflow roles. */
+export const COMBO_SCOPE_NOTE = "Chat replies use the main model; the routes run the workflow roles (/plan, /skill:ralplan, /skill:ultragoal, /skill:deep-interview, /skill:autoresearch)."
+
 function selectionBanner(worktree: string, engine: CliEngine, model: string, presentation?: InputPresentation, note?: string, routes: ComboRoutes = {}): string {
   return "\n" + [
     "Native execution selection:",
     `  Engine: ${engine}`,
     `  Model: ${model}`,
     ...routeLines(routes),
+    ...(Object.keys(routes).length ? [`  ${COMBO_SCOPE_NOTE}`] : []),
     `  Worktree: ${worktree}`,
     ...(note ? [`  ${note}`] : []),
   ].map(line => inputLine(line, presentation)).join("\n") + "\n\n"
@@ -1434,6 +1438,7 @@ export async function runInteractiveSession(
           if (route) lines.push(`  ${role}: ${route.engine} / ${route.model} (${lookup.state === "configured" ? lookup.sources[role] : "user"} config)`)
         }
         if (lookup.state === "unset") lines.push("  No roles are routed; every role uses the main model.")
+        else lines.push(COMBO_SCOPE_NOTE)
         if (current) {
           const wanted = effectiveRoutes(current.engine, current.model, routes)
           lines.push(routesKey(wanted) === routesKey(current.routes)
@@ -1454,7 +1459,7 @@ export async function runInteractiveSession(
         if (!preset) { write(`Unknown combo preset. Choose: ${COMBO_PRESETS.map(candidate => candidate.id).join(", ")}.`); return undefined }
         try {
           const path = deps.combo.replace(preset.routes)
-          write(`Combo ${preset.id}: main ${preset.main.engine} / ${preset.main.model}, routes saved to ${path} (project overrides still take precedence). ${current ? "Switching this session now; the conversation carries over." : "Starting a session with it now."}`)
+          write(`Combo ${preset.id}: main ${preset.main.engine} / ${preset.main.model}, routes saved to ${path} (project overrides still take precedence). ${current ? "Switching this session now; the conversation carries over." : "Starting a session with it now."} ${COMBO_SCOPE_NOTE}`)
           // A recommended combo is the whole multi-model setup: the caller selects its main model and applies the routes.
           return { preset }
         } catch (error) { write(`Combo preset not saved: ${boundedTerminalDiagnostic(error instanceof Error ? error.message : String(error))}`) }
@@ -1555,7 +1560,7 @@ export async function runInteractiveSession(
      * `/auth` (status), `/login [codex|claude] [browser|device|console|api-key]`, `/logout [codex|claude]`. The vendor
      * CLI owns every credential: status is its read-only status command; login/logout get the real terminal.
      */
-    const authUsage = "Usage: /auth · /login [codex|claude] [browser|device|console|api-key] · /logout [codex|claude]"
+    const authUsage = "Usage: /auth [diagnose] · /login [codex|claude] [browser|device|console|api-key] · /logout [codex|claude]"
     /** After a failure, name engines the vendor CLI reports as signed out (status is read-only and bounded). */
     const signInHint = async (engines: Iterable<CliEngine>): Promise<string | undefined> => {
       const wanted = [...new Set(engines)].filter((engine): engine is AuthEngine => (AUTH_ENGINES as readonly string[]).includes(engine))
@@ -1627,6 +1632,12 @@ export async function runInteractiveSession(
     const authCommand = async (command: "/auth" | "/login" | "/logout", rest: readonly string[]): Promise<"aborted" | undefined> => {
       const write = (text: string) => visibleWrite(terminalSafeText(`${text}\n`))
       const signal = abort.signal
+      if (command === "/auth" && rest.length === 1 && rest[0] === "diagnose") {
+        const diagnoses = await Promise.all(AUTH_ENGINES.map(engine => diagnoseAuth(engine, worktree)))
+        write(["Sign-in as your shell sees it vs as otter's model calls see it (variable names only, never values):",
+          ...diagnoses.flatMap(diagnosis => describeDiagnosis(diagnosis))].join("\n"))
+        return undefined
+      }
       if (command === "/auth") {
         if (rest.length) { write(authUsage); return undefined }
         const states = await Promise.all(AUTH_ENGINES.map(engine => deps.auth.status(engine, worktree)))
@@ -2250,6 +2261,11 @@ export async function runInteractiveSession(
       process.kill(process.pid, "SIGSTOP")
     }
     if (!terminal.fullscreen) terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.(), undefined, selection.routes))
+    // The full-screen TUI has no banner: say once that a combo is active and where it takes effect.
+    else if (Object.keys(selection.routes).length) {
+      const count = Object.keys(selection.routes).length
+      terminal.write(terminalSafeText(`Combo: ${selection.engine} / ${selection.model} with ${count} role route${count === 1 ? "" : "s"} (/model combo show lists them). ${COMBO_SCOPE_NOTE}\n`))
+    }
 
     async function runOwned(resumed: boolean) {
       if (persistenceFailed) throw new InteractiveLaunchError("Session transcript persistence failed; the session remains held.")
@@ -2676,7 +2692,7 @@ export async function runInteractiveSession(
         if (abort.signal.aborted) return false
         const note = nextStore.restored ? undefined : switchNote(carried.length / 2, carrySource)
         if (terminal.fullscreen) {
-          terminal.write(terminalSafeText(nextStore.restored ? `Selected: ${selection.engine} / ${selection.model}.` : `Now using ${selection.engine} / ${selection.model}. ${note}`))
+          terminal.write(terminalSafeText(nextStore.restored ? `Selected: ${selection.engine} / ${selection.model}.` : `Now using ${selection.engine} / ${selection.model}${Object.keys(selection.routes).length ? ` with ${Object.keys(selection.routes).length} role route${Object.keys(selection.routes).length === 1 ? "" : "s"}` : ""}. ${note}${Object.keys(selection.routes).length ? `\n${COMBO_SCOPE_NOTE}` : ""}`))
         } else {
           // The banner clips to the terminal width; the carry note states what is sent, so it is never clipped.
           terminal.write(selectionBanner(worktree, selection.engine, selection.model, terminal.presentation?.(), undefined, selection.routes))

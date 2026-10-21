@@ -251,6 +251,13 @@ and `/model combo clear` remove user routes (any value, including a malformed on
 project route still applies. Show, set and clear only touch config,
 so they also work while a session is held. `/model combo apply` starts a new session with the carried
 conversation under the saved combo; it is refused while a workflow is active or ownership is unsettled.
+Sign-in diagnosis: `otter auth --diagnose` (in chat `/auth diagnose`) checks each engine twice — with your shell's
+full environment and with the environment otter's model calls get — and, when they differ, names the cause: a
+credential variable otter never forwards (sign in with the CLI instead), or other variables set in your shell but not
+forwarded (names only, never values). Model calls and status checks also receive the OS keyring locations
+(`DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`) and the WSL session variables, so a sign-in a CLI keeps in the Linux/WSL
+Secret Service is visible to otter.
+
 Engine CLI updates: `otter engines` (and `/engines` in chat) shows each vendor CLI's version, whether otter supports it
 (Codex), its install method (npm, bun, pnpm, Homebrew cask, native installer) and the update that fits it.
 `otter engines update [codex|claude] [--yes]` / `/engines update [codex|claude]` shows the exact command and runs it
@@ -271,6 +278,12 @@ starts on the main model: those roles' routes are dropped for this session (the 
 the notice names the routes, the installed Codex version, the supported versions and the install command
 (`npm install -g @openai/codex@<version>`); `/model combo apply` restores them after the fix. A refusal of the main
 model itself is not bypassed.
+Where a combo takes effect: chat replies always run on the main model; the routes run the workflow roles (`/plan`
+workers and reviewers, `/skill:ralplan`, `/skill:ultragoal`, `/skill:deep-interview`, `/skill:autoresearch`). Each
+workflow role's model call names where it runs: the full-screen live row shows `ralplan · planner · claude / opus`,
+the line-mode output `[activity] Planner model (claude / opus) is working.`; the banner, the start-up notice and
+`/model combo show` repeat the scope.
+
 A recommended combo is a whole multi-model setup. The four presets mix Codex and Claude; each names a main model and
 planner, executor, architect and critic bindings, which map to Otter's planning roles
 (planner, interviewer, researcher), execution roles (worker, simplifier, data-analyst, ontology-evolver), `architect`, and
