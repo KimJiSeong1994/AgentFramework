@@ -1438,7 +1438,8 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   (`delegate.verify_allow`: pytest/unittest, bun/npm/pnpm/yarn test, go/cargo test, make test, `*test*.sh`; a `cd dir`
   segment may only descend (no `..`, no absolute path) and never stands alone; `&&` allowed, `| ; & $ \` < >`, newlines
   and runner options that load repository code (`-p`, `-c`, `-o`, `--rootdir`, `--preload`, …) refused, `true`/`echo`/`ls`
-  refused). Refused commands are reported back to main at delegate time with the reason; the queue re-checks before
+  refused; `tsc -p`/`--project` is the exception: it names the project to type-check and is allowed with a relative path
+  inside the worktree, with tsconfig files protected like the runners' config). Refused commands are reported back to main at delegate time with the reason; the queue re-checks before
   running, and runs verify with `PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 PYTHONDONTWRITEBYTECODE=1`.
 - Task text is checked too: a task that tells the worker to edit a test/assertion or to fake a result (call counters,
   "first call returns 6, second 7", hard-coded answers) is refused at delegate time. In the negative e2e both hacks
@@ -1448,7 +1449,7 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   child session (`session.create({parentID})` + blocking `session.prompt`, with a session-level tool deny for
   task/delegate/todo) -> diff of exactly this task's cumulative changes (`.otter/state`, `.otter/handoffs`, `__pycache__`,
   `.env`, … excluded via `delegate.diff_exclude`) -> **protected-file check**: the test files named in `verify`, runner
-  autoload files (`conftest.py`, `pytest.ini`, `pyproject.toml`, `Makefile`, `package.json`, `bunfig.toml`, … unless
+  autoload files (`conftest.py`, `pytest.ini`, `pyproject.toml`, `Makefile`, `package.json`, `bunfig.toml`, `tsconfig*.json`, … unless
   the task text names them) and, when `verify` names no file, any test-looking path are restored from the snapshot
   (symlinks are never followed; Python bytecode caches are dropped) and the attempt fails -> **gaming scan** of the
   added lines (call counters, frame inspection, pytest detection = fail; weaker shapes = hints for the reviewer) ->

@@ -53,6 +53,14 @@ export function supportsLocalTemperature(providerID: string): boolean {
 export const VERIFY_DENY_RE = /[|;$`<>]|(?<!&)&(?!&)|[\r\n\t]/
 /** Runner options that load code/config from files the worker may have written (pytest -p/-c/-o/--rootdir, npm -C, ...). */
 export const VERIFY_DENY_OPTION_RE = /(^|\s)(-p|-c|-o|-C|--rootdir|--config-file|--override-ini|--import-mode|--preload|--require|-r|--prefix|--userconfig)(\s|=|$)/
+/** A TypeScript type check (`tsc`, `npx tsc`, `bunx tsc`, `bun x tsc`, ...). */
+const TSC_SEGMENT_RE = /^(?:(?:npx|bunx|pnpm dlx|(?:bun|npm|pnpm|yarn) x)\s+)?tsc(?:\s|$)/
+/**
+ * tsc's `-p`/`--project` names which project to check; it loads compiler options, not executable code. It is allowed
+ * only with a relative path inside the worktree (no `..`, not absolute), and tsconfig files are protected like the
+ * test runners' config (AUTOLOAD_PROTECTED), so a worker cannot weaken the check it is verified by.
+ */
+const TSC_PROJECT_RE = /(^|\s)(?:-p|--project)(?:\s+|=)((?!\/)(?!-)(?!(?:[^\s]*\/)?\.\.(?:\/|\s|$))[A-Za-z0-9_.\/-]+)(?=\s|$)/g
 /** A `cd` segment may only descend into the worktree: no `..` segment, no absolute path, no option-looking argument. */
 export const VERIFY_CD_RE = /^cd (?!\/)(?!-)(?!(?:[^\s]*\/)?\.\.(?:\/|$))[A-Za-z0-9_.\/-]+$/
 
@@ -64,7 +72,7 @@ export const VERIFY_CD_RE = /^cd (?!\/)(?!-)(?!(?:[^\s]*\/)?\.\.(?:\/|$))[A-Za-z
 export const AUTOLOAD_PROTECTED = [
   "conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", "sitecustomize.py", "usercustomize.py", "*.pth",
   "Makefile", "makefile", "GNUmakefile", "package.json", "bunfig.toml", ".npmrc", "jest.config.*", "vitest.config.*",
-  ".gitattributes", "go.mod", "Cargo.toml", "build.rs",
+  ".gitattributes", "go.mod", "Cargo.toml", "build.rs", "tsconfig.json", "tsconfig.*.json",
 ]
 
 /** Why a verify command is refused, or null when it may run. Trivial always-pass commands are refused too. */
@@ -73,13 +81,21 @@ export function verifyCommandProblem(command: string, allow: string[]): string |
   if (!c) return "empty"
   if (VERIFY_DENY_RE.test(c)) return "contains a shell control character (| ; & $ ` < > or a newline); use a single test command, && is allowed"
   if (/^(true|false|echo|ls|cat|exit|test)\b|^[:[]/.test(c)) return "trivial command that proves nothing; use the task's test command"
-  if (VERIFY_DENY_OPTION_RE.test(c)) return "uses a runner option that loads plugins/config from the repository (-p, -c, -o, --rootdir, ...); drop it"
   let runners = 0
   for (const part of c.split("&&")) {
     const seg = part.trim()
     if (/^cd\b/.test(seg)) {
       if (!VERIFY_CD_RE.test(seg)) return `cd must stay inside the project (no .., no absolute path): "${seg.slice(0, 60)}"`
       continue
+    }
+    // A tsc project path is checked on its own; every other option on every runner goes through the deny list.
+    const checked = TSC_SEGMENT_RE.test(seg) ? seg.replace(TSC_PROJECT_RE, "$1") : seg
+    const denied = VERIFY_DENY_OPTION_RE.exec(checked)
+    if (denied) {
+      const option = denied[2]
+      return TSC_SEGMENT_RE.test(seg) && (option === "-p")
+        ? "tsc -p/--project must name a relative path inside the project (no .., not absolute)"
+        : `uses a runner option that loads plugins/config from the repository (${option}); drop it`
     }
     if (!allow.some((re) => new RegExp(re).test(seg))) return `not a recognised test/check runner: "${seg.slice(0, 60)}" (allowed: pytest, unittest, bun/npm test, go/cargo test, make test, *test*.sh ...)`
     runners++
