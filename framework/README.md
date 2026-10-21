@@ -259,16 +259,36 @@ the newest otter-supported release (`npm install -g @openai/codex@<version>`; a 
 downgrade); a Homebrew cask is used only when its current version is supported, otherwise the plan says how to switch to
 npm. Claude follows the vendor's `stable` npm tag, `brew upgrade --cask claude-code`, or `claude update`. A running
 session keeps its runtime; `/new` or `/model combo apply` picks the updated CLI up.
+When the global npm folder is not writable (Node from apt on Linux/WSL: `npm install -g` fails with exit 243, EACCES),
+the first choice installs for the user only without sudo (`npm install -g --prefix ~/.local …`; Claude: `claude install
+stable`, the vendor's native build), and `sudo npm install -g …` is offered as an alternative the human may pick
+(`--yes` always takes the first choice). After the run otter re-checks what PATH executes: if an older system copy still
+shadows the new one in `~/.local/bin`, it says so instead of reporting success. The WSL launcher puts `~/.local/bin`
+first on PATH.
 
 When admission refuses only combo routes (for example a Codex CLI version otter does not support), the session still
 starts on the main model: those roles' routes are dropped for this session (the session pins what actually runs), and
 the notice names the routes, the installed Codex version, the supported versions and the install command
 (`npm install -g @openai/codex@<version>`); `/model combo apply` restores them after the fix. A refusal of the main
 model itself is not bypassed.
-Choosing a recommended combo (menu "Apply to this session", or `/model combo preset <name>`) saves it and, once a
-model is selected, applies it at once through the same path as `/model combo apply` (conversation carried; rebound
-in place during an active workflow; refused while held). Before a model is selected it is saved and used by the
-first selection. Custom role edits still only save until `/model combo apply`.
+A recommended combo is a whole multi-model setup. The four presets mix Codex and Claude; each names a main model and
+planner, executor, architect and critic bindings, which map to Otter's planning roles
+(planner, interviewer, researcher), execution roles (worker, simplifier, data-analyst, ontology-evolver), `architect`, and
+the judging roles (critic, reviewer, contrarian, data-verifier, answer-judge).
+
+| preset | main | planner | executor | architect | critic |
+| --- | --- | --- | --- | --- | --- |
+| `astra-fable` | codex gpt-6-astra | codex gpt-6-astra | codex gpt-5.6-luna | claude fable | claude fable |
+| `astra-fable-opus` | codex gpt-6-astra | claude opus | codex gpt-5.6-luna | claude fable | claude fable |
+| `fable-opus-codex` | claude fable | claude opus | codex gpt-5.6-terra | codex gpt-5.6-sol | claude opus |
+| `opus-codex` | claude opus | claude sonnet | codex gpt-5.6-terra | codex gpt-5.6-sol | codex gpt-5.6-sol |
+
+Choosing one in
+the menu, or `/model combo preset <name>`, saves its routes and applies it at once: with a session it switches to the
+preset's main model with those routes (conversation carried; rebound in place during an active workflow; refused while
+held), and before any model is selected it starts the session on them (this session only, no scope prompt). There is
+no confirmation screen and no detour into custom settings. Custom role edits still only save until
+`/model combo apply`, which keeps the current main model.
 Status shows `engine / model +N roles`.
 
 A combo applies to a session when it starts (or when a recommended combo is chosen, see above). The routes are pinned in the session metadata. Every non-resume new

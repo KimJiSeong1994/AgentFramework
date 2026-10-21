@@ -6,6 +6,7 @@ import { dirname, join } from "node:path"
 import { launchInteractive, parseInteractiveArgs, validModelID, type InteractiveDependencies, type Terminal } from "../src/hosts/interactive.ts"
 import type { TerminalControl } from "../src/hosts/interactive-session.ts"
 import type { ShellResult } from "../src/hosts/operator-shell.ts"
+import type { EngineInfo } from "../src/hosts/engine-update.ts"
 import { createChatCheckpoints } from "../src/hosts/chat-checkpoint.ts"
 import type { ModelCatalog } from "../src/hosts/model-catalog.ts"
 import type { ChoicePresentation, InteractiveViewFacts, TranscriptText } from "../src/hosts/interactive-view.ts"
@@ -486,6 +487,11 @@ const proposedPlan = {
 }
 
 const unsafeTerminalControls = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
+
+/** A preset's routes as a runtime carries them: roles equal to the main model are normalized away (they use main). */
+function routesBesideMain(preset: (typeof COMBO_PRESETS)[number]): ComboRoutes {
+  return Object.fromEntries(Object.entries(preset.routes).filter(([, route]) => route.engine !== preset.main.engine || route.model !== preset.main.model)) as ComboRoutes
+}
 
 describe("interactive terminal", () => {
   test("lists catalog metadata and explicitly dispatches only an ordinary skill with a safe source audit", async () => {
@@ -1912,15 +1918,15 @@ describe("interactive terminal", () => {
     const runs: Array<readonly string[]> = []
     let installed = "0.150.0"
     const h = harness({ fullscreen: true, lines: ["/engines", "/engines update codex", "/engines update codex", "/engines update bogus", "/quit"],
-      choose: async (title, values) => { expect(title).toStartWith("Update codex?"); return runs.length === 0 ? 1 : 0 } })
+      choose: async title => { expect(title).toStartWith("Update codex?"); return runs.length === 0 ? 1 : 0 } })
+    const codexInfo = (): EngineInfo => ({ engine: "codex", method: "npm", version: installed, path: "/x/codex", supported: installed === "0.163.0" })
     h.deps.engines = {
-      info: engine => engine === "codex"
-        ? { engine, method: "npm", version: installed, path: "/x/codex", supported: installed === "0.163.0" }
-        : { engine, method: "npm", version: "2.1.301", path: "/x/claude" },
+      info: engine => engine === "codex" ? codexInfo() : { engine, method: "npm", version: "2.1.301", path: "/x/claude" },
       plan: info => info.engine === "codex" && info.version !== "0.163.0"
-        ? { engine: "codex", action: "run", argv: ["npm", "install", "-g", "@openai/codex@0.163.0"], target: "0.163.0", summary: `Codex CLI ${info.version} → 0.163.0 with npm` }
+        ? { engine: "codex", action: "run", target: "0.163.0", summary: `Codex CLI ${info.version} → 0.163.0 with npm`, choices: [{ argv: ["npm", "install", "-g", "@openai/codex@0.163.0"], label: "npm install -g @openai/codex@0.163.0" }] }
         : { engine: info.engine, action: "current", summary: `${info.engine} is current` },
       run: async argv => { runs.push(argv); installed = "0.163.0"; return { exitCode: 0, signal: null } },
+      verify: () => ({ info: codexInfo() }),
     }
     await launchInteractive({ worktree: wt.worktree, engine: "claude", model: "opus" }, h.deps)
     expect(runs).toEqual([["npm", "install", "-g", "@openai/codex@0.163.0"]])
@@ -1934,13 +1940,40 @@ describe("interactive terminal", () => {
     expect(out).toContain("Usage: /engines · /engines update [codex|claude]")
   })
 
+  test("/engines update: EACCES (exit 243) is named and points to the no-sudo choice; a shadowed install says how to fix PATH", async () => {
+    const runs: Array<readonly string[]> = []
+    let attempt = 0
+    // First pick the plain npm command (fails with 243), then the user-only install (works, but PATH still finds /usr/bin).
+    const picks = [1, 2]
+    const h = harness({ fullscreen: true, lines: ["/engines update codex", "/engines update codex", "/quit"], choose: async (_title, values) => {
+      expect(values).toEqual(["Keep the current version", "npm install -g @openai/codex@0.163.0", "install for your user only (/home/u/.local/bin, no sudo)"])
+      return picks[attempt++]!
+    } })
+    const old: EngineInfo = { engine: "codex", method: "npm", version: "0.150.0", path: "/usr/bin/codex", supported: false }
+    h.deps.engines = {
+      info: () => old,
+      plan: () => ({ engine: "codex", action: "run", target: "0.163.0", summary: "Codex CLI 0.150.0 → 0.163.0 with npm", choices: [
+        { argv: ["npm", "install", "-g", "@openai/codex@0.163.0"], label: "npm install -g @openai/codex@0.163.0" },
+        { argv: ["npm", "install", "-g", "--prefix", "/home/u/.local", "@openai/codex@0.163.0"], label: "install for your user only (/home/u/.local/bin, no sudo)" },
+      ] }),
+      run: async argv => { runs.push(argv); return argv.includes("--prefix") ? { exitCode: 0, signal: null } : { exitCode: 243, signal: null } },
+      verify: () => runs.at(-1)?.includes("--prefix") ? { info: old, shadowed: { path: "/home/u/.local/bin/codex", version: "0.163.0" } } : { info: old },
+    }
+    await launchInteractive({ worktree: wt.worktree, engine: "claude", model: "opus" }, h.deps)
+    expect(runs).toEqual([["npm", "install", "-g", "@openai/codex@0.163.0"], ["npm", "install", "-g", "--prefix", "/home/u/.local", "@openai/codex@0.163.0"]])
+    const out = h.calls.output.join("")
+    expect(out).toContain('codex: the update did not finish (exit 243: npm could not write its global folder (permission denied, EACCES)); now 0.150.0 (not otter-supported). Try: /engines update codex and pick "install for your user only (/home/u/.local/bin, no sudo)".')
+    expect(out).toContain("codex: installed 0.163.0 at /home/u/.local/bin/codex, but PATH still runs /usr/bin/codex (0.150.0). Put /home/u/.local/bin first on PATH or remove the older copy, then open a new terminal.")
+  })
+
   test("/engines update: keeping the version runs nothing", async () => {
     const runs: Array<readonly string[]> = []
     const h = harness({ fullscreen: true, lines: ["/engines update claude", "/quit"], choose: async () => 0 })
     h.deps.engines = {
       info: engine => ({ engine, method: "npm", version: "2.1.301", path: "/x" }),
-      plan: info => ({ engine: info.engine, action: "run", argv: ["npm", "install", "-g", "@anthropic-ai/claude-code@stable"], target: "stable", summary: "Claude Code 2.1.301 → stable" }),
+      plan: info => ({ engine: info.engine, action: "run", target: "stable", summary: "Claude Code 2.1.301 → stable", choices: [{ argv: ["npm", "install", "-g", "@anthropic-ai/claude-code@stable"], label: "npm install -g @anthropic-ai/claude-code@stable" }] }),
       run: async argv => { runs.push(argv); return { exitCode: 0, signal: null } },
+      verify: engine => ({ info: { engine, method: "npm", version: "2.1.301" } }),
     }
     await launchInteractive({ worktree: wt.worktree, engine: "claude", model: "opus" }, h.deps)
     expect(runs).toEqual([])
@@ -2026,39 +2059,53 @@ describe("interactive terminal", () => {
     expect(h.calls.runtimes).toHaveLength(1)
   })
 
-  test("combo preset preview can be cancelled without changing config", async () => {
-    let visits = 0
+  test("leaving the combo menu without choosing changes nothing", async () => {
     const h = harness({ fullscreen: true, lines: ["/model combo", "/quit"], combo: configuredCombo,
-      choose: async (title, values) => {
-        if (title.startsWith("Combo · main")) return visits++ === 0 ? 0 : values.indexOf("Done")
-        return undefined
-      },
-    })
+      choose: async (title, values) => title.startsWith("Combo · main") ? values.indexOf("Done") : undefined })
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
-    expect(h.calls.choices.some(choice => choice.title === "Combo preset · astra-fable")).toBe(true)
-    expect(h.calls.output.join("")).toContain("codex / gpt-6-luna")
     expect(h.calls.combo).toEqual(configuredCombo)
     expect(h.calls.comboReplacements).toBeUndefined()
+    expect(h.calls.runtimes).toHaveLength(1)
   })
 
-  test("choosing a recommended combo applies it to the session at once and carries the conversation", async () => {
+  test("choosing a recommended combo switches the session to its main model and routes at once, carrying the conversation", async () => {
     const h = harness({ fullscreen: true, lines: ["q1", "/model combo", "/quit"], turns: [{ text: "a1" }],
       choose: async (title, values) => {
-        if (title.startsWith("Combo · main")) return 0
-        if (title === "Combo preset · astra-fable") { expect(values[0]).toBe("Apply to this session"); return 0 }
+        if (title.startsWith("Combo · main")) { expect(values[0]).toBe("astra-fable — ASTRA + Fable (main gpt-6-astra)"); return 0 }
         return undefined
       },
     })
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
     expect(h.calls.comboReplacements).toEqual([COMBO_PRESETS[0]!.routes])
-    // No second "Apply" step: the new session runs under the preset right after it is chosen.
+    // No confirmation screen and no detour into custom settings: one pick, and the session runs the whole template.
+    expect(h.calls.choices.map(choice => choice.title).filter(title => !title.startsWith("Combo · main"))).toEqual([])
     expect(h.calls.runtimes).toHaveLength(2)
-    expect(h.calls.runtimes[0]?.routes ?? {}).toEqual({})
-    expect(h.calls.runtimes[1]).toMatchObject({ engine: "local", model: "native", routes: COMBO_PRESETS[0]!.routes })
+    expect(h.calls.runtimes[1]).toMatchObject({ engine: "codex", model: "gpt-6-astra" })
+    expect(h.calls.runtimes[1]?.routes).toEqual(routesBesideMain(COMBO_PRESETS[0]!))
     expect(h.calls.conversationRestores.at(-1)?.prior).toEqual([{ role: "user", text: "q1" }, { role: "assistant", text: "a1" }])
-    expect(h.calls.output.join("")).toContain("Applying it to this session now; the conversation carries over.")
-    // The menu closed after applying; it was not shown again.
+    expect(h.calls.output.join("")).toContain("Combo astra-fable: main codex / gpt-6-astra")
+    expect(h.calls.output.join("")).toContain("Switching this session now; the conversation carries over.")
     expect(h.calls.choices.filter(choice => choice.title.startsWith("Combo · main"))).toHaveLength(1)
+  })
+
+  test("before any model is selected, choosing a recommended combo starts the session on it (no custom editor, no scope prompt)", async () => {
+    const h = harness({ fullscreen: true, lines: ["/model", "hello", "/quit"],
+      choose: async (title, values) => {
+        if (title === "Choose an execution engine") return values.indexOf("combo — per-role models")
+        if (title.startsWith("Combo · main")) return 2
+        return undefined
+      },
+    })
+    expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
+    const preset = COMBO_PRESETS[2]!
+    expect(h.calls.comboReplacements).toEqual([preset.routes])
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.runtimes[0]).toMatchObject({ engine: preset.main.engine, model: preset.main.model })
+    expect(h.calls.runtimes[0]?.routes).toEqual(routesBesideMain(preset))
+    expect(h.calls.turnBindings).toMatchObject([{ engine: preset.main.engine, model: preset.main.model, text: "hello" }])
+    expect(h.calls.choices.some(choice => choice.title.startsWith("Custom combo"))).toBe(false)
+    expect(h.calls.choices.some(choice => /scope|default/iu.test(choice.title))).toBe(false)
+    expect(h.calls.defaultModelWrites).toEqual([])
   })
 
   test("custom role edits still save only; Apply to a new session applies them", async () => {
@@ -2080,13 +2127,14 @@ describe("interactive terminal", () => {
     expect(h.calls.conversationRestores.at(-1)?.prior).toEqual([{ role: "user", text: "q1" }, { role: "assistant", text: "a1" }])
   })
 
-  test("typed combo presets save and apply to the session at once; failures preserve config and the session", async () => {
+  test("typed combo presets switch the session to the preset's main model and routes; failures preserve config and the session", async () => {
     const h = harness({ lines: ["/model combo preset opus-codex", "/quit"], combo: configuredCombo })
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
-    expect(h.calls.comboReplacements).toEqual([COMBO_PRESETS[2]!.routes])
+    expect(h.calls.comboReplacements).toEqual([COMBO_PRESETS[3]!.routes])
     expect(h.calls.runtimes).toHaveLength(2)
     expect(h.calls.runtimes[0]).toMatchObject({ routes: comboRoutes })
-    expect(h.calls.runtimes[1]).toMatchObject({ engine: "local", model: "native", routes: COMBO_PRESETS[2]!.routes })
+    expect(h.calls.runtimes[1]).toMatchObject({ engine: "claude", model: "opus" })
+    expect(h.calls.runtimes[1]?.routes).toEqual(routesBesideMain(COMBO_PRESETS[3]!))
     const failed = harness({ lines: ["/model combo preset astra-fable", "/quit"], combo: configuredCombo })
     failed.deps.combo!.replace = () => { throw new Error("config is read-only") }
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, failed.deps)
@@ -2095,12 +2143,14 @@ describe("interactive terminal", () => {
     expect(failed.calls.runtimes).toHaveLength(1)
   })
 
-  test("readline combo preset can be previewed and saved before model selection", async () => {
-    const h = harness({ lines: ["/model combo", "1", "1", "16", "/quit"] })
+  test("readline: a recommended combo before model selection starts the session on it", async () => {
+    const h = harness({ lines: ["/model combo", "1", "hello", "/quit"] })
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
-    expect(h.calls.output.join("")).toContain("Combo preset · astra-fable")
     expect(h.calls.comboReplacements).toEqual([COMBO_PRESETS[0]!.routes])
-    expect(h.calls.runtimes).toEqual([])
+    expect(h.calls.runtimes).toHaveLength(1)
+    expect(h.calls.runtimes[0]).toMatchObject({ engine: "codex", model: "gpt-6-astra" })
+    expect(h.calls.runtimes[0]?.routes).toEqual(routesBesideMain(COMBO_PRESETS[0]!))
+    expect(h.calls.output.join("")).not.toContain("Combo preset · astra-fable")
   })
 
   test("/model lists combo under the engines and opens the same combo menu", async () => {
@@ -2151,8 +2201,8 @@ describe("interactive terminal", () => {
   })
 
   test("readline /model offers combo as entry 4; the combo menu works before a model is selected", async () => {
-    // Engine 4 = combo; Custom settings = 4. 13 roles + Recommended combos + Clear + Done.
-    const h = harness({ lines: ["/model", "4", "4", "2", "1", "1", "17", "16", "/quit"] })
+    // Engine 4 = combo; Custom settings = 5 (after the four recommended combos). 13 roles + Recommended combos + Clear + Done.
+    const h = harness({ lines: ["/model", "4", "5", "2", "1", "1", "17", "16", "/quit"] })
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     const output = h.calls.output.join("")
     expect(output).toContain("4) combo  — per-role models")

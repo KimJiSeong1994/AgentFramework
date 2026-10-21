@@ -21,8 +21,10 @@ if [ "${OTTER_WSL_ENV:-}" != 1 ]; then
 fi
 shift
 
-# Common per-user install locations, after whatever the user's shell already set.
-for dir in "$HOME/.local/bin" "$HOME/.bun/bin" "$HOME/.npm-global/bin"; do
+# Common per-user install locations. ~/.local/bin goes first: `otter engines update` installs codex/claude there when the
+# global npm folder is root-owned (Node from apt), and an older system copy must not shadow it. The others are appended.
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) [ -d "$HOME/.local/bin" ] && PATH="$HOME/.local/bin:$PATH" ;; esac
+for dir in "$HOME/.bun/bin" "$HOME/.npm-global/bin"; do
   case ":$PATH:" in *":$dir:"*) ;; *) [ -d "$dir" ] && PATH="$PATH:$dir" ;; esac
 done
 export PATH
