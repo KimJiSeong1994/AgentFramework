@@ -251,6 +251,20 @@ and `/model combo clear` remove user routes (any value, including a malformed on
 project route still applies. Show, set and clear only touch config,
 so they also work while a session is held. `/model combo apply` starts a new session with the carried
 conversation under the saved combo; it is refused while a workflow is active or ownership is unsettled.
+Engine CLI updates: `otter engines` (and `/engines` in chat) shows each vendor CLI's version, whether otter supports it
+(Codex), its install method (npm, bun, pnpm, Homebrew cask, native installer) and the update that fits it.
+`otter engines update [codex|claude] [--yes]` / `/engines update [codex|claude]` shows the exact command and runs it
+only after confirmation, with the real terminal (no shell; argv only), then re-checks the version. Codex is pinned to
+the newest otter-supported release (`npm install -g @openai/codex@<version>`; a newer unqualified release is a stated
+downgrade); a Homebrew cask is used only when its current version is supported, otherwise the plan says how to switch to
+npm. Claude follows the vendor's `stable` npm tag, `brew upgrade --cask claude-code`, or `claude update`. A running
+session keeps its runtime; `/new` or `/model combo apply` picks the updated CLI up.
+
+When admission refuses only combo routes (for example a Codex CLI version otter does not support), the session still
+starts on the main model: those roles' routes are dropped for this session (the session pins what actually runs), and
+the notice names the routes, the installed Codex version, the supported versions and the install command
+(`npm install -g @openai/codex@<version>`); `/model combo apply` restores them after the fix. A refusal of the main
+model itself is not bypassed.
 Choosing a recommended combo (menu "Apply to this session", or `/model combo preset <name>`) saves it and, once a
 model is selected, applies it at once through the same path as `/model combo apply` (conversation carried; rebound
 in place during an active workflow; refused while held). Before a model is selected it is saved and used by the

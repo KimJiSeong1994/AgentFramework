@@ -4,7 +4,8 @@ import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:pa
 import { tmpdir } from "node:os"
 import { TextDecoder } from "node:util"
 import { createHash } from "node:crypto"
-import { createVendorProcess, type VendorProcessHandle, type VendorProcessResult } from "./vendor-process.ts"
+import { spawnSync } from "node:child_process"
+import { createVendorProcess, vendorProcessEnvironment, type VendorProcessHandle, type VendorProcessResult } from "./vendor-process.ts"
 import type { ExecutionCancelResult, ExecutionReconciliation } from "./types.ts"
 import { CODEX_INSTRUCTIONS, CODEX_VERSION, CODEX_SUPPORTED_VERSIONS, codexProfileArgv, createCodexProfile } from "./codex-profile.ts"
 
@@ -853,6 +854,20 @@ function supportedCodexVersion(result: VendorProcessResult): boolean {
       result.stdout.truncated || result.stderr.truncated || result.stderr.text.trim().length > 0) return false
   const output = result.stdout.text.trim()
   return CODEX_SUPPORTED_VERSIONS.some(version => output === `codex-cli ${version}`)
+}
+
+/**
+ * The installed Codex CLI version (`0.163.0`), for diagnostics only: undefined when codex is missing, slow or reports
+ * something else. Admission never relies on this; the owned version probe decides compatibility.
+ */
+export function installedCodexVersion(): string | undefined {
+  let executable: string
+  try { executable = findExecutable("codex") } catch { return undefined }
+  try {
+    const run = spawnSync(executable, ["--version"], { encoding: "utf8", timeout: 5000, env: vendorProcessEnvironment(), stdio: ["ignore", "pipe", "ignore"] })
+    const match = /^codex-cli (\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\s*$/u.exec(typeof run.stdout === "string" ? run.stdout : "")
+    return match?.[1]
+  } catch { return undefined }
 }
 
 /** Creates an inert, single-use native CLI transport backed by an owned process group. */

@@ -661,7 +661,9 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
         }
         available = available && codexProfileVerified
         const blocked = isCodex && !codexProfileVerified
-        if (blocked) codexProfileBlocked = true
+        // Only the anchor's Codex profile decides the host-wide tool-policy control. A blocked combo route is reported as
+        // that route's problem (with its roles), so admission can name it instead of refusing with a generic message.
+        if (blocked && roles.length === 0) codexProfileBlocked = true
         if (available) continue
         allAvailable = false
         const subject = roles.length ? `combo route for ${roles.join(", ")} -> ${target.engine} / ${target.model}` : undefined

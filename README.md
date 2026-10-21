@@ -47,6 +47,7 @@ bun scripts/otter-wiki.ts lint      # 링크·해시 무결성
 - **콤보**: planner / architect / critic / worker / reviewer 역할별로 엔진·모델 지정. 미지정 역할은 메인 모델
 - **프리셋**: 추천 조합 제공(예: *Astra + Fable*: Astra 계획 · Luna 실행 · Fable 리뷰). 고르면 저장하고 **지금 세션에 바로 적용**(대화 이어짐)
 - **인증**: 각 CLI 공식 로그인 그대로 사용. otter는 인증 정보를 읽거나 저장하지 않음
+- **콤보 경로가 안 될 때**: 예를 들어 지원하지 않는 Codex CLI 버전이면, 그 역할들만 메인 모델로 돌리고 세션은 그대로 시작. 안내에 설치된 버전·지원 버전·설치 명령(`npm install -g @openai/codex@0.163.0`)이 나옴. 고친 뒤 `/model combo apply`
 
 ```text
 /model combo                                   # 메뉴: 추천 프리셋(고르면 바로 적용) 또는 역할 → 엔진 → 모델
@@ -89,6 +90,7 @@ bun scripts/otter-wiki.ts lint      # 링크·해시 무결성
 - macOS/Linux, `git` 필요. `bun`은 없으면 자동 설치
 - 엔진(`ollama`/`codex`/`claude`) 하나 이상이 PATH에 있어야 함
 - 로그인 `otter login codex|claude`, 상태 `otter auth`(대화 중 `/login`·`/auth`·`/logout`)
+- **엔진 CLI 업데이트**: `otter engines`(버전·설치 방식·otter 지원 여부), `otter engines update [codex|claude]`(대화 중 `/engines update`). 설치 방식(npm·bun·pnpm·Homebrew·공식 설치)에 맞는 명령을 보여 주고 **확인한 뒤에만** 실행. Codex는 otter가 검증한 최신 버전으로 고정(더 최신이면 다운그레이드라고 알려 줌), Claude는 벤더 stable 채널
 - **업데이트**: `otter update`(확인만 `otter update --check`). 새 버전이 나오면 `otter` 시작 시 `Update available … Run: otter update` 알림(하루 한 번 백그라운드 확인, 설치는 하지 않음). 끄기: `~/.config/otter/otter.jsonc`에 `"update": { "check": false }` 또는 `OTTER_NO_UPDATE_CHECK=1`
 - 제거는 `~/.local/share/otter/AgentFramework/install.sh --uninstall`
 
