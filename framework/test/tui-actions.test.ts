@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { commandInsertions, interactiveActions, interactiveHelp } from "../src/hosts/interactive-actions.ts"
 import { commandCompletions } from "../src/tui/skill-completion.ts"
 import { TuiApp } from "../src/tui/app.ts"
-import { bodyPanelRows, panelInnerColumns, transcriptViewportRows, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
+import { abovePanelRows, panelInnerColumns, transcriptViewportRows, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
 
 const plain = (frame: string | undefined): string => (frame ?? "").replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
 
@@ -499,10 +499,12 @@ describe("exclusive application input ownership", () => {
       binding: { sessionID: "session-1", workflowID: "workflow-1", expectedRevision: 3, planSha: "a".repeat(64), path: "plan.json" },
     })
     expect(plain(frames.at(-1))).toContain("╭─ Review canonical plan · document focus ─")
-    expect(frames.at(-1)).not.toContain("private approval draft")
-    expect(frames.at(-1)).not.toContain("You> ")
-    expect(frames.at(-1)).toContain("\u001b[?25l")
-    const pageRows = Math.max(1, bodyPanelRows({ columns, rows }) - 5 - values.length)
+    expect(plain(frames.at(-1))).toContain("private approval draft")
+    expect(plain(frames.at(-1))).toContain("You> ")
+    expect(frames.at(-1)).toContain("\u001b[?25h")
+    const contentRows = abovePanelRows({ columns, rows, draft: "private approval draft", cursor: "private approval draft".length, prompt: "You> " })
+    const decisionRows = Math.max(1, Math.min(values.length, contentRows - 6))
+    const pageRows = Math.max(1, contentRows - 5 - decisionRows)
     const totalRows = document.split("\n").flatMap(line => wrapText(line, panelInnerColumns(columns))).length
 
     internal.input({ type: "key", key: "pageDown" })

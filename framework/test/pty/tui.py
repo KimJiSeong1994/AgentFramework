@@ -856,10 +856,35 @@ def run_workflow(temp_root: Path, action: str):
             raise AssertionError(f"input protocol mismatch: expected {expected_input!r}, received {actual_input!r}")
         session.wait_screen("Execution decision")
         session.wait_output("한글")
-        session.wait_screen("UX01_CANONICAL_ROW_001")
-        for _ in range(16):
+        session.wait_screen("Document rows")
+        session.wait_screen("You>")
+        def approval_panel_text():
+            rows = session.screen.current_text().splitlines()
+            start = next((i for i, row in enumerate(rows) if "Execution decision" in row), len(rows))
+            end = next((i for i, row in enumerate(rows) if i > start and "You>" in row), len(rows))
+            return "\n".join(rows[start:end])
+
+        hitl_rows = session.screen.current_text().splitlines()
+        context_row = next((i for i, row in enumerate(hitl_rows) if "Plan SHA:" in row), -1)
+        panel_row = next((i for i, row in enumerate(hitl_rows) if "Execution decision" in row), -1)
+        composer_row = next((i for i, row in enumerate(hitl_rows) if "You>" in row), -1)
+        if not 0 <= context_row < panel_row < composer_row:
+            raise AssertionError(f"HITL must preserve recent context above the panel and composer: {hitl_rows}")
+        session.mode_proof["hitlAboveComposerWithContext"] = True
+        # Inline approval reserves conversation/composer rows, so its document viewport is smaller.
+        # Inspect the panel, not the transcript's retained copy of the canonical plan.
+        for _ in range(240):
+            if "UX01_CANONICAL_ROW_001" in approval_panel_text():
+                break
             session.send(b"\x1b[6~")
-        session.wait_screen("UX01_CANONICAL_ROW_220")
+            session.read_once(0.02)
+        session._wait(lambda: "UX01_CANONICAL_ROW_001" in approval_panel_text(), "first canonical row in approval panel")
+        for _ in range(240):
+            if "UX01_CANONICAL_ROW_220" in approval_panel_text():
+                break
+            session.send(b"\x1b[6~")
+            session.read_once(0.02)
+        session._wait(lambda: "UX01_CANONICAL_ROW_220" in approval_panel_text(), "last canonical row in approval panel")
         session._set_size(120, 40)
         session.screen.resize(120, 40)
         session.wait_screen("Decisions")

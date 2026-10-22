@@ -1,26 +1,39 @@
 import { describe, expect, test } from "bun:test"
 import { TuiApp } from "../src/tui/app.ts"
 
-const plain = (frame: string | undefined): string => (frame ?? "").replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
+const plain = (frame: string | undefined): string => (frame ?? "").replace(/\u001b\[[0-9;?]*[A-Za-z]/gu, "")
+const frameRows = (frame: string | undefined): string[] => [...(frame ?? "").matchAll(/\u001b\[\d+;1H\u001b\[2K((?:[^\u001b]|\u001b\[[0-9;]*m)*)/gu)]
+  .map(match => match[1]!.replace(/\u001b\[[0-9;]*m/gu, "").trimEnd())
 
 type Internal = {
   input(event: unknown): void
+  draw(): void
   driver: { write(frame: string): void }
   dimensions(): { columns: number; rows: number }
   asciiChrome: boolean
   spinnerTimer?: unknown
   hostWorking: boolean
   transcript: { lines(): string[] }
+  choice?: { selected: number; windowStart: number }
+  askState?: { selected: number; windowStart: number }
 }
 
 function setup(columns = 80, rows = 30) {
   const app = new TuiApp()
   app.resume = () => {}
   const internal = app as unknown as Internal
-  internal.dimensions = () => ({ columns, rows })
+  const size = { columns, rows }
+  internal.dimensions = () => size
   const frames: string[] = []
   internal.driver.write = frame => frames.push(frame)
-  return { app, internal, frames, last: () => plain(frames.at(-1)) }
+  return {
+    app, internal, frames, last: () => plain(frames.at(-1)),
+    resize: (nextColumns: number, nextRows: number) => {
+      size.columns = nextColumns
+      size.rows = nextRows
+      internal.draw()
+    },
+  }
 }
 const key = (name: string) => ({ type: "key", key: name })
 const prompt = {
@@ -45,6 +58,39 @@ describe("GJC-style ask", () => {
     expect(frame).toContain("↑↓ move · Enter select · 1-9 jump · Esc cancel")
     app.close()
     return answer
+  })
+
+  test("ask options remain between recent transcript and composer through a tiny-terminal resize", async () => {
+    const { app, internal, frames, resize } = setup(80, 24)
+    app.writeText({ provenance: "assistant", text: "Recent answer stays visible above the decision." })
+    const options = Array.from({ length: 12 }, (_, index) => ({
+      label: `Storage option ${String(index + 1).padStart(2, "0")} ${"x".repeat(80)}`,
+      detail: index === 9 ? "Selected detail " + "context ".repeat(20) : undefined,
+    }))
+    const answer = app.ask({
+      question: "Choose the storage backend for this migration after reviewing these constraints.",
+      options,
+      allowCustom: true,
+    }, new AbortController().signal)
+    for (let index = 0; index < 9; index += 1) internal.input(key("down"))
+    resize(60, 20)
+
+    const drawn = frameRows(frames.at(-1))
+    const transcriptRow = drawn.findIndex(row => row.includes("Recent answer stays visible"))
+    const panelTop = drawn.findIndex(row => row.startsWith("╭─ Question · answer selection focus"))
+    const selectedRow = drawn.findIndex(row => row.includes("❯ 10. Storage option 10"))
+    const composerPrompt = drawn.findIndex(row => row.includes("You>"))
+    const panelBottom = drawn.findIndex((row, index) => index > panelTop && row.startsWith("╰"))
+    expect(transcriptRow).toBeGreaterThanOrEqual(0)
+    expect(panelTop).toBeGreaterThan(transcriptRow)
+    expect(selectedRow).toBeGreaterThan(panelTop)
+    expect(panelBottom + 1).toBe(composerPrompt - 1)
+    expect(drawn.every(row => row.length <= 60)).toBe(true)
+    expect(internal.askState?.selected).toBe(9)
+    expect(internal.askState?.windowStart).toBeGreaterThan(0)
+    internal.input(key("enter"))
+    expect(await answer).toEqual({ kind: "option", index: 9 })
+    app.close()
   })
 
   test("Up/Down move the cursor, Enter returns the option index, recommended only pre-highlights", async () => {
@@ -162,6 +208,34 @@ describe("plain choose restyle", () => {
     const dismissed = app.choose("Pick one", ["alpha", "beta"], new AbortController().signal)
     internal.input(key("escape"))
     expect(await dismissed).toBeUndefined()
+    app.close()
+  })
+
+  test("plain choice keeps recent conversation and retained draft visible, scrolling long choices safely", async () => {
+    const { app, internal, frames, resize } = setup(80, 24)
+    app.writeText({ provenance: "assistant", text: "Most recent answer before the choice." })
+    app.setDraft("retain this composer draft")
+    const choices = Array.from({ length: 30 }, (_, index) => `option ${String(index + 1).padStart(2, "0")} ${"long ".repeat(20)}`)
+    const selected = app.choose("Choose a target", choices, new AbortController().signal)
+    for (let index = 0; index < 9; index += 1) internal.input(key("down"))
+    resize(60, 20)
+
+    const drawn = frameRows(frames.at(-1))
+    const transcriptRow = drawn.findIndex(row => row.includes("Most recent answer before the choice"))
+    const panelTop = drawn.findIndex(row => row.startsWith("╭─ Choose a target · choice selection focus"))
+    const selectedRow = drawn.findIndex(row => row.includes("❯ 10. option 10"))
+    const composerPrompt = drawn.findIndex(row => row.includes("You> retain this composer draft"))
+    const panelBottom = drawn.findIndex((row, index) => index > panelTop && row.startsWith("╰"))
+    expect(transcriptRow).toBeGreaterThanOrEqual(0)
+    expect(panelTop).toBeGreaterThan(transcriptRow)
+    expect(selectedRow).toBeGreaterThan(panelTop)
+    expect(panelBottom + 1).toBe(composerPrompt - 1)
+    expect(internal.choice?.selected).toBe(9)
+    expect(internal.choice?.windowStart).toBeGreaterThan(0)
+    expect(drawn.every(row => row.length <= 60)).toBe(true)
+    internal.input(key("enter"))
+    expect(await selected).toBe(9)
+    expect(app.draftSnapshot().draft).toBe("retain this composer draft")
     app.close()
   })
 

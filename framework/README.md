@@ -460,9 +460,12 @@ revisions and interview rounds loop back), or, for a plain model turn, a sliding
 Readline mode (`OTTER_TUI=0`, or a terminal without full-screen support) prints the same task bar as a
 `[progress] ####---- 3/5 tasks | 60%` line whenever a task finishes.
 Pickers, command/skill suggestions and history search title the composer border instead and
-list their choices beneath it; details, approval, session lists and read failures
-occupy a bordered body panel that hides the retained draft and shows no active
-prompt. Initial selection stays on the rule instead of dumping a path banner into
+list their choices beneath it. HITL choices, question options and approval review appear in a
+bordered panel immediately above the composer, with recent conversation retained above the panel.
+The choice still owns input: showing the draft does not let ordinary typing submit or approve it.
+Long lists and approval documents use a bounded viewport as the terminal resizes.
+Details, session lists and read failures retain their full body panel.
+Initial selection stays on the rule instead of dumping a path banner into
 the transcript. A new conversation is identified by one compact notice.
 Transient main-model activity stays in status rather than becoming chat messages;
 errors and unconfirmed cancellation notices remain visible.
