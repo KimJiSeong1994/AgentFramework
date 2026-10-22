@@ -2293,7 +2293,36 @@ describe("interactive terminal", () => {
     local.deps.createConversation = () => ({ turn: async () => { throw new ModelRequestError("model_failed", "fixture") } })
     await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, local.deps)
     expect(local.calls.authStatusChecks).toEqual([])
+
+    const unknown = harness({ lines: ["hello", "/quit"], auth: { codex: "unknown" } })
+    unknown.deps.createConversation = () => ({ turn: async () => { throw new ModelRequestError("model_failed", "fixture", "transport") } })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, unknown.deps)
+    expect(unknown.calls.authStatusChecks).toEqual(["codex"])
+    expect(unknown.calls.output.join("")).not.toContain("run /login codex.")
   })
+
+  test("a failed chat turn checks only the main engine, not signed-out unused combo routes", async () => {
+    const h = harness({
+      lines: ["hello", "/quit"],
+      combo: { state: "configured", routes: { worker: { engine: "claude", model: "fable" } }, sources: { worker: "user" } },
+      auth: { claude: "signed-out" },
+    })
+    h.deps.createConversation = () => ({ turn: async () => { throw new ModelRequestError("model_failed", "fixture", "transport") } })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(h.calls.authStatusChecks).toEqual(["codex"])
+    expect(h.calls.output.join("")).not.toContain("claude is not signed in; run /login claude.")
+  })
+
+  test.each(["malformed_response", "tool_input", "input_budget"] as const)(
+    "a distinguishable %s failure does not prompt for sign-in",
+    async reason => {
+      const h = harness({ lines: ["hello", "/quit"], auth: { codex: "signed-out" } })
+      h.deps.createConversation = () => ({ turn: async () => { throw new ModelRequestError("model_failed", "fixture", reason) } })
+      await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+      expect(h.calls.authStatusChecks).toEqual([])
+      expect(h.calls.output.join("")).not.toContain("codex is not signed in; run /login codex.")
+    },
+  )
 
   test("there is no top-level /combo command; combo lives under /model", async () => {
     const h = harness({ lines: ["/combo", "/quit"] })

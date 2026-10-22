@@ -41,6 +41,7 @@ type HarnessOptions = {
   engine?: "local" | "codex" | "claude"
   role?: ExecutionRole
   responses?: string[]
+  nativeFailure?: string
   taskText?: string
   maxOutputTokens?: number
   denyTool?: boolean
@@ -162,6 +163,10 @@ function harness(options: HarnessOptions = {}) {
         const response = responses.shift() ?? "{}"
         if (options.transportBehavior === "throw") throw new Error("fixture run failed")
         if (options.transportBehavior === "unresolved") return { status: "unresolved", text: response, quiescent: false }
+        if (options.nativeFailure !== undefined) {
+          finished = true
+          return { status: "failed", text: response, quiescent: true, error: options.nativeFailure }
+        }
         try {
           beforeOutput?.()
           transportOptions.onText?.(response)
@@ -276,6 +281,37 @@ describe("common CLI execution host", () => {
     const handle = await subject.host.prepare(subject.request)
     expect(await handle.run()).toEqual({ status: "completed", text: "still available" })
     expect(subject.controls[1]?.runCalls).toBe(1)
+  })
+
+  test("native failures preserve only exact allowlisted safe transport errors", async () => {
+    const cases: Array<{ engine: "local" | "codex" | "claude"; nativeFailure: string; hostError: string }> = [
+      { engine: "claude", nativeFailure: "Claude CLI login required; run claude auth login", hostError: "Claude CLI login required; run claude auth login" },
+      { engine: "codex", nativeFailure: "Codex native profile verification failed", hostError: "Codex native profile verification failed" },
+      { engine: "codex", nativeFailure: "Codex private profile state verification failed", hostError: "Codex native profile verification failed" },
+      { engine: "claude", nativeFailure: "native tool activity refused", hostError: "native tool activity refused" },
+      { engine: "local", nativeFailure: "execution deadline elapsed", hostError: "execution deadline elapsed" },
+      { engine: "local", nativeFailure: "output byte limit reached", hostError: "output byte limit reached" },
+      { engine: "claude", nativeFailure: "invalid native CLI output", hostError: "invalid native CLI output" },
+      { engine: "claude", nativeFailure: "native CLI result incomplete", hostError: "native CLI result incomplete" },
+      { engine: "codex", nativeFailure: "native CLI reported failure", hostError: "native CLI reported failure" },
+      { engine: "local", nativeFailure: "native CLI process failed", hostError: "native CLI process failed" },
+    ]
+    for (const { engine, nativeFailure, hostError } of cases) {
+      const subject = harness({ engine, nativeFailure })
+      const outcome = await (await subject.host.prepare(subject.request)).run()
+      expect(outcome).toEqual({ status: "failed", error: hostError })
+    }
+
+    const secret = "PRIVATE_TOKEN /home/private/model-cache"
+    const unknown = harness({ nativeFailure: secret })
+    const outcome = await (await unknown.host.prepare(unknown.request)).run()
+    expect(outcome).toEqual({ status: "failed", error: "CLI inference turn failed or exceeded its output bound" })
+    expect(JSON.stringify(outcome)).not.toContain(secret)
+
+    const wrongEngine = harness({ engine: "local", nativeFailure: "Claude CLI login required; run claude auth login" })
+    expect(await (await wrongEngine.host.prepare(wrongEngine.request)).run()).toEqual({
+      status: "failed", error: "CLI inference turn failed or exceeded its output bound",
+    })
   })
 
   test("host progress reports bounded model and allowed-tool activity without content", async () => {

@@ -170,17 +170,29 @@ describe("workflow turn lifecycle (R12)", () => {
   })
 
   test("a failed host execution carries a fixed reason class, never provider text", async () => {
+    let caseNumber = 0
     for (const [error, reason, hint] of [
       ["malformed CLI response; no fallback execution was attempted", "malformed_response", "not in the required tool/answer format"],
       ["Otter tool round limit reached", "tool_rounds", "too many tool rounds"],
       ["estimated input budget exceeded before model dispatch", "input_budget", "did not fit the input budget"],
       ["CLI inference turn failed or exceeded its output bound", "transport", "did not complete the request"],
       ["reactive output byte limit reached", "output_bound", "exceeded the output limit"],
+      ["Claude CLI login required; run claude auth login", "auth_required", "Claude CLI authentication is required. Run claude auth login."],
+      ["Codex native profile verification failed", "profile_version", "Codex CLI version or native profile could not be verified"],
+      ["Codex private profile state verification failed", "profile_version", "Codex CLI version or native profile could not be verified"],
+      ["Codex version/profile probe refused inference", "profile_version", "Codex CLI version or native profile could not be verified"],
+      ["native tool activity refused", "native_tool_refused", "Otter refused unexpected native CLI tool activity"],
+      ["invalid native CLI output", "invalid_native_output", "native CLI returned invalid or incomplete output"],
+      ["native CLI result incomplete", "invalid_native_output", "native CLI returned invalid or incomplete output"],
+      ["execution deadline elapsed", "deadline", "request ran out of time"],
+      ["output byte limit reached", "output_bound", "exceeded the output limit"],
+      ["native CLI process failed", "process_failure", "native CLI process failed before completing the request"],
+      ["native CLI reported failure", "transport", "did not complete the request"],
       ["PRIVATE_PROVIDER_SECRET unrecognized text", "other", undefined],
     ] as const) {
       const h = harness({ outcome: { status: "failed", error } })
       let caught: unknown
-      try { await runWorkflowTurn(h.runtime, bindingFor(null, `s-reason-${reason}`), request()) }
+      try { await runWorkflowTurn(h.runtime, bindingFor(null, `s-reason-${caseNumber++}`), request()) }
       catch (thrown) { caught = thrown }
       expect(caught).toMatchObject({ category: "model_failed", reason, message: "planning model did not complete a response" })
       const diagnostic = (caught as ModelRequestError).diagnostic

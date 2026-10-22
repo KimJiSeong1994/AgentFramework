@@ -190,9 +190,13 @@ Otter delegates sign-in to each vendor CLI and never reads, stores, forwards or 
   CLI's saved sign-in for every program that uses it.
 - `local` (Ollama) has no sign-in. `/login`, `/auth` and `/logout` work before a model is selected and while a session
   is held, never during a running turn.
-- When a codex/claude model request fails or a model switch is refused, otter checks the status of the engines
-  involved (anchor and combo routes) and names a signed-out engine with the command to sign in; a refused startup
-  admission points at `otter auth` / `otter login`.
+- For an ordinary chat transport failure, otter checks only the main engine that handled that turn, not unused
+  combo engines. A signed-out status may add a login hint; it does not prove authentication caused the request
+  failure. Known reply-format, tool-policy and budget failures do not prompt re-login.
+  Model-switch checks still cover the requested anchor and combo routes; refused startup admission points at
+  `otter auth` / `otter login`.
+- “The model request failed after execution stopped” reports a failed model turn, not a failed login command.
+  Known transport causes are shown using fixed, secret-free explanations; unknown vendor errors remain redacted.
 
 ### Role combo
 
