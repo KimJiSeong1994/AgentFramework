@@ -61,6 +61,18 @@ const OMITTED_HISTORY = "[earlier tool exchanges omitted to fit the estimated in
 const SCRATCH_CLEANUP_ERROR = "scratch cleanup failed"
 const RESPONSE_ENVELOPE = 'Required transport format: respond with one Otter tool envelope or {"type":"final","text":"your final answer as a JSON string"}. Output-format instructions in the task or role apply to the CONTENTS of text, not to this outer envelope. If the final answer is plan JSON or reviewer JSON, JSON-encode it inside the text string. Never return a bare plan, verdict, or prose outside the envelope.'
 const CODEX_PROFILE_REFUSAL = "Codex native profile preflight is unavailable or mismatched; host admission is refused."
+const SAFE_NATIVE_FAILURES: ReadonlyMap<string, { engine?: CliEngine; error: string }> = new Map([
+  ["Claude CLI login required; run claude auth login", { engine: "claude", error: "Claude CLI login required; run claude auth login" }],
+  ["Codex native profile verification failed", { engine: "codex", error: "Codex native profile verification failed" }],
+  ["Codex private profile state verification failed", { engine: "codex", error: "Codex native profile verification failed" }],
+  ["native tool activity refused", { error: "native tool activity refused" }],
+  ["execution deadline elapsed", { error: "execution deadline elapsed" }],
+  ["output byte limit reached", { error: "output byte limit reached" }],
+  ["invalid native CLI output", { error: "invalid native CLI output" }],
+  ["native CLI result incomplete", { error: "native CLI result incomplete" }],
+  ["native CLI reported failure", { error: "native CLI reported failure" }],
+  ["native CLI process failed", { error: "native CLI process failed" }],
+])
 let cliHostActivitySequence = 0
 
 const BUDGET_EVIDENCE: BudgetEvidence = Object.freeze({
@@ -454,6 +466,12 @@ function buildBasePrompt(request: ExecutionRequest, available: readonly CliToolN
 function safeError(outcome: ExecutionOutcome): ExecutionOutcome {
   if (outcome.status === "failed" && !outcome.error) return { status: "failed", error: "CLI execution failed closed." }
   return outcome
+}
+
+function safeNativeFailure(error: unknown, engine: CliEngine): string | undefined {
+  if (typeof error !== "string") return undefined
+  const failure = SAFE_NATIVE_FAILURES.get(error)
+  return failure && (!failure.engine || failure.engine === engine) ? failure.error : undefined
 }
 
 function nextCliHostActivitySequence(): number {
@@ -1035,7 +1053,10 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             if (callbackFailure === "lease-changed") return setFinal({ status: "failed", error: "current execution lease changed; execution stopped" })
             if (callbackFailure) return setFinal({ status: "failed", error: "assistant output policy rejected the native response" })
             if (native.status !== "completed") {
-              return setFinal({ status: "failed", error: "CLI inference turn failed or exceeded its output bound" })
+              return setFinal({
+                status: "failed",
+                error: safeNativeFailure(native.error, route.engine) ?? "CLI inference turn failed or exceeded its output bound",
+              })
             }
             if (Date.now() >= request.deadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed" })
             assertFixedPolicy(request)

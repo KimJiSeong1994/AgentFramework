@@ -73,17 +73,24 @@ const MODEL_REQUEST_DIAGNOSTICS: Readonly<Record<ModelRequestFailureCategory, st
  */
 export type HostFailureReason =
   | "malformed_response" | "unknown_tool" | "tool_input" | "tool_denied" | "tool_rounds" | "input_budget"
-  | "output_bound" | "deadline" | "transport" | "policy" | "other"
+  | "output_bound" | "deadline" | "transport" | "policy" | "auth_required" | "profile_version"
+  | "native_tool_refused" | "invalid_native_output" | "process_failure" | "other"
 
 const HOST_FAILURE_PATTERNS: ReadonlyArray<readonly [RegExp, HostFailureReason]> = [
+  [/^Claude CLI login required; run claude auth login$/u, "auth_required"],
+  [/^Codex (?:native profile verification failed|private profile state verification failed|version\/profile probe refused inference)$/u, "profile_version"],
+  [/^native tool activity refused$/u, "native_tool_refused"],
+  [/^invalid native CLI output$|^native CLI result incomplete$/u, "invalid_native_output"],
+  [/^native CLI process failed$/u, "process_failure"],
+  [/^output byte limit reached$/u, "output_bound"],
+  [/^native CLI reported failure$/u, "transport"],
   [/^malformed CLI response/u, "malformed_response"],
   [/^unknown Otter tool refused/u, "unknown_tool"],
   [/^malformed Otter tool input|^Otter tool input or implementation failed/u, "tool_input"],
   [/^Otter tool denied|^Otter pre-execution tool policy|^Otter skill (permission|context)/u, "tool_denied"],
   [/^Otter tool round limit/u, "tool_rounds"],
   [/input budget|^skill instructions exceeded/u, "input_budget"],
-  // "CLI inference turn failed or exceeded its output bound" is any non-completed CLI run (exit code, auth, crash), so it
-  // is a transport failure; only the host's own reactive cap is an output-bound failure.
+  // Unknown native failures remain the generic transport case; only allowlisted native bounds get output_bound.
   [/^CLI inference transport|^CLI inference turn failed|^Codex version\/profile probe|^CLI host execution failed/u, "transport"],
   [/^reactive output byte limit reached/u, "output_bound"],
   [/deadline elapsed/u, "deadline"],
@@ -105,6 +112,11 @@ const HOST_FAILURE_HINTS: Readonly<Partial<Record<HostFailureReason, string>>> =
   output_bound: "The model reply exceeded the output limit.",
   deadline: "The request ran out of time.",
   transport: "The model CLI did not complete the request.",
+  auth_required: "Claude CLI authentication is required. Run claude auth login.",
+  profile_version: "The Codex CLI version or native profile could not be verified.",
+  native_tool_refused: "Otter refused unexpected native CLI tool activity.",
+  invalid_native_output: "The native CLI returned invalid or incomplete output.",
+  process_failure: "The native CLI process failed before completing the request.",
 }
 
 /** Issued only after settlement; the display diagnostic is fixed, not provider text. */

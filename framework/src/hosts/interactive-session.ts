@@ -3761,7 +3761,11 @@ export async function runInteractiveSession(
           publishView()
           if (modelFailureMayReturnToComposer()) {
             progress.responseReceived()
-            const hint = error.category === "model_failed" ? await signInHint(engineSet(turnSelection.engine, turnSelection.routes)) : undefined
+            // Only reasons that can plausibly involve authentication should trigger a status check. A known
+            // format/tool/budget/deadline/profile failure should not prompt a user to sign in.
+            const authMayBeRelevant = error.reason === undefined || error.reason === "other" || error.reason === "transport"
+              || error.reason === "process_failure" || error.reason === "auth_required"
+            const hint = error.category === "model_failed" && authMayBeRelevant ? await signInHint([turnSelection.engine]) : undefined
             const shown = hint ? `${error.diagnostic} ${hint}` : error.diagnostic
             persist("notice", { text: shown, provenance: "error" })
             if (terminal.writeText) terminal.writeText({ provenance: "error", text: shown })
