@@ -15,7 +15,7 @@ import { executionRunDirectory } from "../state/store.ts"
 import { defaultUpdateCheck, updateNoticeText, type UpdateNotice } from "./update-check.ts"
 import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
 import { inputColorSupported, inputLine, renderInput, type InputPresentation } from "./cli-input.ts"
-import { AUTH_ENGINES, authStatus, describeAuth, describeDiagnosis, diagnoseAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
+import { AUTH_ENGINES, authStatus, describeAuth, describeAuthFailure, describeDiagnosis, diagnoseAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
 import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus, type CliToolDisplay } from "./cli-progress.ts"
 import { formatDuration, type WorkflowProgress } from "../tui/progress.ts"
 import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, skillInstructionBudget, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
@@ -1700,7 +1700,7 @@ export async function runInteractiveSession(
         process.stderr.write(`\n$ ${engine} ${argv.join(" ")}\n${hint ? `${hint}\n` : ""}`)
         run = await deps.auth.run(engine, argv, worktree)
       } catch (error) {
-        failure = boundedTerminalDiagnostic(error instanceof Error ? error.message : String(error))
+        failure = describeAuthFailure(error)
       } finally {
         deps.signals.off("SIGINT", ignoreInterrupt)
         if (sigintRegistered) deps.signals.on("SIGINT", onSigint)

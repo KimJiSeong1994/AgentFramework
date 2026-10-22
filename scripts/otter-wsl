@@ -13,7 +13,14 @@ if [ "${OTTER_WSL_ENV:-}" != 1 ]; then
   OTTER_WSL_ENV=1
   export OTTER_WSL_ENV
   shell=${SHELL:-}
-  case "$shell" in /*) [ -x "$shell" ] || shell=/bin/sh ;; *) shell=/bin/sh ;; esac
+  case "$shell" in /*) [ -f "$shell" ] && [ -x "$shell" ] || shell= ;; *) shell= ;; esac
+  if [ -z "$shell" ]; then
+    if passwd_entry=$(getent passwd "$(id -u)" 2>/dev/null); then
+      shell=$(printf '%s\n' "$passwd_entry" | awk -F: 'NF >= 7 { print $7; exit }') || shell=
+      case "$shell" in /*) [ -f "$shell" ] && [ -x "$shell" ] || shell= ;; *) shell= ;; esac
+    fi
+  fi
+  [ -n "$shell" ] || shell=/bin/sh
   # -l loads the profile; -i also loads ~/.bashrc / ~/.zshrc past their non-interactive early return (where nvm lives).
   # -i needs a terminal on stdin (otherwise the shell warns "no job control"), so piped runs use the profile only.
   if [ -t 0 ]; then flags=-lic; else flags=-lc; fi

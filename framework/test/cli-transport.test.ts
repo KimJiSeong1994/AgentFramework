@@ -1,10 +1,11 @@
 import { afterEach, expect, spyOn, test } from "bun:test"
 import * as fs from "node:fs"
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { join, resolve } from "node:path"
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import * as path from "node:path"
+import { delimiter, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import process from "node:process"
-import { createCliTransport, type CliEngine } from "../src/hosts/cli-transport.ts"
+import { CliExecutableError, createCliTransport, findExecutable, type CliEngine } from "../src/hosts/cli-transport.ts"
 import { codexProfileArgv, createCodexProfile } from "../src/hosts/codex-profile.ts"
 
 const CODEX_MODEL = "gpt-5.6-sol"
@@ -30,6 +31,21 @@ function installFakeCli(engine: CliEngine, source: string): string {
   })
   process.env.PATH = directory
   return directory
+}
+
+function createPathDirectory(): string {
+  const directory = mkdtempSync(join(tmpdir(), "cli-transport-path-test-"))
+  testDirectories.push(directory)
+  return directory
+}
+
+function setPath(directories: string[]): void {
+  const previousPath = process.env.PATH
+  restoreEnvironment.push(() => {
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
+  })
+  process.env.PATH = directories.join(delimiter)
 }
 
 function setProcessPlatform(value: string): void {
@@ -222,6 +238,92 @@ function codexOutput(item: Record<string, unknown>, terminal: Record<string, unk
     `${JSON.stringify(terminal)}\n`,
   ]
 }
+
+test.each(["codex", "claude"] as const)("findExecutable reports permission denial for a non-executable %s file", engine => {
+  const directory = createPathDirectory()
+  const candidate = join(directory, engine)
+  writeFileSync(candidate, "", { mode: 0o600 })
+  chmodSync(candidate, 0o600)
+  setPath([directory])
+
+  let thrown: unknown
+  try { findExecutable(engine) } catch (error) { thrown = error }
+
+  expect(thrown).toBeInstanceOf(CliExecutableError)
+  expect(thrown).toMatchObject({ reason: "permission-denied", message: "CLI executable permission denied" })
+  expect((thrown as Error).message).not.toContain(directory)
+})
+
+test.each(["codex", "claude"] as const)("findExecutable preserves the legacy not-found error for absent %s", engine => {
+  setPath([createPathDirectory()])
+
+  let thrown: unknown
+  try { findExecutable(engine) } catch (error) { thrown = error }
+
+  expect(thrown).toBeInstanceOf(CliExecutableError)
+  expect(thrown).toMatchObject({ reason: "not-found", message: "CLI executable not found" })
+})
+
+test.each(["codex", "claude"] as const)("findExecutable skips a denied %s candidate when a later PATH candidate is usable", engine => {
+  const deniedDirectory = createPathDirectory()
+  const usableDirectory = createPathDirectory()
+  const deniedCandidate = join(deniedDirectory, engine)
+  const usableCandidate = join(usableDirectory, engine)
+  writeFileSync(deniedCandidate, "", { mode: 0o600 })
+  chmodSync(deniedCandidate, 0o600)
+  writeFileSync(usableCandidate, "", { mode: 0o700 })
+  chmodSync(usableCandidate, 0o700)
+  setPath([deniedDirectory, usableDirectory])
+
+  expect(findExecutable(engine)).toBe(realpathSync(usableCandidate))
+})
+
+test("findExecutable rejects WSL Windows paths after resolving PATH entries and symlinks", async () => {
+  const moduleSpecifier: string = "../src/hosts/cli-transport.ts?wsl-path-resolution-test"
+  const wslTransport = await import(moduleSpecifier) as typeof import("../src/hosts/cli-transport.ts")
+  setProcessPlatform("linux")
+
+  const readFile = spyOn(fs, "readFileSync").mockImplementation((() => "microsoft") as unknown as typeof fs.readFileSync)
+  const originalPathResolve = path.resolve
+  const resolvePath = spyOn(path, "resolve").mockImplementation((...segments) =>
+    segments[0] === "." ? "/mnt/c/fake/codex" : originalPathResolve(...segments))
+  const inspectedCandidates: string[] = []
+  const originalStat = fs.statSync
+  const stat = spyOn(fs, "statSync").mockImplementation(((candidate: fs.PathLike) => {
+    inspectedCandidates.push(String(candidate))
+    return originalStat(candidate)
+  }) as typeof fs.statSync)
+  try {
+    setPath(["."])
+    expect(() => wslTransport.findExecutable("codex")).toThrow("CLI executable not found")
+    expect(readFile).toHaveBeenCalledWith("/proc/sys/kernel/osrelease", "utf8")
+    expect(inspectedCandidates).toEqual([])
+  } finally {
+    stat.mockRestore()
+    resolvePath.mockRestore()
+    readFile.mockRestore()
+  }
+
+  const deniedDirectory = createPathDirectory()
+  const usableDirectory = createPathDirectory()
+  const deniedCandidate = join(deniedDirectory, "codex")
+  const usableCandidate = join(usableDirectory, "codex")
+  writeFileSync(deniedCandidate, "", { mode: 0o700 })
+  chmodSync(deniedCandidate, 0o700)
+  writeFileSync(usableCandidate, "", { mode: 0o700 })
+  chmodSync(usableCandidate, 0o700)
+  const usableRealpath = realpathSync(usableCandidate)
+  setPath([deniedDirectory, usableDirectory])
+
+  const originalRealpath = fs.realpathSync
+  const realpath = spyOn(fs, "realpathSync").mockImplementation(((candidate: fs.PathLike) =>
+    String(candidate) === deniedCandidate ? "/mnt/c/Windows/codex.exe" : originalRealpath(candidate)) as typeof fs.realpathSync)
+  try {
+    expect(wslTransport.findExecutable("codex")).toBe(usableRealpath)
+  } finally {
+    realpath.mockRestore()
+  }
+})
 
 test("Claude uses the verified stdin launch and emits assistant text once before its final result", async () => {
   const prompt = "private prompt fixture"

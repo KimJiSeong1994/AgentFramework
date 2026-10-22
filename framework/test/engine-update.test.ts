@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { CODEX_SUPPORTED_VERSIONS } from "../src/hosts/codex-profile.ts"
-import { compareVersions, describeEngine, describeUpdateFailure, installMethodOf, npmGlobalWritable, planEngineUpdate, verifyEngineUpdate, type EngineInfo, type UpdateEnvironment } from "../src/hosts/engine-update.ts"
+import { compareVersions, describeEngine, describeUpdateFailure, engineInfo, installMethodOf, npmGlobalWritable, planEngineUpdate, verifyEngineUpdate, type EngineInfo, type UpdateEnvironment } from "../src/hosts/engine-update.ts"
 
 const target = CODEX_SUPPORTED_VERSIONS.at(-1)!
 const codex = (method: EngineInfo["method"], version?: string): EngineInfo =>
@@ -80,6 +80,37 @@ describe("update plan", () => {
   test("descriptions name the version, support and the next step", () => {
     expect(describeEngine(codex("homebrew", target), planEngineUpdate(codex("homebrew", target), writable))).toBe(`codex: ${target} (otter-supported) · homebrew\n    Codex CLI ${target} is the newest version otter supports`)
     expect(describeEngine({ engine: "codex", method: "missing" }, planEngineUpdate({ engine: "codex", method: "missing" }, writable))).toStartWith("codex: not installed\n    update: install Codex CLI")
+  })
+})
+
+describe("executable permission diagnostics", () => {
+  test.each(["codex", "claude"] as const)("%s with no execute permission is not treated as missing", engine => {
+    const root = mkdtempSync(join(tmpdir(), "otter-engine-permissions-"))
+    const executable = join(root, engine)
+    const savedPath = process.env.PATH
+    writeFileSync(executable, "#!/bin/sh\nexit 0\n")
+    chmodSync(executable, 0o644)
+    try {
+      process.env.PATH = root
+      const info = engineInfo(engine)
+      expect(info).toEqual({ engine, method: "missing", failure: "permission-denied" })
+
+      const plan = planEngineUpdate(info, writable)
+      expect(plan).toMatchObject({ engine, action: "manual" })
+      expect(argvs(plan)).toEqual([])
+      if (plan.action === "manual") {
+        expect(plan.summary).toContain("permission denied")
+        expect(plan.summary).toContain("correct them manually")
+        expect(plan.summary).not.toContain("install")
+      }
+      const description = describeEngine(info, plan)
+      expect(description).toContain("permission denied")
+      expect(description).not.toContain("not installed")
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH
+      else process.env.PATH = savedPath
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 

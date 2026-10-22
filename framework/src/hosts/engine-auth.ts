@@ -1,8 +1,9 @@
 // Vendor CLI sign-in for the codex and claude engines. Otter never reads, stores, forwards or prints a credential:
 // status runs the vendor's own read-only status command and keeps only "signed in / not / unknown" plus the sign-in
 // method label, and login/logout hand the real terminal to the vendor's own interactive command.
-import { spawn, spawnSync } from "node:child_process"
-import { findExecutable, insideWsl, type CliEngine } from "./cli-transport.ts"
+import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process"
+import type { Readable } from "node:stream"
+import { CliExecutableError, findExecutable, insideWsl, type CliEngine } from "./cli-transport.ts"
 import { UNFORWARDED_CREDENTIAL_ENV, unforwardedEnvironmentNames, vendorProcessEnvironment } from "./vendor-process.ts"
 
 export type AuthEngine = Extract<CliEngine, "codex" | "claude">
@@ -21,6 +22,35 @@ export type AuthRun = { exitCode: number | null; signal: string | null }
 const STATUS_TIMEOUT_MS = 15_000
 const STATUS_OUTPUT_BYTES = 64 * 1024
 const METHOD_LABEL = /^[A-Za-z0-9 ._()-]{1,40}$/u
+const STATUS_PERMISSION_MARKER = /(?:^|[^A-Za-z0-9_])(?:EACCES|EPERM)(?:$|[^A-Za-z0-9_])|Permission denied/iu
+
+function authFailureCode(error: unknown): string | undefined {
+  if (error === null || typeof error !== "object") return undefined
+  try {
+    const code = (error as { code?: unknown }).code
+    return typeof code === "string" ? code : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** A safe, actionable auth failure description; raw errors, paths and credential-bearing messages are never included. */
+export function describeAuthFailure(error: unknown): string {
+  if (error instanceof CliExecutableError) {
+    if (error.reason === "not-found") return "CLI not found on PATH"
+    if (error.reason === "permission-denied") {
+      return "CLI executable permission denied. Check the CLI file's execute permission and search permission on its parent directories for your normal user. On WSL/Linux, use the Linux-side CLI install. Do not run Otter with sudo."
+    }
+  }
+  const code = authFailureCode(error)
+  if (code === "EACCES" || code === "EPERM") {
+    return "CLI executable permission denied while starting the CLI. Check the executable and search permission on its parent directories for your normal user. On WSL/Linux, use the Linux-side CLI install. Do not run Otter with sudo."
+  }
+  if (code === "ENOENT") {
+    return "CLI could not be started. It was found on PATH, but its interpreter or runtime may be missing. Check that the installed CLI's interpreter/runtime is available."
+  }
+  return "CLI could not be started. Check the CLI installation and permissions for your normal user; on WSL/Linux, use a Linux-side install. Do not run Otter with sudo."
+}
 
 /** The vendor's own sign-in commands. `api-key` reads the key from stdin inside the vendor CLI, never from otter. */
 export function loginArgv(engine: AuthEngine, method: LoginMethod = "browser"): string[] {
@@ -100,6 +130,14 @@ function unforwardedCredential(engine: AuthEngine): string | undefined {
   return UNFORWARDED_CREDENTIAL_ENV[engine].find(name => typeof process.env[name] === "string" && process.env[name] !== "")
 }
 
+function vendorStatusPermissionFailure(engine: AuthEngine): AuthState {
+  return {
+    engine,
+    state: "unknown",
+    reason: `${engine} vendor status reported a permission error. Check whether your normal user can access the authentication store or keyring.`,
+  }
+}
+
 /**
  * Run the vendor status command without a terminal; bounded time and output. It runs with exactly the environment a model
  * call gets (vendorProcessEnvironment), so this reports the same CLI authentication view available to model calls; it
@@ -107,7 +145,8 @@ function unforwardedCredential(engine: AuthEngine): string | undefined {
  */
 export async function authStatus(engine: AuthEngine, cwd: string, env: NodeJS.ProcessEnv = vendorProcessEnvironment()): Promise<AuthState> {
   let executable: string
-  try { executable = findExecutable(engine) } catch { return { engine, state: "unknown", reason: `${engine} CLI not found on PATH` } }
+  try { executable = findExecutable(engine) }
+  catch (error) { return { engine, state: "unknown", reason: `${engine} ${describeAuthFailure(error)}` } }
   const envOnly = env === process.env ? undefined : unforwardedCredential(engine)
   return await new Promise<AuthState>(settle => {
     const stdout: Buffer[] = []
@@ -115,7 +154,13 @@ export async function authStatus(engine: AuthEngine, cwd: string, env: NodeJS.Pr
     let stdoutBytes = 0
     let stderrBytes = 0
     let done = false
-    const child = spawn(executable, statusArgv(engine), { cwd, env, stdio: ["ignore", "pipe", "pipe"] })
+    let child: ChildProcessByStdio<null, Readable, Readable>
+    try {
+      child = spawn(executable, statusArgv(engine), { cwd, env, stdio: ["ignore", "pipe", "pipe"] })
+    } catch (error) {
+      settle({ engine, state: "unknown", reason: `${engine} ${describeAuthFailure(error)}` })
+      return
+    }
     const finish = (value: AuthState) => {
       if (done) return
       done = true
@@ -133,16 +178,17 @@ export async function authStatus(engine: AuthEngine, cwd: string, env: NodeJS.Pr
     child.stdout.on("data", (chunk: Buffer) => { stdoutBytes = take(stdout, stdoutBytes, chunk) })
     // Capture stderr separately: Codex writes its status there, while Claude's JSON is on stdout.
     child.stderr.on("data", (chunk: Buffer) => { stderrBytes = take(stderr, stderrBytes, chunk) })
-    child.on("error", () => finish({ engine, state: "unknown", reason: `${engine} status command could not start` }))
+    child.on("error", error => finish({ engine, state: "unknown", reason: `${engine} ${describeAuthFailure(error)}` }))
     child.on("close", code => {
       const stdoutText = Buffer.concat(stdout, stdoutBytes).toString("utf8")
-      if (engine === "claude") {
-        finish(parseAuthStatus(engine, code, stdoutText))
+      const stderrText = Buffer.concat(stderr, stderrBytes).toString("utf8")
+      const statusOutput = engine === "claude" || !codexStatusFromOutput(stderrText).hasStatus ? stdoutText : stderrText
+      const result = parseAuthStatus(engine, code, statusOutput)
+      if ((code !== 0 || result.state === "unknown") && STATUS_PERMISSION_MARKER.test(stderrText)) {
+        finish(vendorStatusPermissionFailure(engine))
         return
       }
-      const stderrText = Buffer.concat(stderr, stderrBytes).toString("utf8")
-      const statusOutput = codexStatusFromOutput(stderrText).hasStatus ? stderrText : stdoutText
-      finish(parseAuthStatus(engine, code, statusOutput))
+      finish(result)
     })
   })
 }

@@ -2268,7 +2268,7 @@ describe("interactive terminal", () => {
     expect(h.calls.runtimes).toEqual([])
   })
 
-  test("Ctrl+C during the vendor sign-in is not the session's SIGINT; a missing vendor CLI is reported", async () => {
+  test("Ctrl+C during vendor sign-in is not the session's SIGINT; startup errors are reported without raw details", async () => {
     let interruptListeners = -1
     const h = harness({ lines: ["/login codex", "1", "/quit"], auth: { runThrows: true } })
     const auth = h.deps.auth!
@@ -2280,7 +2280,8 @@ describe("interactive terminal", () => {
     }
     expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).toEqual({ code: 0 })
     expect(interruptListeners).toBe(1)
-    expect(h.calls.output.join("")).toContain("codex login could not run: fixture vendor CLI missing")
+    expect(h.calls.output.join("")).toContain("codex login could not run: CLI could not be started.")
+    expect(h.calls.output.join("")).not.toContain("fixture vendor CLI missing")
   })
 
   test("a failed model request names a signed-out engine and how to sign in", async () => {
