@@ -261,8 +261,15 @@ sign-in remains valid. Model calls and status checks also receive the OS keyring
 Secret Service is visible to otter.
 
 Engine discovery requires the vendor CLI on Otter's PATH; installing Otter does not install Codex or Claude.
+Discovery and login distinguish a missing executable, execute/search permission denial, and a found CLI that cannot
+start (for example, a missing interpreter). Status-command permission errors are reported without raw stderr or
+credential paths. `otter engines` does not treat permission-denied discovery as a missing installation or offer an
+automatic install for it. Check the current user's executable, parent-directory, auth-store and keyring access;
+Otter does not run sudo, chmod or chown to repair those permissions.
 Under WSL, install and sign in to the Linux CLIs in the same distribution; Windows-mounted CLI paths are excluded.
-The WSL launcher loads the user's shell environment and preserves arguments for POSIX shells and Fish.
+This exclusion also applies after resolving relative PATH entries and symlinks.
+The WSL launcher loads the user's shell environment and preserves arguments for POSIX shells and Fish. If `SHELL`
+is unavailable, it looks up the current account's login shell before falling back to `/bin/sh`.
 Codex native-profile admission now permits macOS and Linux, including WSL's Linux runtime. Linux/WSL login status alone
 does not establish inference qualification: a mocked Linux platform test is not actual Linux or WSL qualification.
 

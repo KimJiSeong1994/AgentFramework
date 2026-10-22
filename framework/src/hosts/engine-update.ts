@@ -11,7 +11,7 @@ import { accessSync, constants, existsSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join, sep } from "node:path"
 import { CODEX_SUPPORTED_VERSIONS } from "./codex-profile.ts"
-import { findExecutable } from "./cli-transport.ts"
+import { CliExecutableError, findExecutable } from "./cli-transport.ts"
 
 export const UPDATABLE_ENGINES = ["codex", "claude"] as const
 export type UpdatableEngine = (typeof UPDATABLE_ENGINES)[number]
@@ -25,6 +25,8 @@ export type EngineInfo = Readonly<{
   method: InstallMethod
   /** Codex only: whether otter qualified this version. */
   supported?: boolean
+  /** The executable was found on PATH but could not be accessed due to permissions. */
+  failure?: "permission-denied"
 }>
 
 /** One way to run an update: the exact argv and how it is offered to the human. */
@@ -72,7 +74,12 @@ function versionOf(engine: UpdatableEngine, executable: string): string | undefi
 /** What is installed (pure reads plus `--version`). */
 export function engineInfo(engine: UpdatableEngine): EngineInfo {
   let executable: string
-  try { executable = findExecutable(engine) } catch { return { engine, method: "missing" } }
+  try { executable = findExecutable(engine) } catch (error) {
+    if (error instanceof CliExecutableError && error.reason === "permission-denied") {
+      return { engine, method: "missing", failure: "permission-denied" }
+    }
+    return { engine, method: "missing" }
+  }
   let real = executable
   try { real = realpathSync(executable) } catch { /* keep the PATH entry */ }
   const version = versionOf(engine, executable)
@@ -149,6 +156,10 @@ function managerChoices(method: "npm" | "bun" | "pnpm", spec: string, env: Updat
 /** The update for one engine: confirmed command choices, "already current", or what to do by hand. */
 export function planEngineUpdate(info: EngineInfo, env: UpdateEnvironment = defaultUpdateEnvironment()): EngineUpdatePlan {
   const engine = info.engine
+  if (info.failure === "permission-denied") {
+    const name = engine === "codex" ? "Codex CLI" : "Claude Code"
+    return { engine, action: "manual", summary: `${name} on PATH cannot be executed (permission denied). Check its executable bit and parent-directory access permissions and correct them manually; Otter will not change permissions or run sudo.` }
+  }
   if (engine === "codex") {
     const target = CODEX_SUPPORTED_VERSIONS.at(-1)!
     const spec = `${NPM_PACKAGE.codex}@${target}`
@@ -245,7 +256,8 @@ export function runEngineUpdate(argv: readonly string[]): Promise<{ exitCode: nu
 
 /** One line per engine for `otter engines` / `/engines`. */
 export function describeEngine(info: EngineInfo, plan: EngineUpdatePlan): string {
-  const head = info.method === "missing" ? `${info.engine}: not installed`
+  const head = info.failure === "permission-denied" ? `${info.engine}: permission denied (not executable)`
+    : info.method === "missing" ? `${info.engine}: not installed`
     : `${info.engine}: ${info.version ?? "version unknown"}${info.engine === "codex" ? (info.supported ? " (otter-supported)" : " (not otter-supported)") : ""} · ${info.method}`
   const next = plan.action === "run" ? `update: ${plan.summary} — ${plan.choices[0]!.argv.join(" ")}` : plan.action === "current" ? plan.summary : `update by hand: ${plan.summary}`
   return `${head}\n    ${next}`

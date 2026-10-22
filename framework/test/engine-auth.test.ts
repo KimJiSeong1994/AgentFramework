@@ -1,10 +1,10 @@
 // Engine sign-in delegates to the vendor CLIs; otter keeps only the signed-in verdict and the method label.
 import { describe, expect, test } from "bun:test"
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { authStatus, describeAuth, describeDiagnosis, diagnoseAuth, loginArgv, loginHint, logoutArgv, parseAuthStatus, runVendorAuth } from "../src/hosts/engine-auth.ts"
-import { usablePathEntry } from "../src/hosts/cli-transport.ts"
+import { authStatus, describeAuth, describeAuthFailure, describeDiagnosis, diagnoseAuth, loginArgv, loginHint, logoutArgv, parseAuthStatus, runVendorAuth } from "../src/hosts/engine-auth.ts"
+import { CliExecutableError, usablePathEntry } from "../src/hosts/cli-transport.ts"
 
 describe("engine CLI lookup under WSL", () => {
   test("Windows drive mounts never supply an engine CLI under WSL (their sign-in lives on the Windows side)", () => {
@@ -37,6 +37,32 @@ describe("vendor auth commands", () => {
     expect(() => loginArgv("claude", "device")).toThrow("claude does not offer device sign-in")
     expect(logoutArgv("codex")).toEqual(["logout"])
     expect(logoutArgv("claude")).toEqual(["auth", "logout"])
+  })
+})
+
+describe("safe auth failure descriptions", () => {
+  test("lookup and spawn failures are distinguished without echoing errors, paths or secrets", () => {
+    expect(describeAuthFailure(new CliExecutableError("not-found"))).toBe("CLI not found on PATH")
+    expect(describeAuthFailure(new CliExecutableError("permission-denied"))).toContain("parent directories")
+
+    const denied = Object.assign(new Error("EACCES /private/cli-path sk-auth-secret"), { code: "EACCES" })
+    const permissionDescription = describeAuthFailure(denied)
+    expect(permissionDescription).toContain("denied while starting")
+    expect(permissionDescription).toContain("Do not run Otter with sudo")
+    expect(permissionDescription).not.toContain("/private/cli-path")
+    expect(permissionDescription).not.toContain("sk-auth-secret")
+
+    const missingInterpreter = Object.assign(new Error("ENOENT /private/cli-path /private/interpreter"), { code: "ENOENT" })
+    const launchDescription = describeAuthFailure(missingInterpreter)
+    expect(launchDescription).toContain("found on PATH")
+    expect(launchDescription).toContain("interpreter or runtime may be missing")
+    expect(launchDescription).not.toContain("/private/cli-path")
+    expect(launchDescription).not.toContain("/private/interpreter")
+
+    const other = describeAuthFailure(new Error("raw secret sk-auth-secret at /private/cli-path"))
+    expect(other).toContain("CLI could not be started")
+    expect(other).not.toContain("sk-auth-secret")
+    expect(other).not.toContain("/private/cli-path")
   })
 })
 
@@ -101,6 +127,105 @@ describe("authStatus runs the vendor CLI found on PATH", () => {
       expect(await authStatus("codex", tmpdir())).toEqual({ engine: "codex", state: "unknown", reason: "codex CLI not found on PATH" })
     } finally {
       process.env.PATH = saved
+    }
+  })
+
+  test("a mode-0600 CLI is reported as a permission problem without exposing its path", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "otter-auth-private-cli-"))
+    const executable = join(bin, "codex")
+    writeFileSync(executable, "#!/bin/sh\necho 'Logged in using ChatGPT'\n")
+    chmodSync(executable, 0o600)
+    const savedPath = process.env.PATH
+    try {
+      process.env.PATH = bin
+      const status = await authStatus("codex", tmpdir(), process.env)
+      expect(status).toMatchObject({ engine: "codex", state: "unknown" })
+      if (status.state !== "unknown") throw new Error("expected an unknown auth status")
+      expect(status.reason).toContain("CLI executable permission denied")
+      expect(status.reason).toContain("parent directories")
+      expect(status.reason).not.toContain(bin)
+      expect(status.reason).not.toContain("not found on PATH")
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH
+      else process.env.PATH = savedPath
+      rmSync(bin, { recursive: true, force: true })
+    }
+  })
+
+  test("an executable with a missing interpreter is a launch failure, not a PATH lookup miss", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "otter-auth-interpreter-secret-"))
+    const executable = join(bin, "codex")
+    writeFileSync(executable, "#!/missing/auth-secret-interpreter\necho 'Logged in using ChatGPT'\n")
+    chmodSync(executable, 0o755)
+    const savedPath = process.env.PATH
+    try {
+      process.env.PATH = bin
+      const status = await authStatus("codex", tmpdir(), process.env)
+      expect(status).toMatchObject({ engine: "codex", state: "unknown" })
+      if (status.state !== "unknown") throw new Error("expected an unknown auth status")
+      expect(status.reason).toContain("codex CLI could not be started.")
+      expect(status.reason).toContain("found on PATH")
+      expect(status.reason).not.toContain("not found on PATH")
+      expect(status.reason).not.toContain(bin)
+      expect(status.reason).not.toContain("auth-secret-interpreter")
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH
+      else process.env.PATH = savedPath
+      rmSync(bin, { recursive: true, force: true })
+    }
+  })
+
+  test("strict permission markers on failed or unknown vendor status are summarized without stderr details", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "otter-auth-status-permission-"))
+    writeFileSync(join(bin, "codex"), "#!/bin/sh\nprintf '%s\\n' 'Not logged in'\nprintf '%s\\n' \"$OTTER_AUTH_PERMISSION_MARKER: /private/auth-store sk-auth-secret\" >&2\nexit 1\n")
+    writeFileSync(join(bin, "claude"), "#!/bin/sh\nprintf '%s\\n' 'unrecognized status response'\nprintf '%s\\n' \"$OTTER_AUTH_PERMISSION_MARKER: /private/keyring-path sk-ant-secret\" >&2\nexit 0\n")
+    chmodSync(join(bin, "codex"), 0o755)
+    chmodSync(join(bin, "claude"), 0o755)
+    const savedPath = process.env.PATH
+    const savedMarker = process.env.OTTER_AUTH_PERMISSION_MARKER
+    try {
+      process.env.PATH = bin
+      const cases = [
+        { engine: "codex", marker: "EACCES" },
+        { engine: "codex", marker: "EPERM" },
+        { engine: "claude", marker: "Permission denied" },
+      ] as const
+      for (const { engine, marker } of cases) {
+        process.env.OTTER_AUTH_PERMISSION_MARKER = marker
+        const status = await authStatus(engine, tmpdir(), process.env)
+        expect(status).toMatchObject({ engine, state: "unknown" })
+        if (status.state !== "unknown") throw new Error("expected a permission-related unknown status")
+        expect(status.reason).toContain("vendor status reported a permission error")
+        expect(status.reason).toContain("normal user can access the authentication store or keyring")
+        expect(status.reason).not.toContain("/private/")
+        expect(status.reason).not.toContain("sk-auth-secret")
+        expect(status.reason).not.toContain("sk-ant-secret")
+        expect(status.reason).not.toContain(marker)
+      }
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH
+      else process.env.PATH = savedPath
+      if (savedMarker === undefined) delete process.env.OTTER_AUTH_PERMISSION_MARKER
+      else process.env.OTTER_AUTH_PERMISSION_MARKER = savedMarker
+      rmSync(bin, { recursive: true, force: true })
+    }
+  })
+
+  test("an unrelated stderr permission warning does not replace a successful signed-in status", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "otter-auth-status-warning-"))
+    writeFileSync(join(bin, "codex"), "#!/bin/sh\nprintf '%s\\n' 'Logged in using ChatGPT'\nprintf '%s\\n' 'unrelated EACCES warning' >&2\nexit 0\n")
+    writeFileSync(join(bin, "claude"), "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'\nprintf '%s\\n' 'unrelated Permission denied warning' >&2\nexit 0\n")
+    chmodSync(join(bin, "codex"), 0o755)
+    chmodSync(join(bin, "claude"), 0o755)
+    const savedPath = process.env.PATH
+    try {
+      process.env.PATH = bin
+      expect(await authStatus("codex", tmpdir(), process.env)).toEqual({ engine: "codex", state: "signed-in", method: "ChatGPT" })
+      expect(await authStatus("claude", tmpdir(), process.env)).toEqual({ engine: "claude", state: "signed-in", method: "claude.ai" })
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH
+      else process.env.PATH = savedPath
+      rmSync(bin, { recursive: true, force: true })
     }
   })
 

@@ -636,6 +636,42 @@ describe("foreground CLI", () => {
 })
 
 describe("auth CLI subprocess failure handling", () => {
+  test("login keeps the existing message when the CLI is missing", async () => {
+    const env = fakeCodexCli("#!/bin/sh\nexit 0\n")
+    fs.rmSync(join(env.PATH!, "codex"))
+    const result = await invokeCli(["login", "codex"], env)
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain("codex CLI not found on PATH.")
+    expect(result.stderr).not.toContain("fake-cli-secret-path")
+  })
+
+  test("auth status distinguishes an inaccessible CLI from a missing one", async () => {
+    const env = fakeCodexCli("#!/bin/sh\necho 'Logged in using ChatGPT'\n")
+    fs.chmodSync(join(env.PATH!, "codex"), 0o600)
+    const result = await invokeCli(["auth", "status"], env)
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toContain("codex: unknown (codex CLI executable permission denied")
+    expect(result.stdout).toContain("parent directories")
+    expect(result.stdout).not.toContain("fake-cli-secret-path")
+    expect(result.stdout).not.toContain("codex CLI not found on PATH")
+    expect(result.stdout).toContain("claude CLI not found on PATH")
+  })
+
+  test("login reports a mode-0600 CLI as a permission problem without leaking paths or secrets", async () => {
+    const env = fakeCodexCli("#!/bin/sh\nexit 0\n")
+    fs.chmodSync(join(env.PATH!, "codex"), 0o600)
+    const secret = "sk-auth-error-secret"
+    const result = await invokeCli(["login", "codex"], { ...env, OPENAI_API_KEY: secret })
+    const output = `${result.stdout}\n${result.stderr}`
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain("codex CLI executable permission denied")
+    expect(result.stderr).toContain("parent directories")
+    expect(result.stderr).toContain("Do not run Otter with sudo")
+    expect(output).not.toContain("fake-cli-secret-path")
+    expect(output).not.toContain(secret)
+    expect(output).not.toContain("EACCES")
+  })
+
   test("failed login is not success when existing credentials keep status signed in", async () => {
     const env = fakeCodexCli(`#!/bin/sh
 if [ "$1" = login ] && [ "$2" = status ]; then
@@ -671,8 +707,11 @@ exit 0
     const result = await invokeCli(["login", "codex"], env)
     expect(result.exitCode).toBe(1)
     expect(result.stderr).toContain("codex CLI could not be started.")
+    expect(result.stderr).toContain("found on PATH")
+    expect(result.stderr).toContain("interpreter or runtime may be missing")
     expect(result.stderr).not.toContain("not found on PATH")
     expect(result.stderr).not.toContain("ENOENT")
     expect(result.stderr).not.toContain("fake-cli-secret-path")
+    expect(result.stderr).not.toContain("fake-cli-interpreter")
   })
 })

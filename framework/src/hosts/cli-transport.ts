@@ -50,6 +50,7 @@ const CLAUDE_RATE_LIMIT_STATUSES = new Set(["allowed", "allowed_warning", "rejec
 const SAFE_ERRORS = {
   options: "invalid CLI transport options",
   executable: "CLI executable not found",
+  executablePermissionDenied: "CLI executable permission denied",
   scratch: "safe CLI scratch directory unavailable",
   process: "native CLI process failed",
   deadline: "execution deadline elapsed",
@@ -64,6 +65,16 @@ const SAFE_ERRORS = {
   callback: "output callback failed",
   cleanup: "scratch cleanup failed",
 } as const
+
+export class CliExecutableError extends Error {
+  readonly reason: "not-found" | "permission-denied"
+
+  constructor(reason: "not-found" | "permission-denied") {
+    super(reason === "not-found" ? SAFE_ERRORS.executable : SAFE_ERRORS.executablePermissionDenied)
+    this.name = "CliExecutableError"
+    this.reason = reason
+  }
+}
 
 type NativeProtocol = {
   consume(chunk: Uint8Array): void
@@ -162,22 +173,29 @@ export function insideWsl(): boolean {
 export function findExecutable(engine: CliEngine): string {
   const pathValue = process.env.PATH
   if (typeof pathValue !== "string" || pathValue.length === 0 || pathValue.includes("\0")) {
-    throw new Error(SAFE_ERRORS.executable)
+    throw new CliExecutableError("not-found")
   }
   const name = executableName(engine)
   const wsl = insideWsl()
+  let permissionDenied = false
   for (const entry of pathValue.split(delimiter)) {
     if (!usablePathEntry(entry, wsl)) continue
     try {
       const candidate = resolve(entry, name)
+      if (!usablePathEntry(candidate, wsl)) continue
       if (!statSync(candidate).isFile()) continue
       accessSync(candidate, constants.X_OK)
-      return realpathSync(candidate)
-    } catch {
+      const realCandidate = realpathSync(candidate)
+      if (!usablePathEntry(realCandidate, wsl)) continue
+      return realCandidate
+    } catch (error) {
+      if (error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM")) {
+        permissionDenied = true
+      }
       // An unavailable PATH entry is not an execution failure worth exposing.
     }
   }
-  throw new Error(SAFE_ERRORS.executable)
+  throw new CliExecutableError(permissionDenied ? "permission-denied" : "not-found")
 }
 
 /** Whether the engine's CLI is an executable file on PATH (the same lookup a transport run uses). */

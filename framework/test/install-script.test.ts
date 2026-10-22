@@ -61,24 +61,59 @@ exec /bin/sh "$@"
   return mock
 }
 
-function runWsl(shell: string, args: string[], initializedPath?: string) {
+function bashLoginShell(initializedPath: string): string {
+  mkdirSync(initializedPath, { recursive: true })
+  writeFileSync(join(home, ".bash_profile"), 'PATH="$OTTER_TEST_INITIALIZED_PATH:$PATH"\nexport PATH\n')
+  return "/bin/bash"
+}
+
+function currentUid(): number {
+  if (typeof process.getuid !== "function") throw new Error("install-script tests require process.getuid support")
+  return process.getuid()
+}
+
+function mockGetent(passwdShell: string, status = 0) {
+  const mockDir = join(home, "mock-getent")
+  mkdirSync(mockDir)
+  const mock = join(mockDir, "getent")
+  writeFileSync(mock, `#!/bin/sh
+printf '%s\\n' "$@" > "$OTTER_TEST_GETENT_ARGS_FILE"
+[ "$1" = passwd ] || exit 97
+[ "$2" = "$OTTER_TEST_UID" ] || exit 98
+[ "$OTTER_TEST_GETENT_STATUS" = 0 ] || exit "$OTTER_TEST_GETENT_STATUS"
+printf 'otter:x:%s:1000:Otter:%s:%s\\n' "$OTTER_TEST_UID" "$HOME" "$OTTER_TEST_PASSWD_SHELL"
+`)
+  chmodSync(mock, 0o755)
+  return { dir: mockDir, passwdShell, status }
+}
+
+function runWsl(shell: string | undefined, args: string[], initializedPath?: string, getent?: ReturnType<typeof mockGetent>) {
   const launcher = join(home, "otter-launcher")
   const argsFile = join(home, "launcher-args")
   const pathFile = join(home, "launcher-path")
+  const getentArgsFile = join(home, "getent-args")
   writeFileSync(launcher, `#!/bin/sh
 printf '%s\\n' "$@" > "$OTTER_TEST_ARGS_FILE"
 printf '%s' "$PATH" > "$OTTER_TEST_PATH_FILE"
 `)
   chmodSync(launcher, 0o755)
 
-  const result = spawnSync("/bin/sh", [wslScript, launcher, ...args], {
+  // macOS /bin/sh synthesizes SHELL at startup; unset it after startup to exercise the WSL missing-SHELL case.
+  const shellArgs = shell === undefined
+    ? ["-c", 'unset SHELL; script=$1; shift; . "$script"', wslScript, wslScript, launcher, ...args]
+    : [wslScript, launcher, ...args]
+  const result = spawnSync("/bin/sh", shellArgs, {
     env: {
       HOME: home,
-      SHELL: shell,
-      PATH: "/usr/bin:/bin",
+      ...(shell === undefined ? {} : { SHELL: shell }),
+      PATH: getent ? `${getent.dir}${delimiter}/usr/bin:/bin` : "/usr/bin:/bin",
       BROWSER: "/bin/true",
       OTTER_TEST_ARGS_FILE: argsFile,
       OTTER_TEST_PATH_FILE: pathFile,
+      OTTER_TEST_GETENT_ARGS_FILE: getentArgsFile,
+      OTTER_TEST_UID: String(currentUid()),
+      OTTER_TEST_GETENT_STATUS: String(getent?.status ?? 0),
+      OTTER_TEST_PASSWD_SHELL: getent?.passwdShell ?? "",
       ...(initializedPath ? { OTTER_TEST_INITIALIZED_PATH: initializedPath } : {}),
     },
     encoding: "utf8",
@@ -89,6 +124,7 @@ printf '%s' "$PATH" > "$OTTER_TEST_PATH_FILE"
     out: `${result.stdout}${result.stderr}`,
     args: existsSync(argsFile) ? readFileSync(argsFile, "utf8").split("\n").slice(0, -1) : undefined,
     path: existsSync(pathFile) ? readFileSync(pathFile, "utf8") : undefined,
+    getentArgs: existsSync(getentArgsFile) ? readFileSync(getentArgsFile, "utf8").split("\n").slice(0, -1) : undefined,
   }
 }
 
@@ -176,4 +212,44 @@ test("Fish login initialization PATH reaches the launcher", () => {
   const result = runWsl(fishShell(), [], initializedPath)
   expect(result.code).toBe(0)
   expect(result.path?.split(delimiter)).toContain(initializedPath)
+})
+
+test("missing SHELL resolves the current UID passwd shell and preserves its initialized PATH", () => {
+  const initializedPath = join(home, "bash-login-bin")
+  const shell = bashLoginShell(initializedPath)
+  const result = runWsl(undefined, [], initializedPath, mockGetent(shell))
+
+  expect(result.code).toBe(0)
+  expect(result.path?.split(delimiter)).toContain(initializedPath)
+  expect(result.getentArgs).toEqual(["passwd", String(currentUid())])
+})
+
+test("a non-absolute SHELL resolves through the passwd login shell", () => {
+  const initializedPath = join(home, "bash-login-bin")
+  const shell = bashLoginShell(initializedPath)
+  const result = runWsl("bash", [], initializedPath, mockGetent(shell))
+
+  expect(result.code).toBe(0)
+  expect(result.path?.split(delimiter)).toContain(initializedPath)
+  expect(result.getentArgs).toEqual(["passwd", String(currentUid())])
+})
+
+test("unavailable getent retains the /bin/sh fallback", () => {
+  const initializedPath = join(home, "bash-login-bin")
+  bashLoginShell(initializedPath)
+  const result = runWsl(undefined, [], initializedPath, mockGetent("/bin/bash", 127))
+
+  expect(result.code).toBe(0)
+  expect(result.path?.split(delimiter)).not.toContain(initializedPath)
+  expect(result.getentArgs).toEqual(["passwd", String(currentUid())])
+})
+
+test("a valid explicit SHELL takes precedence over the passwd shell", () => {
+  const initializedPath = join(home, "bash-login-bin")
+  const shell = bashLoginShell(initializedPath)
+  const result = runWsl(shell, [], initializedPath, mockGetent("/bin/sh"))
+
+  expect(result.code).toBe(0)
+  expect(result.path?.split(delimiter)).toContain(initializedPath)
+  expect(result.getentArgs).toBeUndefined()
 })

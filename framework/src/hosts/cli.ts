@@ -27,7 +27,7 @@ import { getOwnedSession, readSessionMetadata, sessionWasRebound } from "../sess
 import { assertSDKSessionQuiescent, readSDKResumeIdentity } from "../sessions/sdk-quiescence.ts"
 import { captureSDKSessionLifetime } from "../sessions/sdk-transcript.ts"
 import { assertNever, isCancelPending, stopDisplay } from "../workflows/types.ts"
-import { AUTH_ENGINES, authStatus, describeAuth, describeDiagnosis, diagnoseAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type LoginMethod } from "./engine-auth.ts"
+import { AUTH_ENGINES, authStatus, describeAuth, describeAuthFailure, describeDiagnosis, diagnoseAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type LoginMethod } from "./engine-auth.ts"
 import { updateCli } from "./update-check.ts"
 import { describeEngine, describeUpdateFailure, engineInfo, planEngineUpdate, runEngineUpdate, UPDATABLE_ENGINES, verifyEngineUpdate, type UpdatableEngine } from "./engine-update.ts"
 import { createInterface } from "node:readline"
@@ -895,10 +895,10 @@ async function authCli(argv: readonly string[]): Promise<number> {
   const hint = command === "login" ? loginHint(engine, (methodArg ?? "browser") as LoginMethod) : undefined
   if (hint) console.error(hint.replace("/login codex device", "otter login codex device"))
   try { findExecutable(engine) }
-  catch { console.error(`${engine} CLI not found on PATH.`); return 1 }
+  catch (error) { console.error(`${engine} ${describeAuthFailure(error)}.`); return 1 }
   let run: Awaited<ReturnType<typeof runVendorAuth>>
   try { run = await runVendorAuth(engine, argvFor, cwd) }
-  catch { console.error(`${engine} CLI could not be started.`); return 1 }
+  catch (error) { console.error(`${engine} ${describeAuthFailure(error)}.`); return 1 }
   const after = await authStatus(engine, cwd)
   console.log(describeAuth(after).replace(/\/login (\w+)/u, "otter login $1"))
   if (run.signal !== null) {
