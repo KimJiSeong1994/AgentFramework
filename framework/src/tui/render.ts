@@ -27,17 +27,18 @@ type CursorPosition = {
 }
 
 /**
- * `below` panels list under the composer (pickers, completions, history search) and keep
- * the transcript visible; `body` panels replace the transcript and hide the composer.
+ * `below` panels list under the composer (pickers, completions, history search), `above`
+ * panels sit between status and composer for HITL choices, and `body` panels replace the
+ * transcript and hide the composer.
  */
 export type FramePanel = {
   readonly title: string
   readonly focus: string
   readonly lines: readonly string[]
-  readonly placement?: "below" | "body"
+  readonly placement?: "below" | "above" | "body"
   /** Option rows are `label  description`: the description after the first two-space gap is muted. */
   readonly columns?: boolean
-  /** Body panels only: indexes into `lines` painted as the highlighted row / dimmed text. */
+  /** Indexes into `lines` painted as the highlighted row / dimmed text. */
   readonly accentLines?: readonly number[]
   readonly mutedLines?: readonly number[]
 }
@@ -66,7 +67,8 @@ const ruleRows = 1
 const composerBorderRows = 2
 const panelBorderRows = 2
 const minimumBodyRows = 3
-const maximumBelowRows = 12
+const minimumTranscriptRows = 1
+const maximumPanelRows = 12
 
 function isBidiControl(codePoint: number): boolean {
   return codePoint === 0x061c || codePoint === 0x200e || codePoint === 0x200f ||
@@ -799,8 +801,8 @@ function composerRowCount(input: { columns: number; rows: number; draft: string;
   return Math.min(composer.rows.length, maximumComposerRows(input.rows))
 }
 
-function bottomRows(rows: number, composerRows: number, belowRows: number): number {
-  return statusRows + ruleRows + (composerRows ? composerBorderRows + composerRows : 0) + belowRows
+function bottomRows(rows: number, composerRows: number, belowRows: number, aboveRows = 0): number {
+  return statusRows + ruleRows + (composerRows ? composerBorderRows + composerRows : 0) + belowRows + aboveRows
 }
 
 /** Rows a `below` panel may use under the composer while keeping a minimal transcript. */
@@ -809,7 +811,17 @@ export function belowPanelRows(input: { columns: number; rows: number; draft: st
   const rows = terminalDimension(input.rows)
   if (columns < MIN_COLUMNS || rows < MIN_ROWS) return 0
   const used = bottomRows(rows, composerRowCount({ ...input, columns, rows }), 0)
-  return Math.max(1, Math.min(maximumBelowRows, rows - used - minimumBodyRows))
+  return Math.max(1, Math.min(maximumPanelRows, rows - used - minimumBodyRows))
+}
+
+/** Content rows available to a bordered HITL panel between status and composer. */
+export function abovePanelRows(input: { columns: number; rows: number; draft: string; cursor: number; prompt?: string }): number {
+  const columns = terminalDimension(input.columns)
+  const rows = terminalDimension(input.rows)
+  if (columns < MIN_COLUMNS || rows < MIN_ROWS) return 0
+  const composerRows = composerRowCount({ ...input, columns, rows })
+  const fixedRows = statusRows + ruleRows + composerBorderRows + composerRows + panelBorderRows + minimumTranscriptRows
+  return Math.max(1, Math.min(maximumPanelRows, rows - fixedRows))
 }
 
 /** Transcript rows above the bottom block; render and scroll bounds share this. */
@@ -821,12 +833,13 @@ export function transcriptViewportRows(input: {
   prompt?: string
   composerVisible?: boolean
   belowRows?: number
+  aboveRows?: number
 }): number {
   const columns = terminalDimension(input.columns)
   const rows = terminalDimension(input.rows)
   if (columns < MIN_COLUMNS || rows < MIN_ROWS) return 0
   const composerRows = input.composerVisible === false ? 0 : composerRowCount({ ...input, columns, rows })
-  return Math.max(0, rows - bottomRows(rows, composerRows, Math.max(0, input.belowRows ?? 0)))
+  return Math.max(0, rows - bottomRows(rows, composerRows, Math.max(0, input.belowRows ?? 0), Math.max(0, input.aboveRows ?? 0)))
 }
 
 /** Content rows inside a bordered body panel (composer hidden). */
@@ -860,8 +873,8 @@ function padToWidth(text: string, width: number): string {
 
 /**
  * Render one full frame in the GJC arrangement: transcript (or a welcome/body panel) on top,
- * then status rows, a rule carrying the model badge, the bordered composer, and any list
- * that belongs to the composer (picker, completions, history search) beneath it.
+ * then status rows, a rule carrying the model badge, an optional HITL panel, the bordered
+ * composer, and any list that belongs to the composer (picker, completions, history search) beneath it.
  */
 export function renderFrame(input: {
   columns: number
@@ -910,8 +923,9 @@ export function renderFrame(input: {
   const horizontal = (width: number): string => glyph.h.repeat(Math.max(0, width))
   const innerWidth = columns - 4
 
-  const bodyPanel = input.panel && input.panel.placement !== "below" ? input.panel : undefined
+  const bodyPanel = input.panel && (input.panel.placement === undefined || input.panel.placement === "body") ? input.panel : undefined
   const belowPanel = input.panel?.placement === "below" ? input.panel : undefined
+  const abovePanel = input.panel?.placement === "above" ? input.panel : undefined
   const composerVisible = input.composerVisible !== false && !bodyPanel
   const composer = layoutComposer(
     composerVisible ? input.draft : "",
@@ -928,9 +942,19 @@ export function renderFrame(input: {
   )
   const belowLimit = Math.max(0, rows - bottomRows(rows, composerRows, 0) - minimumBodyRows)
   const belowLines = belowPanel && composerVisible
-    ? belowPanel.lines.flatMap(line => wrapText(line, columns)).slice(0, Math.min(maximumBelowRows, belowLimit))
+    ? belowPanel.lines.flatMap(line => wrapText(line, columns)).slice(0, Math.min(maximumPanelRows, belowLimit))
     : []
-  const bottom = bottomRows(rows, composerRows, belowLines.length)
+  const aboveCapacity = abovePanel && composerVisible
+    ? abovePanelRows({ columns, rows, draft: input.draft, cursor: input.cursor, prompt: input.prompt })
+    : 0
+  const aboveContent = abovePanel && aboveCapacity > 0
+    ? abovePanel.lines.flatMap((line, lineIndex) => wrapText(line, innerWidth).map(text => ({
+      text,
+      token: abovePanel.accentLines?.includes(lineIndex) ? "accent" as const : abovePanel.mutedLines?.includes(lineIndex) ? "muted" as const : undefined,
+    }))).slice(0, aboveCapacity)
+    : []
+  const abovePanelFrameRows = aboveContent.length > 0 ? aboveContent.length + panelBorderRows : 0
+  const bottom = bottomRows(rows, composerRows, belowLines.length, abovePanelFrameRows)
   const bodyRows = Math.max(0, rows - bottom)
 
   // Body: transcript rows, a welcome box, or a bordered panel.
@@ -1008,7 +1032,8 @@ export function renderFrame(input: {
   // Bottom block.
   const statusStart = bodyRows
   const ruleRow = statusStart + statusRows
-  const composerTop = ruleRow + 1
+  const abovePanelTop = ruleRow + 1
+  const composerTop = abovePanelTop + abovePanelFrameRows
   const requestedStatus = (Array.isArray(input.status) ? input.status : [input.status]).filter(value => value !== "")
   const statusValues = requestedStatus.slice(0, statusRows)
   if (input.notice) statusValues.push(input.notice)
@@ -1016,6 +1041,17 @@ export function renderFrame(input: {
   shownStatus.forEach((value, index) => {
     frameLines[statusStart + statusRows - shownStatus.length + index] = paint(clipToWidth(oneLineText(value), columns), "muted")
   })
+
+  if (abovePanel && abovePanelFrameRows > 0) {
+    const title = clipToWidth(oneLineText(`${abovePanel.title}${separator}${abovePanel.focus} focus`), Math.max(1, columns - 6))
+    frameLines[abovePanelTop] = `${paint(`${glyph.tl}${glyph.h} `, "border")}${paint(title, "focus")}${paint(` ${horizontal(columns - 5 - displayWidth(title))}${glyph.tr}`, "border")}`
+    aboveContent.forEach((line, index) => {
+      const text = padToWidth(line.text, innerWidth)
+      frameLines[abovePanelTop + index + 1] = `${paint(`${glyph.v} `, "border")}${line.token ? paint(text, line.token) : text}${paint(` ${glyph.v}`, "border")}`
+    })
+    const bottomRow = abovePanelTop + abovePanelFrameRows - 1
+    frameLines[bottomRow] = paint(`${glyph.bl}${horizontal(columns - 2)}${glyph.br}`, "border")
+  }
 
   const scrolled = visualTranscriptRows > bodyRows || input.transcriptOlder || input.transcriptNewer
   let right: string

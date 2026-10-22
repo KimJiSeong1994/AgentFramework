@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import fixtureSet from "./fixtures/gjc-keys-8cd17c0.json"
-import { displayAnsiWidth, displayWidth, renderFrame, transcriptDisplayRows, transcriptRowText, transcriptViewportRows, wrapAnsiText, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
+import { abovePanelRows, displayAnsiWidth, displayWidth, renderFrame, transcriptDisplayRows, transcriptRowText, transcriptViewportRows, wrapAnsiText, wrapText, wrapTranscriptLine } from "../src/tui/render.ts"
 
 interface ReferenceFixture {
   id: string
@@ -323,6 +323,45 @@ describe("renderFrame", () => {
     expect(drawn.at(-7)).toEndWith("─ Otter")
     expect(stripCsi(frame).match(/Choose an execution engine/g)).toHaveLength(1)
     expect(finalCursor(frame)).toEqual([20, 13])
+  })
+
+  test.each([[60, 20], [80, 24]] as const)("an above panel preserves transcript and sits directly on the composer at %ix%i", (columns, rows) => {
+    const input = {
+      columns,
+      rows,
+      transcript: ["[Assistant] latest conversation context"],
+      panel: {
+        title: "Pick a direction",
+        focus: "choice selection",
+        placement: "above" as const,
+        lines: ["❯ 1. selected", "  2. another", "", "↑↓ move · Enter select · Esc cancel"],
+        accentLines: [0],
+        mutedLines: [3],
+      },
+      status: "Waiting for your choice",
+      draft: "preserved draft",
+      cursor: 9,
+      prompt: "You> ",
+      color: false,
+    }
+    const frame = renderFrame(input)
+    const drawn = frameRows(frame)
+    const transcriptRow = drawn.findIndex(row => row.includes("latest conversation context"))
+    const panelTop = drawn.findIndex(row => row.startsWith("╭─ Pick a direction · choice selection focus"))
+    const selectedRow = drawn.findIndex(row => row.includes("❯ 1. selected"))
+    const composerPrompt = drawn.findIndex(row => row.includes("You> preserved draft"))
+    const panelBottom = drawn.findIndex((row, index) => index > panelTop && row.startsWith("╰"))
+    expect(transcriptRow).toBeGreaterThanOrEqual(0)
+    expect(panelTop).toBeGreaterThan(transcriptRow)
+    expect(selectedRow).toBeGreaterThan(panelTop)
+    expect(panelBottom + 1).toBe(composerPrompt - 1)
+    expect(abovePanelRows({ columns, rows, draft: input.draft, cursor: input.cursor, prompt: input.prompt })).toBeGreaterThan(0)
+    expect(drawn.every(row => displayWidth(row) <= columns)).toBe(true)
+    const [cursorRow, cursorColumn] = finalCursor(frame)
+    expect(cursorRow).toBeGreaterThan(0)
+    expect(cursorRow).toBeLessThanOrEqual(rows)
+    expect(cursorColumn).toBeGreaterThan(0)
+    expect(cursorColumn).toBeLessThanOrEqual(columns)
   })
 
   test("overflow is reported on the composer border even when draft lines fill every column", () => {

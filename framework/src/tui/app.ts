@@ -2,7 +2,7 @@ import type { Terminal, TerminalControl } from "../hosts/interactive-session.ts"
 import type { ShellResult } from "../hosts/operator-shell.ts"
 import { Editor, searchSubmittedHistory } from "./editor.ts"
 import type { InputEvent } from "./keys.ts"
-import { belowPanelRows, bodyPanelRows, ellipsize, panelInnerColumns, renderFrame, transcriptViewportRows, transcriptVisualRows, wrapText, type FrameHome } from "./render.ts"
+import { abovePanelRows, belowPanelRows, bodyPanelRows, ellipsize, panelInnerColumns, renderFrame, transcriptViewportRows, transcriptVisualRows, wrapText, type FrameHome } from "./render.ts"
 import { TerminalDriver } from "./terminal.ts"
 import { MIN_COLUMNS, MIN_ROWS, MIN_SIZE_LABEL } from "./capability.ts"
 import { TranscriptModel } from "./transcript-model.ts"
@@ -45,6 +45,7 @@ type AskState = {
   prompt: AskPrompt
   /** Row index; `prompt.options.length` is the automatic custom row. */
   selected: number
+  windowStart: number
   custom?: Editor
   finish: (answer: AskAnswer | undefined) => void
 }
@@ -393,7 +394,30 @@ export class TuiApp implements Terminal {
   }
 
   private approvalPageRows(choice: Choice): number {
-    return Math.max(1, this.panelRows() - 5 - choice.values.length)
+    const contentRows = this.hitlPanelRows()
+    const visibleChoices = Math.max(1, Math.min(choice.values.length, contentRows - 6))
+    return Math.max(1, contentRows - 5 - visibleChoices)
+  }
+
+  private hitlPanelRows(): number {
+    const { columns, rows } = this.dimensions()
+    return abovePanelRows({ columns, rows, draft: this.editor.text, cursor: this.editor.cursor, prompt: this.prompt })
+  }
+
+  private choiceWindowStart(choice: Choice, visibleRows: number): number {
+    const maximumStart = Math.max(0, choice.values.length - visibleRows)
+    choice.windowStart = Math.max(0, Math.min(maximumStart, choice.windowStart))
+    if (choice.selected < choice.windowStart) choice.windowStart = choice.selected
+    if (choice.selected >= choice.windowStart + visibleRows) choice.windowStart = choice.selected - visibleRows + 1
+    return choice.windowStart
+  }
+
+  private askWindowStart(ask: AskState, visibleRows: number): number {
+    const maximumStart = Math.max(0, this.askRowCount(ask) - visibleRows)
+    ask.windowStart = Math.max(0, Math.min(maximumStart, ask.windowStart))
+    if (ask.selected < ask.windowStart) ask.windowStart = ask.selected
+    if (ask.selected >= ask.windowStart + visibleRows) ask.windowStart = ask.selected - visibleRows + 1
+    return ask.windowStart
   }
 
   private pickerWindowRows(choice: Choice): number {
@@ -547,6 +571,8 @@ export class TuiApp implements Terminal {
     } else if (this.choice?.presentation.kind === "approval") {
       const columns = panelInnerColumns(this.dimensions().columns)
       const wrapped = documentRows(this.choice.presentation.document, columns)
+      const contentRows = this.hitlPanelRows()
+      const decisionRows = Math.max(1, Math.min(this.choice.values.length, contentRows - 6))
       const availableRows = this.approvalPageRows(this.choice)
       const maximumOffset = Math.max(0, wrapped.length - availableRows)
       const anchoredOffset = wrapped.findIndex(row =>
@@ -555,23 +581,26 @@ export class TuiApp implements Terminal {
       this.choice.documentOffset = Math.min(anchoredOffset < 0 ? maximumOffset : anchoredOffset, maximumOffset)
       const end = Math.min(wrapped.length, this.choice.documentOffset + availableRows)
       const binding = this.choice.presentation.binding
-      const fixed = (value: string) => wrapText(value, columns)[0] ?? ""
+      const fixed = (value: string) => ellipsize(value, columns, this.asciiChrome)
+      const decisionStart = this.choiceWindowStart(this.choice, decisionRows)
+      const decisionEnd = Math.min(this.choice.values.length, decisionStart + decisionRows)
       screen = "Approval"
       panel = {
         title: this.choice.title,
         focus: this.choice.focus,
-        placement: "body",
+        placement: "above",
         lines: [
         fixed(`source ${binding.path}`),
         fixed(`session ${binding.sessionID}${this.separator()}workflow ${binding.workflowID}${this.separator()}rev ${binding.expectedRevision}`),
         fixed(`plan sha256 ${binding.planSha}`),
         fixed(`Document rows ${wrapped.length ? this.choice.documentOffset + 1 : 0}-${end}/${wrapped.length}${this.separator()}Up/Down scroll${this.separator()}PageUp/PageDown page`),
         ...wrapped.slice(this.choice.documentOffset, end).map(row => row.text),
-        `Decisions${this.separator()}Enter acts only while decisions are focused${this.separator()}Escape keeps pending`,
-        ...this.choice.values.map((value, index) => `${this.choice!.focus === "decisions" && index === this.choice!.selected ? ">" : " "} ${value}`),
+        `Decisions${this.separator()}Tab focus${this.separator()}Enter acts${this.separator()}Esc keeps pending`,
+        ...this.choice.values.slice(decisionStart, decisionEnd).map((value, index) =>
+          `${this.choice!.focus === "decisions" && decisionStart + index === this.choice!.selected ? ">" : " "} ${ellipsize(value, Math.max(1, columns - 6), this.asciiChrome)}`),
         ],
+        accentLines: [5 + end - this.choice.documentOffset + this.choice.selected - decisionStart],
       }
-      composerVisible = false
     } else if (this.choice?.presentation.kind === "generic-list") {
       const height = Math.max(1, this.panelRows() - 3)
       const maximumStart = Math.max(0, this.choice.values.length - height)
@@ -626,16 +655,21 @@ export class TuiApp implements Terminal {
       prompt = "Filter> "
     } else if (this.choice) {
       screen = this.choice.title
-      const rows = this.choice.values.map((value, i) => `${i === this.choice!.selected ? this.cursorGlyph() : " "} ${i + 1}. ${value}`)
+      const contentRows = Math.max(1, this.hitlPanelRows())
+      const optionRows = Math.max(1, contentRows - 2)
+      const start = this.choiceWindowStart(this.choice, optionRows)
+      const end = Math.min(this.choice.values.length, start + optionRows)
+      const rows = this.choice.values.slice(start, end).map((value, index) =>
+        ellipsize(`${start + index === this.choice!.selected ? this.cursorGlyph() : " "} ${start + index + 1}. ${value}`,
+          Math.max(1, this.dimensions().columns - 4), this.asciiChrome))
       panel = {
         title: this.choice.title,
         focus: "choice selection",
-        placement: "body",
+        placement: "above",
         lines: [...rows, "", this.selectHint()],
-        accentLines: [this.choice.selected],
+        accentLines: [this.choice.selected - start],
         mutedLines: [rows.length + 1],
       }
-      composerVisible = false
     } else if (this.askState) {
       const ask = this.askState
       screen = "Question"
@@ -650,19 +684,27 @@ export class TuiApp implements Terminal {
         cursor = ask.custom.cursor
         prompt = "Answer> "
       } else {
-        const rows = this.askRows(ask)
+        const contentRows = Math.max(1, this.hitlPanelRows())
+        const columns = panelInnerColumns(this.dimensions().columns)
+        const question = wrapText(ask.prompt.question, columns)
+          .slice(0, Math.max(1, Math.min(2, contentRows - 3)))
         const detail = ask.prompt.options[ask.selected]?.detail
-        const question = ask.prompt.question.split("\n")
+        const details = detail ? wrapText(detail, Math.max(1, columns - 2)) : []
+        const detailRows = Math.min(details.length, 2, Math.max(0, contentRows - question.length - 2))
+        const optionRows = Math.max(1, contentRows - question.length - detailRows - 1)
+        const start = this.askWindowStart(ask, optionRows)
+        const end = Math.min(this.askRowCount(ask), start + optionRows)
+        const rows = this.askRows(ask).slice(start, end).map((row, index) =>
+          ellipsize(row, columns, this.asciiChrome))
         panel = {
           title: "Question",
           focus: "answer selection",
-          placement: "body",
-          lines: [...question, "", ...rows, ...(detail ? ["", ...detail.split("\n").map(line => `  ${line}`)] : []), "", this.selectHint()],
-          accentLines: [question.length + 1 + ask.selected],
-          mutedLines: [...(detail ? Array.from({ length: detail.split("\n").length }, (_, i) => question.length + 1 + rows.length + 1 + i) : []),
-            question.length + 1 + rows.length + (detail ? detail.split("\n").length + 1 : 0) + 1],
+          placement: "above",
+          lines: [...question, ...rows, ...details.slice(0, detailRows).map(line => `  ${line}`), this.selectHint()],
+          accentLines: [question.length + ask.selected - start],
+          mutedLines: [...Array.from({ length: detailRows }, (_, index) => question.length + rows.length + index),
+            question.length + rows.length + detailRows],
         }
-        composerVisible = false
       }
     }
     const search = this.readFailure ? undefined : this.editor.searchState
@@ -733,7 +775,7 @@ export class TuiApp implements Terminal {
       ...(panel ? { panel } : {}),
       composerVisible,
       ...(panel?.placement === "below" ? { composerTitle: panel.title } : {}),
-      ...(composerVisible && panel?.placement !== "below" ? (() => {
+      ...(composerVisible && !panel ? (() => {
         const line = this.progressLine(Math.max(1, this.dimensions().columns - 6))
         return line ? { progress: line } : {}
       })() : {}),
@@ -1232,7 +1274,7 @@ export class TuiApp implements Terminal {
         resolve(answer)
         this.draw()
       }
-      this.askState = { prompt, selected: initial, finish }
+      this.askState = { prompt, selected: initial, windowStart: 0, finish }
       signal.addEventListener("abort", abort, { once: true })
       this.draw()
     })
