@@ -46,6 +46,8 @@ describe("status parsing keeps only the verdict and method", () => {
     expect(signedIn).toEqual({ engine: "claude", state: "signed-in", method: "claude.ai" })
     expect(JSON.stringify(signedIn)).not.toContain("example.com")
     expect(parseAuthStatus("claude", 1, JSON.stringify({ loggedIn: false, authMethod: "none" }))).toEqual({ engine: "claude", state: "signed-out" })
+    expect(parseAuthStatus("claude", 1, JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }))).toMatchObject({ state: "unknown" })
+    expect(parseAuthStatus("claude", null, JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }))).toMatchObject({ state: "unknown" })
     expect(parseAuthStatus("claude", 0, "not json")).toMatchObject({ state: "unknown" })
     // A method label that is not a plain short word is dropped, not echoed.
     expect(parseAuthStatus("claude", 0, JSON.stringify({ loggedIn: true, authMethod: "\u001b[2Jx" }))).toEqual({ engine: "claude", state: "signed-in" })
@@ -54,7 +56,18 @@ describe("status parsing keeps only the verdict and method", () => {
   test("codex text status", () => {
     expect(parseAuthStatus("codex", 0, "Logged in using ChatGPT\n")).toEqual({ engine: "codex", state: "signed-in", method: "ChatGPT" })
     expect(parseAuthStatus("codex", 0, "Logged in using an API key - sk-proj-***ABCD\n")).toEqual({ engine: "codex", state: "signed-in" })
+    const apiKeyStatus = parseAuthStatus("codex", 0, "Logged in using an API key - sk-secret-value\n")
+    expect(apiKeyStatus).toEqual({ engine: "codex", state: "signed-in" })
+    expect(JSON.stringify(apiKeyStatus)).not.toContain("sk-secret-value")
     expect(parseAuthStatus("codex", 1, "Not logged in\n")).toEqual({ engine: "codex", state: "signed-out" })
+    expect(parseAuthStatus("codex", 0, "unexpected output\n")).toMatchObject({ state: "unknown" })
+    expect(parseAuthStatus("codex", 1, "Logged in using ChatGPT\n")).toMatchObject({ state: "unknown" })
+    expect(parseAuthStatus("codex", 0, "Warning: status details follow\nLogged in using ChatGPT\n")).toEqual({ engine: "codex", state: "signed-in", method: "ChatGPT" })
+    expect(parseAuthStatus("codex", 0, "Warning: Logged in using ChatGPT\n")).toMatchObject({ state: "unknown" })
+    expect(parseAuthStatus("codex", 0, "Logged in using an API key - status is uncertain\n")).toMatchObject({ state: "unknown" })
+    const arbitrary = parseAuthStatus("codex", 0, "debug token sk-secret-value\n")
+    expect(arbitrary).toMatchObject({ state: "unknown" })
+    expect(JSON.stringify(arbitrary)).not.toContain("sk-secret-value")
     expect(parseAuthStatus("codex", 2, "boom")).toMatchObject({ state: "unknown" })
   })
 
@@ -76,7 +89,7 @@ describe("authStatus runs the vendor CLI found on PATH", () => {
   test("a fake vendor CLI is asked for status; a missing CLI is unknown, not signed in", async () => {
     const bin = mkdtempSync(join(tmpdir(), "otter-auth-bin-"))
     writeFileSync(join(bin, "codex"), "#!/bin/sh\n[ \"$1 $2\" = \"login status\" ] && { echo 'Not logged in'; exit 1; }\nexit 3\n")
-    writeFileSync(join(bin, "claude"), "#!/bin/sh\necho '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"x@y.z\"}'\n")
+    writeFileSync(join(bin, "claude"), "#!/bin/sh\necho '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"x@y.z\"}'\necho 'harmless diagnostic notice' >&2\n")
     chmodSync(join(bin, "codex"), 0o755)
     chmodSync(join(bin, "claude"), 0o755)
     const saved = process.env.PATH
@@ -86,6 +99,19 @@ describe("authStatus runs the vendor CLI found on PATH", () => {
       expect(await authStatus("claude", tmpdir())).toEqual({ engine: "claude", state: "signed-in", method: "claude.ai" })
       process.env.PATH = mkdtempSync(join(tmpdir(), "otter-auth-empty-"))
       expect(await authStatus("codex", tmpdir())).toEqual({ engine: "codex", state: "unknown", reason: "codex CLI not found on PATH" })
+    } finally {
+      process.env.PATH = saved
+    }
+  })
+
+  test("Codex status written only to stderr is recognized without merging warning output", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "otter-auth-codex-stderr-"))
+    writeFileSync(join(bin, "codex"), "#!/bin/sh\nprintf 'Logged in using ChatGPT\\n' >&2\n")
+    chmodSync(join(bin, "codex"), 0o755)
+    const saved = process.env.PATH
+    try {
+      process.env.PATH = bin
+      expect(await authStatus("codex", tmpdir())).toEqual({ engine: "codex", state: "signed-in", method: "ChatGPT" })
     } finally {
       process.env.PATH = saved
     }
@@ -140,7 +166,7 @@ describe("authStatus runs the vendor CLI found on PATH", () => {
     }
   })
 
-  test("diagnosis compares the shell's view with otter's and names the cause (names only, never values)", async () => {
+  test("diagnosis compares the shell's view with otter's and cautiously names possible causes (names only, never values)", async () => {
     const bin = mkdtempSync(join(tmpdir(), "otter-auth-diagnose-"))
     writeFileSync(join(bin, "claude"), "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '2.1.301 (Claude Code)'; exit 0; fi\nif [ -n \"$ANTHROPIC_API_KEY\" ] || [ -n \"$CLAUDE_SECRET_STORE\" ]; then echo '{\"loggedIn\":true,\"authMethod\":\"api_key\"}'; else echo '{\"loggedIn\":false}'; fi\n")
     chmodSync(join(bin, "claude"), 0o755)
@@ -152,15 +178,26 @@ describe("authStatus runs the vendor CLI found on PATH", () => {
       const keyOnly = await diagnoseAuth("claude", tmpdir())
       expect(keyOnly).toMatchObject({ shell: { state: "signed-in" }, otter: { state: "signed-out" }, credentialEnv: ["ANTHROPIC_API_KEY"] })
       const keyLines = describeDiagnosis(keyOnly).join("\n")
-      expect(keyLines).toContain("your shell signs in through ANTHROPIC_API_KEY, which otter never passes to the CLI. Sign in with /login claude")
+      expect(keyLines).toContain("ANTHROPIC_API_KEY is set in your shell but not passed to the CLI; this may explain the different status. Sign in with /login claude")
       expect(keyLines).not.toContain("sk-ant-secret-value")
       delete process.env.ANTHROPIC_API_KEY
       process.env.CLAUDE_SECRET_STORE = "/secret/location"
-      const other = describeDiagnosis(await diagnoseAuth("claude", tmpdir())).join("\n")
-      expect(other).toMatch(/otter cannot see this sign-in\. Set in your shell but not passed to model calls: [A-Z0-9_, ]*CLAUDE_SECRET_STORE/u)
+      const otherDiagnosis = await diagnoseAuth("claude", tmpdir())
+      expect(otherDiagnosis.unforwarded).toContain("CLAUDE_SECRET_STORE")
+      const other = describeDiagnosis(otherDiagnosis).join("\n")
+      expect(other).toContain(`These shell variables are not passed to model calls and may explain the difference: ${otherDiagnosis.unforwarded.join(", ")}.`)
       expect(other).not.toContain("/secret/location")
       delete process.env.CLAUDE_SECRET_STORE
-      expect(describeDiagnosis(await diagnoseAuth("claude", tmpdir())).join("\n")).toContain("not signed in anywhere: /login claude.")
+      expect(describeDiagnosis(await diagnoseAuth("claude", tmpdir())).join("\n")).toContain("the CLI reports signed out in both environments; /login claude.")
+      const sameSignedIn = describeDiagnosis({
+        engine: "claude",
+        shell: { engine: "claude", state: "signed-in" },
+        otter: { engine: "claude", state: "signed-in" },
+        credentialEnv: [],
+        unforwarded: [],
+      }).join("\n")
+      expect(sameSignedIn).toContain("the CLI reports the same signed-in status in both environments.")
+      expect(sameSignedIn).not.toContain("model calls use this sign-in")
     } finally {
       for (const key of keys) {
         if (saved[key] === undefined) delete process.env[key]

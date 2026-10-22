@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { delimiter, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const repo = realpathSync(join(dirname(fileURLToPath(import.meta.url)), "..", ".."))
 const script = join(repo, "install.sh")
+const wslScript = join(repo, "scripts", "otter-wsl")
 const bun = realpathSync(process.execPath)
 let home: string
 
@@ -23,6 +24,72 @@ function run(args: string[] = [], env: Record<string, string> = {}, input?: stri
     timeout: 120_000,
   })
   return { code: result.status, out: `${result.stdout}${result.stderr}` }
+}
+
+function findFish(): string | undefined {
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (!dir) continue
+    const candidate = join(dir, "fish")
+    try {
+      accessSync(candidate, fsConstants.X_OK)
+      if (spawnSync(candidate, ["--version"], { stdio: "ignore", timeout: 5_000 }).status === 0) return candidate
+    } catch {}
+  }
+}
+
+function fishShell(): string {
+  const configDir = join(home, ".config", "fish")
+  mkdirSync(configDir, { recursive: true })
+  writeFileSync(join(configDir, "config.fish"), 'set -gx PATH "$OTTER_TEST_INITIALIZED_PATH" $PATH\n')
+
+  const fish = findFish()
+  if (fish) return fish
+
+  // Test-only Fish mock for hosts without Fish; verify the Fish command and emulate its argv-list handoff.
+  const mockDir = join(home, "mock-fish")
+  mkdirSync(mockDir)
+  const mock = join(mockDir, "fish")
+  writeFileSync(mock, `#!/bin/sh
+[ "$1" = -lc ] || exit 97
+[ "$2" = 'exec /bin/sh $argv' ] || exit 98
+shift 2
+PATH="$OTTER_TEST_INITIALIZED_PATH:$PATH"
+export PATH
+exec /bin/sh "$@"
+`)
+  chmodSync(mock, 0o755)
+  return mock
+}
+
+function runWsl(shell: string, args: string[], initializedPath?: string) {
+  const launcher = join(home, "otter-launcher")
+  const argsFile = join(home, "launcher-args")
+  const pathFile = join(home, "launcher-path")
+  writeFileSync(launcher, `#!/bin/sh
+printf '%s\\n' "$@" > "$OTTER_TEST_ARGS_FILE"
+printf '%s' "$PATH" > "$OTTER_TEST_PATH_FILE"
+`)
+  chmodSync(launcher, 0o755)
+
+  const result = spawnSync("/bin/sh", [wslScript, launcher, ...args], {
+    env: {
+      HOME: home,
+      SHELL: shell,
+      PATH: "/usr/bin:/bin",
+      BROWSER: "/bin/true",
+      OTTER_TEST_ARGS_FILE: argsFile,
+      OTTER_TEST_PATH_FILE: pathFile,
+      ...(initializedPath ? { OTTER_TEST_INITIALIZED_PATH: initializedPath } : {}),
+    },
+    encoding: "utf8",
+    timeout: 10_000,
+  })
+  return {
+    code: result.status,
+    out: `${result.stdout}${result.stderr}`,
+    args: existsSync(argsFile) ? readFileSync(argsFile, "utf8").split("\n").slice(0, -1) : undefined,
+    path: existsSync(pathFile) ? readFileSync(pathFile, "utf8") : undefined,
+  }
 }
 
 beforeEach(() => { home = realpathSync(mkdtempSync(join(tmpdir(), "otter-install-"))) })
@@ -81,4 +148,32 @@ test("missing bun fails with guidance when automatic bun installation is disable
   })
   expect(result.status).toBe(1)
   expect(`${result.stdout}${result.stderr}`).toContain("bun >= 1.2 is required")
+})
+
+test("Fish handoff preserves argv spaces and metacharacters (using a labeled mock only when Fish is unavailable)", () => {
+  const initializedPath = join(home, "fish-login-bin")
+  mkdirSync(initializedPath)
+  const shell = fishShell()
+  const args = ["space argument", "literal*glob", "semi;colon", "$(not-executed)", "$HOME", "question?"]
+
+  const result = runWsl(shell, args, initializedPath)
+  expect(result.code).toBe(0)
+  expect(result.args).toEqual(args)
+})
+
+test("non-Fish shells retain the POSIX handoff and preserve argv boundaries", () => {
+  const args = ["space argument", "literal*glob", "semi;colon", "$(not-executed)"]
+
+  const result = runWsl("/bin/bash", args)
+  expect(result.code).toBe(0)
+  expect(result.args).toEqual(args)
+})
+
+test("Fish login initialization PATH reaches the launcher", () => {
+  const initializedPath = join(home, "fish-login-bin")
+  mkdirSync(initializedPath)
+
+  const result = runWsl(fishShell(), [], initializedPath)
+  expect(result.code).toBe(0)
+  expect(result.path?.split(delimiter)).toContain(initializedPath)
 })

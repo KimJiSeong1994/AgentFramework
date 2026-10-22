@@ -17,10 +17,10 @@ let wt: ReturnType<typeof tempWorktree>
 beforeEach(() => { wt = tempWorktree() })
 afterEach(() => wt.cleanup())
 
-async function invokeCli(argv: string[]) {
+async function invokeCli(argv: string[], env: NodeJS.ProcessEnv = {}) {
   const child = Bun.spawn([process.execPath, join(import.meta.dir, "../src/hosts/cli.ts"), ...argv], {
     cwd: wt.worktree,
-    env: { ...process.env, XDG_CONFIG_HOME: join(wt.stateHome, "config") },
+    env: { ...process.env, XDG_CONFIG_HOME: join(wt.stateHome, "config"), ...env },
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
@@ -29,6 +29,13 @@ async function invokeCli(argv: string[]) {
     child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
   ])
   return { exitCode, stdout, stderr }
+}
+
+function fakeCodexCli(script: string): NodeJS.ProcessEnv {
+  const bin = join(wt.worktree, "fake-cli-secret-path")
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(join(bin, "codex"), script, { mode: 0o755 })
+  return { PATH: bin }
 }
 
 async function statusSubprocess(args: string[]) {
@@ -625,5 +632,47 @@ describe("foreground CLI", () => {
     for (const server of ["https://127.0.0.1:4096", "http://localhost:4096", "http://192.0.2.1:4096", "http://127.0.0.1:4096/prefix"]) {
       await expect(runCli(parseCliArgs(["resume", "--worktree", wt.worktree, "--server", server, "--session", "ses_local"]))).rejects.toThrow("loopback IP")
     }
+  })
+})
+
+describe("auth CLI subprocess failure handling", () => {
+  test("failed login is not success when existing credentials keep status signed in", async () => {
+    const env = fakeCodexCli(`#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then
+  printf '%s\\n' 'Logged in using ChatGPT' >&2
+  exit 0
+fi
+exit 23
+`)
+    const result = await invokeCli(["login", "codex"], env)
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toContain("codex: signed in")
+    expect(result.stderr).toContain("codex login command exited with code 23.")
+  })
+
+  test("signal-terminated login is reported distinctly from a nonzero exit", async () => {
+    const env = fakeCodexCli(`#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then
+  printf '%s\\n' 'Logged in using ChatGPT' >&2
+  exit 0
+fi
+kill -TERM "$$"
+exit 0
+`)
+    const result = await invokeCli(["login", "codex"], env)
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toContain("codex: signed in")
+    expect(result.stderr).toContain("codex login command was terminated by SIGTERM.")
+    expect(result.stderr).not.toContain("exited with code")
+  })
+
+  test("an executable with a missing interpreter is a launch failure, not a PATH lookup miss", async () => {
+    const env = fakeCodexCli("#!/missing/fake-cli-interpreter\nexit 0\n")
+    const result = await invokeCli(["login", "codex"], env)
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain("codex CLI could not be started.")
+    expect(result.stderr).not.toContain("not found on PATH")
+    expect(result.stderr).not.toContain("ENOENT")
+    expect(result.stderr).not.toContain("fake-cli-secret-path")
   })
 })
