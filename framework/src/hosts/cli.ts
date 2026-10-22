@@ -16,7 +16,7 @@ import { settled } from "./run-state.ts"
 import { incompleteArtifactSummary } from "../workflows/artifacts.ts"
 import { humanDecision, type DecisionBinding } from "./operator.ts"
 import { createCliRuntime } from "./cli-runtime.ts"
-import type { CliEngine } from "./cli-transport.ts"
+import { findExecutable, type CliEngine } from "./cli-transport.ts"
 import { AdmissionRefusal, assertHostAdmission } from "./required-controls.ts"
 import { EXECUTION_ROLES, LinuxAdmissionRefused, type ExecutionRuntime, type FlowRuntime } from "./types.ts"
 import { InteractiveLaunchError, launchInteractive, parseInteractiveArgs } from "./interactive.ts"
@@ -894,10 +894,23 @@ async function authCli(argv: readonly string[]): Promise<number> {
   console.error(`$ ${engine} ${argvFor.join(" ")}`)
   const hint = command === "login" ? loginHint(engine, (methodArg ?? "browser") as LoginMethod) : undefined
   if (hint) console.error(hint.replace("/login codex device", "otter login codex device"))
-  try { await runVendorAuth(engine, argvFor, cwd) }
+  try { findExecutable(engine) }
   catch { console.error(`${engine} CLI not found on PATH.`); return 1 }
+  let run: Awaited<ReturnType<typeof runVendorAuth>>
+  try { run = await runVendorAuth(engine, argvFor, cwd) }
+  catch { console.error(`${engine} CLI could not be started.`); return 1 }
   const after = await authStatus(engine, cwd)
   console.log(describeAuth(after).replace(/\/login (\w+)/u, "otter login $1"))
+  if (run.signal !== null) {
+    console.error(`${engine} ${command} command was terminated by ${run.signal}.`)
+    return 1
+  }
+  if (run.exitCode !== 0) {
+    console.error(run.exitCode === null
+      ? `${engine} ${command} command ended without an exit code.`
+      : `${engine} ${command} command exited with code ${run.exitCode}.`)
+    return 1
+  }
   return command === "login" ? (after.state === "signed-in" ? 0 : 1) : (after.state === "signed-out" ? 0 : 1)
 }
 

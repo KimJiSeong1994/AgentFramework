@@ -17,6 +17,7 @@ const ENV_ALLOWLIST = [
   "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
   "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
   "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+  "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WSL_DISTRO_NAME", "WSL_INTEROP",
 ]
 const tempDirectories: string[] = []
 const executionFixtureCleanups: Array<() => void> = []
@@ -400,11 +401,17 @@ test("argv is literal, stdin and exit are captured, and child environment is exa
   const previous = process.env.VENDOR_PROCESS_TEST_ONLY
   process.env.VENDOR_PROCESS_TEST_ONLY = "synthetic-test-value"
   // Sign-in locations reach the CLI; credentials never do.
-  const saved = { CODEX_HOME: process.env.CODEX_HOME, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY, OPENAI_API_KEY: process.env.OPENAI_API_KEY }
+  const saved = { CODEX_HOME: process.env.CODEX_HOME, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY, OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+    WSL_DISTRO_NAME: process.env.WSL_DISTRO_NAME, WSL_INTEROP: process.env.WSL_INTEROP }
   process.env.CODEX_HOME = "/fixture/codex-home"
   process.env.CLAUDE_CONFIG_DIR = "/fixture/claude-config"
   process.env.ANTHROPIC_API_KEY = "sk-ant-fixture"
   process.env.OPENAI_API_KEY = "sk-fixture"
+  process.env.DBUS_SESSION_BUS_ADDRESS = "unix:path=/fixture/bus"
+  process.env.XDG_RUNTIME_DIR = "/fixture/runtime"
+  process.env.WSL_DISTRO_NAME = "fixture-distro"
+  process.env.WSL_INTEROP = "/fixture/interop"
   try {
     const argv = ["two words", ";", "$(not-a-shell)", "--literal=value", "quote'\"", "雪"]
     const input = "fixture stdin only\n"
@@ -417,6 +424,7 @@ test("argv is literal, stdin and exit are captured, and child environment is exa
     expect(report.envKeys).toEqual(expectedEnvKeys)
     expect(report.envKeys).not.toContain("VENDOR_PROCESS_TEST_ONLY")
     expect(report.envKeys).toEqual(expect.arrayContaining(["CODEX_HOME", "CLAUDE_CONFIG_DIR"]))
+    expect(report.envKeys).toEqual(expect.arrayContaining(["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WSL_DISTRO_NAME", "WSL_INTEROP"]))
     expect(report.envKeys).not.toContain("ANTHROPIC_API_KEY")
     expect(report.envKeys).not.toContain("OPENAI_API_KEY")
     expect(result.stdout.text.slice(newline + 1)).toBe(input)

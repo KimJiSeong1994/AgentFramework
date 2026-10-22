@@ -901,7 +901,8 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
   }
 
   const runCodexVersionProbe = async (): Promise<CodexProbeResult> => {
-    if (options.engine !== "codex" || !codexProfile || !profileIntegrity(codexProfile) || process.platform !== "darwin") {
+    if (options.engine !== "codex" || !codexProfile || !profileIntegrity(codexProfile) ||
+        (process.platform !== "darwin" && process.platform !== "linux")) {
       return { compatible: false, quiescent: true, cancelled: false, error: SAFE_ERRORS.profile }
     }
 

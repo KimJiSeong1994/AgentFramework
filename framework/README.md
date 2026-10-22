@@ -252,11 +252,19 @@ project route still applies. Show, set and clear only touch config,
 so they also work while a session is held. `/model combo apply` starts a new session with the carried
 conversation under the saved combo; it is refused while a workflow is active or ownership is unsettled.
 Sign-in diagnosis: `otter auth --diagnose` (in chat `/auth diagnose`) checks each engine twice — with your shell's
-full environment and with the environment otter's model calls get — and, when they differ, names the cause: a
-credential variable otter never forwards (sign in with the CLI instead), or other variables set in your shell but not
-forwarded (names only, never values). Model calls and status checks also receive the OS keyring locations
+full environment and with the environment otter's model calls get — and, when they differ, lists possible environment
+causes, not a proven diagnosis (variable names only, never values). A signed-in status is not proof that model inference
+will succeed. Status parsing keeps vendor output streams separate: Claude's JSON comes from stdout, while Codex
+normally reports status on stderr. Login/logout command failure or cancellation is not success even when an earlier
+sign-in remains valid. Model calls and status checks also receive the OS keyring locations
 (`DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`) and the WSL session variables, so a sign-in a CLI keeps in the Linux/WSL
 Secret Service is visible to otter.
+
+Engine discovery requires the vendor CLI on Otter's PATH; installing Otter does not install Codex or Claude.
+Under WSL, install and sign in to the Linux CLIs in the same distribution; Windows-mounted CLI paths are excluded.
+The WSL launcher loads the user's shell environment and preserves arguments for POSIX shells and Fish.
+Codex native-profile admission now permits macOS and Linux, including WSL's Linux runtime. Linux/WSL login status alone
+does not establish inference qualification: a mocked Linux platform test is not actual Linux or WSL qualification.
 
 Engine CLI updates: `otter engines` (and `/engines` in chat) shows each vendor CLI's version, whether otter supports it
 (Codex), its install method (npm, bun, pnpm, Homebrew cask, native installer) and the update that fits it.
@@ -619,13 +627,15 @@ These names do not establish execution authority. Vendor account quotas still ap
 All three engines use the same conversation → canonical plan → local human decision →
 serial execution controller. Main/reviewer file tools are read-only. Otter owns the JSON
 file-tool loop; native inference runs in a separate empty scratch directory rather than
-the source worktree. Codex admission is currently Darwin-only and accepts CLI 0.159.3 or 0.163.0
+the source worktree. Codex admission permits macOS and Linux and accepts CLI 0.159.3 or 0.163.0
 with an exact bundled model slug. The model metadata remains pinned to the 0.159.3 catalogue.
 An Otter-owned, hash-bound catalogue removes native patch, shell and code-mode tools, and native
 goal tools are explicitly disabled; a named permission profile restricts residual filesystem
 reads to the empty scratch workdir. The legacy `--sandbox` override is not used.
 Version and catalogue checks precede inference; unknown models or drift refuse without
-fallback. Unexpected native tool activity is an error. Workers do not receive a shell
+fallback. Linux admission keeps these same restrictions; a Linux platform mock does not
+qualify actual Linux/WSL execution or containment. Windows executables remain excluded from
+WSL PATH discovery. Unexpected native tool activity is an error. Workers do not receive a shell
 tool; the existing queue owns verification.
 Model output and previous approvals never approve a new plan.
 

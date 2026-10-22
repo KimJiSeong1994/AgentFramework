@@ -475,8 +475,38 @@ test.each(["0.159.3", "0.163.0"])("Codex %s uses the owned restricted-read profi
   expect(catalogIndex).toBeGreaterThan(permissionProfileIndex)
 })
 
-test("Codex Darwin admission gate refuses before any executable spawn", async () => {
+test("Codex Linux preflight verifies the pinned profile and inference rechecks the version", async () => {
   setProcessPlatform("linux")
+  const profile = createCodexProfile(CODEX_MODEL)
+  const prompt = "Linux Codex fixture"
+  const directory = mkdtempSync(join(tmpdir(), "cli-transport-marker-"))
+  testDirectories.push(directory)
+  const marker = join(directory, "inference.json")
+  const invocationMarker = join(directory, "codex-invocations.jsonl")
+  installFakeCli("codex", fixtureSource({
+    expectedArgs: codexExpectedArgs(),
+    prompt,
+    chunks: codexOutput({ type: "item.completed", item: { type: "agent_message", text: "Linux answer" } }),
+    marker,
+    sourceRoot: sourceRoot(),
+    version: "codex-cli 0.159.3",
+    invocationMarker,
+    profileCatalog: { name: `codex-${profile.version}-catalog.json`, contents: profile.catalogJson },
+  }))
+  const handle = createCliTransport(options("codex", { prompt }))
+
+  expect(await handle.preflight?.()).toEqual({ compatible: true, nativePolicyHash: profile.catalogHash })
+  expect(existsSync(marker)).toBe(false)
+  expect(await handle.run()).toEqual({ status: "completed", text: "Linux answer", quiescent: true })
+  const invocations = readFileSync(invocationMarker, "utf8").trim().split("\n")
+    .map(line => JSON.parse(line) as { argv: string[] })
+  expect(invocations).toHaveLength(3)
+  expect(invocations.slice(0, 2).map(invocation => invocation.argv)).toEqual([["--version"], ["--version"]])
+  expect(invocations[2]?.argv[0]).toBe("exec")
+})
+
+test("Codex refuses unsupported Windows platform before any executable spawn", async () => {
+  setProcessPlatform("win32")
   const directory = mkdtempSync(join(tmpdir(), "cli-transport-marker-"))
   testDirectories.push(directory)
   const marker = join(directory, "invocation.json")

@@ -55,6 +55,19 @@ function statusArgv(engine: AuthEngine): string[] {
   return engine === "codex" ? ["login", "status"] : ["auth", "status", "--json"]
 }
 
+type CodexStatusLine = "signed-out" | "chatgpt" | "api-key"
+
+function codexStatusFromOutput(output: string): { hasStatus: boolean; status?: CodexStatusLine } {
+  const statuses = new Set<CodexStatusLine>()
+  for (const line of output.split(/\r?\n/u)) {
+    if (line === "Not logged in") statuses.add("signed-out")
+    else if (line === "Logged in using ChatGPT") statuses.add("chatgpt")
+    else if (/^Logged in using an API key(?: - sk-[A-Za-z0-9._*-]+)?$/u.test(line)) statuses.add("api-key")
+  }
+  const status = statuses.values().next().value
+  return statuses.size === 1 && status ? { hasStatus: true, status } : { hasStatus: statuses.size > 0 }
+}
+
 /** Read only the sign-in verdict (and the method label) from the vendor status output. */
 export function parseAuthStatus(engine: AuthEngine, exitCode: number | null, output: string): AuthState {
   if (engine === "claude") {
@@ -65,18 +78,20 @@ export function parseAuthStatus(engine: AuthEngine, exitCode: number | null, out
       if (value && typeof value === "object" && typeof (value as { loggedIn?: unknown }).loggedIn === "boolean") {
         const record = value as { loggedIn: boolean; authMethod?: unknown }
         if (!record.loggedIn) return { engine, state: "signed-out" }
+        if (exitCode !== 0) return { engine, state: "unknown", reason: `claude auth status exited ${exitCode ?? "without a code"}` }
         const method = typeof record.authMethod === "string" && METHOD_LABEL.test(record.authMethod) ? record.authMethod : undefined
         return { engine, state: "signed-in", ...(method ? { method } : {}) }
       }
     } catch { /* fall through */ }
     return { engine, state: "unknown", reason: "claude auth status returned unrecognized output" }
   }
-  const text = output.trim()
-  if (exitCode === 0) {
-    const using = /^Logged in using (.{1,40})$/mu.exec(text)?.[1]?.trim()
-    return { engine, state: "signed-in", ...(using && METHOD_LABEL.test(using) ? { method: using } : {}) }
+  const { status } = codexStatusFromOutput(output)
+  if (status === "signed-out") return { engine, state: "signed-out" }
+  if (exitCode === 0 && status === "chatgpt") return { engine, state: "signed-in", method: "ChatGPT" }
+  // Codex may include a masked API-key hint after this status. Never retain or echo that suffix.
+  if (exitCode === 0 && status === "api-key") {
+    return { engine, state: "signed-in" }
   }
-  if (/^Not logged in$/mu.test(text)) return { engine, state: "signed-out" }
   return { engine, state: "unknown", reason: `codex login status exited ${exitCode ?? "without a code"}` }
 }
 
@@ -87,14 +102,18 @@ function unforwardedCredential(engine: AuthEngine): string | undefined {
 
 /**
  * Run the vendor status command without a terminal; bounded time and output. It runs with exactly the environment a model
- * call gets (vendorProcessEnvironment), so "signed in" here means a model call will find the same sign-in.
+ * call gets (vendorProcessEnvironment), so this reports the same CLI authentication view available to model calls; it
+ * does not verify that a model request can successfully infer.
  */
 export async function authStatus(engine: AuthEngine, cwd: string, env: NodeJS.ProcessEnv = vendorProcessEnvironment()): Promise<AuthState> {
   let executable: string
   try { executable = findExecutable(engine) } catch { return { engine, state: "unknown", reason: `${engine} CLI not found on PATH` } }
   const envOnly = env === process.env ? undefined : unforwardedCredential(engine)
   return await new Promise<AuthState>(settle => {
-    let output = ""
+    const stdout: Buffer[] = []
+    const stderr: Buffer[] = []
+    let stdoutBytes = 0
+    let stderrBytes = 0
     let done = false
     const child = spawn(executable, statusArgv(engine), { cwd, env, stdio: ["ignore", "pipe", "pipe"] })
     const finish = (value: AuthState) => {
@@ -104,11 +123,27 @@ export async function authStatus(engine: AuthEngine, cwd: string, env: NodeJS.Pr
       settle(value.state === "signed-out" && envOnly ? { ...value, envOnly } : value)
     }
     const timer = setTimeout(() => { try { child.kill("SIGKILL") } catch {} finish({ engine, state: "unknown", reason: "status check timed out" }) }, STATUS_TIMEOUT_MS)
-    const take = (chunk: Buffer) => { if (output.length < STATUS_OUTPUT_BYTES) output += chunk.toString("utf8").slice(0, STATUS_OUTPUT_BYTES - output.length) }
-    child.stdout.on("data", take)
-    child.stderr.on("data", take)
+    const take = (chunks: Buffer[], byteLength: number, chunk: Buffer) => {
+      const remaining = STATUS_OUTPUT_BYTES - byteLength
+      if (remaining <= 0) return byteLength
+      const bounded = Buffer.from(chunk.subarray(0, remaining))
+      chunks.push(bounded)
+      return byteLength + bounded.length
+    }
+    child.stdout.on("data", (chunk: Buffer) => { stdoutBytes = take(stdout, stdoutBytes, chunk) })
+    // Capture stderr separately: Codex writes its status there, while Claude's JSON is on stdout.
+    child.stderr.on("data", (chunk: Buffer) => { stderrBytes = take(stderr, stderrBytes, chunk) })
     child.on("error", () => finish({ engine, state: "unknown", reason: `${engine} status command could not start` }))
-    child.on("close", code => finish(parseAuthStatus(engine, code, output)))
+    child.on("close", code => {
+      const stdoutText = Buffer.concat(stdout, stdoutBytes).toString("utf8")
+      if (engine === "claude") {
+        finish(parseAuthStatus(engine, code, stdoutText))
+        return
+      }
+      const stderrText = Buffer.concat(stderr, stderrBytes).toString("utf8")
+      const statusOutput = codexStatusFromOutput(stderrText).hasStatus ? stderrText : stdoutText
+      finish(parseAuthStatus(engine, code, statusOutput))
+    })
   })
 }
 
@@ -144,13 +179,13 @@ export function describeDiagnosis(d: AuthDiagnosis): string[] {
   const view = (state: AuthState) => describeAuth(state).replace(/^\w+: /u, "")
   const lines = [`${d.engine}${d.cli ? ` (${d.cli})` : ""}`, `  your shell:      ${view(d.shell)}`, `  otter (models):  ${view(d.otter)}`]
   if (d.shell.state === d.otter.state) {
-    lines.push(d.otter.state === "signed-in" ? "  → consistent: model calls use this sign-in." : d.otter.state === "signed-out" ? `  → not signed in anywhere: /login ${d.engine}.` : "  → status could not be read; see the reason above.")
+    lines.push(d.otter.state === "signed-in" ? "  → the CLI reports the same signed-in status in both environments." : d.otter.state === "signed-out" ? `  → the CLI reports signed out in both environments; /login ${d.engine}.` : "  → status could not be read; see the reason above.")
     return lines
   }
   if (d.shell.state === "signed-in" && d.otter.state !== "signed-in") {
-    if (d.credentialEnv.length) lines.push(`  → your shell signs in through ${d.credentialEnv.join(", ")}, which otter never passes to the CLI. Sign in with /login ${d.engine} so the CLI stores it.`)
-    else lines.push(`  → otter cannot see this sign-in.${d.unforwarded.length ? ` Set in your shell but not passed to model calls: ${d.unforwarded.join(", ")}.` : ""} Please report this line.`)
-  } else lines.push("  → otter and your shell disagree; please report these lines.")
+    if (d.credentialEnv.length) lines.push(`  → ${d.credentialEnv.join(", ")} is set in your shell but not passed to the CLI; this may explain the different status. Sign in with /login ${d.engine} so the CLI stores its own sign-in.`)
+    else lines.push(`  → otter and your shell report different statuses.${d.unforwarded.length ? ` These shell variables are not passed to model calls and may explain the difference: ${d.unforwarded.join(", ")}.` : ""} Please report these lines.`)
+  } else lines.push("  → otter and your shell report different statuses; please report these lines.")
   return lines
 }
 
