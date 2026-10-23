@@ -852,6 +852,20 @@ export function transcriptVisualRows(lines: readonly string[], columns: number, 
   return transcriptDisplayRows(lines, columns, ascii).length
 }
 
+/** One retained layout per terminal. Callers must replace the immutable lines when content changes. */
+export class TranscriptLayoutCache {
+  private cached?: { lines: readonly string[]; columns: number; ascii: boolean; spinner?: string; rows: readonly TranscriptRow[] }
+
+  get(lines: readonly string[], columns: number, ascii = false, spinner?: string): readonly TranscriptRow[] {
+    const width = safeColumns(columns)
+    const cached = this.cached
+    if (cached?.lines === lines && cached.columns === width && cached.ascii === ascii && cached.spinner === spinner) return cached.rows
+    const rows = transcriptDisplayRows(lines, width, ascii, spinner)
+    this.cached = { lines, columns: width, ascii, spinner, rows }
+    return rows
+  }
+}
+
 function makeFrame(lines: readonly string[], cursor: CursorPosition, cursorVisible = true): string {
   const output: string[] = []
   for (let row = 0; row < lines.length; row += 1) {
@@ -880,6 +894,8 @@ export function renderFrame(input: {
   columns: number
   rows: number
   transcript: readonly string[]
+  /** Reuse semantic transcript layout when only the composer, status, theme or viewport changes. */
+  transcriptLayout?: TranscriptLayoutCache
   header?: FrameHeader
   panel?: FramePanel
   composerVisible?: boolean
@@ -958,7 +974,9 @@ export function renderFrame(input: {
   const bodyRows = Math.max(0, rows - bottom)
 
   // Body: transcript rows, a welcome box, or a bordered panel.
-  const displayRows = bodyPanel ? [] : transcriptDisplayRows(input.transcript, columns, input.ascii, input.spinner)
+  const displayRows = bodyPanel ? [] : input.transcriptLayout
+    ? input.transcriptLayout.get(input.transcript, columns, input.ascii, input.spinner)
+    : transcriptDisplayRows(input.transcript, columns, input.ascii, input.spinner)
   const visualTranscriptRows = displayRows.length
   const maximumTranscriptOffset = Math.max(0, visualTranscriptRows - bodyRows)
   const requestedTranscriptOffset = input.transcriptOffset ?? 0
