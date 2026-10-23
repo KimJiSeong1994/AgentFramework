@@ -60,12 +60,13 @@ export type TurnResult =
 
 const MAX_LATE_TEXT = 2_000
 
-export type ModelRequestFailureCategory = "model_failed" | "empty_response" | "response_budget"
+export type ModelRequestFailureCategory = "model_failed" | "empty_response" | "response_budget" | "input_budget"
 
 const MODEL_REQUEST_DIAGNOSTICS: Readonly<Record<ModelRequestFailureCategory, string>> = {
   model_failed: "The model request failed after execution stopped. Check the selected model or CLI, then submit the draft again manually.",
   empty_response: "The model returned no usable response after execution stopped. Review the draft, then submit it again manually.",
   response_budget: "The model response exceeded the configured response budget. Shorten the draft, then submit it again manually.",
+  input_budget: "The request exceeds the conversation context budget. This conversation request was not sent to the model. Shorten the draft or skill instructions; for local models, review /context status, /context unpin or /context budget, then submit again manually.",
 }
 /**
  * Why a host execution failed, from its fixed failure string (never provider text). Lets a user and the telemetry tell
@@ -119,7 +120,7 @@ const HOST_FAILURE_HINTS: Readonly<Partial<Record<HostFailureReason, string>>> =
   process_failure: "The native CLI process failed before completing the request.",
 }
 
-/** Issued only after settlement; the display diagnostic is fixed, not provider text. */
+/** Issued before dispatch or after settlement; the display diagnostic is fixed, not provider text. */
 export class ModelRequestError extends Error {
   readonly category: ModelRequestFailureCategory
   readonly diagnostic: string

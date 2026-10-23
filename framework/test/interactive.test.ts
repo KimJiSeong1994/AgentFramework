@@ -2510,6 +2510,58 @@ describe("interactive terminal", () => {
     return prompts
   }
 
+  test.each(["x".repeat(25000), "가".repeat(8000)])("production context factory keeps the session open after oversized input (%#)", async oversized => {
+    const note = "Keep the API contract"
+    const h = harness({ lines: ["First valid request", `/context pin ${note}`, oversized, "/context status", "Next valid request", "/quit"] })
+    const prompts = useProductionContext(h)
+    h.deps.terminal!.draftSnapshot = () => ({ draft: "", queued: [] })
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).toEqual({ code: 0 })
+    expect(prompts).toHaveLength(2)
+    expect(prompts[1]!.text).toContain("First valid request")
+    expect(prompts[1]!.text).toContain(note)
+    expect(prompts[1]!.text).not.toContain(oversized)
+    expect(h.calls.drafts).toContain(oversized)
+    expect(h.calls.output.join("")).toContain("This conversation request was not sent to the model")
+    expect(h.calls.viewFacts.some(fact => fact.request.state === "failed" && fact.request.category.state === "known" && fact.request.category.value === "input_budget")).toBe(true)
+    const records = replaySession(wt.worktree, h.calls.boundSessions[0]!, { order: "asc" }).records
+    expect(records.filter(record => record.kind === "assistant")).toHaveLength(2)
+    expect(records.filter(record => record.kind === "context-window").at(-1)?.data.pinnedNote).toBe(note)
+  })
+
+  test("production context factory allows unpinning after pinned context exceeds a reduced budget", async () => {
+    const h = harness({ lines: [`/context pin ${"가".repeat(2000)}`, "Too much pinned context", "/context unpin", "Try after unpinning", "/quit"] })
+    const prompts = useProductionContext(h)
+    writeFileSync(join(wt.worktree, ".otter", "otter.jsonc"), JSON.stringify({
+      chat: { intent: "off", execute: "plan" }, memory: { engine: "off" }, local_model: { context_input_tokens: 4096 },
+    }))
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).toEqual({ code: 0 })
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]!.text).toContain("Try after unpinning")
+    expect(prompts[0]!.text).not.toContain("Too much pinned context")
+    expect(h.calls.output.join("")).toContain("This conversation request was not sent to the model")
+  })
+
+  test("production context factory releases the claim after explicit skill context exceeds the budget", async () => {
+    const directory = join(wt.worktree, ".agents", "skills", "inspect")
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(join(directory, "SKILL.md"), `---\nname: inspect\ndescription: Inspect this project\nallowed-tools: [read]\n---\n${"가".repeat(2000)}\n`)
+    const h = harness({ lines: ["/skill:inspect inspect files", "Continue without the skill", "/quit"], choose: async () => 0 })
+    const prompts = useProductionContext(h)
+    writeFileSync(join(wt.worktree, ".otter", "otter.jsonc"), JSON.stringify({
+      chat: { intent: "off", execute: "plan" }, memory: { engine: "off" }, local_model: { context_input_tokens: 4096 },
+    }))
+    const createRuntime = h.deps.createRuntime!
+    let runtime: ReturnType<typeof createRuntime> | undefined
+    h.deps.createRuntime = options => { runtime = createRuntime(options); return runtime }
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).toEqual({ code: 0 })
+    expect(h.calls.output.join("")).toContain("This conversation request was not sent to the model")
+    expect(h.calls.choices).toHaveLength(1)
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]!.text).toContain("Continue without the skill")
+    expect(runtime!.runs.status().claim).toBeUndefined()
+    expect(runtime!.runs.status().executions).toHaveLength(1)
+  })
+
   test("production context factory preserves the pinned note in resumed inference and its next checkpoint", async () => {
     const note = "PIN-RESUME-428: API  호환성\n  유지"
     const oldInput = "OLD-CONTEXT-764: previous discussion"
