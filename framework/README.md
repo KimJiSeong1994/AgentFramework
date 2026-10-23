@@ -128,7 +128,8 @@ Every execution is approved by the local human, one action at a time or one plan
 - **Tool-call limit**: at 24 tool calls a chat turn asks to continue (24 more, at most 3 times) instead of failing;
   workers and workflow roles keep the hard limit.
 - **Context**: Claude/Codex chat uses a 96,000-character conversation window (vendor main input estimate 49,152
-  tokens); local and OpenCode keep 24,000 characters (8,192 tokens).
+  tokens); local defaults to 24,000 conversation characters and an 8,192-token input estimate (configurable with
+  `/context budget`). OpenCode keeps its existing 24,000-character conversation window.
 
 ### Session history (`/history`, `/facts`, `/wiki`)
 
@@ -336,8 +337,105 @@ roles are distinguished by their policy IDs.
 
 Limits: roles run one after another, not as parallel model execution. There is no prompt-cache
 continuity across roles, and no tier aliases (`opus`/`sonnet` are the engine's native names). Each
-role's input budget is set per role (`roleInputLimit`), not per model. Switching between local Ollama models
+role's input budget is set per role (`roleInputLimit`); local roles also obey `local_model.context_input_tokens`,
+with worker roles capped at 5120 estimated tokens. Switching between local Ollama models
 can incur a model reload delay on the first call of each role.
+
+### Local conversation context (`/context`)
+
+Context memory is the conversation, instructions and tool results sent to a model. `/context` manages this input
+window for the local CLI engine; `/local` below manages the separate question of model residency in RAM.
+
+| Command | Behavior |
+| --- | --- |
+| `/context` | Show estimated input budget, retained conversation size, complete pairs and pinned note. |
+| `/context optimize` | Apply the balanced preset using the selected model's loaded Ollama context size. |
+| `/context optimize speed` | Cap input at 8192 estimated tokens; trim toward 50% to leave more room between trims. |
+| `/context optimize balanced` | Cap input at 16384 estimated tokens; trim toward 70%. |
+| `/context optimize long` | Cap input at 32768 estimated tokens; trim toward 85% to retain more history. |
+| `/context optimize default` | Reset input budget and trim target to 8192 and 70%, subject to project overrides. |
+| `/context budget 16384` | Save a local input budget of 4096–65536 estimated tokens; applies on the next turn. |
+| `/context budget default` | Restore the 8192-token default, unless overridden by the project. |
+| `/context pin Preserve the public API` | Replace the pinned note (up to 2000 characters), kept through automatic or manual trimming. |
+| `/context unpin` | Remove the pinned note while keeping conversation history. |
+| `/context compact` | Keep the newest four complete user/assistant pairs and the pinned note. |
+| `/context compact 2` | Keep a chosen number of pairs (0–24). Full transcript records remain available. |
+
+The local conversation window accounts for Korean/CJK and code density using Otter's token estimator. It reserves
+3072 estimated tokens for host instructions, schemas and tool context, and also enforces a character limit with
+response headroom. On overflow it removes complete older pairs in a batch, targeting the configured percentage (70% by default) of the conversation
+allowance and at most 16 prior pairs. This leaves room for subsequent turns without repeatedly shifting the oldest
+prefix. Current input and pinned notes are never silently truncated: an oversized request is refused. Existing tool
+history fitting trims older tool results within the overall input budget; the execution role and user task remain intact.
+
+Compaction here removes old pairs; it does not invent or generate a semantic summary. Pin decisions and requirements
+that must remain available before compacting. The active window and note are checkpointed in the session transcript,
+restored on resume, and carried during a model switch. `/new` starts without them. Context mutations require an idle
+local conversation, and they grant no execution or approval authority. Pinned references cannot override current
+instructions or approval checks. Claude/Codex input budgets are unchanged.
+
+The equivalent configuration is:
+
+```json
+{ "local_model": { "context_input_tokens": 16384, "context_trim_target_percent": 70 } }
+```
+
+User settings are saved atomically in `otter.jsonc`; project settings take precedence. `null` restores the default.
+Optimization reads `ollama ps` for the selected loaded model and saves both settings atomically. It reserves the greater
+of 2048 or one eighth of the loaded context for output, caps the preset input budget accordingly, and rounds down to
+1024-token increments. If the model is not loaded, its context size is unavailable, or the remaining input space is below
+4096, it refuses to guess. Run a message first if the model is not loaded. These are heuristic presets, not performance
+benchmarks or continuous autotuning. Settings apply to subsequent local turns and are shared across local models,
+including local combo routes; status and save results show this shared scope. Optimization inspects only the selected
+model, so check smaller-context combo models before using them and rerun optimization after changing models or their
+loaded context. The trim target accepts integers 50–85 (or `null`).
+This budget controls what **Otter sends**, not Ollama's `num_ctx`: set it below the model's configured context size
+with room for output. The estimates are not exact tokenizer counts. Batching reduces prefix changes, but cache hits
+and performance gains are not measured or guaranteed; manual compaction may require rebuilding the prompt cache.
+
+To run the opt-in integration test against an already installed Ollama model, from `framework` run
+`OTTER_CONTEXT_LIVE_MODEL=gemma4-26b-mtp:latest bun test test/local-context.live.test.ts` (replace the model name as needed).
+It uses real CLI inference in a temporary worktree to check pinned-note recall, manual/automatic trimming, context
+state reload through the production conversation factory and oversized-input refusal. Interactive regression tests
+also exercise session-store resume and model switches through that factory, checking subsequent prompts and checkpoints.
+The live test logs elapsed times and estimated prompt sizes; it is not a cache benchmark.
+
+### Local model memory and cache retention
+
+`/local` (or `/local status`) shows the effective retention setting and `ollama ps` output:
+loaded model sizes, processor placement, context length when available, and expiry.
+These are Ollama's model allocations, not the computer's total free RAM or a cache-hit measurement.
+
+| Command | Behavior |
+| --- | --- |
+| `/local profile memory` | Release after each response (`0`); frees memory but requires loading and prompt processing again. |
+| `/local profile balanced` | Retain for 5 minutes idle (`5m`), allowing reuse between nearby requests. |
+| `/local profile speed` | Disable idle expiry (`-1`); retains memory and can preserve eligible prompt cache between requests. |
+| `/local profile default` | Inherit the Ollama server's retention setting. |
+| `/local keepalive 10m` | Set a custom duration: positive whole `s`, `m`, or `h`, up to 24 hours; also accepts `0`, `-1`, and `default`. |
+| `/local unload [model]` | Release the selected local model, or an explicitly named model, and its runtime prompt cache. |
+
+Settings are saved in the user `otter.jsonc`; project settings take precedence. The effective value is shown after
+saving. They apply on subsequent local CLI calls, including combo roles, local wiki recall and local skill selection;
+already loaded models keep their current expiry until a new request. The default behavior is unchanged until configured.
+The equivalent project or user setting is:
+
+```json
+{ "local_model": { "keep_alive": "5m" } }
+```
+
+Set `keep_alive` to `null` to inherit the server default even when a user setting exists. Model unload is available
+only in idle chat, after selecting a model; held workflows refuse it. It keeps downloaded model files and conversation
+history. Ollama is shared with other clients, which may have to reload that model. Otter does not automatically unload
+other models, start or restart the server, or change system-wide settings. These commands use the same sanitized CLI
+environment as inference; currently `OLLAMA_HOST` is not forwarded, so they address the default local Ollama service.
+
+Retention can avoid reloads and preserve eligible prefix cache, but does not guarantee a cache hit or a speedup:
+prompt changes, other models and server eviction still matter. This setting does not tune OpenCode-hosted inference.
+Per-request context size is not exposed by the noninteractive Ollama CLI. Context limits and KV cache quantization
+require separate server or Modelfile configuration; see the [Ollama FAQ](https://docs.ollama.com/faq) and
+[context size configuration](https://docs.ollama.com/api/openai-compatibility#setting-the-local-context-size).
+`/memory` continues to select the wiki recall engine; it is separate from model RAM management.
 
 Either flag on its own still opens the unselected composer; `/model` then asks for the
 missing choice. Without an explicit model, `/model` offers numbered choices or native

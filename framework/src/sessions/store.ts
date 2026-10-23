@@ -12,7 +12,7 @@ import { consumeValidatedResumeProof } from "./admission.ts"
 import { validateComboRoutes } from "../hosts/default-model.ts"
 import type { ComboRoutes } from "../hosts/types.ts"
 
-export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "model-rebind" | "shell" | "verify" | "action"
+export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "context-window" | "model-rebind" | "shell" | "verify" | "action"
 export type TranscriptRecord = { seq: number; kind: TranscriptKind; eventID: string; data: Record<string, unknown> }
 export type SessionMetadata = {
   version: 1
@@ -87,7 +87,7 @@ const MAX_EVENT_ID_BYTES = 16 * 1024
 const MAX_TOOL_TEXT_BYTES = 4096
 const noFollow = fs.constants.O_NOFOLLOW ?? 0
 const directoryOnly = fs.constants.O_DIRECTORY ?? 0
-const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice", "carried-context", "model-rebind", "shell", "verify", "action"])
+const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice", "carried-context", "context-window", "model-rebind", "shell", "verify", "action"])
 /** Bounds for a persisted operator shell run (see hosts/operator-shell.ts). */
 export const MAX_SHELL_LINES = 200
 export const MAX_SHELL_OUTPUT_BYTES = 64 * 1024
@@ -656,6 +656,19 @@ function validateKindData(kind: TranscriptKind, data: Record<string, unknown>): 
           message.role === (index % 2 === 0 ? "user" : "assistant") && boundedString(message.text, MAX_SEGMENT_BYTES, false) &&
           (message.text as string).trim().length > 0)) {
       throw new TypeError("carried-context transcript data must be {sourceSessionID,engine,model,messages:[user,assistant,...]}")
+    }
+    return
+  }
+  if (kind === "context-window") {
+    // Historical inference context only; restoring this checkpoint grants no approval.
+    const messages = data.messages
+    if (!exactKeys(data, ["version", "messages", "pinnedNote"]) || data.version !== 1 ||
+        typeof data.pinnedNote !== "string" || data.pinnedNote.length > 2000 || !Array.isArray(messages) ||
+        messages.length % 2 !== 0 || messages.length > MAX_CARRIED_MESSAGES ||
+        !messages.every((message, index) => plainObject(message) && exactKeys(message, ["role", "text"]) &&
+          message.role === (index % 2 === 0 ? "user" : "assistant") && boundedString(message.text, MAX_SEGMENT_BYTES, false) &&
+          (message.text as string).trim().length > 0) || JSON.stringify(messages).length > 196608) {
+      throw new TypeError("context-window transcript data must be {version:1,messages:[user,assistant,...],pinnedNote:string}")
     }
     return
   }

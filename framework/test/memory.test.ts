@@ -199,6 +199,24 @@ describe("memory recall (Claude/Codex/Ollama CLI engines)", () => {
   }
   const distribution = (given: Record<string, number>) => JSON.stringify({ probabilities: { [CACHE]: 0, [BUDGET]: 0, [ROUTER]: 0, none: 0, ...given } })
 
+  test("local recall refreshes retention without forwarding it to cloud models", async () => {
+    mkdirSync(join(root, ".otter"), { recursive: true })
+    const path = join(root, ".otter", "otter.jsonc")
+    const fake = fakeTransport(() => ({ text: distribution({ none: 1 }) }))
+    const run = (engine: "local" | "claude" = "local") => recallMemory(root, "q", { ...memory, engine, model: engine === "local" ? "native" : "haiku" }, undefined, { transport: fake.factory, fresh: true })
+    writeFileSync(path, '{"local_model":{"keep_alive":"-1"}}')
+    await run()
+    expect(fake.calls.at(-1)?.localKeepAlive).toBe("-1")
+    await run("claude")
+    expect(fake.calls.at(-1)).not.toHaveProperty("localKeepAlive")
+    writeFileSync(path, '{"local_model":{"keep_alive":null}}')
+    await run()
+    expect(fake.calls.at(-1)).not.toHaveProperty("localKeepAlive")
+    writeFileSync(path, '{"local_model":{"keep_alive":"wrong"}}')
+    expect(await run()).toEqual({ status: "unavailable", reason: "invalid_config" })
+    expect(fake.calls).toHaveLength(3)
+  })
+
   test("runs the selected CLI model tool-free with a bounded classification prompt and links like jev", async () => {
     const fake = fakeTransport(() => ({ text: "```json\n" + distribution({ [CACHE]: 0.7, [BUDGET]: 0.2, none: 0.1 }) + "\n```" }))
     const recall = await recallMemory(root, "시스템 프롬프트에 날짜", { ...memory, engine: "claude", model: "haiku" }, undefined, { transport: fake.factory })

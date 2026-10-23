@@ -18,10 +18,10 @@ import { inputColorSupported, inputLine, renderInput, type InputPresentation } f
 import { AUTH_ENGINES, authStatus, describeAuth, describeAuthFailure, describeDiagnosis, diagnoseAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
 import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus, type CliToolDisplay } from "./cli-progress.ts"
 import { formatDuration, type WorkflowProgress } from "../tui/progress.ts"
-import { createPlanConversation, MAX_PLAN_CONVERSATION_CHARS, skillInstructionBudget, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation } from "./plan-conversation.ts"
+import { createPlanConversation, skillInstructionBudget, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation, type ConversationContextState, type ConversationContextReport } from "./plan-conversation.ts"
 import type { WorkflowEnvelope } from "../workflows/types.ts"
 import { PROTECTED_WORKFLOWS, resolveSkillRoots } from "../skills/roots.ts"
-import { chatExecuteMode, chatIntentMode, chatWorktreeMode } from "../config.ts"
+import { chatExecuteMode, chatIntentMode, chatWorktreeMode, loadConfig, localContextInputTokens } from "../config.ts"
 import { classifyIntent, hasIntentForcePrefix, INTENT_CLASSIFIER, isFollowUp, type IntentClass } from "../modes/detect.ts"
 import { claimPreparedSkillInvocation, SkillSession, type AutoSkillCandidate, type PreparedSkillInvocation, type SkillCatalog } from "../skills/session.ts"
 import { readCapturedFile } from "../skills/capture.ts"
@@ -63,6 +63,8 @@ import { closeSessionHistory, projectHasWiki, renderFacts, worktreeFacts } from 
 import { lintWiki, statusWiki } from "../wiki/wiki.ts"
 import { describeDigest, readSessionDigest, readSessionDigests } from "../sessions/digest.ts"
 import { fileMemoryStore, memoryCommand, type MemoryCommandStore } from "./memory-command.ts"
+import { localModelCommand, type LocalModelStore } from "./local-model-command.ts"
+import { contextCommand, type ContextBudgetStore, type ContextController } from "./context-command.ts"
 
 export type CliEngine = CliRuntimeOptions["engine"]
 export type InteractiveArgs = { worktree: string; engine?: CliEngine; model?: string; resume?: string | true; continue?: boolean }
@@ -113,6 +115,9 @@ export type Terminal = {
 
 type PlanConversation = {
   turn: (text: string, signal?: AbortSignal, skill?: SkillConversationInvocation, skillTool?: SkillToolProvider, actionGate?: ActionGate) => Promise<ConversationTurn>
+  contextState?: () => ConversationContextState
+  contextReport?: () => ConversationContextReport
+  replaceContext?: (state: ConversationContextState) => void
 }
 
 type SignalName = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGTSTP" | "SIGCONT"
@@ -156,7 +161,7 @@ export type InteractiveDependencies = {
   checkUpdate: () => Promise<UpdateNotice | undefined>
   createRuntime: (options: RuntimeOptions) => ExecutionRuntime
   admitRuntime: (runtime: ExecutionRuntime) => Promise<void>
-  createConversation: (runtime: ExecutionRuntime, sessionID: string, prior?: readonly ConversationMessage[]) => PlanConversation
+  createConversation: (runtime: ExecutionRuntime, sessionID: string, prior?: readonly ConversationMessage[], pinnedNote?: string) => PlanConversation
   createController: (runtime: ExecutionRuntime) => ForegroundController
   discoverModels: (engine: CliEngine, worktree: string, signal?: AbortSignal) => Promise<ModelCatalog>
   /** Persisted `chat.default_model`; used only when neither --engine nor --model is given. */
@@ -165,6 +170,8 @@ export type InteractiveDependencies = {
   combo: ComboStore
   /** Persisted `memory.engine`/`memory.model` for `/memory`; recall reads it per call. Defaults to the user config. */
   memory?: MemoryCommandStore
+  localModel?: LocalModelStore
+  contextBudget?: ContextBudgetStore
   /** Vendor sign-in for codex/claude: read-only status, and the vendor's own interactive login/logout. */
   auth: EngineAuth
   /** User-config skill trust and `skill_auto` policy, read once per skill session. */
@@ -263,12 +270,10 @@ function readProgressTasks(worktree: string, sessionID: string, taskIDs: readonl
 /** Keep the newest complete pairs that fit the turn cap and the conversation character budget. */
 function boundedPairs(pairs: readonly ConversationMessage[]): ConversationMessage[] {
   const kept: ConversationMessage[] = []
-  let chars = 0
   for (let index = pairs.length - 2; index >= 0 && kept.length < MAX_CARRIED_MESSAGES; index -= 2) {
     const user = pairs[index]!
     const assistant = pairs[index + 1]!
-    chars += user.text.length + assistant.text.length
-    if (chars > MAX_PLAN_CONVERSATION_CHARS && kept.length) break
+    if (JSON.stringify([user, assistant, ...kept]).length > 196608) break
     kept.unshift(user, assistant)
   }
   return kept
@@ -478,7 +483,7 @@ export function defaultDependencies(): InteractiveDependencies {
     admitRuntime: async (runtime) => {
       assertHostAdmission(await runtime.host.preflight(runtime.host.identity.profile), runtime.host.identity.controlProfile)
     },
-    createConversation: (runtime, sessionID, prior) => createPlanConversation(runtime, sessionID, prior),
+    createConversation: createPlanConversation,
     createController: runtime => createForegroundController(runtime, { planWorktree: chatWorktreeMode(runtime.config) === "plan" }),
     discoverModels: discoverModelCatalog,
     skillPolicy: () => readSkillTrust(),
@@ -1346,7 +1351,8 @@ export async function runInteractiveSession(
       const runtime = attachedRuntime
       if (!policy || policy.auto.mode === "off" || !runtime) return
       const current = () => generation === autoCandidateGeneration && target === skillSession && target.store === sessionStore && !abort.signal.aborted
-      autoCandidateWork = target.autoCandidates(policy.auto, skillInstructionBudget(runtime.config.delegate.verify_allow, "", runtime.host.identity.engine), abort.signal)
+      autoCandidateWork = target.autoCandidates(policy.auto, skillInstructionBudget(runtime.config.delegate.verify_allow, "", runtime.host.identity.engine,
+        runtime.host.identity.engine === "local" ? localContextInputTokens(loadConfig(runtime.worktree)) : undefined), abort.signal)
         .then(candidates => { if (current()) autoSkillCandidates = candidates }, () => {
           if (current()) visibleWrite("Automatic skill candidates unavailable; explicit /skill: invocation still works.\n")
         })
@@ -1895,6 +1901,14 @@ export async function runInteractiveSession(
           terminal.write(`${command} is a local full-screen TUI action; it is unavailable in readline and no model turn was dispatched.\n`)
           continue
         }
+        if (command === "/local") {
+          terminal.write(terminalSafeText(`${await localModelCommand(commandArgs, worktree, { allowUnload: false, signal: abort.signal }, deps.localModel)}\n`))
+          continue
+        }
+        if (command === "/context") {
+          terminal.write(terminalSafeText(`${await contextCommand(commandArgs, worktree, undefined, deps.contextBudget, { signal: abort.signal })}\n`))
+          continue
+        }
         if (command === "/memory" && hasInteractiveAction("unselected", "memory")) {
           if (commandArgs[0] === "test") terminal.write("Testing the memory engine with one fixed request; this can take up to memory.timeout_ms...\n")
           terminal.write(terminalSafeText(`${await memoryCommand(commandArgs, worktree, deps.memory ?? fileMemoryStore)}\n`))
@@ -2043,6 +2057,7 @@ export async function runInteractiveSession(
     sessionStore = attachAdmission(initialRuntime, initialSessionID, { engine, model, ...(Object.keys(initialRoutes).length ? { routes: initialRoutes } : {}) })
     initialProgress.bind(sessionStore)
     attachedRuntime = initialRuntime
+    const initialContext = startupSession ? restoredContext(initialSessionID) : undefined
     let selection = {
       engine,
       model,
@@ -2050,7 +2065,7 @@ export async function runInteractiveSession(
       sessionID: initialSessionID,
       runtime: initialRuntime,
       controller: deps.createController(initialRuntime),
-      conversation: deps.createConversation(initialRuntime, initialSessionID, startupSession ? restoredConversation(initialSessionID) : undefined),
+      conversation: deps.createConversation(initialRuntime, initialSessionID, initialContext?.messages, initialContext?.pinnedNote),
     }
     let requestObservation: RequestObservation = { state: "not-observed" }
     let discoveryObservation: InteractiveViewFacts["discovery"] = startupDiscovery
@@ -2118,6 +2133,7 @@ export async function runInteractiveSession(
     await bindSkillSession(sessionStore)
     if (abort.signal.aborted) return signalExit(receivedSignal)
     let operationAbort: AbortController | undefined
+    let localModelOperation = false
     /** The committed non-plan (planning-kind) workflow this session owns, if any. */
     function ownedPlanningWorkflow() {
       const wf = activeAnyWorkflow(worktree)
@@ -2160,6 +2176,7 @@ export async function runInteractiveSession(
       visibleWrite("Skill source consent cancelled; no model turn was dispatched.\n")
     }
     requestCancel = () => {
+      if (localModelOperation) { operationAbort?.abort(); return }
       if (retainedSDKSessionID) {
         terminal.write(`Retained SDK session ${retainedSDKSessionID} is read-only; cancellation is unavailable.\n`)
         return
@@ -2352,7 +2369,7 @@ export async function runInteractiveSession(
      * Complete user/assistant pairs, oldest first, including context carried into this session by a model switch.
      * Bounded to the turns and characters a conversation window can use.
      */
-    function restoredConversation(sessionID: string): ConversationMessage[] {
+    function restoredContext(sessionID: string): ConversationContextState {
       const pairs: ConversationMessage[] = []
       let response: string | undefined
       let offset = 0
@@ -2362,17 +2379,18 @@ export async function runInteractiveSession(
         for (const record of replay.records) {
           if (record.kind === "assistant" && typeof record.data.text === "string") response = record.data.text
           else if (record.kind === "user" && typeof record.data.text === "string" && response !== undefined) {
-            pairs.unshift({ role: "user", text: record.data.text }, { role: "assistant", text: response })
+            if (pairs.length < MAX_CARRIED_MESSAGES) pairs.unshift({ role: "user", text: record.data.text }, { role: "assistant", text: response })
             response = undefined
-            if (pairs.length >= MAX_CARRIED_MESSAGES) return boundedPairs(pairs)
+          } else if (record.kind === "context-window") {
+            return { messages: boundedPairs([...(record.data.messages as ConversationMessage[]), ...pairs]), pinnedNote: record.data.pinnedNote as string }
           } else if (record.kind === "carried-context" && Array.isArray(record.data.messages)) {
             // The carried record is written first in a session, so everything before it is older context.
             response = undefined
             pairs.unshift(...record.data.messages as ConversationMessage[])
-            return boundedPairs(pairs)
+            return { messages: boundedPairs(pairs), pinnedNote: "" }
           }
         }
-        if (replay.nextOffset === undefined) return boundedPairs(pairs)
+        if (replay.nextOffset === undefined) return { messages: boundedPairs(pairs), pinnedNote: "" }
         if (replay.nextOffset <= offset) throw new InteractiveLaunchError("Session replay did not advance; work remains held.")
         offset = replay.nextOffset
       }
@@ -2537,8 +2555,8 @@ export async function runInteractiveSession(
       }
       const store = sessionStore!
       try {
-        let prior: ConversationMessage[]
-        try { prior = restoredConversation(selection.sessionID) }
+        let prior: ConversationContextState
+        try { prior = restoredContext(selection.sessionID) }
         catch {
           terminal.write("Model switch refused: the current conversation could not be read in full; selection and conversation are unchanged.\n")
           return true
@@ -2550,7 +2568,7 @@ export async function runInteractiveSession(
         if (admitted.notice) comboNotice = `${admitted.notice}\n${comboNotice ?? ""}`
         if (abort.signal.aborted) return false
         const controller = deps.createController(runtime)
-        const conversation = deps.createConversation(runtime, selection.sessionID, prior.length ? prior : undefined)
+        const conversation = deps.createConversation(runtime, selection.sessionID, prior.messages.length ? prior.messages : undefined, prior.pinnedNote)
         if (abort.signal.aborted) return false
         // The admission check below requires no live local activity, so the guard's own activity is released first.
         guard.release()
@@ -2624,8 +2642,9 @@ export async function runInteractiveSession(
           ? { sessionID: selection.sessionID, engine: selection.engine, model: selection.model }
           : undefined
         let carried: ConversationMessage[] = []
+        let carriedNote = ""
         if (carrySource) {
-          try { carried = restoredConversation(carrySource.sessionID) }
+          try { const prior = restoredContext(carrySource.sessionID); carried = prior.messages; carriedNote = prior.pinnedNote }
           catch {
             // Never drop context silently: keep the current model and conversation.
             terminal.write("Model switch refused: the current conversation could not be read in full; selection and conversation are unchanged. Use /new to start without it.\n")
@@ -2648,7 +2667,8 @@ export async function runInteractiveSession(
         }
         if (abort.signal.aborted) return false
         const controller = deps.createController(runtime)
-        const conversation = deps.createConversation(runtime, sessionID, retained ? restoredConversation(sessionID) : carried.length ? carried : undefined)
+        const context = retained ? restoredContext(sessionID) : { messages: carried, pinnedNote: carriedNote }
+        const conversation = deps.createConversation(runtime, sessionID, context.messages.length ? context.messages : undefined, context.pinnedNote)
         if (abort.signal.aborted) return false
         const drafts = terminal.draftSnapshot?.()
         if (drafts) persist("notice", drafts)
@@ -2676,6 +2696,7 @@ export async function runInteractiveSession(
         if (carrySource && carried.length) {
           persist("carried-context", { sourceSessionID: carrySource.sessionID, engine: carrySource.engine, model: carrySource.model, messages: carried })
         }
+        if (carrySource && (carried.length || carriedNote)) persist("context-window", { version: 1, messages: carried, pinnedNote: carriedNote })
         nextProgress.bind(nextStore)
         attachedRuntime = runtime
         retainedSDKSessionID = undefined
@@ -3217,6 +3238,70 @@ export async function runInteractiveSession(
         wikiLintAfterTurn = true
         continue
       }
+      if (command === "/context") {
+        const conversation = selection.conversation
+        const controller: ContextController | undefined = selection.engine === "local" && conversation.contextState && conversation.contextReport && conversation.replaceContext ? {
+          state: () => conversation.contextState!(), report: () => conversation.contextReport!(),
+          apply(state) {
+            const live = selection.runtime.runs.status()
+            if (!sessionStore || effectiveHold(worktree, selection.sessionID) || readAnyWorkflowChecked(worktree).corrupt ||
+                activeAnyWorkflow(worktree) || live.claim || live.executions.some(execution => !settled(execution))) {
+              throw new Error("Context changes require an idle conversation; finish active work first")
+            }
+            const previous = conversation.contextState!()
+            conversation.replaceContext!(state)
+            try {
+              if (!persist("context-window", { version: 1, ...state })) throw new Error("Context checkpoint could not be saved")
+            } catch (error) { conversation.replaceContext!(previous); throw error }
+          },
+        } : undefined
+        const args = commandArgs[0] === "pin" ? ["pin", message.replace(/^\/context\s+pin(?:\s+|$)/u, "")] : commandArgs
+        const contextAbort = new AbortController()
+        operationAbort = contextAbort
+        localModelOperation = true
+        const cancel = () => contextAbort.abort()
+        abort.signal.addEventListener("abort", cancel, { once: true })
+        if (abort.signal.aborted) cancel()
+        try {
+          terminal.write(terminalSafeText(`${await contextCommand(args, worktree, controller, deps.contextBudget, {
+            ...(selection.engine === "local" ? { model: selection.model } : {}),
+            signal: contextAbort.signal, run: deps.localModel?.run,
+          })}\n`))
+        } finally {
+          abort.signal.removeEventListener("abort", cancel)
+          operationAbort = undefined
+          localModelOperation = false
+        }
+        continue
+      }
+      if (command === "/local") {
+        // Input may have waited while another terminal acquired a workflow or execution claim.
+        let allowUnload = false
+        if (commandArgs[0] === "unload") {
+          try {
+            const state = selection.runtime.runs.status()
+            allowUnload = !effectiveHold(worktree, selection.sessionID) && !readAnyWorkflowChecked(worktree).corrupt &&
+              !activeAnyWorkflow(worktree) && !state.claim && state.executions.every(settled)
+          } catch { /* Unknown live state cannot authorize model release. */ }
+        }
+        const controller = new AbortController()
+        operationAbort = controller
+        localModelOperation = true
+        const cancel = () => controller.abort()
+        abort.signal.addEventListener("abort", cancel, { once: true })
+        if (abort.signal.aborted) cancel()
+        try {
+          terminal.write(terminalSafeText(`${await localModelCommand(commandArgs, worktree, {
+            ...(selection.engine === "local" ? { model: selection.model } : {}),
+            allowUnload, signal: controller.signal,
+          }, deps.localModel)}\n`))
+        } finally {
+          abort.signal.removeEventListener("abort", cancel)
+          operationAbort = undefined
+          localModelOperation = false
+        }
+        continue
+      }
       // Config-only: selecting the memory engine never dispatches a model or touches the session.
       if (command === "/memory") {
         if (commandArgs[0] === "test") terminal.write("Testing the memory engine with one fixed request; this can take up to memory.timeout_ms...\n")
@@ -3624,7 +3709,8 @@ export async function runInteractiveSession(
           // Model-chosen skills: the main model sees the consent-free catalog and may load entries with the `skill` tool
           // as the conversation calls for them. A load never prompts (consent "never") and is re-checked against the
           // current content and the role's tools; protected workflows are never in the catalog.
-          const budget = skillInstructionBudget(turnSelection.runtime.config.delegate.verify_allow, outbound, turnSelection.runtime.host.identity.engine)
+          const budget = skillInstructionBudget(turnSelection.runtime.config.delegate.verify_allow, outbound, turnSelection.runtime.host.identity.engine,
+            turnSelection.engine === "local" ? localContextInputTokens(loadConfig(worktree)) : undefined)
           const catalog = autoSkillCandidates.filter(candidate => candidate.bytes <= budget)
           const runtime = turnSelection.runtime
           const sessionID = turnStore.sessionID
@@ -3819,6 +3905,9 @@ export async function runInteractiveSession(
       previousTurnSkills = loadedSkills.map(skill => skill.name)
       if (turn.text) {
         assistantFact = persist("assistant", { text: turn.text })
+        if (turnSelection.engine === "local" && turnSelection.conversation.contextState) {
+          persist("context-window", { version: 1, ...turnSelection.conversation.contextState() })
+        }
         const assistantText = terminalSafeText(turn.text)
         if (terminal.writeText) terminal.writeText({ provenance: "assistant", text: assistantText })
         else visibleWrite(`\nConversation:\n${assistantText}\n`)

@@ -240,6 +240,11 @@ export async function recallMemory(
   }
   if (cached) scoreCache.delete(key)
   if (inFlight) return { status: "unavailable", reason: "busy" }
+  let localKeepAlive: string | null | undefined
+  if (config.engine === "local") {
+    try { localKeepAlive = loadConfig(worktree).local_model?.keep_alive }
+    catch { return { status: "unavailable", reason: "invalid_config" } }
+  }
   inFlight = true
   const controller = new AbortController()
   const abort = () => controller.abort()
@@ -251,6 +256,7 @@ export async function recallMemory(
     const started = performance.now()
     const classified = await judgeChoice({
       engine: config.engine, ...(config.model ? { model: config.model } : {}), endpoint: config.endpoint,
+      ...(localKeepAlive != null ? { localKeepAlive } : {}),
       role: "Otter project memory", question: QUESTION, instructions: INSTRUCTIONS, text, criteria,
       signal: controller.signal, deadlineAt, cancelReason: "memory recall cancelled", ...(options.transport ? { transport: options.transport } : {}),
     })

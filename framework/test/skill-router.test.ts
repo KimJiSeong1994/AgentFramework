@@ -519,6 +519,28 @@ describe("otter chat automatic skill selector", () => {
   beforeEach(() => { cliPrompts = []; cliDelayMs = 0; deps.config.memory = { ...DEFAULT_CONFIG.memory } })
   const labelsOf = (prompt: string) => [...prompt.matchAll(/^- ([^:]+): /gmu)].map((match) => match[1])
 
+  test("local classifier reloads retention per request; cloud is unaffected and invalid config refuses inference", async () => {
+    const calls: Parameters<JudgeTransportFactory>[0][] = []
+    const subject = selector({ transport: options => { calls.push(options); return cli(options) } })
+    deps.config.memory = { ...DEFAULT_CONFIG.memory, engine: "local", model: "native" }
+    mkdirSync(join(root, ".otter"), { recursive: true })
+    const path = join(root, ".otter", "otter.jsonc")
+    const run = () => subject.select({ sessionID: "s1", messageID: `m${calls.length}`, text: "plan this", mode: "offer", candidates: candidates(["plan"]) })
+    writeFileSync(path, '{"local_model":{"keep_alive":"10m"}}')
+    await run()
+    expect(calls.at(-1)?.localKeepAlive).toBe("10m")
+    writeFileSync(path, '{"local_model":{"keep_alive":null}}')
+    await run()
+    expect(calls.at(-1)).not.toHaveProperty("localKeepAlive")
+    writeFileSync(path, '{"local_model":{"keep_alive":"wrong"}}')
+    expect((await run()).reason).toBe("invalid_config")
+    expect(calls).toHaveLength(2)
+    deps.config.memory = { ...DEFAULT_CONFIG.memory, engine: "claude", model: "haiku" }
+    await run()
+    expect(calls).toHaveLength(3)
+    expect(calls.at(-1)).not.toHaveProperty("localKeepAlive")
+  })
+
   test("prefilter ranks lexically, keeps small catalogs whole and falls back for unmatched requests", () => {
     const skills = [
       { name: "llm-wiki", description: "Register local documents and compile wiki pages" },

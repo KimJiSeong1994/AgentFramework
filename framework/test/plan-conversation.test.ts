@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { estimateTokens } from "../src/tokens.ts"
+import { ModelRequestError } from "../src/workflows/turn.ts"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { newWorkflow, withFlowTransaction, workflowPath } from "../src/flow/state.ts"
 import { writeWorkflow } from "./commit-fixture.ts"
@@ -414,4 +416,213 @@ describe("common planning conversation", () => {
     await conversation.turn("empty catalog", undefined, undefined, { catalog: [], load: skillTool.load })
     expect(f.requests.at(-1)?.skillTool).toBeUndefined()
   })
+})
+
+
+describe("local conversation context", () => {
+  function budget(tokens: number | null) {
+    mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".otter", "otter.jsonc"), JSON.stringify({ local_model: { context_input_tokens: tokens } }))
+  }
+  const pairs = (count: number, text = "") => Array.from({ length: count }, (_, index) => [
+    { role: "user" as const, text: `question-${index} ${text}` },
+    { role: "assistant" as const, text: `answer-${index} ${text}` },
+  ]).flat()
+
+  test("token gate counts Korean and code, with pinned reference and pending text retained verbatim", async () => {
+    budget(8192)
+    for (const text of ["한글문맥".repeat(400), "{}[]()=>;\n".repeat(200)]) {
+      const f = fixture({ engine: "local" })
+      const note = "반드시 유지할 사용자 참고 메모"
+      const conversation = createPlanConversation(f.runtime, `local-dense-${text.startsWith("한") ? "ko" : "code"}`, pairs(12, text), note)
+      await conversation.turn(text)
+      const request = f.requests[0]!.text
+      expect(estimateTokens(request)).toBeLessThanOrEqual(5120)
+      expect(request.length + PLAN_RESPONSE_RESERVE_CHARS).toBeLessThanOrEqual(24000)
+      expect(request).toContain(note)
+      expect(request).toContain("current instructions and execution approvals take precedence")
+      const state = conversation.contextState()
+      expect(state.messages.at(-2)?.text).toBe(text)
+      expect(state.messages.length % 2).toBe(0)
+      expect(state.pinnedNote).toBe(note)
+      expect(conversation.contextReport().droppedPairs).toBeGreaterThan(0)
+    }
+  })
+
+  test("count overflow prunes in batches then preserves stable newest complete pairs", async () => {
+    const f = fixture({ engine: "local" })
+    const conversation = createPlanConversation(f.runtime, "local-batch", pairs(24), "keep me")
+    await conversation.turn("latest user input")
+    const state = conversation.contextState()
+    expect(state.messages).toHaveLength(34)
+    expect(state.messages[0]?.text).toBe("question-8 ")
+    expect(state.messages.at(-2)?.text).toBe("latest user input")
+    expect(conversation.contextReport().droppedPairs).toBe(8)
+    await conversation.turn("next input")
+    expect(conversation.contextState().messages[0]).toEqual(state.messages[0])
+    expect(conversation.contextReport().droppedPairs).toBe(8)
+  })
+
+  test("fresh trim targets retain more history at 85 than 50 while preserving pinned and pending content", async () => {
+    budget(8192)
+    const f = fixture({ engine: "local" })
+    const original = { messages: pairs(24, "context detail ".repeat(40)), pinnedNote: "Keep project decision: use SQLite." }
+    const conversation = createPlanConversation(f.runtime, "local-trim-target", original.messages, original.pinnedNote)
+    const counts: number[] = []
+    for (const percent of [50, 85]) {
+      conversation.replaceContext(original)
+      writeFileSync(join(wt.worktree, ".otter", "otter.jsonc"), JSON.stringify({ local_model: { context_input_tokens: 8192, context_trim_target_percent: percent } }))
+      await conversation.turn("Preserve this pending request verbatim.")
+      const request = f.requests.at(-1)!.text
+      expect(request).toContain(original.pinnedNote)
+      expect(estimateTokens(request)).toBeLessThanOrEqual(Math.floor(5120 * percent / 100))
+      expect(request.length).toBeLessThanOrEqual(Math.floor((24000 - PLAN_RESPONSE_RESERVE_CHARS) * percent / 100))
+      const state = conversation.contextState()
+      expect(state.pinnedNote).toBe(original.pinnedNote)
+      expect(state.messages.at(-2)?.text).toBe("Preserve this pending request verbatim.")
+      expect(state.messages.length % 2).toBe(0)
+      expect(state.messages.length).toBeLessThanOrEqual(34)
+      counts.push(state.messages.length)
+    }
+    expect(counts[0]).toBeGreaterThan(2)
+    expect(counts[1]).toBeGreaterThan(counts[0]!)
+  })
+
+  test("replacement validates complete bounded pairs and clones all exposed state", () => {
+    const conversation = createPlanConversation(fixture({ engine: "local" }).runtime, "local-replace", pairs(3), "original")
+    const state = conversation.contextState()
+    state.messages[0]!.text = "mutated externally"
+    expect(conversation.contextState().messages[0]?.text).toBe("question-0 ")
+    const replacement = { messages: pairs(1), pinnedNote: "new note" }
+    conversation.replaceContext(replacement)
+    replacement.messages[0]!.text = "mutated replacement"
+    expect(conversation.contextState().messages[0]?.text).toBe("question-0 ")
+    expect(conversation.contextReport()).toMatchObject({ pairs: 1, droppedPairs: 2, pinnedNote: "new note" })
+    const before = conversation.contextState()
+    for (const invalid of [
+      { messages: pairs(25), pinnedNote: "" },
+      { messages: [{ role: "user", text: "partial" }], pinnedNote: "" },
+      { messages: pairs(1), pinnedNote: "x".repeat(2001) },
+      { messages: pairs(1, "x".repeat(100000)), pinnedNote: "" },
+      { messages: [{ role: "assistant", text: "wrong" }, { role: "user", text: "order" }], pinnedNote: "" },
+    ]) expect(() => conversation.replaceContext(invalid as never)).toThrow()
+    expect(conversation.contextState()).toEqual(before)
+  })
+
+  test("failed oversized input leaves full state and counters unchanged", async () => {
+    const f = fixture({ engine: "local" })
+    const conversation = createPlanConversation(f.runtime, "local-refuse", pairs(24), "pin")
+    const before = conversation.contextState()
+    await expect(conversation.turn("가".repeat(8000))).rejects.toThrow("too large")
+    expect(conversation.contextState()).toEqual(before)
+    expect(conversation.contextReport().droppedPairs).toBe(0)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  test("cancelled in-flight turn refuses replacement and does not commit pruning", async () => {
+    const f = fixture({ engine: "local", hang: true })
+    const conversation = createPlanConversation(f.runtime, "local-busy", pairs(24), "pin")
+    const before = conversation.contextState()
+    const controller = new AbortController()
+    const turn = conversation.turn("pending", controller.signal)
+    await waitFor(() => f.started)
+    expect(() => conversation.replaceContext({ messages: [], pinnedNote: "" })).toThrow("active turn")
+    controller.abort()
+    await expect(turn).rejects.toThrow()
+    expect(conversation.contextState()).toEqual(before)
+    expect(conversation.contextReport().droppedPairs).toBe(0)
+  })
+
+  test("fresh local configuration changes budgets; null restores defaults and cloud is unchanged", async () => {
+    const f = fixture({ engine: "local" })
+    const conversation = createPlanConversation(f.runtime, "local-config")
+    expect(conversation.contextReport().inputTokens).toBe(8192)
+    budget(4096)
+    expect(conversation.contextReport()).toMatchObject({ inputTokens: 4096, conversationTokens: 1024 })
+    await expect(conversation.turn("가".repeat(2000))).rejects.toThrow("too large")
+    budget(65536)
+    await conversation.turn("가".repeat(2000))
+    const state = conversation.contextState()
+    const report = conversation.contextReport()
+    expect(report.inputTokens).toBe(65536)
+    expect(report.usedTokens).toBeGreaterThan(estimateTokens(JSON.stringify(state.messages)))
+    budget(null)
+    expect(conversation.contextReport().inputTokens).toBe(8192)
+    expect(planConversationChars("local", 4096)).toBe(12288)
+    expect(planConversationChars("local", 65536)).toBe(196608)
+    expect(skillInstructionBudget([], "", "local", 65536)).toBeGreaterThan(skillInstructionBudget([], "", "local"))
+    budget(4096)
+    const cloud = fixture({ engine: "claude" })
+    await createPlanConversation(cloud.runtime, "cloud-context").turn("가".repeat(10000))
+    expect(cloud.requests).toHaveLength(1)
+    expect(planConversationChars("claude", 4096)).toBe(96000)
+  })
+})
+
+
+test("local conversation reserves enough space for the real CLI main tools at 4096 and default budgets", async () => {
+  for (const inputTokens of [4096, 8192]) {
+    mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".otter", "otter.jsonc"), JSON.stringify({ local_model: { context_input_tokens: inputTokens }, memory: { engine: "off" } }))
+    const prompts: string[] = []
+    const runtime = createCliRuntime({ worktree: wt.worktree, engine: "local", model: "fixture", createTransport(options) {
+      return {
+        async run() {
+          prompts.push(options.prompt)
+          const text = JSON.stringify({ type: "final", text: "done" })
+          options.onText?.(text)
+          return { status: "completed", text, quiescent: true }
+        },
+        async reconcile() { return { outcome: "terminal", quiescent: true, evidence: "fixture complete" } },
+        async requestCancel() { return { requested: true, acknowledged: true, terminal: true, quiescent: true } },
+      }
+    } })
+    const conversation = createPlanConversation(runtime, `local-real-${inputTokens}`, [], "유지할 참고 정보")
+    const report = conversation.contextReport()
+    const dense = "한글{}[]();"
+    const repeats = Math.max(1, Math.floor((report.conversationTokens - report.usedTokens - 32) / estimateTokens(dense)))
+    await conversation.turn(dense.repeat(repeats), undefined, undefined, undefined, { approve: async () => ({ allow: true as const }), run: async () => ({ ok: true, text: "" }) })
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain("- bash: allowed")
+    expect(prompts[0]).toContain("- edit: allowed")
+    expect(64 + estimateTokens(prompts[0]!)).toBeLessThanOrEqual(inputTokens)
+  }
+})
+
+
+test("whitespace-only completed output leaves local context and drop counts unchanged", async () => {
+  const prior: ConversationMessage[] = [{ role: "user", text: "keep question" }, { role: "assistant", text: "keep answer" }]
+  const f = fixture({ engine: "local", text: "\n" })
+  const conversation = createPlanConversation(f.runtime, "local-empty-output", prior, "pin")
+  const before = conversation.contextState()
+  await expect(conversation.turn("new input")).rejects.toBeInstanceOf(ModelRequestError)
+  expect(conversation.contextState()).toEqual(before)
+  expect(conversation.contextReport().droppedPairs).toBe(0)
+  expect(f.runtime.runs.status().claim).toBeUndefined()
+})
+
+test("escaped output stays intact while oversized checkpoint context drops only complete pairs", async () => {
+  mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
+  writeFileSync(join(wt.worktree, ".otter", "otter.jsonc"), '{"local_model":{"context_input_tokens":65536},"memory":{"engine":"off"}}')
+  const output = "\u0000".repeat(7999) + "x"
+  expect(output.length).toBe(PLAN_RESPONSE_RESERVE_CHARS)
+  for (const inputLength of [145000, 170000]) {
+    const prior: ConversationMessage[] = [{ role: "user", text: "p".repeat(6000) }, { role: "assistant", text: "prior answer" }]
+    const f = fixture({ engine: "local", text: output })
+    const conversation = createPlanConversation(f.runtime, `local-escaped-${inputLength}`, prior, "pinned forever")
+    const input = "u".repeat(inputLength)
+    expect((await conversation.turn(input)).text).toBe(output)
+    const state = conversation.contextState()
+    expect(JSON.stringify(state.messages).length).toBeLessThanOrEqual(196608)
+    expect(state.messages.length % 2).toBe(0)
+    expect(state.pinnedNote).toBe("pinned forever")
+    if (inputLength === 145000) {
+      expect(state.messages).toEqual([{ role: "user", text: input }, { role: "assistant", text: output }])
+      expect(conversation.contextReport().droppedPairs).toBe(1)
+    } else {
+      expect(state.messages).toEqual([])
+      expect(conversation.contextReport().droppedPairs).toBe(2)
+    }
+    expect(() => conversation.replaceContext(state)).not.toThrow()
+  }
 })

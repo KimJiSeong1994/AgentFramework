@@ -8,11 +8,13 @@ import { spawnSync } from "node:child_process"
 import { createVendorProcess, vendorProcessEnvironment, type VendorProcessHandle, type VendorProcessResult } from "./vendor-process.ts"
 import type { ExecutionCancelResult, ExecutionReconciliation } from "./types.ts"
 import { CODEX_INSTRUCTIONS, CODEX_VERSION, CODEX_SUPPORTED_VERSIONS, codexProfileArgv, createCodexProfile } from "./codex-profile.ts"
+import { isLocalKeepAlive } from "../config.ts"
 
 export type CliEngine = "local" | "codex" | "claude"
 
 export type CliTransportOptions = {
   engine: CliEngine
+  localKeepAlive?: string
   model: string
   prompt: string
   deadlineAt: number
@@ -135,7 +137,8 @@ function safeOptions(options: CliTransportOptions): CliTransportOptions {
       typeof options.prompt !== "string" || !isWellFormedUtf16(options.prompt) || Buffer.byteLength(options.prompt, "utf8") > MAX_PROMPT_BYTES ||
       !Number.isSafeInteger(options.deadlineAt) || options.deadlineAt < 0 || options.deadlineAt - Date.now() > MAX_EXECUTION_MS ||
       !Number.isSafeInteger(options.maxOutputBytes) || options.maxOutputBytes < 0 || options.maxOutputBytes > MAX_OUTPUT_BYTES ||
-      (options.onText !== undefined && typeof options.onText !== "function")) {
+      (options.onText !== undefined && typeof options.onText !== "function") ||
+      (options.localKeepAlive !== undefined && !isLocalKeepAlive(options.localKeepAlive))) {
     throw new TypeError(SAFE_ERRORS.options)
   }
   return { ...options }
@@ -1047,6 +1050,10 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
           scratch = createScratchDirectory()
           if (!hasOwnedScratchIdentity(scratch)) throw new Error(SAFE_ERRORS.cleanup)
           const argv = nativeArgv(options.engine, options.model, scratch.path)
+          if (options.engine === "local" && options.localKeepAlive !== undefined) {
+            // Ollama's CLI parses Go durations: negative residency needs a unit even though config uses -1.
+            argv.push("--keepalive", options.localKeepAlive === "-1" ? "-1m" : options.localKeepAlive)
+          }
           protocol = createNativeProtocol(options, stopAtOutputLimit)
           processHandle = createVendorProcess({
             executable,

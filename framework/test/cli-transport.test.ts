@@ -996,3 +996,30 @@ test("model option injection and callback failures are bounded", async () => {
   expect(result.error).toBe("output callback failed")
   expect(result.error).not.toContain("SECRET")
 })
+
+test("local retention is snapshotted into Ollama argv and omitted by default", async () => {
+  installFakeCli("local", `process.stdout.write(JSON.stringify(process.argv.slice(2)))`)
+  for (const keepAlive of [undefined, "0", "-1", "5m", "24h"]) {
+    const input = options("local", { localKeepAlive: keepAlive })
+    const handle = createCliTransport(input)
+    input.localKeepAlive = "1h"
+    const result = await handle.run()
+    expect(result.status).toBe("completed")
+    expect(JSON.parse(result.text)).toEqual(["run", "test-model:tag", "--think=false", "--nowordwrap", ...(keepAlive === undefined ? [] : ["--keepalive", keepAlive === "-1" ? "-1m" : keepAlive])])
+  }
+})
+
+test("invalid local retention is rejected before executable lookup", () => {
+  for (const value of [null, 5, "25h", "-2", "5m --verbose", "1.5h"]) {
+    expect(() => createCliTransport(options("local", { localKeepAlive: value as never }))).toThrow("invalid CLI transport options")
+  }
+})
+
+test("cloud transport never forwards local retention", async () => {
+  const directory = installFakeCli("claude", `
+    require("node:fs").writeFileSync(require("node:path").join(import.meta.dir, "argv.json"), JSON.stringify(process.argv.slice(2)))
+    process.stdout.write(${JSON.stringify(claudeOutput("done").join(""))})
+  `)
+  expect((await createCliTransport(options("claude", { localKeepAlive: "5m" })).run()).status).toBe("completed")
+  expect(JSON.parse(readFileSync(join(directory, "argv.json"), "utf8"))).not.toContain("--keepalive")
+})

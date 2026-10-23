@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { SKILL_CATALOG_LIMIT, SKILL_DROPPED_RESULT, createCliHost, fitHistory, type CliToolOutcomeFact } from "../src/hosts/cli-host.ts"
+import { SKILL_CATALOG_LIMIT, SKILL_DROPPED_RESULT, roleInputLimit, createCliHost, fitHistory, type CliToolOutcomeFact } from "../src/hosts/cli-host.ts"
 import { assertHostAdmission } from "../src/hosts/required-controls.ts"
 import type { CliTransportHandle, CliTransportOptions } from "../src/hosts/cli-transport.ts"
 import type { ActionGate, ChatAction, ComboRoutes, ExecutionPolicy, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole, SkillToolProvider } from "../src/hosts/types.ts"
@@ -144,10 +144,12 @@ function harness(options: HarnessOptions = {}) {
     executions: [intent],
   }
   const runs = { status: () => state } as unknown as ExecutionRunStore
+  const transportCalls: CliTransportOptions[] = []
   const prompts: string[] = []
   const controls: Array<{ cancelCalls: number; runCalls: number; reconcileCalls: number; preflightCalls: number }> = []
   const responses = [...(options.responses ?? [])]
   const createTransport = (transportOptions: CliTransportOptions): CliTransportHandle => {
+    transportCalls.push(transportOptions)
     prompts.push(transportOptions.prompt)
     const control = { cancelCalls: 0, runCalls: 0, reconcileCalls: 0, preflightCalls: 0 }
     controls.push(control)
@@ -251,6 +253,7 @@ function harness(options: HarnessOptions = {}) {
     host,
     request,
     prompts,
+    transportCalls,
     controls,
     observed,
     get state() { return state },
@@ -271,6 +274,26 @@ const toolWrite = (path: string, content: string): string => JSON.stringify({
 })
 
 describe("common CLI execution host", () => {
+  test("local retention reloads between inference turns and null resets it", async () => {
+    mkdirSync(join(root, ".otter"))
+    const path = join(root, ".otter", "otter.jsonc")
+    writeFileSync(path, JSON.stringify({ local_model: { keep_alive: "5m" } }))
+    const subject = harness({ responses: [toolWrite("one.txt", "one"), JSON.stringify({ type: "final", text: "done" })], afterNativeTurn: () => {
+      writeFileSync(path, JSON.stringify({ local_model: { keep_alive: null } }))
+    } })
+    const handle = await subject.host.prepare(subject.request)
+    expect((await handle.run()).status).toBe("completed")
+    expect(subject.transportCalls.map(call => call.localKeepAlive)).toEqual(["5m", undefined])
+  })
+
+  test("cloud inference ignores even invalid local config", async () => {
+    mkdirSync(join(root, ".otter"))
+    writeFileSync(join(root, ".otter", "otter.jsonc"), '{"local_model":{"keep_alive":"bad"}}')
+    const subject = harness({ engine: "claude", responses: [JSON.stringify({ type: "final", text: "done" })] })
+    expect((await (await subject.host.prepare(subject.request)).run()).status).toBe("completed")
+    expect(subject.transportCalls[0]?.localKeepAlive).toBeUndefined()
+  })
+
   test("preflight uses the injected transport factory without running inference", async () => {
     const subject = harness({ responses: [JSON.stringify({ type: "final", text: "still available" })] })
     const preflight = await subject.host.preflight(subject.host.identity.profile)
@@ -790,6 +813,50 @@ describe("common CLI execution host", () => {
     }
   })
 
+  test("configured local budget changes dispatch admission while cloud budgets remain fixed", async () => {
+    mkdirSync(join(root, ".otter"))
+    const path = join(root, ".otter", "otter.jsonc")
+    const taskText = "x".repeat(24_000)
+    for (const budget of [4096, 65536]) {
+      writeFileSync(path, JSON.stringify({ local_model: { context_input_tokens: budget } }))
+      const subject = harness({ role: "main", taskText, responses: [JSON.stringify({ type: "final", text: "done" })] })
+      const result = await (await subject.host.prepare(subject.request)).run()
+      expect(result.status).toBe(budget === 4096 ? "failed" : "completed")
+      if (budget === 4096) {
+        expect(result).toMatchObject({ error: expect.stringContaining("estimated input budget") })
+        expect(subject.prompts).toHaveLength(0)
+      } else expect(subject.prompts[0]).toContain("Input estimate limit: 65536")
+    }
+    writeFileSync(path, '{"local_model":{"context_input_tokens":4096}}')
+    const cloud = harness({ engine: "claude", role: "main", taskText, responses: [JSON.stringify({ type: "final", text: "done" })] })
+    expect((await (await cloud.host.prepare(cloud.request)).run()).status).toBe("completed")
+    expect(cloud.prompts[0]).toContain("Input estimate limit: 49152")
+  })
+
+  test("local budget is fixed for an execution even when config changes between tool turns", async () => {
+    mkdirSync(join(root, ".otter"))
+    const path = join(root, ".otter", "otter.jsonc")
+    writeFileSync(path, '{"local_model":{"context_input_tokens":4096}}')
+    const subject = harness({ responses: [toolWrite("budget.txt", "ok"), JSON.stringify({ type: "final", text: "done" })], afterNativeTurn: () => {
+      writeFileSync(path, '{"local_model":{"context_input_tokens":65536}}')
+    } })
+    expect((await (await subject.host.prepare(subject.request)).run()).status).toBe("completed")
+    expect(subject.prompts).toHaveLength(2)
+    for (const prompt of subject.prompts) expect(prompt).toContain("Input estimate limit: 4096")
+  })
+
+  test("local read-only roles use context budget; worker limits remain bounded", () => {
+    for (const role of ["main", "planner", "architect", "critic"] as const) {
+      expect(roleInputLimit(role)).toBe(8192)
+      expect(roleInputLimit(role, "local", 4096)).toBe(4096)
+      expect(roleInputLimit(role, "local", 65536)).toBe(65536)
+      expect(roleInputLimit(role, "claude", 4096)).toBe(49152)
+    }
+    expect(roleInputLimit("worker", "local", 4096)).toBe(4096)
+    expect(roleInputLimit("worker", "local", 65536)).toBe(5120)
+    expect(roleInputLimit("worker", "codex", 4096)).toBe(5120)
+  })
+
   test("input estimate rejects an oversized mandatory task without native dispatch", async () => {
     const subject = harness({ taskText: "x".repeat(40_000), responses: [JSON.stringify({ type: "final", text: "unexpected" })] })
     const handle = await subject.host.prepare(subject.request)
@@ -982,10 +1049,12 @@ describe("route-aware common CLI host", () => {
       assistantText: () => ({ cancel: false }),
     }
     const policy = { resolve, handlers: () => handlers, bindSession() {}, unbindSession() {}, handlersForSession: () => undefined, snapshotForSession: () => undefined } as unknown as ExecutionPolicy
+    const retentionCalls: CliTransportOptions[] = []
     const requests: Array<{ role: ExecutionRole; engine: string; model: string }> = []
     const transports: Array<{ engine: string; model: string; prompt: string }> = []
     let currentRole: ExecutionRole = "worker"
     const createTransport = (opts: CliTransportOptions): CliTransportHandle => {
+      retentionCalls.push(opts)
       transports.push({ engine: opts.engine, model: opts.model, prompt: opts.prompt })
       const failing = options.failPreflightFor === `${opts.engine}/${opts.model}`
       const handle: CliTransportHandle = {
@@ -1030,7 +1099,7 @@ describe("route-aware common CLI host", () => {
     const runs = { status: () => state(active) } as unknown as ExecutionRunStore
     const host = createCliHost({ engine: anchor.engine, model: anchor.model, routes: options.routes ?? routes, policy, runs, createTransport })
     return {
-      host, requests, transports, makeRequest,
+      host, requests, transports, makeRequest, retentionCalls,
       async dispatch(role: ExecutionRole) {
         active = role
         currentRole = role
@@ -1039,6 +1108,15 @@ describe("route-aware common CLI host", () => {
       },
     }
   }
+
+  test("local combo routes receive retention under a cloud anchor", async () => {
+    mkdirSync(join(root, ".otter"))
+    writeFileSync(join(root, ".otter", "otter.jsonc"), '{"local_model":{"keep_alive":"0"}}')
+    const subject = routed({ anchor: { engine: "claude", model: "opus" }, routes: { planner: { engine: "local", model: "fixture" } } })
+    expect((await subject.dispatch("planner")).status).toBe("completed")
+    expect((await subject.dispatch("worker")).status).toBe("completed")
+    expect(subject.retentionCalls.map(call => call.localKeepAlive)).toEqual(["0", undefined])
+  })
 
   test("each request dispatches on its role route while identity stays the anchor", async () => {
     const subject = routed()

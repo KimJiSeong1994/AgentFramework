@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { chatExecuteMode, chatIntentMode, chatWorktreeMode, ConfigError, DEFAULT_CONFIG, loadConfig, parseJsonc, projectConfigPath, userConfigPath } from "../src/config.ts"
+import { localContextTrimTargetPercent, localContextInputTokens, isLocalKeepAlive, chatExecuteMode, chatIntentMode, chatWorktreeMode, ConfigError, DEFAULT_CONFIG, loadConfig, parseJsonc, projectConfigPath, userConfigPath } from "../src/config.ts"
 
 let root: string
 let worktree: string
@@ -150,4 +150,71 @@ describe("explicit verifier configuration", () => {
       try { refused(path, "unreadable") } finally { chmodSync(dirname(path), 0o700) }
     })
   }
+})
+
+
+describe("local model retention", () => {
+  test("validates bounded durations and explicit residency policies", () => {
+    for (const value of ["-1", "0", "1s", "86400s", "1440m", "24h"]) expect(isLocalKeepAlive(value)).toBe(true)
+    for (const value of [null, undefined, 0, "", "0s", "-2", "25h", "86401s", "1441m", "1.5h", "1h30m", " 5m", "999999999999999999999s"]) expect(isLocalKeepAlive(value)).toBe(false)
+  })
+  test("inherits by default, merges project overrides and resets user policy with null", () => {
+    expect(loadConfig(worktree).local_model).toBeUndefined()
+    put(userConfigPath(), '{"local_model":{"keep_alive":"10m"}}')
+    expect(loadConfig(worktree).local_model?.keep_alive).toBe("10m")
+    put(projectConfigPath(worktree), '{"local_model":{}}')
+    expect(loadConfig(worktree).local_model?.keep_alive).toBe("10m")
+    put(projectConfigPath(worktree), '{"local_model":{"keep_alive":"0"}}')
+    expect(loadConfig(worktree).local_model?.keep_alive).toBe("0")
+    put(projectConfigPath(worktree), '{"local_model":{"keep_alive":null}}')
+    expect(loadConfig(worktree).local_model?.keep_alive).toBeNull()
+    expect(DEFAULT_CONFIG.local_model).toBeUndefined()
+  })
+  test("rejects malformed sections and unknown settings", () => {
+    for (const local_model of [null, [], "5m", { keep_alive: 5 }, { keep_alive: "25h" }, { context: 1000 }]) {
+      put(projectConfigPath(worktree), JSON.stringify({ local_model }))
+      refused(projectConfigPath(worktree), "invalid-local-model")
+    }
+  })
+})
+
+
+describe("local context input budget", () => {
+  test("defaults and null use 8192; project budget overrides user while retaining keepalive", () => {
+    expect(localContextInputTokens(loadConfig(worktree))).toBe(8192)
+    put(userConfigPath(), '{"local_model":{"context_input_tokens":65536,"keep_alive":"5m"}}')
+    expect(localContextInputTokens(loadConfig(worktree))).toBe(65536)
+    put(projectConfigPath(worktree), '{"local_model":{"context_input_tokens":4096}}')
+    expect(localContextInputTokens(loadConfig(worktree))).toBe(4096)
+    expect(loadConfig(worktree).local_model?.keep_alive).toBe("5m")
+    put(projectConfigPath(worktree), '{"local_model":{"context_input_tokens":null}}')
+    expect(localContextInputTokens(loadConfig(worktree))).toBe(8192)
+  })
+  test("rejects noninteger and out-of-range budgets", () => {
+    for (const context_input_tokens of [4095, 65537, 4096.5, "8192", false, {}, []]) {
+      put(projectConfigPath(worktree), JSON.stringify({ local_model: { context_input_tokens } }))
+      refused(projectConfigPath(worktree), "invalid-local-model")
+    }
+  })
+})
+
+
+describe("local context trim target", () => {
+  test("defaults and null use 70; project overrides user without resetting other local settings", () => {
+    expect(localContextTrimTargetPercent(loadConfig(worktree))).toBe(70)
+    put(userConfigPath(), '{"local_model":{"context_trim_target_percent":85,"context_input_tokens":16384,"keep_alive":"5m"}}')
+    expect(localContextTrimTargetPercent(loadConfig(worktree))).toBe(85)
+    put(projectConfigPath(worktree), '{"local_model":{"context_trim_target_percent":50}}')
+    expect(localContextTrimTargetPercent(loadConfig(worktree))).toBe(50)
+    expect(localContextInputTokens(loadConfig(worktree))).toBe(16384)
+    expect(loadConfig(worktree).local_model?.keep_alive).toBe("5m")
+    put(projectConfigPath(worktree), '{"local_model":{"context_trim_target_percent":null}}')
+    expect(localContextTrimTargetPercent(loadConfig(worktree))).toBe(70)
+  })
+  test("rejects noninteger and out-of-range percentages", () => {
+    for (const context_trim_target_percent of [49, 86, 70.5, "70", false, {}, []]) {
+      put(projectConfigPath(worktree), JSON.stringify({ local_model: { context_trim_target_percent } }))
+      refused(projectConfigPath(worktree), "invalid-local-model")
+    }
+  })
 })
