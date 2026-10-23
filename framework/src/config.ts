@@ -7,6 +7,26 @@ import { parse as parseJsonWithComments, type ParseError } from "jsonc-parser"
 
 export type Mode = "none" | "ulw" | "plan" | "data"
 
+/** Ollama retention: inherit is represented by omission/null in config, not by a CLI value. */
+export function isLocalKeepAlive(value: unknown): value is string {
+  if (typeof value !== "string") return false
+  if (value === "-1" || value === "0") return true
+  const match = /^([1-9][0-9]*)(s|m|h)$/.exec(value)
+  if (!match) return false
+  const seconds = Number(match[1]) * (match[2] === "h" ? 3600 : match[2] === "m" ? 60 : 1)
+  return Number.isSafeInteger(seconds) && seconds <= 24 * 60 * 60
+}
+
+/** Otter's estimated local input budget; does not change the model server's context window. */
+export function localContextInputTokens(config: Pick<OtterConfig, "local_model">): number {
+  return config.local_model?.context_input_tokens ?? 8192
+}
+
+/** Retained percentage after local context overflow; leaves room before the next batch trim. */
+export function localContextTrimTargetPercent(config: Pick<OtterConfig, "local_model">): number {
+  return config.local_model?.context_trim_target_percent ?? 70
+}
+
 export type ModelSelection = { providerID: string; modelID: string }
 
 /** Parse OpenCode's provider/model selector without silently accepting an empty or ambiguous component. */
@@ -105,6 +125,8 @@ export function verifyCommandProblem(command: string, allow: string[]): string |
 }
 
 export type OtterConfig = {
+  /** Ollama model residency after a request; absent/null inherits the server default. */
+  local_model?: { keep_alive?: string | null; context_input_tokens?: number | null; context_trim_target_percent?: number | null }
   /** hook ids to disable, e.g. ["guard.repeat", "mode.detect"] */
   disabled_hooks: string[]
   /** prefix budgets in estimated tokens; doctor/tests assert these */
@@ -423,7 +445,7 @@ export function projectConfigPath(worktree: string): string {
   return join(worktree, ".otter", "otter.jsonc")
 }
 
-export type ConfigErrorKind = "unreadable" | "not-a-file" | "invalid-jsonc" | "invalid-verifier-selector" | "invalid-chat-intent" | "invalid-chat-worktree" | "invalid-chat-execute"
+export type ConfigErrorKind = "unreadable" | "not-a-file" | "invalid-jsonc" | "invalid-verifier-selector" | "invalid-chat-intent" | "invalid-chat-worktree" | "invalid-chat-execute" | "invalid-local-model"
 
 /** Effective `chat.intent`: an absent key means the default, "offer". */
 export function chatIntentMode(config: { chat: { intent?: "offer" | "off" } }): "offer" | "off" {
@@ -510,6 +532,18 @@ export function loadConfig(worktree: string): OtterConfig {
     if (Object.hasOwn(patch, "chat") && patch.chat && typeof patch.chat === "object" && !Array.isArray(patch.chat) &&
         Object.hasOwn(patch.chat, "execute") && patch.chat.execute !== "ask" && patch.chat.execute !== "auto-edit" && patch.chat.execute !== "plan") {
       throw new ConfigError(p, "invalid-chat-execute")
+    }
+    if (Object.hasOwn(patch, "local_model")) {
+      const local = patch.local_model
+      if (!local || typeof local !== "object" || Array.isArray(local) ||
+          Object.keys(local).some(key => key !== "keep_alive" && key !== "context_input_tokens" && key !== "context_trim_target_percent") ||
+          (local.keep_alive !== undefined && local.keep_alive !== null && !isLocalKeepAlive(local.keep_alive)) ||
+          (local.context_input_tokens !== undefined && local.context_input_tokens !== null &&
+            (!Number.isInteger(local.context_input_tokens) || local.context_input_tokens < 4096 || local.context_input_tokens > 65536)) ||
+          (local.context_trim_target_percent !== undefined && local.context_trim_target_percent !== null &&
+            (!Number.isInteger(local.context_trim_target_percent) || local.context_trim_target_percent < 50 || local.context_trim_target_percent > 85))) {
+        throw new ConfigError(p, "invalid-local-model")
+      }
     }
     cfg = deepMerge(cfg, patch)
   }

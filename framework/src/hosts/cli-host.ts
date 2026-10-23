@@ -14,7 +14,7 @@ import { CODEX_INSTRUCTIONS, createCodexProfile } from "./codex-profile.ts"
 import { parseTree, type Node, type ParseError } from "jsonc-parser"
 import { estimateTokens } from "../tokens.ts"
 import { prefilterSkills } from "../routing/retrieve.ts"
-import { DEFAULT_CONFIG, type OtterConfig } from "../config.ts"
+import { DEFAULT_CONFIG, loadConfig, localContextInputTokens, type OtterConfig } from "../config.ts"
 import type {
   BudgetEvidence,
   ChatAction,
@@ -406,9 +406,9 @@ function droppedSkills(before: readonly TranscriptExchange[], after: readonly Tr
 }
 
 /** Workflow read-only roles carry plan/spec context, so they use the main limit (B1); every legacy role keeps its limit. */
-export function roleInputLimit(role: ExecutionRole, engine: CliEngine = "local"): number {
-  if (role !== "main" && !isWorkflowReadOnlyRole(role)) return WORKER_INPUT_LIMIT
-  return engine === "local" ? MAIN_INPUT_LIMIT : VENDOR_MAIN_INPUT_LIMIT
+export function roleInputLimit(role: ExecutionRole, engine: CliEngine = "local", localInputTokens = MAIN_INPUT_LIMIT): number {
+  if (role !== "main" && !isWorkflowReadOnlyRole(role)) return engine === "local" ? Math.min(WORKER_INPUT_LIMIT, localInputTokens) : WORKER_INPUT_LIMIT
+  return engine === "local" ? localInputTokens : VENDOR_MAIN_INPUT_LIMIT
 }
 
 /** At most this many skills are listed per turn (ranked against the task text); each description is clipped. */
@@ -847,7 +847,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               assertSkillExecution(request)
             },
           })
-          const inputLimit = roleInputLimit(request.role, route.engine)
+          const inputLimit = roleInputLimit(request.role, route.engine, route.engine === "local" ? localContextInputTokens(loadConfig(request.cwd)) : undefined)
           const nativeInstructionTokens = request.policy.nativeContext ? estimateTokens(request.policy.nativeContext.instructions) : 0
           let available = tools.available
           let basePrompt = buildBasePrompt(request, available, offered?.catalog, inputLimit)
@@ -934,6 +934,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             try {
               transport = transportFactory({
                 engine: route.engine,
+                ...(route.engine === "local" ? { localKeepAlive: loadConfig(request.cwd).local_model?.keep_alive ?? undefined } : {}),
                 model: route.model,
                 prompt,
                 deadlineAt: request.deadlineAt,

@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { launchInteractive, parseInteractiveArgs, validModelID, type InteractiveDependencies, type Terminal } from "../src/hosts/interactive.ts"
-import type { TerminalControl } from "../src/hosts/interactive-session.ts"
+import { defaultDependencies, type TerminalControl } from "../src/hosts/interactive-session.ts"
 import type { ShellResult } from "../src/hosts/operator-shell.ts"
 import type { EngineInfo } from "../src/hosts/engine-update.ts"
 import { createChatCheckpoints } from "../src/hosts/chat-checkpoint.ts"
@@ -37,7 +37,7 @@ import type { AuthState } from "../src/hosts/engine-auth.ts"
 import { CODEX_SUPPORTED_VERSIONS } from "../src/hosts/codex-profile.ts"
 import { getOwnedSession, inspectSessionAttachment, openSession, replaySession, readSessionMetadata, type ReplayOptions, type ReplayResult } from "../src/sessions/store.ts"
 import { sessionDir } from "../src/state/store.ts"
-import type { ConversationMessage, SkillConversationInvocation } from "../src/hosts/plan-conversation.ts"
+import type { ConversationMessage, SkillConversationInvocation, ConversationContextState } from "../src/hosts/plan-conversation.ts"
 import type { SkillToolProvider } from "../src/hosts/types.ts"
 
 let wt: ReturnType<typeof tempGitWorktree>
@@ -138,7 +138,7 @@ function harness(options: HarnessOptions = {}) {
     transcriptSources: Array<(options: ReplayOptions) => ReplayResult>
     queueAdmissions: boolean[]
     controllerCreations: number
-    conversationRestores: Array<{ sessionID: string; prior?: readonly ConversationMessage[] }>
+    conversationRestores: Array<{ sessionID: string; prior?: readonly ConversationMessage[]; pinnedNote?: string }>
     defaultModel: DefaultModelLookup
     defaultModelWrites: Array<{ engine: string; model: string } | null>
     combo: ComboLookup
@@ -298,11 +298,11 @@ function harness(options: HarnessOptions = {}) {
       } as unknown as ExecutionRuntime
     },
     admitRuntime: async () => { calls.events.push("admitRuntime") },
-    createConversation: (runtime, sessionID, prior) => {
+    createConversation: (runtime, sessionID, prior, pinnedNote) => {
       calls.events.push("conversation")
       calls.sessionID = sessionID
       calls.sessionIDs.push(sessionID)
-      calls.conversationRestores.push({ sessionID, ...(prior ? { prior } : {}) })
+      calls.conversationRestores.push({ sessionID, ...(prior ? { prior } : {}), ...(pinnedNote ? { pinnedNote } : {}) })
       const selectedRuntime = runtime as ExecutionRuntime & { selectedEngine: string; selectedModel: string; progress?: CliProgressSink }
       if (options.failConversationFor?.(selectedRuntime.selectedEngine, selectedRuntime.selectedModel)) {
         throw new Error("fixture conversation setup failed")
@@ -1050,7 +1050,7 @@ describe("interactive terminal", () => {
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     const commands = h.calls.choices.find(choice => choice.title === "Commands")!.values
       .map(value => value.split(" ")[0])
-    expect(commands).toEqual(["/help", "/model", "/memory", "/login", "/sessions", "/resume", "/engines", "/theme", "/ascii", "!", "/quit"])
+    expect(commands).toEqual(["/help", "/model", "/memory", "/local", "/context", "/login", "/sessions", "/resume", "/engines", "/theme", "/ascii", "!", "/quit"])
     expect(h.calls.runtimes).toEqual([])
     expect(h.calls.discoveries).toEqual([])
     expect(h.calls.turns).toEqual([])
@@ -2439,6 +2439,214 @@ describe("interactive terminal", () => {
     expect(output).toContain("Saved combo route architect")
     expect(output).toContain("It applies when a model is selected.")
     expect(output).not.toContain("starts a new session")
+  })
+
+  function withContextControls(h: ReturnType<typeof harness>) {
+    const create = h.deps.createConversation!
+    h.deps.createConversation = (runtime, sessionID, prior, pinnedNote) => {
+      const original = create(runtime, sessionID, prior, pinnedNote)
+      let state: ConversationContextState = { messages: (prior ?? []).map(m => ({ ...m })), pinnedNote: pinnedNote ?? "" }
+      return {
+        ...original,
+        contextState: () => structuredClone(state),
+        contextReport: () => ({ inputTokens: 8192, conversationTokens: 5120, usedTokens: 1000, pairs: state.messages.length / 2, pinnedNote: state.pinnedNote, droppedPairs: 0 }),
+        replaceContext: next => { state = structuredClone(next) },
+        async turn(...args) {
+          const result = await original.turn(...args)
+          state.messages.push({ role: "user", text: args[0] }, { role: "assistant", text: result.text })
+          return result
+        },
+      }
+    }
+    return h
+  }
+
+  test("/context pin and compact persist across resume without deleting transcript or dispatching commands", async () => {
+    const note = "API  호환성\n  유지"
+    const first = withContextControls(harness({ lines: ["hello", `/context pin ${note}`, "/context compact 0", "/context", "/quit"], turns: [{ text: "hello back" }] }))
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, first.deps)
+    expect(first.calls.turns).toEqual(["hello"])
+    const records = replaySession(wt.worktree, "otter-fixture-session", { order: "asc" }).records
+    expect(records.some(r => r.kind === "user" && r.data.text === "hello")).toBe(true)
+    expect(records.filter(r => r.kind === "context-window").at(-1)?.data).toEqual({ version: 1, messages: [], pinnedNote: note })
+    const second = withContextControls(harness({ lines: ["/context", "/quit"] }))
+    await launchInteractive({ worktree: wt.worktree, resume: "otter-fixture-session" }, second.deps)
+    expect(second.calls.conversationRestores[0]).toEqual({ sessionID: "otter-fixture-session", prior: [], pinnedNote: note })
+    expect(second.calls.output.join("")).toContain("0 complete pairs")
+    expect(second.calls.output.join("")).toContain(note)
+    expect(second.calls.turns).toEqual([])
+  })
+
+  test("context pin survives a model switch and /new starts with no pin", async () => {
+    const h = withContextControls(harness({ lines: ["/context pin keep this", "/model local native-next", "/context", "/new", "/context", "/quit"] }))
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.conversationRestores[1]?.pinnedNote).toBe("keep this")
+    expect(h.calls.conversationRestores[2]?.pinnedNote).toBeUndefined()
+    expect(h.calls.output.join("")).toContain("Pinned note: none")
+    expect(h.calls.turns).toEqual([])
+  })
+
+  function useProductionContext(h: ReturnType<typeof harness>) {
+    useRealRuntime(h)
+    mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".otter", "otter.jsonc"), JSON.stringify({
+      chat: { intent: "off", execute: "plan" }, memory: { engine: "off" },
+      local_model: { context_input_tokens: 8192 },
+    }))
+    const prompts: Array<{ model: string; text: string }> = []
+    h.deps.createConversation = defaultDependencies().createConversation
+    h.deps.createRuntime = options => createCliRuntime({ ...options, createTransport(request) {
+      return {
+        async run() {
+          prompts.push({ model: options.model, text: request.prompt })
+          const text = JSON.stringify({ type: "final", text: "Context response completed." })
+          request.onText?.(text)
+          return { status: "completed", text, quiescent: true }
+        },
+        async reconcile() { return { outcome: "terminal", quiescent: true, evidence: "fixture completed" } },
+        async requestCancel() { return { requested: true, acknowledged: true, terminal: true, quiescent: true } },
+      }
+    } })
+    return prompts
+  }
+
+  test("production context factory preserves the pinned note in resumed inference and its next checkpoint", async () => {
+    const note = "PIN-RESUME-428: API  호환성\n  유지"
+    const oldInput = "OLD-CONTEXT-764: previous discussion"
+    const first = harness({ lines: [oldInput, `/context pin ${note}`, "/context compact 0", "/quit"] })
+    const firstPrompts = useProductionContext(first)
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, first.deps)).toEqual({ code: 0 })
+    expect(firstPrompts).toHaveLength(1)
+    const sessionID = first.calls.boundSessions[0]!
+    const before = replaySession(wt.worktree, sessionID, { order: "asc" }).records
+    expect(before.filter(record => record.kind === "context-window").at(-1)?.data).toEqual({ version: 1, messages: [], pinnedNote: note })
+    expect(before.some(record => record.kind === "user" && record.data.text === oldInput)).toBe(true)
+
+    const resumed = harness({ lines: ["/continue", "RESUME", "What reference should I retain?", "/quit"] })
+    const resumedPrompts = useProductionContext(resumed)
+    expect(await launchInteractive({ worktree: wt.worktree, resume: sessionID }, resumed.deps)).toEqual({ code: 0 })
+    expect(resumedPrompts).toHaveLength(1)
+    const checkpoint = replaySession(wt.worktree, sessionID, { order: "asc", kind: "context-window" }).records.at(-1)?.data
+    expect({ promptHasPin: resumedPrompts[0]!.text.includes(note), checkpointPin: checkpoint?.pinnedNote }).toEqual({ promptHasPin: true, checkpointPin: note })
+    expect(resumedPrompts[0]!.text).not.toContain(oldInput)
+    expect(checkpoint?.messages).toEqual([
+      { role: "user", text: "What reference should I retain?" },
+      { role: "assistant", text: "Context response completed." },
+    ])
+  })
+
+  test("production context factory preserves the pin after model switching and clears it for new sessions", async () => {
+    const note = "PIN-SWITCH-914: retain the API contract"
+    const h = harness({ lines: [`/context pin ${note}`, "/model local native-next", "Continue with the reference.", "/new", "Start a clean discussion.", "/quit"] })
+    const prompts = useProductionContext(h)
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).toEqual({ code: 0 })
+    expect(prompts).toHaveLength(2)
+    expect(prompts.map(prompt => prompt.model)).toEqual(["native-next", "native-next"])
+    expect(h.calls.boundSessions).toHaveLength(3)
+    const switched = replaySession(wt.worktree, h.calls.boundSessions[1]!, { order: "asc", kind: "context-window" }).records.at(-1)?.data
+    const fresh = replaySession(wt.worktree, h.calls.boundSessions[2]!, { order: "asc", kind: "context-window" }).records.at(-1)?.data
+    expect({ promptHasPin: prompts[0]!.text.includes(note), checkpointPin: switched?.pinnedNote }).toEqual({ promptHasPin: true, checkpointPin: note })
+    expect(prompts[1]!.text).not.toContain(note)
+    expect(prompts[1]!.text).not.toContain("Continue with the reference.")
+    expect(fresh).toEqual({ version: 1, pinnedNote: "", messages: [
+      { role: "user", text: "Start a clean discussion." },
+      { role: "assistant", text: "Context response completed." },
+    ] })
+  })
+
+  test("/context rechecks live claims before trimming and budgets can be set before selection", async () => {
+    const status: NonNullable<HarnessOptions["executionStatus"]> = { generation: 0, executions: [] }
+    const h = withContextControls(harness({ lines: ["/context compact 0", "/quit"], executionStatus: status, beforeRead() {
+      status.claim = { ownerSession: "other", instance: "other", pid: 1, generation: 1 }
+    } }))
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.output.join("")).toContain("Context changes require an idle conversation")
+    expect(replaySession(wt.worktree, "otter-fixture-session", { kind: "context-window" }).records).toEqual([])
+    const unselected = harness({ lines: ["/context budget 16384", "/quit"] })
+    let budget = 8192
+    await launchInteractive({ worktree: wt.worktree }, { ...unselected.deps, contextBudget: {
+      read: () => budget, save: value => { budget = value ?? 8192; return "/user/config" },
+    } })
+    expect(budget).toBe(16384)
+    expect(unselected.calls.runtimes).toEqual([])
+  })
+
+  test("/context optimize uses the selected local model and persists both settings without inference", async () => {
+    const h = harness({ lines: ["/context optimize long", "/context", "/quit"] })
+    let tokens = 8192
+    let target = 70
+    const operations: string[][] = []
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, { ...h.deps,
+      contextBudget: {
+        read: () => tokens, save: value => { tokens = value ?? 8192; return "/user/config" },
+        readTrimTarget: () => target,
+        saveOptimization: (value, percent) => { tokens = value ?? 8192; target = percent ?? 70; return "/user/config" },
+      },
+      localModel: { read: () => null, save: () => "/user/config", run: async argv => {
+        operations.push([...argv])
+        return "NAME    CONTEXT\nnative:latest    65536\nother:latest    8192"
+      } },
+    })
+    expect(tokens).toBe(32768)
+    expect(target).toBe(85)
+    expect(operations).toEqual([["ps"]])
+    expect(h.calls.output.join("")).toContain("Observed native: 65536")
+    expect(h.calls.output.join("")).toContain("Automatic trim target: 85%")
+    expect(h.calls.turns).toEqual([])
+  })
+
+  test("/local configures retention before selection and unloads only from idle chat without model turns", async () => {
+    let keepAlive: string | null | undefined
+    const operations: string[][] = []
+    const store = {
+      read: () => keepAlive,
+      save: (value: string | null) => { keepAlive = value; return "/user/otter.jsonc" },
+      run: async (argv: readonly string[]) => { operations.push([...argv]); return "NAME SIZE PROCESSOR UNTIL" },
+    }
+    const unselected = harness({ lines: ["/local", "/local profile speed", "/local unload native", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree }, { ...unselected.deps, localModel: store })
+    expect(unselected.calls.output.join("")).toContain("Saved local model keepalive -1")
+    expect(unselected.calls.output.join("")).toContain("before a model is selected")
+    expect(unselected.calls.runtimes).toHaveLength(0)
+    expect(operations).toEqual([["ps"]])
+    const chat = harness({ lines: ["/local unload", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, { ...chat.deps, localModel: store })
+    expect(chat.calls.output.join("")).toContain("Unloaded native")
+    expect(chat.calls.turns).toEqual([])
+    expect(operations).toEqual([["ps"], ["stop", "native"]])
+    const held = harness({ lines: ["/local unload native", "/quit"], executionStatus: { generation: 1, claim: { ownerSession: "other", instance: "other", pid: 1, generation: 1 }, executions: [] } })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, { ...held.deps, localModel: store })
+    expect(held.calls.output.join("")).toContain("while this session is held")
+    expect(operations).toHaveLength(2)
+  })
+
+  test("/local unload rechecks claims acquired while input was pending", async () => {
+    const status: NonNullable<HarnessOptions["executionStatus"]> = { generation: 0, executions: [] }
+    let runs = 0
+    const h = harness({ lines: ["/local unload", "/quit"], executionStatus: status, beforeRead() {
+      status.claim = { ownerSession: "another", instance: "another", pid: 1, generation: 1 }
+    } })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, { ...h.deps, localModel: {
+      read: () => undefined, save: () => "unused", run: async () => { runs++; return "" },
+    } })
+    expect(h.calls.output.join("")).toContain("while this session is held")
+    expect(runs).toBe(0)
+  })
+
+  test("Escape cancels /local status without a model turn or a workflow cancellation", async () => {
+    const h = harness({ lines: ["/local", "/quit"] })
+    let cancelled = false
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, { ...h.deps, localModel: {
+      read: () => undefined, save: () => "unused", run: async (_argv, _worktree, signal) => {
+        h.calls.control?.("interrupt")
+        cancelled = signal?.aborted === true
+        if (cancelled) throw new Error("cancelled")
+        return "not cancelled"
+      },
+    } })
+    expect(cancelled).toBe(true)
+    expect(h.calls.output.join("")).toContain("Status unavailable: cancelled")
+    expect(h.calls.turns).toEqual([])
   })
 
   test("/memory selects the recall engine from the composer, before and during a session, without a model turn", async () => {
