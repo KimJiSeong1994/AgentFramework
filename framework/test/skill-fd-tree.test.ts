@@ -26,6 +26,35 @@ afterEach(() => {
 })
 
 describe("checked FD skill tree", () => {
+  test("unrelated siblings do not invalidate the root anchor but root contents still do", () => {
+    const parent = sandbox()
+    const boundary = join(parent, "boundary")
+    mkdirSync(boundary)
+    writeFileSync(join(boundary, "payload.txt"), "stable bytes")
+    const tree = FdTree.openRoot(boundary)
+    try {
+      expect(tree.readFileRelative("payload.txt").bytes.toString()).toBe("stable bytes")
+      mkdirSync(join(parent, "unrelated-sibling"))
+      writeFileSync(join(parent, "unrelated.txt"), "outside the capture boundary")
+      expect(() => tree.assertStable()).not.toThrow()
+      writeFileSync(join(boundary, "new-entry.txt"), "inside the capture boundary")
+      expect(() => tree.assertStable()).toThrow(FdTreeError)
+    } finally { tree.close() }
+  })
+
+  test("replacing the parent anchor still invalidates an otherwise unchanged held root", () => {
+    const base = sandbox()
+    const parent = join(base, "parent")
+    const boundary = join(parent, "boundary")
+    mkdirSync(boundary, { recursive: true })
+    const tree = FdTree.openRoot(boundary)
+    try {
+      renameSync(parent, join(base, "retained-parent"))
+      mkdirSync(boundary, { recursive: true })
+      expect(() => tree.assertStable()).toThrow(FdTreeError)
+    } finally { tree.close() }
+  })
+
   test("refuses an external regular-file inode hard-linked into the source boundary", () => {
     const root = sandbox()
     const boundary = join(root, "boundary")
