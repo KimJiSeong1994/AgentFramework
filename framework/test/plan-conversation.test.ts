@@ -513,7 +513,7 @@ describe("local conversation context", () => {
     const f = fixture({ engine: "local" })
     const conversation = createPlanConversation(f.runtime, "local-refuse", pairs(24), "pin")
     const before = conversation.contextState()
-    await expect(conversation.turn("가".repeat(8000))).rejects.toThrow("too large")
+    await expect(conversation.turn("가".repeat(8000))).rejects.toMatchObject({ name: "ModelRequestError", category: "input_budget" })
     expect(conversation.contextState()).toEqual(before)
     expect(conversation.contextReport().droppedPairs).toBe(0)
     expect(f.requests).toHaveLength(0)

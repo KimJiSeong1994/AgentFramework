@@ -193,9 +193,8 @@ export function createPlanConversation(
       const trimTargetPercent = engine === "local" ? localContextTrimTargetPercent(loadConfig(runtime.worktree)) : 70
       const limit = planConversationChars(engine, inputTokens)
       const tokenLimit = engine === "local" ? Math.max(512, inputTokens - 3072) : undefined
-      if (typeof text !== "string" || !text.trim() || text.length > limit) {
-        throw new Error("conversation message is empty or too large")
-      }
+      if (typeof text !== "string" || !text.trim()) throw new TypeError("conversation message is empty or invalid")
+      if (text.length > limit) throw new ModelRequestError("input_budget", "conversation message is too large")
       if (busy) throw new Error("conversation already has an active turn")
       if (signal?.aborted) throw new Error("conversation cancelled")
       const pending = { role: "user" as const, text }
@@ -204,7 +203,7 @@ export function createPlanConversation(
       const gate = mainPrompt === PLAN_CHAT_PROMPT ? actionGate : undefined
       const facts = turnFacts(runtime, mainPrompt)
       let window = selectWindow(history, pending, promptPrefix(mainPrompt, runtime.config.delegate.verify_allow, undefined, facts, pinnedNote), limit, tokenLimit, trimTargetPercent)
-      if (!window) throw new Error("conversation message is too large for the reserved context budget")
+      if (!window) throw new ModelRequestError("input_budget", "conversation message is too large for the reserved context budget")
       const workflow = activeWorkflow(runtime.worktree)
       if (workflow?.sessionID === sessionID) {
         const refusal = workflowEngineRefusal(workflow, runtime.host.identity.engine)
@@ -233,13 +232,13 @@ export function createPlanConversation(
             const bound = skill ? bindSkillInvocation(skill.prepared, request, runtime.policy, skill.terminal) : undefined
             if (!bound) return { handlers: runtime.policy.handlers(request), ...(skillTool && skillTool.catalog.length ? { skillTool } : {}), ...(gate ? { actionGate: gate } : {}) }
             window = selectWindow(history, pending, promptPrefix(mainPrompt, runtime.config.delegate.verify_allow, bound.instructions, facts, pinnedNote), limit, tokenLimit, trimTargetPercent)
-            if (!window) { finishSkillInvocation(bound.context); throw new Error("skill instructions exceed the reserved conversation context budget") }
+            if (!window) { finishSkillInvocation(bound.context); throw new ModelRequestError("input_budget", "skill instructions exceed the reserved conversation context budget") }
             audit = skillInvocationAudit(bound.context)
             return { handlers: bound.handlers, skillContext: bound.context, text: window.requestText, ...(gate ? { actionGate: gate } : {}) }
           },
         }, signal)
         if (result.status === "diagnostic") throw new Error(`planning conversation superseded: ${result.reason}`)
-        if (result.status === "stuck") throw new Error(result.reason)
+        if (result.status === "stuck") throw new ModelRequestError("input_budget", result.reason)
         if (!result.text.trim()) throw new ModelRequestError("empty_response", "planning conversation model returned only whitespace")
         const next: ConversationMessage[] = [...window.messages, { role: "assistant", text: result.text }]
         // JSON escaping can make a completed response larger than its raw character reserve.
