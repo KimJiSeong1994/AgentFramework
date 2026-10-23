@@ -42,6 +42,7 @@ export class TranscriptModel {
   private readonly shells = new Map<string, ShellItem>()
   private readonly pendingDisplay = new Map<string, Partial<CliToolDisplay>>()
   private nextShellOrdinal = 0
+  private cachedLines?: { query: string | undefined; lines: readonly string[] }
   constructor(readonly sessionID: string, private readonly now: () => number = Date.now) {}
   get runningShell(): boolean {
     for (const shell of this.shells.values()) if (shell.status === "running") return true
@@ -131,6 +132,7 @@ export class TranscriptModel {
     return details
   }
   taskSnapshot(tasks: readonly CliProgressTask[], historical = false): void {
+    this.cachedLines = undefined
     for (const task of tasks) {
       const prior = this.tasks.get(task.id)
       this.tasks.set(task.id, { status: task.status, ...(task.title ? { title: task.title } : prior?.title ? { title: prior.title } : {}) })
@@ -139,12 +141,14 @@ export class TranscriptModel {
     }
   }
   evidenceSnapshot(executionID: string, evidence: readonly string[], execution: ExecutionDisplay): void {
+    this.cachedLines = undefined
     for (const item of this.calls.values()) if (item.executionID === executionID) {
       item.evidence = [...evidence]
       item.execution = { ...execution }
     }
   }
   executionSnapshot(state: ExecutionRunStatus, active: boolean): void {
+    this.cachedLines = undefined
     for (const item of this.calls.values()) {
       const execution = state.executions.find(record => record.executionId === item.executionID && record.ownerSession === this.sessionID)
       if (!execution) continue
@@ -164,12 +168,14 @@ export class TranscriptModel {
   }
 
   append(value: string | TranscriptText): void {
+    this.cachedLines = undefined
     const entry = typeof value === "string" ? { text: value, provenance: "notice" as const } : value
     this.entries.push({ kind: "text", id: `text:${++this.sequence}`, text: entry.text, provenance: entry.provenance })
   }
 
   activity(activity: CliHostActivity, ordinal?: number, historical = false): void {
     if (activity.kind !== "tool-started" && activity.kind !== "tool-finished") return
+    this.cachedLines = undefined
     const id = `tool:${JSON.stringify([activity.executionID, activity.callID])}`
     if (historical) this.historicalCalls.add(id)
     else this.historicalCalls.delete(id)
@@ -203,6 +209,7 @@ export class TranscriptModel {
 
   /** Live-only target/result/duration for a tool call already in the transcript (or arriving just before it). */
   toolDisplay(display: CliToolDisplay): void {
+    this.cachedLines = undefined
     const id = `tool:${JSON.stringify([display.executionID, display.callID])}`
     const item = this.calls.get(id)
     if (!item || this.historicalCalls.has(id)) {
@@ -218,6 +225,7 @@ export class TranscriptModel {
   shellStarted(id: string, command: string, ordinal?: number, origin?: { source: "verify"; taskID: string; attempt: number; timeoutMs: number }): ShellItem {
     const existing = this.shells.get(id)
     if (existing) return existing
+    this.cachedLines = undefined
     const assigned = ordinal ?? this.nextShellOrdinal + 1
     this.nextShellOrdinal = Math.max(this.nextShellOrdinal, assigned)
     const item: ShellItem = { kind: "shell", id, ordinal: assigned, command, lines: [], totalLines: 0, status: "running",
@@ -230,10 +238,12 @@ export class TranscriptModel {
   shellFinished(id: string, result: { status: Exclude<ShellItemStatus, "running">; exitCode: number | null; signal: string | null; durationMs: number; lines: readonly string[]; totalLines: number }): void {
     const item = this.shells.get(id)
     if (!item) return
+    this.cachedLines = undefined
     Object.assign(item, { status: result.status, exitCode: result.exitCode, signal: result.signal, durationMs: result.durationMs, lines: [...result.lines], totalLines: result.totalLines })
   }
 
   toggle(id: string): boolean {
+    this.cachedLines = undefined
     const shell = this.shells.get(id)
     if (shell) {
       shell.expanded = !shell.expanded
@@ -255,8 +265,12 @@ export class TranscriptModel {
     })
   }
 
-  lines(query?: string): string[] {
-    return (query === undefined ? this.entries : this.search(query)).flatMap(item => {
+  lines(query?: string): readonly string[] {
+    // Composer edits do not change the transcript. Keep one immutable projection so the
+    // renderer can reuse its layout; running tool/shell elapsed labels still refresh.
+    const cacheable = !this.liveActivity
+    if (cacheable && this.cachedLines && this.cachedLines.query === query) return this.cachedLines.lines
+    const lines = (query === undefined ? this.entries : this.search(query)).flatMap(item => {
       if (item.kind === "text") {
         const label = item.provenance === "user" ? "You" :
           item.provenance === "assistant" ? "Assistant" :
@@ -299,6 +313,9 @@ export class TranscriptModel {
         : item.detail?.resultLines !== undefined ? [`  Result: ${item.detail.resultLines} line${item.detail.resultLines === 1 ? "" : "s"}`] : []
       return item.expanded ? [summary, `  Call ${item.callID} · execution ${item.executionID} · ${item.role}`, ...result, ...item.evidence.map(line => `  ${line}`)] : [summary]
     })
+    const result = Object.freeze(lines)
+    this.cachedLines = cacheable ? { query, lines: result } : undefined
+    return result
   }
 }
 

@@ -2,7 +2,7 @@ import type { Terminal, TerminalControl } from "../hosts/interactive-session.ts"
 import type { ShellResult } from "../hosts/operator-shell.ts"
 import { Editor, searchSubmittedHistory } from "./editor.ts"
 import type { InputEvent } from "./keys.ts"
-import { abovePanelRows, belowPanelRows, bodyPanelRows, ellipsize, panelInnerColumns, renderFrame, transcriptViewportRows, transcriptVisualRows, wrapText, type FrameHome } from "./render.ts"
+import { abovePanelRows, belowPanelRows, bodyPanelRows, ellipsize, panelInnerColumns, renderFrame, transcriptViewportRows, TranscriptLayoutCache, wrapText, type FrameHome } from "./render.ts"
 import { TerminalDriver } from "./terminal.ts"
 import { MIN_COLUMNS, MIN_ROWS, MIN_SIZE_LABEL } from "./capability.ts"
 import { TranscriptModel } from "./transcript-model.ts"
@@ -74,6 +74,7 @@ export class TuiApp implements Terminal {
   private readonly overlayControls = new Editor({ platform: process.platform })
   private readonly driver = new TerminalDriver(event => this.input(event), () => this.draw(), () => this.control?.("disconnect"))
   private transcript = new TranscriptModel("selection")
+  private readonly transcriptLayout = new TranscriptLayoutCache()
   private transcriptQuery: string | undefined
   private scrollOffset = 0
   private catalog?: SkillCatalog
@@ -359,7 +360,7 @@ export class TuiApp implements Terminal {
   private transcriptScrollBounds(): { pageRows: number; maximumOffset: number } {
     const { columns, rows } = this.dimensions()
     const viewportRows = transcriptViewportRows({ columns, rows, draft: this.editor.text, cursor: this.editor.cursor, prompt: this.prompt })
-    const visualRows = transcriptVisualRows(this.transcript.lines(this.transcriptQuery), columns, this.asciiChrome)
+    const visualRows = this.transcriptLayout.get(this.transcript.lines(this.transcriptQuery), columns, this.asciiChrome, this.spinnerGlyph()).length
     return { pageRows: Math.max(1, viewportRows), maximumOffset: Math.max(0, visualRows - viewportRows) }
   }
 
@@ -766,6 +767,7 @@ export class TuiApp implements Terminal {
     if (panel?.placement === "body") composerVisible = false
     if (!composerVisible) { draft = ""; cursor = 0; prompt = "" }
     this.renderedFrame = renderFrame({ ...this.dimensions(), transcript: panel?.placement === "body" ? [] : lines,
+      transcriptLayout: this.transcriptLayout,
       onTranscriptRows: rows => { this.renderedTranscript = rows },
       header: {
         screen,

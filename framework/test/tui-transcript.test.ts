@@ -10,6 +10,76 @@ function finish(callID: string, outcome: "succeeded" | "failed" | "denied" = "su
   return { ...start(callID), kind: "tool-finished", ok: outcome === "succeeded", outcome } as CliHostActivity
 }
 
+test("unchanged transcript lines are immutable and reused until content or query changes", () => {
+  const model = new TranscriptModel("sid")
+  model.append({ provenance: "assistant", text: "First answer\nSecond line" })
+  const first = model.lines()
+  expect(model.lines()).toBe(first)
+  expect(Object.isFrozen(first)).toBe(true)
+  expect(model.lines("missing")).toEqual([])
+  const filtered = model.lines("First")
+  expect(filtered).toEqual(first)
+  expect(model.lines("First")).toBe(filtered)
+  model.append("Another answer")
+  expect(model.lines()).not.toBe(first)
+  expect(model.lines()).toContain("[Notice] Another answer")
+  expect(first).toEqual(["[Assistant] First answer", "  | Second line"])
+})
+
+test("historical calls reuse lines but live elapsed time and terminal updates stay fresh", () => {
+  let now = 1000
+  const model = new TranscriptModel("sid", () => now)
+  model.activity(start("one"), undefined, true)
+  const historical = model.lines()
+  now = 3000
+  expect(model.lines()).toBe(historical)
+  expect(historical[0]).toContain("running (last recorded; unconfirmed)")
+  model.activity(start("one"))
+  const running = model.lines()
+  now = 5000
+  expect(model.lines()).not.toEqual(running)
+  expect(model.lines()[0]).toContain("2.0s")
+  model.activity(finish("one"))
+  const finished = model.lines()
+  now = 9000
+  expect(model.lines()).toBe(finished)
+  expect(finished[0]).toContain("call succeeded")
+})
+
+test("cached tool rows refresh for display, task, expansion and evidence changes", () => {
+  const model = new TranscriptModel("sid")
+  model.activity(start("one")); model.activity(finish("one"))
+  const initial = model.lines()
+  model.toolDisplay({ executionID: "exec", callID: "one", phase: "finished", detail: { path: "new-path.ts", resultLines: 4 } })
+  expect(model.lines()).not.toBe(initial)
+  expect(model.lines()[0]).toContain("new-path.ts")
+  model.taskSnapshot([{ id: "t1", status: "done", title: "New title" }])
+  expect(model.lines()[0]).toContain("New title")
+  model.toggle(model.items[0]!.id)
+  expect(model.lines()).toContain("  Result: 4 lines")
+  model.evidenceSnapshot("exec", ["New evidence"], { state: "settled", claim: false, fence: false })
+  expect(model.lines()).toContain("  New evidence")
+  expect(model.lines()[0]).not.toContain("execution not observed")
+})
+
+test("shell elapsed rows remain live and settled rows refresh when expanded", () => {
+  let now = 1000
+  const model = new TranscriptModel("sid", () => now)
+  model.shellStarted("shell", "test")
+  expect(model.lines().at(-1)).toContain("running · 0s")
+  now = 4000
+  expect(model.lines().at(-1)).toContain("running · 3s")
+  model.shellFinished("shell", { status: "complete", exitCode: 0, signal: null, durationMs: 3000,
+    lines: Array.from({ length: 25 }, (_, i) => `output ${i}`), totalLines: 25 })
+  const finished = model.lines()
+  now = 8000
+  expect(model.lines()).toBe(finished)
+  expect(finished).not.toContain("  | output 0")
+  model.toggle("shell")
+  expect(model.lines()).toContain("  | output 0")
+  expect(model.lines().at(-1)).toContain("exit 0")
+})
+
 test("repeated same-name calls remain individual and duplicate terminals are idempotent", () => {
   const model = new TranscriptModel("sid")
   model.activity(start("one")); model.activity(finish("one")); model.activity(finish("one"))
