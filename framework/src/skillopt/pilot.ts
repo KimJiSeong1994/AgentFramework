@@ -25,6 +25,19 @@ export const PILOT_LIMITS = Object.freeze({
   candidateSteps: 3,
 })
 
+/** Native-v1 resource caps. These do not alter the historical local-Ollama pilot contract above. */
+export const NATIVE_SKILLOPT_LIMITS = Object.freeze({
+  targetRequests: 512,
+  optimizerRequests: 40,
+  reviewerRequests: 2,
+  candidateSteps: 1,
+  concurrency: 1,
+  activeMilliseconds: 21600000,
+  requestMilliseconds: 120000,
+  artifactBytes: 256 * 1024 * 1024,
+  fixtureBytes: 512 * 1024,
+})
+
 export class SkillOptError extends Error {
   constructor(readonly code: string) {
     super(code)

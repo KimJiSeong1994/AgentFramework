@@ -47,6 +47,8 @@ export type ExecutionPolicyOptions = {
   /** With planningOnlyMain: the chat model may also write, edit and run commands (each approved through an ActionGate). */
   chatExecuteMain?: boolean
   nativeContext?: Readonly<{ identity: string; instructions: string }>
+  /** Internal loader-canary evaluator text; never read from user config or task/model output. Main only. */
+  skillLoaderCanaryInstructions?: string
   /** Per-role model (and Codex native context) overriding the runtime-wide selection; roles absent here are computed exactly as without routes. */
   routes?: Readonly<Partial<Record<ExecutionRole, Readonly<{ model: ModelSelection; nativeContext?: Readonly<{ identity: string; instructions: string }> }>>>>
 }
@@ -66,6 +68,13 @@ export function createExecutionPolicy(config: Readonly<OtterConfig>, options: Ex
   const chatExecuteMain = planningOnlyMain && options.chatExecuteMain === true
   const mainTools = chatExecuteMain ? CHAT_EXECUTE_TOOLS : PLANNING_MAIN_TOOLS
   const nativeContext = options.nativeContext === undefined ? undefined : freezeNativeContext(options.nativeContext)
+  const skillLoaderCanaryInstructions = options.skillLoaderCanaryInstructions
+  if (skillLoaderCanaryInstructions !== undefined && (typeof skillLoaderCanaryInstructions !== "string" ||
+      !skillLoaderCanaryInstructions.trim() || Buffer.byteLength(skillLoaderCanaryInstructions, "utf8") > 8 * 1024 ||
+      Buffer.from(skillLoaderCanaryInstructions, "utf8").toString("utf8") !== skillLoaderCanaryInstructions ||
+      skillLoaderCanaryInstructions.includes("\0"))) {
+    throw new TypeError("invalid skill loader canary instructions")
+  }
   // `chat` (launch model), `skill_trust` (user-config consent prompt skip), `skill_auto` (user-config per-turn skill
   // selection, which only chooses an already consent-free skill) and `memory` (recall engine, re-read per `memory` call
   // and switched live by /memory) never shape a role's prompt, tools or limits, so they stay out of role identity.
@@ -94,11 +103,15 @@ export function createExecutionPolicy(config: Readonly<OtterConfig>, options: Ex
       : planningMain
         ? chatExecuteMain ? CHAT_EXECUTE_PROMPT : PLANNING_MAIN_PROMPT
         : mainPrompt(!config.disabled_hooks.includes("tool.delegate"), config.data.backend !== "none" && !config.disabled_hooks.includes("tool.data"), config.flow.enabled && !config.disabled_hooks.includes("flow"))
+    if (role === "main" && skillLoaderCanaryInstructions !== undefined && system.includes(skillLoaderCanaryInstructions)) {
+      throw new TypeError("skill loader canary instructions must have one unique system span")
+    }
     const resolved: Omit<ExecutionPolicySnapshot, "id"> = {
       role, ...(model ? { model: Object.freeze(model) } : {}),
       maxOutputTokens: isWorkflowReadOnlyRole(role) ? config.max_output.worker : config.max_output[role] ?? config.max_output.worker,
       tools: Object.freeze({ allowed: Object.freeze([...allowed]), denied: Object.freeze([...new Set([...denied, ...(role === "reviewer" ? KNOWN_TOOLS.filter((t) => !REVIEW_TOOLS.includes(t)) : [])])]) }),
-      system: Object.freeze([system]),
+      system: Object.freeze(role === "main" && skillLoaderCanaryInstructions !== undefined
+        ? [system, skillLoaderCanaryInstructions] : [system]),
       ...(roleNativeContext ? { nativeContext: roleNativeContext } : {}),
       thinking: role !== "main" && model && /ollama|:11434/i.test(model.providerID) ? "disabled" : "inherit",
     }

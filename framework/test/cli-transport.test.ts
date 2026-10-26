@@ -1,11 +1,14 @@
 import { afterEach, expect, spyOn, test } from "bun:test"
+import { createHash } from "node:crypto"
 import * as fs from "node:fs"
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import * as path from "node:path"
 import { delimiter, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import process from "node:process"
-import { CliExecutableError, createCliTransport, findExecutable, type CliEngine } from "../src/hosts/cli-transport.ts"
+import {
+  CliExecutableError, createCliTransport, findExecutable, nativeObservedUsageCanonicalByteBound, type CliEngine,
+} from "../src/hosts/cli-transport.ts"
 import { codexProfileArgv, createCodexProfile } from "../src/hosts/codex-profile.ts"
 
 const CODEX_MODEL = "gpt-5.6-sol"
@@ -238,6 +241,168 @@ function codexOutput(item: Record<string, unknown>, terminal: Record<string, unk
     `${JSON.stringify(terminal)}\n`,
   ]
 }
+
+test("Claude reports only final observed usage and retains unknown fields instead of inventing zeros", async () => {
+  const frames = claudeOutput("usage answer")
+  const terminal = JSON.parse(frames[frames.length - 1]!)
+  terminal.usage = { input_tokens: 12, output_tokens: 4, cache_read_input_tokens: 3, cache_creation_input_tokens: 0 }
+  terminal.total_cost_usd = 0.002
+  frames[frames.length - 1] = `${JSON.stringify(terminal)}\n`
+  expect((await runClaudeFixture(frames)).usage).toEqual({
+    inputTokens: 12, outputTokens: 4, cachedInputTokens: 3, cacheCreationTokens: 0, reportedCostUsd: 0.002,
+  })
+  // Intermediate message_delta usage is not an aggregate counter.
+  expect((await runClaudeFixture(claudeOutput("unknown usage"))).usage).toBeUndefined()
+})
+
+test("observed usage canonical byte bound covers normalized numeric edges and omits unknown vendor fields", async () => {
+  const frames = claudeOutput("usage byte bound")
+  const terminal = JSON.parse(frames[frames.length - 1]!)
+  terminal.usage = {
+    input_tokens: Number.MAX_SAFE_INTEGER,
+    output_tokens: Number.MAX_SAFE_INTEGER,
+    cache_read_input_tokens: Number.MAX_SAFE_INTEGER,
+    cache_creation_input_tokens: Number.MAX_SAFE_INTEGER,
+    future_vendor_counter: Number.MAX_SAFE_INTEGER,
+  }
+  terminal.total_cost_usd = Number.MAX_VALUE
+  frames[frames.length - 1] = `${JSON.stringify(terminal)}\n`
+
+  const usage = (await runClaudeFixture(frames)).usage
+  if (!usage) throw new Error("normalized native CLI usage was omitted")
+  expect(usage).toEqual({
+    inputTokens: Number.MAX_SAFE_INTEGER,
+    outputTokens: Number.MAX_SAFE_INTEGER,
+    cachedInputTokens: Number.MAX_SAFE_INTEGER,
+    cacheCreationTokens: Number.MAX_SAFE_INTEGER,
+    reportedCostUsd: Number.MAX_VALUE,
+  })
+  expect(nativeObservedUsageCanonicalByteBound()).toBe(191)
+  const serializedUsage = JSON.stringify(usage)
+  expect(Buffer.byteLength(serializedUsage, "utf8")).toBeLessThanOrEqual(nativeObservedUsageCanonicalByteBound())
+  expect(serializedUsage).not.toContain("future_vendor_counter")
+})
+
+test("malformed or unreported usage stays unknown without coercion or cost invention", async () => {
+  const frames = claudeOutput("partial usage")
+  const terminal = JSON.parse(frames[frames.length - 1]!)
+  terminal.usage = { input_tokens: "12", output_tokens: 0, cache_read_input_tokens: -1, cache_creation_input_tokens: 0.5 }
+  terminal.total_cost_usd = "0.002"
+  frames[frames.length - 1] = `${JSON.stringify(terminal)}\n`
+  const usage = (await runClaudeFixture(frames)).usage
+  if (!usage) throw new Error("valid observed output counter was omitted")
+  expect(usage).toEqual({ outputTokens: 0 })
+  const serializedUsage = JSON.stringify(usage)
+  expect(serializedUsage).toBe('{"outputTokens":0}')
+  expect(Buffer.byteLength(serializedUsage, "utf8")).toBeLessThanOrEqual(nativeObservedUsageCanonicalByteBound())
+})
+
+test("Codex retains its reported token counters without implying provider billing or retries", async () => {
+  setProcessPlatform("darwin")
+  const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
+  testDirectories.push(resolve(marker, ".."))
+  const profile = createCodexProfile(CODEX_MODEL)
+  installFakeCli("codex", fixtureSource({
+    expectedArgs: codexExpectedArgs(), prompt: "fixture prompt", marker, sourceRoot: sourceRoot(),
+    version: "codex-cli 0.163.0",
+    profileCatalog: { name: `codex-${profile.version}-catalog.json`, contents: profile.catalogJson },
+    chunks: codexOutput(
+      { type: "item.completed", item: { id: "item_1", type: "agent_message", text: "usage answer" } },
+      { type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 2 } },
+    ),
+  }))
+  const result = await createCliTransport(options("codex")).run()
+  expect(result.status).toBe("completed")
+  expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 5, cachedInputTokens: 2 })
+})
+
+function installIdentityFixture(engine: "codex" | "claude", modifyAfterDispatch = false, versionLinger = false) {
+  setProcessPlatform("darwin")
+  const root = mkdtempSync(join(tmpdir(), "cli-identity-test-"))
+  testDirectories.push(root)
+  const marker = join(root, "inference.json")
+  const versionMarker = join(root, "version.json")
+  const profile = createCodexProfile(CODEX_MODEL)
+  const expectedArgs = engine === "codex" ? codexExpectedArgs() : [
+    "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
+    "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome",
+    "--no-session-persistence", "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
+  ]
+  let source = fixtureSource({
+    expectedArgs, prompt: "fixture prompt", marker, versionMarker, versionLinger, sourceRoot: sourceRoot(),
+    version: engine === "codex" ? "codex-cli 0.163.0" : "2.1.301 (Claude Code)",
+    ...(engine === "codex" ? { profileCatalog: { name: `codex-${profile.version}-catalog.json`, contents: profile.catalogJson } } : {}),
+    chunks: engine === "codex"
+      ? codexOutput({ type: "item.completed", item: { id: "item_1", type: "agent_message", text: "identity answer" } })
+      : claudeOutput("identity answer"),
+  })
+  if (modifyAfterDispatch) source = source.replace("for (const chunk of chunks)", 'fs.appendFileSync(process.argv[1], "\\n// runtime changed\\n"); for (const chunk of chunks)')
+  const directory = installFakeCli(engine, source)
+  return { marker, versionMarker, executable: join(directory, engine), handle: createCliTransport(options(engine)) }
+}
+
+test.each(["codex", "claude"] as const)("%s identity inspection observes version and pinned bytes without inference", async engine => {
+  const fixture = installIdentityFixture(engine)
+  const identity = await fixture.handle.inspectIdentity!()
+  expect(identity).toMatchObject({
+    engine, requestedModel: options(engine).model,
+    runtimeIdentity: {
+      version: engine === "codex" ? "0.163.0" : "2.1.301",
+      executableSha256: createHash("sha256").update(readFileSync(fixture.executable)).digest("hex"),
+    },
+  })
+  expect(existsSync(fixture.versionMarker)).toBe(true)
+  expect(existsSync(fixture.marker)).toBe(false)
+  if (engine === "codex") expect(identity!.profileIdentity.sha256).toBe(createCodexProfile(CODEX_MODEL).catalogHash)
+  expect(await fixture.handle.run()).toMatchObject({ status: "completed", text: "identity answer", quiescent: true })
+  expect(await fixture.handle.inspectIdentity!()).toEqual(identity)
+})
+
+test("post-run identity cannot invent pre-dispatch observation and refuses later executable drift", async () => {
+  const unobserved = installIdentityFixture("claude")
+  expect((await unobserved.handle.run()).status).toBe("completed")
+  expect(await unobserved.handle.inspectIdentity!()).toBeUndefined()
+  const observed = installIdentityFixture("claude")
+  expect(await observed.handle.inspectIdentity!()).toBeDefined()
+  expect((await observed.handle.run()).status).toBe("completed")
+  writeFileSync(observed.executable, `${readFileSync(observed.executable, "utf8")}\n// changed after dispatch\n`)
+  expect(await observed.handle.inspectIdentity!()).toBeUndefined()
+})
+
+test.each(["codex", "claude"] as const)("%s refuses executable drift after identity inspection before inference", async engine => {
+  const fixture = installIdentityFixture(engine)
+  expect(await fixture.handle.inspectIdentity!()).toBeDefined()
+  writeFileSync(fixture.executable, `${readFileSync(fixture.executable, "utf8")}\n// changed before dispatch\n`)
+  expect(await fixture.handle.run()).toMatchObject({ status: "failed", quiescent: true, error: "native runtime identity verification failed" })
+  expect(existsSync(fixture.marker)).toBe(false)
+})
+
+test.each(["codex", "claude"] as const)("%s refuses successful output when executable changes during dispatch", async engine => {
+  const fixture = installIdentityFixture(engine, true)
+  expect(await fixture.handle.inspectIdentity!()).toBeDefined()
+  expect(await fixture.handle.run()).toMatchObject({ status: "failed", quiescent: true, error: "native runtime identity verification failed" })
+  expect(existsSync(fixture.marker)).toBe(true)
+})
+
+test("identity inspection supports read-only installed hard-links but refuses changes through aliases", async () => {
+  const fixture = installIdentityFixture("claude")
+  const alias = `${fixture.executable}-package-cache`
+  fs.linkSync(fixture.executable, alias)
+  expect(await fixture.handle.inspectIdentity!()).toBeDefined()
+  writeFileSync(alias, `${readFileSync(alias, "utf8")}\n// package cache changed\n`)
+  expect(await fixture.handle.run()).toMatchObject({ status: "failed", quiescent: true, error: "native runtime identity verification failed" })
+  expect(existsSync(fixture.marker)).toBe(false)
+})
+
+test("cancelling an owned identity probe prevents subsequent inference", async () => {
+  const fixture = installIdentityFixture("claude", false, true)
+  const inspection = fixture.handle.inspectIdentity!()
+  await waitForPath(fixture.versionMarker)
+  expect((await fixture.handle.requestCancel("fixture cancellation", Date.now() + 2000)).requested).toBe(true)
+  expect(await inspection).toBeUndefined()
+  expect(await fixture.handle.run()).toMatchObject({ status: "cancelled", quiescent: true })
+  expect(existsSync(fixture.marker)).toBe(false)
+})
 
 test.each(["codex", "claude"] as const)("findExecutable reports permission denial for a non-executable %s file", engine => {
   const directory = createPathDirectory()

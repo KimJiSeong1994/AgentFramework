@@ -2130,6 +2130,18 @@ The full experiment, independent qualification, exact-candidate approval and
 verified production application remain unmet. See the
 [pilot runbook and capability boundary](../docs/lca-skillopt-pipeline-2026-10-03.md).
 
+## Native SkillOpt runbook
+
+Native foreground SkillOpt의 현재 명령, 입력·동의 경계, private TTY 게시·rollback 및 복구 한계는 별도
+[한국어 운영 안내서](../docs/lca-skillopt-native-wiki.md)에 정리되어 있다. 현재 실행용 genuine/승인 76-family
+pack은 제공되지 않았다. 필수 입력/fixture 데이터가 빠지거나 구조 요건을 충족하지 못하면 `DATA_REQUIRED`로
+멈추며 dispatch는 시작되지 않는다. 코드의 구조 검증은 사람의 pack 승인을 대신하지 않는다. 현재 통합은 검증 중이며 실제 qualified
+campaign과 production apply/rollback을 완료했다는 뜻이 아니다. 위의 날짜가 있는 P1 차단 기록과 기존
+파이프라인 문서는 역사 기록으로 유지한다.
+`/skillopt cleanup <run-id>`와 CLI `cleanup --run ID`는 만료된 private 실험 텍스트만 별도 승인으로
+정리하는 경로다. 원본·promotion backup·journal·복구·감사 기록은 보존하며 자동 GC나 실행 권한 복원은
+하지 않는다. cleanup 통합 검증 상태와 거부 조건도 운영 안내서에서 구분한다.
+
 ## Delegate config (`.otter/otter.jsonc` → `delegate`)
 
 | key | default | meaning |

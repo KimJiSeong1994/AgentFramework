@@ -1,4 +1,4 @@
-/** `observer`: chat is held only because another session owns the active workflow; held actions plus /model. */
+/** `observer`: chat is held only because another session owns the active workflow; held actions plus /model and SkillOpt commands. */
 export type InteractiveContext = "chat" | "busy" | "held" | "observer" | "read-only" | "selection" | "choice" | "unselected"
 
 export type InteractiveAction = Readonly<{
@@ -20,6 +20,7 @@ const all: readonly InteractiveAction[] = [
   { id: "resume", syntax: "/resume [sid]", summary: "open a retained session through existing checks", contexts: ["chat", "held", "read-only", "selection", "unselected"] },
   { id: "new", syntax: "/new", summary: "start a new conversation after release checks", contexts: ["chat", "held", "read-only"] },
   { id: "status", syntax: "/status", summary: "show checked workflow and execution state", contexts: ["chat", "busy", "held", "read-only"] },
+  { id: "skillopt", syntax: "/skillopt [status | prepare <input-path> | consent|arm|disarm|cancel|resume|run <run-id> [input-path] | apply|rollback|cleanup <run-id>]", summary: "inspect or manage a native SkillOpt run; cleanup requires explicit retirement approval", contexts: ["chat", "held", "observer"] },
   { id: "continue", syntax: "/continue", summary: "request proof-checked work Resume", contexts: ["held"] },
   { id: "pause", syntax: "/pause", summary: "request pause; it is not proof of stopped work", contexts: ["chat", "busy", "held"] },
   { id: "cancel", syntax: "/cancel", summary: "request cancellation; proof may remain unconfirmed", contexts: ["chat", "busy", "held"] },
@@ -44,8 +45,43 @@ const all: readonly InteractiveAction[] = [
 ]
 
 export function interactiveActions(context?: InteractiveContext): readonly InteractiveAction[] {
-  if (context === "observer") return all.filter(action => action.contexts.includes("held") || action.id === "model")
+  if (context === "observer") return all.filter(action => action.contexts.includes("observer") || action.contexts.includes("held") || action.id === "model")
   return context ? all.filter(action => action.contexts.includes(context)) : all
+}
+
+export type SkillOptCommand =
+  | Readonly<{ operation: "status" }>
+  | Readonly<{ operation: "prepare"; inputPath?: string }>
+  | Readonly<{ operation: "consent" | "arm" | "disarm" | "cancel" | "resume" | "run"; runId: string; inputPath?: string }>
+  | Readonly<{ operation: "apply" | "rollback"; runId: string }>
+  | Readonly<{ operation: "cleanup"; runId: string }>
+  | Readonly<{ operation: "invalid"; reason: "usage" | "operation" }>
+
+const SKILLOPT_REENTRY_OPERATIONS = new Set(["consent", "arm", "disarm", "cancel", "resume", "run"])
+
+/** Parse only the slash-command boundary; paths are the literal remainder, never shell-tokenized or expanded. */
+export function parseSkillOptCommand(line: string): SkillOptCommand | undefined {
+  if (typeof line !== "string") return undefined
+  const match = /^\/skillopt(?:\s+([\s\S]*))?$/u.exec(line.trim())
+  if (!match) return undefined
+  const rest = match[1]?.trim() ?? ""
+  if (!rest || rest === "status") return Object.freeze({ operation: "status" })
+  const token = /^(\S+)(?:\s+([\s\S]*))?$/u.exec(rest)
+  if (!token) return Object.freeze({ operation: "invalid", reason: "usage" })
+  const operation = token[1]!
+  const tail = token[2]?.trim()
+  if (operation === "prepare") return Object.freeze({ operation, ...(tail ? { inputPath: tail } : {}) })
+  if (operation === "status") return Object.freeze({ operation: "invalid", reason: "usage" })
+  if (operation === "apply" || operation === "rollback" || operation === "cleanup") {
+    if (!tail || /\s/u.test(tail)) return Object.freeze({ operation: "invalid", reason: "usage" })
+    return Object.freeze({ operation, runId: tail })
+  }
+  if (!SKILLOPT_REENTRY_OPERATIONS.has(operation)) return Object.freeze({ operation: "invalid", reason: "operation" })
+  if (!tail) return Object.freeze({ operation: "invalid", reason: "usage" })
+  const run = /^(\S+)(?:\s+([\s\S]*))?$/u.exec(tail)
+  if (!run) return Object.freeze({ operation: "invalid", reason: "usage" })
+  return Object.freeze({ operation: operation as "consent" | "arm" | "disarm" | "cancel" | "resume" | "run", runId: run[1]!,
+    ...(run[2]?.trim() ? { inputPath: run[2]!.trim() } : {}) })
 }
 
 export function commandInsertion(action: InteractiveAction): string | undefined {
@@ -67,5 +103,9 @@ export function commandInsertions(prefix: string, context: InteractiveContext = 
 
 export function interactiveHelp(context: InteractiveContext = "chat"): string {
   const actions = interactiveActions(context).map(action => `${action.syntax} — ${action.summary}${action.local ? " (local)" : ""}`)
-  return [`Commands (${context}):`, ...actions, "Keys: Enter send/select · Ctrl+R history · PageUp/PageDown transcript or active document · Escape interrupts running work or dismisses (/cancel stops a workflow) · Ctrl+C clear then shutdown on second press · Ctrl+D quit · Ctrl+Z proof-guarded suspend."].join("\n") + "\n"
+  return [`Commands (${context}):`, ...actions,
+    "SkillOpt input paths are literal remainders of the line (spaces are allowed; no shell expansion). Reentry inputs default to the run's saved input. In the TUI, `/skillopt run` waits for separate `/skillopt apply`; `/skillopt rollback` is available only in the same live owner session after that session's publication. `/skillopt cleanup` requires explicit approval in the current TUI owner session. CLI cleanup is `bun scripts/otter-skillopt.ts cleanup --run <run-id>` and requires fresh approval under its newly attached owner, not run reentry. CLI `run` also requires real publication approval; standalone CLI apply/rollback is not available.",
+    "SkillOpt source, fixture, model-response, and candidate text are not added to chat or saved session history; summaries expose allowlisted metadata only.",
+    "Keys: Enter send/select · Ctrl+R history · PageUp/PageDown transcript or active document · Escape interrupts running work or dismisses (/cancel stops a workflow) · Ctrl+C clear then shutdown on second press · Ctrl+D quit · Ctrl+Z proof-guarded suspend.",
+  ].join("\n") + "\n"
 }

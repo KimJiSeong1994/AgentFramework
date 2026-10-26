@@ -1,15 +1,38 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { execFileSync } from "node:child_process"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { SKILL_CATALOG_LIMIT, SKILL_DROPPED_RESULT, roleInputLimit, createCliHost, fitHistory, type CliToolOutcomeFact } from "../src/hosts/cli-host.ts"
+import { consumeCliSkillLoaderCompletion, SKILL_CATALOG_LIMIT, SKILL_DROPPED_RESULT, roleInputLimit, createCliHost, fitHistory, type CliToolOutcomeFact } from "../src/hosts/cli-host.ts"
 import { assertHostAdmission } from "../src/hosts/required-controls.ts"
-import type { CliTransportHandle, CliTransportOptions } from "../src/hosts/cli-transport.ts"
+import { createCliTransport, type CliNativeIdentity, type CliTransportHandle, type CliTransportOptions } from "../src/hosts/cli-transport.ts"
 import type { ActionGate, ChatAction, ComboRoutes, ExecutionPolicy, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole, SkillToolProvider } from "../src/hosts/types.ts"
 import type { ExecutionRunStore, ExecutionRunStatus } from "../src/hosts/run-state.ts"
 import type { CliHostActivity } from "../src/hosts/cli-progress.ts"
 import { estimateTokens } from "../src/tokens.ts"
 import { CODEX_INSTRUCTIONS, createCodexProfile } from "../src/hosts/codex-profile.ts"
+import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
+import { attachAdmission } from "../src/sessions/admission.ts"
+import {
+  consumeSkillLoaderWitness, finishSkillInvocation, registerSkillLoaderWitness,
+  bindSkillInvocation, type SkillInvocationContext, type SkillLoaderCanaryBinding,
+} from "../src/skills/context.ts"
+import {
+  NATIVE_PROTOCOL_SHA256, NATIVE_WIKI_OUTPUT_SCHEMA, type NativeWikiFixture,
+} from "../src/skillopt/dataset.ts"
+import {
+  buildNativeEvaluationPrompt, NATIVE_EVALUATION_PROTOCOL_SHA256, NATIVE_WIKI_REFERENCE_ANSWER_SCHEMA,
+  scoreNativeFixtureResponse,
+} from "../src/skillopt/evaluation.ts"
+import {
+  completeNativeSkillLoadWitness, prepareNativeSkillLoadCanary, registerNativeSkillLoadWitness, verifyNativeSkillLoadVerificationProof,
+  type NativeSkillLoadCanaryPlan,
+} from "../src/skillopt/load-verification.ts"
+import { canonicalJson, sha256 } from "../src/skillopt/pilot.ts"
+import type { PromotionBindings } from "../src/skillopt/promotion.ts"
+import { resolveSkillRoots } from "../src/skills/roots.ts"
+import { SkillSession } from "../src/skills/session.ts"
+import { makeSkillOptCanaryFixture } from "./skillopt-canary-fixtures.ts"
 
 const CONTROL_PROFILE = "estimated-input-reactive-output-v1" as const
 const ALL_TOOLS = ["read", "list", "glob", "grep", "write", "edit"]
@@ -17,6 +40,130 @@ const OWNER = "test-owner"
 const EXECUTION = "test-execution"
 const WORKER_INPUT_LIMIT = 5120
 const HISTORY_TRUNCATION_MARKER = "\n[older tool output truncated to fit the estimated input budget]"
+const WITNESS_MODEL = "gpt-5.6-sol"
+const WITNESS_SKILL_TEXT = "---\nname: llm-wiki\ndescription: Use project wiki guidance\nallowed-tools: [read]\n---\nUse the captured wiki instructions exactly.\r\n"
+const REAL_GIT = Bun.which("git")
+let cachedWitnessCanary: Readonly<{ taskText: string; binding: Readonly<{
+  fixturePackSha256: string; fixtureId: string; fixtureSha256: string; taskSha256: string
+  evaluatorPromptSha256: string; evaluatorSystemSha256: string; protocolSha256: string; evaluatorSha256: string
+}>; systemInstructions: string
+}> | undefined
+
+function witnessCanary() {
+  if (cachedWitnessCanary) return cachedWitnessCanary
+  const fixture = makeSkillOptCanaryFixture()
+  const evaluatorPrompt = buildNativeEvaluationPrompt(fixture.fixture, WITNESS_SKILL_TEXT)
+  const systemPrefix = `${WITNESS_SKILL_TEXT}\n\n`
+  if (!evaluatorPrompt.system.startsWith(systemPrefix)) throw new Error("Synthetic evaluator prompt has an unexpected skill prefix")
+  const systemInstructions = evaluatorPrompt.system.slice(systemPrefix.length)
+  const taskText = evaluatorPrompt.user
+  cachedWitnessCanary = Object.freeze({
+    taskText,
+    systemInstructions,
+    binding: Object.freeze({
+      fixturePackSha256: fixture.packSha256,
+      fixtureId: fixture.fixture.id,
+      fixtureSha256: fixture.fixtureSha256,
+      taskSha256: sha256(taskText),
+      evaluatorPromptSha256: evaluatorPrompt.promptSha256,
+      evaluatorSystemSha256: sha256(systemInstructions),
+      protocolSha256: NATIVE_PROTOCOL_SHA256,
+      evaluatorSha256: NATIVE_EVALUATION_PROTOCOL_SHA256,
+    }),
+  })
+  return cachedWitnessCanary
+}
+
+function prepareMockNativeCanary(nativeRuntime: Readonly<{ version: string; executableSha256: string }>): Readonly<{
+  plan: NativeSkillLoadCanaryPlan
+  fixture: NativeWikiFixture
+  canary: ReturnType<typeof witnessCanary>
+  bindings: PromotionBindings
+  projectRootSha256: string
+  expectedFileSha256: string
+}> {
+  const fixturePack = makeSkillOptCanaryFixture()
+  const profile = createCodexProfile(WITNESS_MODEL)
+  const targetSkillBytes = Buffer.from(WITNESS_SKILL_TEXT, "utf8")
+  const bindings: PromotionBindings = {
+    witnessMode: "native",
+    runId: "synthetic-test-run",
+    rootBinding: sha256(`root:${realpathSync.native(root)}`),
+    sourceSha256: sha256("synthetic source binding"),
+    originalSha256: sha256(targetSkillBytes),
+    candidateSha256: sha256(targetSkillBytes),
+    fixturePackSha256: fixturePack.packSha256,
+    canaryFixtureSha256: fixturePack.fixtureSha256,
+    protocolSha256: NATIVE_PROTOCOL_SHA256,
+    evaluatorSha256: NATIVE_EVALUATION_PROTOCOL_SHA256,
+    runtimeSha256: sha256("synthetic runtime binding"),
+    resultsSha256: sha256("synthetic results binding"),
+    witnessSha256: sha256("synthetic witness binding"),
+    nativeEngine: "codex",
+    nativeModel: WITNESS_MODEL,
+    nativeProfileId: "codex-restricted-read.v1",
+    nativeProfileSha256: profile.catalogHash,
+    nativeRuntimeVersion: nativeRuntime.version,
+    nativeExecutableSha256: nativeRuntime.executableSha256,
+  }
+  const plan = prepareNativeSkillLoadCanary({
+    fixturePack: fixturePack.pack,
+    fixtureId: fixturePack.fixture.id,
+    approvedFixtureSha256: fixturePack.fixtureSha256,
+    targetSkillBytes,
+    projectRoot: realpathSync.native(root),
+    bindings,
+    operation: "apply",
+  })
+  const binding: SkillLoaderCanaryBinding = Object.freeze({
+    fixturePackSha256: plan.fixturePackSha256,
+    fixtureId: plan.fixtureId,
+    fixtureSha256: plan.fixtureSha256,
+    taskSha256: plan.taskSha256,
+    evaluatorPromptSha256: plan.evaluatorPromptSha256,
+    evaluatorSystemSha256: plan.evaluatorSystemSha256,
+    protocolSha256: plan.protocolSha256,
+    evaluatorSha256: plan.evaluatorSha256,
+  })
+  const canary: ReturnType<typeof witnessCanary> = Object.freeze({
+    taskText: plan.taskText,
+    systemInstructions: plan.systemInstructions,
+    binding,
+  })
+  return Object.freeze({
+    plan,
+    fixture: fixturePack.fixture,
+    canary,
+    bindings,
+    projectRootSha256: sha256(realpathSync.native(root)),
+    expectedFileSha256: sha256(targetSkillBytes),
+  })
+}
+
+function successfulSyntheticCanaryResponse(fixture: NativeWikiFixture): string {
+  const writes = fixture.outputSlots.map(slot => {
+    const ownership = fixture.assertions.ownership.find(item => item.slotId === slot.id)
+    const action = ownership?.expected === "preserve-existing" ? "preserve"
+      : ownership?.expected === "reject-unowned" ? "reject" : "append"
+    const facts = action === "append" ? fixture.assertions.facts
+      .filter(item => item.slotId === slot.id)
+      .map(item => ({ statement: item.statement, citations: [...item.sourceIds].sort() }))
+      .sort((left, right) => left.statement.localeCompare(right.statement)) : []
+    const factsById = new Map(fixture.assertions.facts.map(item => [item.id, item]))
+    const contradictions = action === "append" ? fixture.assertions.contradictions
+      .filter(item => factsById.get(item.leftFactId)?.slotId === slot.id)
+      .map(item => {
+        const [leftStatement, rightStatement] = [factsById.get(item.leftFactId)!.statement, factsById.get(item.rightFactId)!.statement].sort()
+        return { leftStatement, rightStatement, resolution: item.expected }
+      })
+      .sort((left, right) => `${left.leftStatement}:${left.rightStatement}`.localeCompare(`${right.leftStatement}:${right.rightStatement}`)) : []
+    return {
+      slotId: slot.id,
+      content: canonicalJson({ schema: NATIVE_WIKI_REFERENCE_ANSWER_SCHEMA, action, facts, contradictions }),
+    }
+  }).sort((left, right) => left.slotId.localeCompare(right.slotId))
+  return canonicalJson({ schema: NATIVE_WIKI_OUTPUT_SCHEMA, writes })
+}
 
 type HistoryEntry = { assistant: string; ok: boolean; result: string }
 
@@ -33,13 +180,88 @@ function historyPrompt(base: string, history: readonly HistoryEntry[]): string {
 }
 
 let root: string
+let witnessSessions: SkillSession[] = []
+let witnessContexts: SkillInvocationContext[] = []
+let mockNativeCliPathRestores: Array<() => void> = []
+let mockNativeCliDirectories: string[] = []
 
-beforeEach(() => { root = mkdtempSync(join(tmpdir(), "otter-cli-host-")) })
-afterEach(() => rmSync(root, { recursive: true, force: true }))
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), "otter-cli-host-"))
+  witnessSessions = []
+  witnessContexts = []
+  mockNativeCliPathRestores = []
+  mockNativeCliDirectories = []
+})
+afterEach(() => {
+  for (const context of witnessContexts) finishSkillInvocation(context)
+  for (const session of witnessSessions) session.close()
+  for (const restore of mockNativeCliPathRestores.splice(0).reverse()) restore()
+  for (const directory of mockNativeCliDirectories.splice(0)) rmSync(directory, { recursive: true, force: true })
+  rmSync(root, { recursive: true, force: true })
+})
+
+function installMockCodexCli(): Readonly<{
+  runtime: Readonly<{ version: string; executableSha256: string }>
+  setResponse: (response: string) => void
+  probes: () => Array<{ args: string[] }>
+  invocations: () => Array<{ argv: string[]; prompt: string }>
+}> {
+  if (!REAL_GIT) throw new Error("Git executable is required for the native witness fixture")
+  const gitExecutable = realpathSync.native(REAL_GIT)
+  const bin = mkdtempSync(join(tmpdir(), "otter-mock-codex-"))
+  mockNativeCliDirectories.push(bin)
+  const executable = join(bin, "codex")
+  symlinkSync(gitExecutable, join(bin, "git"))
+  const responsePath = join(bin, "response.txt")
+  const probePath = join(bin, "probes.jsonl")
+  const invocationPath = join(bin, "invocations.jsonl")
+  writeFileSync(responsePath, "{}")
+  const source = `
+const fs = require("node:fs")
+let prompt = ""
+;(async () => {
+  for await (const chunk of process.stdin) prompt += chunk.toString("utf8")
+  const args = process.argv.slice(2)
+  if (args.length === 1 && args[0] === "--version") {
+    fs.appendFileSync(${JSON.stringify(probePath)}, JSON.stringify({ args }) + "\\n")
+    process.stdout.write("codex-cli 0.163.0\\n")
+    return
+  }
+  fs.appendFileSync(${JSON.stringify(invocationPath)}, JSON.stringify({ argv: args, prompt }) + "\\n")
+  const response = fs.readFileSync(${JSON.stringify(responsePath)}, "utf8")
+  const records = [
+    { type: "thread.started", thread_id: "synthetic-thread" },
+    { type: "turn.started" },
+    { type: "item.completed", item: { type: "agent_message", text: response } },
+    { type: "turn.completed", usage: {} },
+  ]
+  process.stdout.write(records.map(record => JSON.stringify(record)).join("\\n") + "\\n")
+})().catch(() => { process.exitCode = 1 })
+`
+  writeFileSync(executable, `#!${process.execPath}\n${source}\n`, { mode: 0o700 })
+  chmodSync(executable, 0o700)
+  const previousPath = process.env.PATH
+  mockNativeCliPathRestores.push(() => {
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
+  })
+  process.env.PATH = bin
+  const readJsonLines = (path: string): unknown[] => existsSync(path)
+    ? readFileSync(path, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line))
+    : []
+  return Object.freeze({
+    runtime: Object.freeze({ version: "0.163.0", executableSha256: sha256(readFileSync(executable)) }),
+    setResponse: (response: string) => writeFileSync(responsePath, response),
+    probes: () => readJsonLines(probePath) as Array<{ args: string[] }>,
+    invocations: () => readJsonLines(invocationPath) as Array<{ argv: string[]; prompt: string }>,
+  })
+}
 
 type HarnessOptions = {
   engine?: "local" | "codex" | "claude"
   role?: ExecutionRole
+  useRealTransport?: boolean
+  transportOverride?: (options: CliTransportOptions) => CliTransportHandle
   responses?: string[]
   nativeFailure?: string
   taskText?: string
@@ -62,19 +284,33 @@ type HarnessOptions = {
   observeActivity?: (activity: CliHostActivity) => void
   recordOutcome?: (fact: CliToolOutcomeFact) => void
   tools?: readonly string[]
+  omitNativeIdentity?: boolean
+  nativeIdentityAfterRun?: CliNativeIdentity
 }
 
 function harness(options: HarnessOptions = {}) {
   const engine = options.engine ?? "local"
   const role = options.role ?? "worker"
-  const model = engine === "codex" ? "gpt-5.6-sol" : "fixture-model"
+  const model = engine === "codex" ? WITNESS_MODEL : "fixture-model"
   const codexProfile = engine === "codex" ? createCodexProfile(model) : undefined
+  const nativeIdentity: CliNativeIdentity | undefined = engine === "local" ? undefined : Object.freeze({
+    engine,
+    requestedModel: model,
+    runtimeIdentity: Object.freeze({
+      version: engine === "codex" ? "0.163.0" : "2.1.27 (Claude Code)",
+      executableSha256: "a".repeat(64),
+    }),
+    profileIdentity: Object.freeze({
+      id: engine === "codex" ? "codex-restricted-read.v1" : "claude-native-no-tools.v1",
+      sha256: codexProfile?.catalogHash ?? "b".repeat(64),
+    }),
+  })
   const executionID = `${EXECUTION}-${engine}-${role}`
   const taskID = "task"
   const attemptID = "attempt"
   const generation = 7
   const policyID = `policy-${role}`
-  const snapshot = Object.freeze({
+  let snapshot = Object.freeze({
     id: policyID,
     role,
     model: Object.freeze({ providerID: engine, modelID: model }),
@@ -147,6 +383,7 @@ function harness(options: HarnessOptions = {}) {
   const transportCalls: CliTransportOptions[] = []
   const prompts: string[] = []
   const controls: Array<{ cancelCalls: number; runCalls: number; reconcileCalls: number; preflightCalls: number }> = []
+  let identityInspectionCalls = 0
   const responses = [...(options.responses ?? [])]
   const createTransport = (transportOptions: CliTransportOptions): CliTransportHandle => {
     transportCalls.push(transportOptions)
@@ -232,9 +469,20 @@ function harness(options: HarnessOptions = {}) {
         }
       }
     }
+    if (nativeIdentity && !options.omitNativeIdentity) {
+      transport.inspectIdentity = async () => {
+        identityInspectionCalls++
+        return identityInspectionCalls === 1 ? nativeIdentity : options.nativeIdentityAfterRun ?? nativeIdentity
+      }
+    }
     return transport
   }
-  const host = createCliHost({ engine, model, policy, runs, createTransport, observeActivity: options.observeActivity, recordOutcome: options.recordOutcome })
+  const host = createCliHost({
+    engine, model, policy, runs,
+    ...(!options.useRealTransport ? { createTransport: options.transportOverride ?? createTransport } : {}),
+    observeActivity: options.observeActivity,
+    recordOutcome: options.recordOutcome,
+  })
   const request: ExecutionRequest = {
     executionID,
     supervisorSessionID: OWNER,
@@ -256,6 +504,12 @@ function harness(options: HarnessOptions = {}) {
     transportCalls,
     controls,
     observed,
+    policy,
+    setSystemInstruction(instruction: string) {
+      snapshot = Object.freeze({ ...snapshot, system: Object.freeze([...snapshot.system, instruction]) })
+      request.policy = snapshot
+    },
+    get identityInspectionCalls() { return identityInspectionCalls },
     get state() { return state },
     set state(value: ExecutionRunStatus) { state = value },
     set allowBeforeTool(value: boolean) { allowBeforeTool = value },
@@ -266,6 +520,61 @@ function harness(options: HarnessOptions = {}) {
     releaseTransportRun() { releaseTransportRun?.(); releaseTransportRun = undefined },
     set onToolResult(value: () => void) { onToolResult = value },
     set afterNativeTurn(value: () => void) { afterNativeTurn = value },
+  }
+}
+
+async function attachLlmWikiWitness(subject: ReturnType<typeof harness>, canary = witnessCanary(), plan?: NativeSkillLoadCanaryPlan) {
+  if (!REAL_GIT) throw new Error("Git executable is required for the native witness fixture")
+  const gitExecutable = realpathSync.native(REAL_GIT)
+  root = realpathSync.native(root)
+  const git = (args: string[]) => execFileSync(gitExecutable, args, {
+    cwd: root,
+    env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+    stdio: "pipe",
+  })
+  git(["init", "--quiet"])
+  const instructions = WITNESS_SKILL_TEXT
+  const directory = join(root, ".agents", "skills", "llm-wiki")
+  mkdirSync(directory, { recursive: true })
+  writeFileSync(join(directory, "SKILL.md"), instructions)
+  git(["add", "--", ".agents/skills/llm-wiki/SKILL.md"])
+  git(["-c", "user.name=CLI Host Fixture", "-c", "user.email=fixture@example.test", "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "witness-fixture"])
+
+  const policyModel = subject.request.policy.model
+  if (!policyModel) throw new Error("Witness fixture requires an explicit model")
+  const engine = policyModel.providerID === "claude" ? "claude" :
+    policyModel.providerID === "codex" ? "codex" : "local"
+  const model = policyModel.modelID
+  const runtime = createCliRuntime({ worktree: root, engine, model })
+  const store = attachAdmission(runtime, OWNER, { engine, model })
+  const roots = await resolveSkillRoots({ projectRoot: root })
+  const session = await SkillSession.create({ roots, store }, new AbortController().signal)
+  witnessSessions.push(session)
+  const prepared = await session.prepare("llm-wiki", new AbortController().signal)
+  subject.setSystemInstruction(`${instructions}\n\n${canary.systemInstructions}`)
+  const requestScope = {
+    executionID: subject.request.executionID,
+    supervisorSessionID: subject.request.supervisorSessionID,
+    taskID: subject.request.taskID,
+    attemptID: subject.request.attemptID,
+    generation: subject.request.generation,
+    role: subject.request.role,
+    title: subject.request.title,
+    cwd: subject.request.cwd,
+    text: canary.taskText,
+    deadlineAt: subject.request.deadlineAt,
+    policy: subject.request.policy,
+  }
+  const bound = bindSkillInvocation(prepared, requestScope, subject.policy)
+  witnessContexts.push(bound.context)
+  subject.request.text = `Witness prefix: 한글🦦\n${canary.taskText}`
+  subject.request.skillContext = bound.context
+  subject.request.handlers = bound.handlers
+  return {
+    session, bound, observation: plan
+      ? registerNativeSkillLoadWitness(bound.context, plan)
+      : registerSkillLoaderWitness(bound.context, canary.binding, canary.systemInstructions), instructions,
+    canary: canary.binding, taskText: canary.taskText, systemInstructions: canary.systemInstructions, request: subject.request,
   }
 }
 
@@ -306,11 +615,254 @@ describe("common CLI execution host", () => {
     expect(subject.controls[1]?.runCalls).toBe(1)
   })
 
+  test("registered native loader witness captures the exact prompt sent through real transport to a synthetic mock CLI", async () => {
+    const mockCli = installMockCodexCli()
+    mockCli.setResponse(JSON.stringify({ type: "final", text: "fixture response" }))
+    const subject = harness({ engine: "codex", role: "main", useRealTransport: true })
+    const witness = await attachLlmWikiWitness(subject)
+    const outcome = await (await subject.host.prepare(subject.request)).run()
+    expect(outcome).toEqual({ status: "completed", text: "fixture response" })
+    const invocations = mockCli.invocations()
+    expect(invocations).toHaveLength(1)
+    const probes = mockCli.probes()
+    expect(probes.length).toBeGreaterThan(0)
+    expect(probes.every(probe => JSON.stringify(probe.args) === JSON.stringify(["--version"]))).toBe(true)
+    const prompt = invocations[0]!.prompt
+    expect(invocations[0]!.argv[0]).toBe("exec")
+    expect(invocations[0]!.argv).toContain(WITNESS_MODEL)
+    const completion = consumeCliSkillLoaderCompletion(outcome)
+    expect(completion).toMatchObject({
+      status: "completed", quiescent: true, taskSha256: witness.canary.taskSha256,
+      canary: witness.canary, responseText: "fixture response", responseSha256: sha256("fixture response"),
+      responseBytes: Buffer.byteLength("fixture response", "utf8"),
+    })
+    expect(completion.requestTextSha256).toBe(sha256(subject.request.text))
+    expect(completion.requestTextSha256).not.toBe(completion.taskSha256)
+    expect(completion.promptSha256).toBe(sha256(prompt))
+    expect(Object.isFrozen(completion)).toBe(true)
+    expect(Object.isFrozen(completion.canary)).toBe(true)
+    expect(Reflect.set(completion, "taskSha256", "0".repeat(64))).toBe(false)
+    expect(Reflect.set(completion, "promptSha256", "0".repeat(64))).toBe(false)
+    expect(() => consumeCliSkillLoaderCompletion({ ...outcome })).toThrow("copied")
+    expect(() => consumeCliSkillLoaderCompletion({ ...outcome, text: "tampered response" })).toThrow("copied")
+    expect(() => consumeCliSkillLoaderCompletion(outcome)).toThrow("already consumed")
+    expect(prompt).toContain("Only these Otter tools may run: none.")
+    expect(prompt).toContain(witness.instructions)
+    expect(prompt).toContain(witness.systemInstructions)
+    expect(prompt.indexOf(witness.systemInstructions)).toBe(prompt.lastIndexOf(witness.systemInstructions))
+
+    const receipt = await consumeSkillLoaderWitness(witness.observation)
+    const instructionOffset = prompt.indexOf(witness.instructions)
+    expect(receipt.instructions.span.startByte).toBe(Buffer.byteLength(prompt.slice(0, instructionOffset), "utf8"))
+    expect(receipt.instructions.span.endByte - receipt.instructions.span.startByte).toBe(Buffer.byteLength(witness.instructions, "utf8"))
+    expect(receipt.instructions.evaluatorSystem.utf8Sha256).toBe(witness.canary.evaluatorSystemSha256)
+    expect(receipt.instructions.evaluatorSystem.endByte - receipt.instructions.evaluatorSystem.startByte)
+      .toBe(Buffer.byteLength(witness.systemInstructions, "utf8"))
+    expect(receipt.requestTextSha256).toBe(sha256(subject.request.text))
+    expect(receipt.native).toMatchObject({
+      engine: "codex", profileIdentity: { id: "codex-restricted-read.v1" }, identityStable: true,
+    })
+    expect(receipt.native.identityBefore).toEqual(receipt.native.identityAfter)
+    expect(receipt).toMatchObject({ loaderDelivery: "observed", behavioralCanary: "not-evaluated" })
+  })
+
+  test("synthetic native canary adapter binds a successful mock host completion without model evidence", async () => {
+    const mockCli = installMockCodexCli()
+    const nativeCanary = prepareMockNativeCanary(mockCli.runtime)
+    const responseText = successfulSyntheticCanaryResponse(nativeCanary.fixture)
+    expect(scoreNativeFixtureResponse(nativeCanary.fixture, responseText)).toMatchObject({ status: "valid", hardPass: true })
+    mockCli.setResponse(JSON.stringify({ type: "final", text: responseText }))
+    const subject = harness({ engine: "codex", role: "main", useRealTransport: true })
+    const witness = await attachLlmWikiWitness(subject, nativeCanary.canary, nativeCanary.plan)
+    const outcome = await (await subject.host.prepare(subject.request)).run()
+    expect(outcome).toEqual({ status: "completed", text: responseText })
+
+    const completed = await completeNativeSkillLoadWitness({
+      plan: nativeCanary.plan,
+      observation: witness.observation,
+      hostCompletion: outcome,
+    })
+    expect(completed.record.canary).toMatchObject({
+      split: "dev", status: "valid", hardPass: true, outputSha256: sha256(responseText),
+    })
+    expect(completed.record.invocation.requestTextSha256).toBe(sha256(subject.request.text))
+    expect(completed.record.canary.taskSha256).toBe(nativeCanary.plan.taskSha256)
+    expect(completed.record.prompt.evaluatorSystemSha256).toBe(nativeCanary.plan.evaluatorSystemSha256)
+    expect(completed.sha256).toBe(sha256(completed.bytes))
+    const verified = verifyNativeSkillLoadVerificationProof({
+      proof: completed.proof,
+      bytes: completed.bytes,
+      bindings: nativeCanary.bindings,
+      expectedFileSha256: nativeCanary.expectedFileSha256,
+      projectRootSha256: nativeCanary.projectRootSha256,
+      operation: "apply",
+    })
+    expect(verified).toBe(completed.record)
+    expect(() => verifyNativeSkillLoadVerificationProof({
+      proof: completed.proof,
+      bytes: completed.bytes,
+      bindings: nativeCanary.bindings,
+      expectedFileSha256: nativeCanary.expectedFileSha256,
+      projectRootSha256: nativeCanary.projectRootSha256,
+      operation: "apply",
+    })).toThrow("native-load-proof-invalid-or-consumed")
+    await expect(completeNativeSkillLoadWitness({
+      plan: nativeCanary.plan, observation: witness.observation, hostCompletion: outcome,
+    })).rejects.toThrow("native-load-observation-does-not-match-plan")
+    expect(mockCli.invocations()).toHaveLength(1)
+  })
+
+  test("copied, response-altered, and replayed completion objects cannot pass the native adapter", async () => {
+    const mockCli = installMockCodexCli()
+    const nativeCanary = prepareMockNativeCanary(mockCli.runtime)
+    const responseText = successfulSyntheticCanaryResponse(nativeCanary.fixture)
+    mockCli.setResponse(JSON.stringify({ type: "final", text: responseText }))
+    const subject = harness({ engine: "codex", role: "main", useRealTransport: true })
+    const witness = await attachLlmWikiWitness(subject, nativeCanary.canary, nativeCanary.plan)
+    const outcome = await (await subject.host.prepare(subject.request)).run()
+    expect(outcome.status).toBe("completed")
+    const altered = { ...outcome, text: `${responseText} ` }
+    await expect(completeNativeSkillLoadWitness({
+      plan: nativeCanary.plan, observation: witness.observation, hostCompletion: altered,
+    })).rejects.toThrow("copied, altered, unavailable, or already consumed")
+    await expect(completeNativeSkillLoadWitness({
+      plan: nativeCanary.plan, observation: witness.observation, hostCompletion: outcome,
+    })).rejects.toThrow("native-load-observation-does-not-match-plan")
+    expect(mockCli.invocations()).toHaveLength(1)
+  })
+
+  test("a valid but altered canary answer fails independently scored mock evaluation", async () => {
+    const mockCli = installMockCodexCli()
+    const nativeCanary = prepareMockNativeCanary(mockCli.runtime)
+    const validResponse = successfulSyntheticCanaryResponse(nativeCanary.fixture)
+    const alteredResponse = validResponse.replace(nativeCanary.fixture.assertions.facts[0]!.statement, "An unsupported synthetic assertion.")
+    expect(scoreNativeFixtureResponse(nativeCanary.fixture, alteredResponse)).toMatchObject({ status: "valid", hardPass: false })
+    mockCli.setResponse(JSON.stringify({ type: "final", text: alteredResponse }))
+    const subject = harness({ engine: "codex", role: "main", useRealTransport: true })
+    const witness = await attachLlmWikiWitness(subject, nativeCanary.canary, nativeCanary.plan)
+    const outcome = await (await subject.host.prepare(subject.request)).run()
+    expect(outcome).toEqual({ status: "completed", text: alteredResponse })
+    await expect(completeNativeSkillLoadWitness({
+      plan: nativeCanary.plan, observation: witness.observation, hostCompletion: outcome,
+    })).rejects.toThrow("native-load-canary-not-passed")
+    expect(mockCli.invocations()).toHaveLength(1)
+  })
+
+  test("registered witness runs through real transport without changing the fixed output policy", async () => {
+    const mockCli = installMockCodexCli()
+    mockCli.setResponse(JSON.stringify({ type: "final", text: "bounded response" }))
+    const subject = harness({ engine: "codex", role: "main", maxOutputTokens: 20_000, useRealTransport: true })
+    subject.request.deadlineAt = Date.now() + 600_000
+    await attachLlmWikiWitness(subject)
+    const outcome = await (await subject.host.prepare(subject.request)).run()
+    expect(outcome).toEqual({ status: "completed", text: "bounded response" })
+    expect(mockCli.invocations()).toHaveLength(1)
+    expect(subject.request.policy.maxOutputTokens).toBe(20_000)
+  })
+
+  test("oversize witness prompts are refused before native transport preparation", async () => {
+    const mockCli = installMockCodexCli()
+    mockCli.setResponse(JSON.stringify({ type: "final", text: "must not dispatch" }))
+    const subject = harness({ engine: "codex", role: "main", useRealTransport: true })
+    await attachLlmWikiWitness(subject)
+    subject.request.text += "x".repeat(64 * 1024)
+    const outcome = await (await subject.host.prepare(subject.request)).run()
+    expect(outcome).toMatchObject({ status: "failed", error: "skill loader witness prompt byte limit exceeded" })
+    expect(mockCli.probes()).toHaveLength(0)
+    expect(mockCli.invocations()).toHaveLength(0)
+  })
+
+  test("registered witness refuses an explicit injected transport override before provider invocation", async () => {
+    const subject = harness({ engine: "claude", role: "main", responses: [JSON.stringify({ type: "final", text: "must not dispatch" })] })
+    const witness = await attachLlmWikiWitness(subject)
+    const outcome = await (await subject.host.prepare(subject.request)).run()
+    expect(outcome).toMatchObject({ status: "failed", error: "skill loader witness transport override refused" })
+    expect(subject.observed.assistant).toBe(0)
+    expect(subject.transportCalls).toHaveLength(0)
+    expect(subject.controls).toHaveLength(0)
+    expect(subject.identityInspectionCalls).toBe(0)
+    expect(() => consumeCliSkillLoaderCompletion(outcome)).toThrow("unavailable")
+    await expect(consumeSkillLoaderWitness(witness.observation)).rejects.toThrow()
+  })
+
+  test("oversized witness responses fail the real transport output bound without qualifying completion", async () => {
+    const mockCli = installMockCodexCli()
+    mockCli.setResponse(JSON.stringify({ type: "final", text: "x".repeat(32 * 1024 + 1) }))
+    const subject = harness({ engine: "codex", role: "main", useRealTransport: true })
+    const witness = await attachLlmWikiWitness(subject)
+    const outcome = await (await subject.host.prepare(subject.request)).run()
+    expect(outcome).toMatchObject({ status: "failed", error: "output byte limit reached" })
+    expect(mockCli.invocations()).toHaveLength(1)
+    expect(() => consumeCliSkillLoaderCompletion(outcome)).toThrow("unavailable")
+    await expect(consumeSkillLoaderWitness(witness.observation)).rejects.toThrow()
+  })
+
+  test("registered witness refuses a misbound real transport override without probing or dispatching", async () => {
+    const mockCli = installMockCodexCli()
+    mockCli.setResponse(JSON.stringify({ type: "final", text: "unexpected synthetic response" }))
+    let overrideCalls = 0
+    const subject = harness({
+      engine: "codex",
+      role: "main",
+      transportOverride: transportOptions => {
+        overrideCalls++
+        return createCliTransport({
+          ...transportOptions,
+          prompt: `${transportOptions.prompt}\nmisbound transport prompt`,
+          deadlineAt: transportOptions.deadlineAt + 1,
+        })
+      },
+    })
+    const witness = await attachLlmWikiWitness(subject)
+    const outcome = await (await subject.host.prepare(subject.request)).run()
+    expect(outcome).toMatchObject({ status: "failed", error: "skill loader witness transport override refused" })
+    expect(overrideCalls).toBe(0)
+    expect(mockCli.probes()).toHaveLength(0)
+    expect(mockCli.invocations()).toHaveLength(0)
+    expect(subject.transportCalls).toHaveLength(0)
+    expect(() => consumeCliSkillLoaderCompletion(outcome)).toThrow("unavailable")
+    await expect(consumeSkillLoaderWitness(witness.observation)).rejects.toThrow()
+  })
+
+  test("registered witness refuses local engines before transport inspection or inference", async () => {
+    const local = harness({ engine: "local", role: "main", responses: [JSON.stringify({ type: "final", text: "must not dispatch" })] })
+    await attachLlmWikiWitness(local)
+    const localResult = await (await local.host.prepare(local.request)).run()
+    expect(localResult).toMatchObject({ status: "failed", error: "skill loader witness pre-dispatch refused" })
+    expect(local.controls[0]?.runCalls).toBe(0)
+    expect(local.identityInspectionCalls).toBe(0)
+  })
+
+  test("witness tool envelopes from a synthetic mock CLI are refused before effects and do not trigger another dispatch", async () => {
+    const mockCli = installMockCodexCli()
+    mockCli.setResponse(toolWrite("must-not-exist.txt", "no effect"))
+    let effects = 0
+    const subject = harness({ engine: "codex", role: "main", beforeToolEffect: () => { effects++ }, useRealTransport: true })
+    const witness = await attachLlmWikiWitness(subject)
+    const outcome = await (await subject.host.prepare(subject.request)).run()
+    expect(outcome).toMatchObject({ status: "failed", error: "skill loader witness refused a tool response before effects" })
+    expect(mockCli.invocations()).toHaveLength(1)
+    expect(effects).toBe(0)
+    expect(existsSync(join(root, "must-not-exist.txt"))).toBe(false)
+    expect(() => consumeCliSkillLoaderCompletion(outcome)).toThrow("unavailable")
+    await expect(consumeSkillLoaderWitness(witness.observation)).rejects.toThrow("failed closed")
+  })
+
+  test("ordinary CLI turns do not opt into runtime identity inspection", async () => {
+    const subject = harness({ engine: "codex", responses: [JSON.stringify({ type: "final", text: "ordinary" })] })
+    const outcome = await (await subject.host.prepare(subject.request)).run()
+    expect(outcome.status).toBe("completed")
+    expect(() => consumeCliSkillLoaderCompletion(outcome)).toThrow("unavailable")
+    expect(subject.identityInspectionCalls).toBe(0)
+  })
+
   test("native failures preserve only exact allowlisted safe transport errors", async () => {
     const cases: Array<{ engine: "local" | "codex" | "claude"; nativeFailure: string; hostError: string }> = [
       { engine: "claude", nativeFailure: "Claude CLI login required; run claude auth login", hostError: "Claude CLI login required; run claude auth login" },
       { engine: "codex", nativeFailure: "Codex native profile verification failed", hostError: "Codex native profile verification failed" },
       { engine: "codex", nativeFailure: "Codex private profile state verification failed", hostError: "Codex native profile verification failed" },
+      { engine: "codex", nativeFailure: "native runtime identity verification failed", hostError: "native runtime identity verification failed" },
+      { engine: "claude", nativeFailure: "native runtime identity verification failed", hostError: "native runtime identity verification failed" },
       { engine: "claude", nativeFailure: "native tool activity refused", hostError: "native tool activity refused" },
       { engine: "local", nativeFailure: "execution deadline elapsed", hostError: "execution deadline elapsed" },
       { engine: "local", nativeFailure: "output byte limit reached", hostError: "output byte limit reached" },

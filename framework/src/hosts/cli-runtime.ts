@@ -11,6 +11,8 @@ import type { CliProgressSink } from "./cli-progress.ts"
 import { currentMemoryConfig } from "../wiki/recall.ts"
 
 export type CliRuntimeOptions = { worktree: string; engine: CliEngine; model: string; progress?: CliProgressSink
+  /** Code-owned native skill-loader canary evaluator instructions; never sourced from user config or model output. */
+  skillLoaderCanaryInstructions?: string
   /** Per-role routes pinned for this runtime; roles absent (or equal to the anchor) use engine/model. */
   routes?: ComboRoutes
   /** Test-only transport seam; production always uses the real CLI transport. */
@@ -73,6 +75,7 @@ export function createCliRuntime(options: CliRuntimeOptions): ExecutionRuntime {
       planningOnlyMain: true,
       chatExecuteMain: chatExecuteMode(config) !== "plan",
       ...(nativeContext ? { nativeContext } : {}),
+      skillLoaderCanaryInstructions: options.skillLoaderCanaryInstructions,
       ...(Object.keys(routePolicies).length ? { routes: routePolicies } : {}),
     })
 }

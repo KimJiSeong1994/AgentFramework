@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test"
 import {
   appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync,
   truncateSync, writeFileSync,
 } from "node:fs"
 import { dirname, join } from "node:path"
+import * as nodeFs from "node:fs"
 import { tmpdir } from "node:os"
 import { spawnSync } from "node:child_process"
 import { recordToolOutcome } from "../src/telemetry/outcomes.ts"
@@ -16,12 +17,37 @@ import {
   type SkillObservationList,
 } from "../src/telemetry/skills.ts"
 import { RETURNED_BODY_BASIS, RETURNED_PAYLOAD_BASIS } from "../src/telemetry/skill-evaluation.ts"
-import { captureWiki, lintWiki, parseLog, registerWiki, statusWiki, summarizeOutcomes, unlockWiki } from "../src/wiki/wiki.ts"
+import {
+  captureWiki, lintWiki, parseLog, registerWiki, registerWikiForFixture, renderWikiLockContent,
+  renderWikiRegisterIndexReplacement, renderWikiRegisterLogAppend, renderWikiRegisterSourcePage,
+  statusWiki, summarizeOutcomes, unlockWiki, validateWikiTimestamp,
+} from "../src/wiki/wiki.ts"
 
 let root: string
 let state: string
 let oldState: string | undefined
 let docsDir: string
+
+function captureSerializedWrites<T>(root: string, operation: () => T): { result: T; writes: { bytes: number; sha256: string }[] } {
+  const canonicalRoot = nodeFs.realpathSync.native(root)
+  const writes: { bytes: number; sha256: string }[] = []
+  const realWriteFileSync = nodeFs.writeFileSync
+  const spy = spyOn(nodeFs, "writeFileSync").mockImplementation((...args) => {
+    const [path, data] = args
+    const pathText = typeof path === "string" ? path : path.toString()
+    if (pathText === root || pathText.startsWith(`${root}/`) ||
+        pathText === canonicalRoot || pathText.startsWith(`${canonicalRoot}/`)) {
+      const bytes = typeof data === "string"
+        ? Buffer.from(data)
+        : Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+      writes.push({ bytes: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") })
+    }
+    return Reflect.apply(realWriteFileSync, nodeFs, args)
+  })
+  try { return { result: operation(), writes } }
+  finally { spy.mockRestore() }
+}
+
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "otter-wiki-"))
   state = mkdtempSync(join(tmpdir(), "otter-wiki-state-"))
@@ -770,6 +796,46 @@ test("register happy path writes byte-identical raw, source page, index and log;
   const log = readFileSync(join(root, "knowledge/wiki/log.md"), "utf8")
   expect(log).toContain(`register | My Notes`)
   expect(log).toContain(`source_id: ${receipt.sourceId}`)
+  expect(lintWiki(root)).toEqual([])
+})
+
+test("bounded fixture registration shares exact Wiki renderers and captures actual file writes", () => {
+  const timestamp = "2026-10-23T10:11:12.013Z"
+  expect(validateWikiTimestamp(timestamp)).toBe(true)
+  expect(validateWikiTimestamp("2026-10-23T10:11:12Z")).toBe(false)
+  expect(Buffer.byteLength(renderWikiLockContent(9_999_999_999, timestamp), "utf8")).toBe(51)
+  expect(() => renderWikiLockContent(10_000_000_000, timestamp)).toThrow("serialized bound")
+  expect(() => renderWikiLockContent(process.pid, "not-a-date")).toThrow("serialized bound")
+
+  const content = "# Rendered\n\nUnicode: 한글.\n"
+  const source = doc("rendered.md", content)
+  const title = "Explicit Render Title"
+  const firstRegistration = captureSerializedWrites(root, () => registerWikiForFixture(root, source, { title }, { timestamp }))
+  const receipt = firstRegistration.result
+  const sourcePageName = `documents-${receipt.sourceId}.md`
+  const expectedSourcePage = renderWikiRegisterSourcePage(title, receipt.sourceId, ".md", Buffer.byteLength(content), "rendered.md")
+  expect(readFileSync(join(root, receipt.summary), "utf8")).toBe(expectedSourcePage)
+  const oldIndex = "# Index\n\n[Log](log.md)\n[Report](reports/tool-outcomes.md)\n"
+  const expectedIndex = renderWikiRegisterIndexReplacement(oldIndex, title, sourcePageName, Buffer.byteLength(content))
+  expect(expectedIndex).not.toBeNull()
+  if (expectedIndex === null) throw new Error("Wiki registration index renderer omitted a required new link")
+  expect(readFileSync(join(root, "knowledge/wiki/index.md"), "utf8")).toBe(expectedIndex)
+  const expectedLogAppend = renderWikiRegisterLogAppend(timestamp, title, receipt.sourceId, sourcePageName)
+  expect(readFileSync(join(root, "knowledge/wiki/log.md"), "utf8")).toBe(`# Log\n${expectedLogAppend}`)
+  const actualExpectedWrites = [
+    Buffer.from(renderWikiLockContent(process.pid, timestamp)), Buffer.from(content), Buffer.from(expectedSourcePage),
+    Buffer.from(expectedIndex), Buffer.from(expectedLogAppend),
+  ]
+  expect(firstRegistration.writes).toEqual(actualExpectedWrites.map(bytes => ({
+    bytes: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex"),
+  })))
+
+  const replay = captureSerializedWrites(root, () => registerWikiForFixture(root, source, { title: "Ignored replay title" }, { timestamp }))
+  expect(replay.result.created).toBe(false)
+  const lockBytes = Buffer.from(renderWikiLockContent(process.pid, timestamp), "utf8")
+  expect(replay.writes).toEqual([{
+    bytes: lockBytes.byteLength, sha256: createHash("sha256").update(lockBytes).digest("hex"),
+  }])
   expect(lintWiki(root)).toEqual([])
 })
 

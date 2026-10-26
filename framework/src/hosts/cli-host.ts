@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import {
   boundToolText as safeToolText,
   CLI_TOOL_NAMES,
@@ -9,7 +10,7 @@ import {
   type CliToolName,
   type CliToolOutput,
 } from "./cli-tools.ts"
-import { createCliTransport, type CliEngine, type CliTransportHandle, type CliTransportOptions } from "./cli-transport.ts"
+import { createCliTransport, type CliEngine, type CliNativeIdentity, type CliTransportHandle, type CliTransportOptions } from "./cli-transport.ts"
 import { CODEX_INSTRUCTIONS, createCodexProfile } from "./codex-profile.ts"
 import { parseTree, type Node, type ParseError } from "jsonc-parser"
 import { estimateTokens } from "../tokens.ts"
@@ -36,8 +37,12 @@ import type { ExecutionRunStore } from "./run-state.ts"
 import { cliToolDetail, validatedToolDetail, type CliHostActivity, type CliToolDisplay } from "./cli-progress.ts"
 import { awaitSkillPermission, type SkillPermissionPermit } from "../skills/broker.ts"
 import {
-  assertSkillExecution, consumeSkillToolEffect, finishSkillInvocation, prepareSkillToolCall,
+  assertSkillExecution, beginSkillLoaderWitness, consumeSkillToolEffect, finishSkillInvocation,
+  finishSkillLoaderWitness, invalidateSkillLoaderWitness, prepareSkillToolCall, skillLoaderWitnessCanaryBinding,
+  skillLoaderWitnessCompletion, skillLoaderWitnessRegistered,
   readSkillToolSnapshot, revalidateSkillToolEffect, skillExecutionSignal,
+  type SkillLoaderCanaryBinding,
+  type SkillLoaderWitnessReceipt,
 } from "../skills/context.ts"
 
 const CONTROL_PROFILE = "estimated-input-reactive-output-v1" as const
@@ -65,6 +70,7 @@ const SAFE_NATIVE_FAILURES: ReadonlyMap<string, { engine?: CliEngine; error: str
   ["Claude CLI login required; run claude auth login", { engine: "claude", error: "Claude CLI login required; run claude auth login" }],
   ["Codex native profile verification failed", { engine: "codex", error: "Codex native profile verification failed" }],
   ["Codex private profile state verification failed", { engine: "codex", error: "Codex native profile verification failed" }],
+  ["native runtime identity verification failed", { error: "native runtime identity verification failed" }],
   ["native tool activity refused", { error: "native tool activity refused" }],
   ["execution deadline elapsed", { error: "execution deadline elapsed" }],
   ["output byte limit reached", { error: "output byte limit reached" }],
@@ -74,6 +80,133 @@ const SAFE_NATIVE_FAILURES: ReadonlyMap<string, { engine?: CliEngine; error: str
   ["native CLI process failed", { error: "native CLI process failed" }],
 ])
 let cliHostActivitySequence = 0
+
+export type CliSkillLoaderCompletion = Readonly<{
+  status: "completed"
+  quiescent: true
+  reconciliation: Readonly<{ outcome: "terminal"; quiescent: true; evidence: string }>
+  executionID: string
+  sessionID: string
+  attachmentEpoch: string
+  taskID: string
+  attemptID: string
+  generation: number
+  role: "main"
+  invocationID: string
+  taskSha256: string
+  requestTextSha256: string
+  canary: SkillLoaderCanaryBinding
+  promptSha256: string
+  promptBytes: number
+  responseText: string
+  responseSha256: string
+  responseBytes: number
+  engine: "codex" | "claude"
+  requestedModel: string
+  identityBefore: CliNativeIdentity
+  identityAfter: CliNativeIdentity
+}>
+
+type CliSkillLoaderCompletionState = { value: CliSkillLoaderCompletion; outcomeText: string; consumed: boolean }
+const cliSkillLoaderCompletions = new WeakMap<object, CliSkillLoaderCompletionState>()
+
+function hashUtf8(value: string): string {
+  return createHash("sha256").update(Buffer.from(value, "utf8")).digest("hex")
+}
+
+function sameCanaryBinding(left: SkillLoaderCanaryBinding, right: SkillLoaderCanaryBinding): boolean {
+  return left.fixturePackSha256 === right.fixturePackSha256 && left.fixtureId === right.fixtureId &&
+    left.fixtureSha256 === right.fixtureSha256 && left.taskSha256 === right.taskSha256 &&
+    left.evaluatorPromptSha256 === right.evaluatorPromptSha256 && left.evaluatorSystemSha256 === right.evaluatorSystemSha256 &&
+    left.protocolSha256 === right.protocolSha256 &&
+    left.evaluatorSha256 === right.evaluatorSha256
+}
+
+function sameNativeIdentity(left: CliNativeIdentity, right: CliNativeIdentity): boolean {
+  return left.engine === right.engine && left.requestedModel === right.requestedModel &&
+    left.runtimeIdentity.version === right.runtimeIdentity.version &&
+    left.runtimeIdentity.executableSha256 === right.runtimeIdentity.executableSha256 &&
+    left.profileIdentity.id === right.profileIdentity.id && left.profileIdentity.sha256 === right.profileIdentity.sha256
+}
+
+function createWitnessCompletion(input: {
+  request: ExecutionRequest
+  route: { engine: CliEngine; model: string }
+  reconciliation: ExecutionReconciliation | undefined
+  responseText: string
+  canary: SkillLoaderCanaryBinding | undefined
+  receipt: SkillLoaderWitnessReceipt | undefined
+}): CliSkillLoaderCompletion | undefined {
+  const { request, route, reconciliation, responseText, canary, receipt } = input
+  const context = request.skillContext
+  if (!context || !canary || !receipt || (route.engine !== "codex" && route.engine !== "claude") ||
+      request.role !== "main" || !reconciliation || reconciliation.outcome !== "terminal" || reconciliation.quiescent !== true ||
+      typeof reconciliation.evidence !== "string" || reconciliation.evidence.length === 0 ||
+      reconciliation.evidence.includes(SCRATCH_CLEANUP_ERROR) || !sameCanaryBinding(canary, receipt.canary) ||
+      receipt.native.status !== "completed" || receipt.native.quiescent !== true || receipt.native.reconciliation !== "terminal-quiescent" ||
+      receipt.native.identityStable !== true || !sameNativeIdentity(receipt.native.identityBefore, receipt.native.identityAfter) ||
+      receipt.native.engine !== route.engine || receipt.native.requestedModel !== route.model ||
+      receipt.instructions.evaluatorSystem.utf8Sha256 !== canary.evaluatorSystemSha256 ||
+      receipt.invocation.executionID !== request.executionID || receipt.invocation.sessionID !== request.supervisorSessionID ||
+      receipt.invocation.taskID !== request.taskID || receipt.invocation.attemptID !== request.attemptID ||
+      receipt.invocation.generation !== request.generation || receipt.invocation.role !== request.role ||
+      receipt.invocation.invocationID !== context.invocationID || receipt.invocation.attachmentEpoch !== context.attachmentEpoch ||
+      Buffer.byteLength(request.text, "utf8") > 64 * 1024 || Buffer.from(request.text, "utf8").toString("utf8") !== request.text ||
+      receipt.requestTextSha256 !== hashUtf8(request.text) || !/^[a-f0-9]{64}$/u.test(canary.taskSha256) ||
+      !/^[a-f0-9]{64}$/u.test(canary.fixturePackSha256) || !/^[a-f0-9]{64}$/u.test(canary.fixtureSha256) ||
+      !/^[a-f0-9]{64}$/u.test(canary.evaluatorPromptSha256) || !/^[a-f0-9]{64}$/u.test(canary.protocolSha256) ||
+      !/^[a-f0-9]{64}$/u.test(canary.evaluatorSystemSha256) || !/^[a-f0-9]{64}$/u.test(canary.evaluatorSha256) ||
+      typeof responseText !== "string" || Buffer.byteLength(responseText, "utf8") < 1 || Buffer.byteLength(responseText, "utf8") > 32 * 1024 ||
+      Buffer.from(responseText, "utf8").toString("utf8") !== responseText ||
+      receipt.response.sha256 !== hashUtf8(responseText) || receipt.response.bytes !== Buffer.byteLength(responseText, "utf8") ||
+      receipt.instructions.promptBytes < 1 || receipt.instructions.promptBytes > 64 * 1024 ||
+      !/^[a-f0-9]{64}$/u.test(receipt.instructions.promptSha256) ||
+      !/^[a-f0-9]{64}$/u.test(receipt.native.identityBefore.runtimeIdentity.executableSha256) ||
+      !/^[a-f0-9]{64}$/u.test(receipt.native.identityAfter.runtimeIdentity.executableSha256)) return undefined
+  return Object.freeze({
+    status: "completed",
+    quiescent: true,
+    reconciliation: Object.freeze({ outcome: "terminal", quiescent: true, evidence: reconciliation.evidence }),
+    executionID: request.executionID,
+    sessionID: request.supervisorSessionID,
+    attachmentEpoch: context.attachmentEpoch,
+    taskID: request.taskID,
+    attemptID: request.attemptID,
+    generation: request.generation,
+    role: "main",
+    invocationID: context.invocationID,
+    taskSha256: canary.taskSha256,
+    requestTextSha256: receipt.requestTextSha256,
+    canary: Object.freeze({ ...canary }),
+    promptSha256: receipt.instructions.promptSha256,
+    promptBytes: receipt.instructions.promptBytes,
+    responseText,
+    responseSha256: receipt.response.sha256,
+    responseBytes: receipt.response.bytes,
+    engine: route.engine,
+    requestedModel: route.model,
+    identityBefore: receipt.native.identityBefore,
+    identityAfter: receipt.native.identityAfter,
+  })
+}
+
+/** Consume only the exact completed ExecutionOutcome object returned by a qualified native loader witness. */
+export function consumeCliSkillLoaderCompletion(result: ExecutionOutcome): CliSkillLoaderCompletion {
+  const state = result && typeof result === "object" ? cliSkillLoaderCompletions.get(result) : undefined
+  if (!state || state.consumed || result.status !== "completed" || result.text !== state.outcomeText ||
+      state.value.responseText !== state.outcomeText || state.value.status !== "completed" || state.value.quiescent !== true ||
+      state.value.reconciliation.outcome !== "terminal" || state.value.reconciliation.quiescent !== true ||
+      state.value.taskSha256 !== state.value.canary.taskSha256 ||
+      !/^[a-f0-9]{64}$/u.test(state.value.requestTextSha256) || !/^[a-f0-9]{64}$/u.test(state.value.promptSha256) ||
+      state.value.promptBytes < 1 || state.value.promptBytes > 64 * 1024 ||
+      !sameNativeIdentity(state.value.identityBefore, state.value.identityAfter) ||
+      hashUtf8(state.value.responseText) !== state.value.responseSha256 ||
+      Buffer.byteLength(state.value.responseText, "utf8") !== state.value.responseBytes || state.value.responseBytes < 1 || state.value.responseBytes > 32 * 1024) {
+    throw new Error("CLI skill loader completion is copied, altered, unavailable, or already consumed.")
+  }
+  state.consumed = true
+  return state.value
+}
 
 const BUDGET_EVIDENCE: BudgetEvidence = Object.freeze({
   input: "estimated",
@@ -135,7 +268,7 @@ export type CliHostOptions = {
    * status and basis, timing; never arguments or bodies). Called for every executed tool; denied calls never ran.
    */
   recordOutcome?: (outcome: CliToolOutcomeFact) => void
-  /** A transport factory keeps native inference replaceable in deterministic host fixtures. */
+  /** A transport factory keeps ordinary inference replaceable; registered native loader witnesses reject overrides. */
   createTransport?: CliTransportFactory
   /**
    * Memory recall settings for the `memory` tool, read per call so a `/memory` engine switch applies immediately;
@@ -555,7 +688,8 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
     catch { throw new TypeError("unsupported Codex model profile") }
   }
 
-  const transportFactory = options.createTransport ?? createCliTransport
+  const injectedTransportFactory = options.createTransport
+  const transportFactory = injectedTransportFactory ?? createCliTransport
   const loadMemory = options.loadMemory ?? (() => DEFAULT_CONFIG.memory)
   const currentHandles = new Map<string, { reconcile: () => Promise<ExecutionReconciliation> }>()
   const preflightTransports = new Set<CliTransportHandle>()
@@ -753,8 +887,12 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
         void owned.requestCancel(reason, deadlineAt).catch(() => {})
       }
 
-      const setFinal = (outcome: ExecutionOutcome): ExecutionOutcome => {
+      const setFinal = (outcome: ExecutionOutcome, completion?: CliSkillLoaderCompletion): ExecutionOutcome => {
         finalOutcome = safeError(outcome)
+        if (completion && finalOutcome.status === "completed" && finalOutcome.text === completion.responseText) {
+          Object.freeze(finalOutcome)
+          cliSkillLoaderCompletions.set(finalOutcome, { value: completion, outcomeText: completion.responseText, consumed: false })
+        }
         finalReconciliation = emptyTerminalEvidence(finalOutcome.status)
         return finalOutcome
       }
@@ -831,6 +969,13 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
           if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
           const currentLease = checkLease(request, fixedLease)
           if (currentLease.state === "cancelled") return setFinal({ status: "cancelled", error: "execution cancellation requested" })
+          const witnessRequested = skillLoaderWitnessRegistered(request)
+          const nativeWitnessRequested = witnessRequested && (route.engine === "codex" || route.engine === "claude")
+          if (nativeWitnessRequested && injectedTransportFactory !== undefined) {
+            return setFinal({ status: "failed", error: "skill loader witness transport override refused" })
+          }
+          const effectiveOutputLimit = witnessRequested ? Math.min(outputLimit, 32 * 1024) : outputLimit
+          const nativeDeadlineAt = witnessRequested ? Math.min(request.deadlineAt, Date.now() + 120_000) : request.deadlineAt
           let offered = offeredSkillTool(request)
           const tools = createCliTools({
             root: request.cwd,
@@ -849,7 +994,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
           })
           const inputLimit = roleInputLimit(request.role, route.engine, route.engine === "local" ? localContextInputTokens(loadConfig(request.cwd)) : undefined)
           const nativeInstructionTokens = request.policy.nativeContext ? estimateTokens(request.policy.nativeContext.instructions) : 0
-          let available = tools.available
+          let available = witnessRequested ? Object.freeze([] as CliToolName[]) : tools.available
           let basePrompt = buildBasePrompt(request, available, offered?.catalog, inputLimit)
           // Skills are optional: when the catalog would push the prompt over the limit, this turn runs without them
           // rather than failing a turn that fits on its own.
@@ -915,7 +1060,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
           let extensions = 0
           for (turn = 0; turn < roundLimit + 1; turn++) {
             if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-            if (Date.now() >= request.deadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed before the next model turn" })
+            if (Date.now() >= nativeDeadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed before the next model turn" })
             assertFixedPolicy(request)
             assertSkillExecution(request)
             const lease = checkLease(request, fixedLease)
@@ -924,20 +1069,23 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             if (!fitted) return setFinal({ status: "failed", error: "estimated input budget exceeded; task and role constraints were preserved" })
             replaceHistory(fitted)
             const prompt = renderPrompt(basePrompt, history)
+            if (witnessRequested && Buffer.byteLength(prompt, "utf8") > 64 * 1024) {
+              return setFinal({ status: "failed", error: "skill loader witness prompt byte limit exceeded" })
+            }
             if (estimatedTokens(prompt) + nativeInstructionTokens > inputLimit) return setFinal({ status: "failed", error: "estimated input budget exceeded" })
-            const remainingOutputBytes = outputLimit - outputBytes
+            const remainingOutputBytes = effectiveOutputLimit - outputBytes
             if (remainingOutputBytes <= 0) return setFinal({ status: "failed", error: "reactive output byte limit reached" })
 
             let assistantPart = 0
             let callbackFailure: string | undefined
             let transport: CliTransportHandle
             try {
-              transport = transportFactory({
+              const transportOptions: CliTransportOptions = {
                 engine: route.engine,
                 ...(route.engine === "local" ? { localKeepAlive: loadConfig(request.cwd).local_model?.keep_alive ?? undefined } : {}),
                 model: route.model,
                 prompt,
-                deadlineAt: request.deadlineAt,
+                deadlineAt: nativeDeadlineAt,
                 maxOutputBytes: remainingOutputBytes,
                 onText(text) {
                   if (callbackFailure) return
@@ -947,8 +1095,9 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                       throw new Error("execution cancelled")
                     }
                     assertFixedPolicy(request)
-                    if (Date.now() >= request.deadlineAt) throw new Error("deadline")
+                    if (Date.now() >= nativeDeadlineAt) throw new Error("deadline")
                     outputBytes += Buffer.byteLength(text, "utf8")
+                    if (witnessRequested && outputBytes > effectiveOutputLimit) throw new Error("reactive output byte limit reached")
                     const decision = request.handlers.assistantText({
                       type: "text",
                       sessionID: callSession,
@@ -962,7 +1111,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                       callbackFailure = "policy-cancelled"
                       throw new Error(callbackFailure)
                     }
-                    if (outputBytes > outputLimit) throw new Error("reactive output byte limit reached")
+                    if (outputBytes > effectiveOutputLimit) throw new Error("reactive output byte limit reached")
                   } catch (error) {
                     callbackFailure ??= error instanceof Error && error.message === "policy-cancelled" ? "policy-cancelled"
                       : error instanceof Error && error.message === "current execution lease changed" ? "lease-changed"
@@ -971,7 +1120,10 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                     throw new Error("assistant output rejected")
                   }
                 },
-              })
+              }
+              transport = nativeWitnessRequested
+                ? createCliTransport(transportOptions)
+                : transportFactory(transportOptions)
             } catch {
               return setFinal({ status: "failed", error: "CLI inference transport could not be prepared" })
             }
@@ -1015,19 +1167,50 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               }
               assertFixedPolicy(request)
             }
+            let witnessObservation: Awaited<ReturnType<typeof beginSkillLoaderWitness>> = undefined
+            if (witnessRequested) {
+              if (cancelled || checkLease(request, fixedLease).state === "cancelled") {
+                return setFinal({ status: "cancelled", error: "execution cancellation requested" })
+              }
+              if (Date.now() >= request.deadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed before inference" })
+              try {
+                witnessObservation = await beginSkillLoaderWitness(request, {
+                  prompt,
+                  engine: route.engine,
+                  model: route.model,
+                  ...(route.engine === "codex" && routeCodexProfile ? { codexProfileSha256: routeCodexProfile.catalogHash } : {}),
+                  transport,
+                })
+              } catch (error) {
+                const identityFailure = error instanceof Error && error.message === "native runtime identity verification failed"
+                return setFinal({ status: "failed", error: identityFailure ? error.message : "skill loader witness pre-dispatch refused" })
+              }
+              if (!witnessObservation) return setFinal({ status: "failed", error: "skill loader witness was not registered for this request" })
+              if (cancelled || checkLease(request, fixedLease).state === "cancelled") {
+                return setFinal({ status: "cancelled", error: "execution cancellation requested" })
+              }
+              if (Date.now() >= request.deadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed before inference" })
+            }
             let native: Awaited<ReturnType<CliTransportHandle["run"]>> | undefined
             observeActivity({ kind: "model-started", role: request.role, execution: activityExecution, engine: route.engine, model: route.model })
             try { native = await transport.run() }
             catch { native = undefined }
+            let witnessReconciliation: ExecutionReconciliation | undefined
+            if (witnessObservation) {
+              try { witnessReconciliation = await transport.reconcile() }
+              catch { witnessReconciliation = undefined }
+            }
             const modelStatus = !native ? (cancelled ? "cancelled" : "unresolved") :
               !native.quiescent ? "unresolved" : native.status
             observeActivity({
               kind: "model-returned", role: request.role, execution: activityExecution, status: modelStatus,
             })
             if (!native) {
-              let reconciliation: ExecutionReconciliation | undefined
-              try { reconciliation = await transport.reconcile() }
-              catch { reconciliation = undefined }
+              let reconciliation = witnessReconciliation
+              if (!reconciliation) {
+                try { reconciliation = await transport.reconcile() }
+                catch { reconciliation = undefined }
+              }
               if (reconciliation?.quiescent && !reconciliation.evidence.includes(SCRATCH_CLEANUP_ERROR) && currentTransport === transport) currentTransport = undefined
               if (cancelled && reconciliation?.outcome === "terminal" && reconciliation.quiescent) {
                 const outcome = setFinal({ status: "cancelled", error: cancelReason })
@@ -1082,8 +1265,117 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             // The prompt still asks every role for the envelope (RESPONSE_ENVELOPE); accepting main prose is only a host-side
             // fallback, so models keep aiming for the structured form.
             const envelope = parseEnvelope(native.text, route.engine === "local" || request.role === "main")
-            if (!envelope) return setFinal({ status: "failed", error: "malformed CLI response; no fallback execution was attempted" })
-            if (envelope.type === "final") return setFinal({ status: "completed", text: envelope.text })
+            if (!envelope) {
+              if (witnessObservation) {
+                try {
+                  await finishSkillLoaderWitness(request, witnessObservation, {
+                    status: native.status, quiescent: native.quiescent, responseKind: "invalid",
+                    ...(native.error === undefined ? {} : { error: native.error }),
+                    reconciliation: witnessReconciliation,
+                  })
+                } catch (error) {
+                  if (error instanceof Error && error.message === "native runtime identity verification failed") {
+                    return setFinal({ status: "failed", error: error.message })
+                  }
+                }
+              }
+              return setFinal({ status: "failed", error: "malformed CLI response; no fallback execution was attempted" })
+            }
+            if (witnessObservation && envelope.type !== "final") {
+              try {
+                await finishSkillLoaderWitness(request, witnessObservation, {
+                  status: native.status, quiescent: native.quiescent, responseKind: "tool",
+                  ...(native.error === undefined ? {} : { error: native.error }),
+                  reconciliation: witnessReconciliation,
+                })
+              } catch (error) {
+                if (error instanceof Error && error.message === "native runtime identity verification failed") {
+                  return setFinal({ status: "failed", error: error.message })
+                }
+              }
+              return setFinal({ status: "failed", error: "skill loader witness refused a tool response before effects" })
+            }
+            if (envelope.type === "final") {
+              if (witnessObservation) {
+                try {
+                  await finishSkillLoaderWitness(request, witnessObservation, {
+                    status: native.status,
+                    quiescent: native.quiescent,
+                    responseKind: "final",
+                    responseText: envelope.text,
+                    requestText: request.text,
+                    ...(native.error === undefined ? {} : { error: native.error }),
+                    reconciliation: witnessReconciliation,
+                  })
+                } catch (error) {
+                  const identityFailure = error instanceof Error && error.message === "native runtime identity verification failed"
+                  return setFinal({ status: "failed", error: identityFailure ? error.message : "skill loader witness finalization refused" })
+                }
+                let postWitnessLease: LeaseCheck
+                try { postWitnessLease = checkLease(request, fixedLease) }
+                catch {
+                  invalidateSkillLoaderWitness(witnessObservation)
+                  return setFinal({ status: "failed", error: "current execution lease changed; execution stopped" })
+                }
+                try { assertFixedPolicy(request) }
+                catch {
+                  invalidateSkillLoaderWitness(witnessObservation)
+                  return setFinal({ status: "failed", error: "fixed execution policy changed; execution stopped" })
+                }
+                if (cancelled || postWitnessLease.state === "cancelled") {
+                  invalidateSkillLoaderWitness(witnessObservation)
+                  return setFinal({ status: "cancelled", error: "execution cancellation requested" })
+                }
+                if (Date.now() >= nativeDeadlineAt) {
+                  invalidateSkillLoaderWitness(witnessObservation)
+                  return setFinal({ status: "failed", error: "execution deadline elapsed" })
+                }
+              }
+              if (witnessObservation) {
+                let canary: SkillLoaderCanaryBinding | undefined
+                let receipt: SkillLoaderWitnessReceipt | undefined
+                try {
+                  canary = skillLoaderWitnessCanaryBinding(request)
+                  receipt = skillLoaderWitnessCompletion(request, witnessObservation)
+                } catch {
+                  invalidateSkillLoaderWitness(witnessObservation)
+                  return setFinal({ status: "failed", error: "skill loader witness finalization refused" })
+                }
+                const completion = createWitnessCompletion({
+                  request,
+                  route,
+                  reconciliation: witnessReconciliation,
+                  responseText: envelope.text,
+                  canary,
+                  receipt,
+                })
+                if (!completion || cancelled || Date.now() >= nativeDeadlineAt) {
+                  invalidateSkillLoaderWitness(witnessObservation)
+                  return setFinal({ status: "failed", error: "skill loader witness finalization refused" })
+                }
+                let finalLease: LeaseCheck
+                try { finalLease = checkLease(request, fixedLease) }
+                catch {
+                  invalidateSkillLoaderWitness(witnessObservation)
+                  return setFinal({ status: "failed", error: "current execution lease changed; execution stopped" })
+                }
+                try { assertFixedPolicy(request) }
+                catch {
+                  invalidateSkillLoaderWitness(witnessObservation)
+                  return setFinal({ status: "failed", error: "fixed execution policy changed; execution stopped" })
+                }
+                if (finalLease.state === "cancelled") {
+                  invalidateSkillLoaderWitness(witnessObservation)
+                  return setFinal({ status: "cancelled", error: "execution cancellation requested" })
+                }
+                if (Date.now() >= nativeDeadlineAt) {
+                  invalidateSkillLoaderWitness(witnessObservation)
+                  return setFinal({ status: "failed", error: "execution deadline elapsed" })
+                }
+                return setFinal({ status: "completed", text: envelope.text }, completion)
+              }
+              return setFinal({ status: "completed", text: envelope.text })
+            }
             if (!CLI_TOOL_NAMES.includes(envelope.name as CliToolName)) return setFinal({ status: "failed", error: "unknown Otter tool refused; no fallback execution was attempted" })
             const name = envelope.name as CliToolName
             // Shown with this call's result so the model re-issues what it batched instead of assuming it ran.

@@ -3,6 +3,7 @@ import {
   constants, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readSync,
   readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync,
 } from "node:fs"
+import * as nodeFs from "node:fs"
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path"
 import { containsSecret } from "../security/secrets.ts"
 import { listToolOutcomes, type ToolOutcome } from "../telemetry/outcomes.ts"
@@ -18,6 +19,75 @@ const digestBytes = (bytes: Uint8Array) => createHash("sha256").update(bytes).di
 const markdown = (text: string) => text.replace(/[\\`*_[\]{}()<>#+.!|~-]/g, "\\$&").replace(/[\r\n]/g, " ")
 /** Inverse of markdown(): our own escaping only ever inserts a single backslash before a matched char. */
 const unescapeMarkdown = (text: string) => text.replace(/\\([\\`*_[\]{}()<>#+.!|~-])/g, "$1")
+
+export type WikiSerializedWriteObservation = Readonly<{ kind: string; bytes: number; sha256: string }>
+
+function validWikiPid(pid: unknown): pid is number {
+  return Number.isSafeInteger(pid) && Number(pid) > 0 && Number(pid) <= 9_999_999_999
+}
+
+export function validateWikiTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return false
+  const milliseconds = Date.parse(value)
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value
+}
+
+function currentWikiTimestamp(): string {
+  const at = new Date().toISOString()
+  if (!validateWikiTimestamp(at)) throw new Error("Wiki clock did not produce a bounded ISO timestamp")
+  return at
+}
+
+export function renderWikiLockContent(pid: number, at: string): string {
+  if (!validWikiPid(pid) || !validateWikiTimestamp(at)) throw new Error("Wiki lock metadata is outside its serialized bound")
+  const content = `${JSON.stringify({ pid, at })}\n`
+  if (Buffer.byteLength(content, "utf8") > 51) throw new Error("Wiki lock metadata is outside its serialized bound")
+  return content
+}
+
+export function renderWikiRegisterSourcePage(title: string, id: string, ext: string, bytesLen: number, fileBaseName: string): string {
+  return [
+    `# ${markdown(title)}`,
+    "",
+    "> 이 페이지는 등록 시점에 결정적으로 생성되었습니다. 에이전트는 원본을 읽고 출처를 유지하면서 이 페이지를 확장할 수 있습니다.",
+    "",
+    `[불변 원본](../../raw/documents/${id}${ext}) · [인덱스](../index.md)`,
+    "",
+    `- source_id: ${id}`,
+    `- 형식: ${ext.slice(1)}; 바이트: ${bytesLen}`,
+    `- 원본 파일명: ${markdown(fileBaseName)}`,
+    "",
+    "## 지식 통합",
+    "",
+    "LLM이 ingest할 때 기존 위키 페이지와 비교하고, 새로 확인된 사실과 기존 주장과의 충돌을 출처 링크와 함께 기록합니다. 확인할 수 없는 내용은 미확정으로 남깁니다.",
+    "",
+  ].join("\n")
+}
+
+export function renderWikiRegisterIndexReplacement(
+  indexText: string,
+  title: string,
+  sourcePageName: string,
+  bytesLen: number,
+): string | null {
+  const indexLink = `sources/${sourcePageName}`
+  if (indexText.includes(`](${indexLink})`)) return null
+  return `${indexText.trimEnd()}\n\n- [${markdown(title)}](${indexLink}) — 등록 문서, ${bytesLen} bytes.\n`
+}
+
+export function renderWikiRegisterLogAppend(timestamp: string, title: string, id: string, sourcePageName: string): string {
+  if (!validateWikiTimestamp(timestamp)) throw new Error("Wiki log timestamp is outside its serialized bound")
+  return `\n## [${timestamp}] register | ${markdown(title)}\n\n- source_id: ${id}\n- [원본 요약](sources/${sourcePageName}); 의미적 ingest는 아직 실행하지 않았습니다.\n`
+}
+
+export function wikiRegisterLogHasSourceId(logText: string, id: string): boolean {
+  return parseLog(logText).some(entry => entry.op === "register" && hasSourceId(entry, id))
+}
+
+export function wikiRegisterStoredTitle(logText: string, id: string): string | undefined {
+  const entry = parseLog(logText).find(item => item.op === "register" && hasSourceId(item, id))
+  return entry ? unescapeMarkdown(entry.title) : undefined
+}
 
 function contained(root: string, path: string): boolean {
   const rel = relative(root, path)
@@ -47,13 +117,17 @@ function replaceDerived(path: string, text: string) {
   if (existsSync(path) && readFileSync(path, "utf8") === text) return
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`
   let created = false
-  try { writeFileSync(temp, text, { flag: "wx", mode: 0o600 }); created = true; renameSync(temp, path) }
+  try {
+    nodeFs.writeFileSync(temp, text, { flag: "wx", mode: 0o600 })
+    created = true
+    renameSync(temp, path)
+  }
   finally { if (created && existsSync(temp)) unlinkSync(temp) }
 }
 function createOnly(path: string, text: string): boolean {
   safeFile(path)
   if (existsSync(path)) return false
-  writeFileSync(path, text, { flag: "wx", mode: 0o600 })
+  nodeFs.writeFileSync(path, text, { flag: "wx", mode: 0o600 })
   return true
 }
 
@@ -85,11 +159,12 @@ function lockProblem(root: string): string {
  * Creates the lock (wx, 0600) or throws a refusal error. Writers never remove a lock they did not create, so a
  * lock is only ever deleted by its owner or by an explicit `unlock` of a dead owner's lock.
  */
-function acquireLock(root: string): string {
+function acquireLock(root: string, at = currentWikiTimestamp()): string {
+  const content = renderWikiLockContent(process.pid, at)
   const knowledge = safeDirectory(root, ["knowledge"])
   const lock = join(knowledge, ".wiki.lock")
   try {
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }) + "\n", { flag: "wx", mode: 0o600 })
+    nodeFs.writeFileSync(lock, content, { flag: "wx", mode: 0o600 })
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(lockProblem(root))
     throw error
@@ -674,7 +749,7 @@ export function captureWiki(worktree: string) {
     const alreadyLogged = parseLog(logText).some((e) => e.op === "capture" && hasSourceId(e, sourceName))
     if (!alreadyLogged) {
       // Append, never regenerate: LLM ingest/query/lint entries must survive future captures.
-      writeFileSync(log, `\n## [${new Date().toISOString()}] capture | 도구 실행 관측\n\n- source_id: ${sourceName}\n- [원본 요약](sources/${sourcePage}); ${observations.length}/${totalCount}개 관측.\n- 의미적 ingest는 아직 실행하지 않았습니다.\n`, { flag: "a", mode: 0o600 })
+      writeFileSync(log, `\n## [${currentWikiTimestamp()}] capture | 도구 실행 관측\n\n- source_id: ${sourceName}\n- [원본 요약](sources/${sourcePage}); ${observations.length}/${totalCount}개 관측.\n- 의미적 ingest는 아직 실행하지 않았습니다.\n`, { flag: "a", mode: 0o600 })
     }
 
     const routingContent = JSON.stringify(routingSnapshot, null, 2) + "\n"
@@ -698,7 +773,7 @@ export function captureWiki(worktree: string) {
     const currentLog = readFileSync(log, "utf8")
     const routingLogged = parseLog(currentLog).some((entry) => entry.op === "capture" && hasSourceId(entry, routingSourceId))
     if (!routingLogged) {
-      writeFileSync(log, `\n## [${new Date().toISOString()}] capture | Jev routing observations\n\n- source_id: ${routingSourceId}\n- [Sanitized routing snapshot](sources/${routingPageName}); ${routingSnapshot.coverage.valid} unique valid events.\n- Recommendations and advice insertion are not evidence of skill execution or success.\n`, { flag: "a", mode: 0o600 })
+      writeFileSync(log, `\n## [${currentWikiTimestamp()}] capture | Jev routing observations\n\n- source_id: ${routingSourceId}\n- [Sanitized routing snapshot](sources/${routingPageName}); ${routingSnapshot.coverage.valid} unique valid events.\n- Recommendations and advice insertion are not evidence of skill execution or success.\n`, { flag: "a", mode: 0o600 })
     }
     const routingSummary = summarizeRouting(routingSnapshot)
     const skillRawPath = join(skillRaw, `${skillSourceId}.json`)
@@ -730,7 +805,7 @@ export function captureWiki(worktree: string) {
     const skillLogged = parseLog(skillLogText).some((entry) => entry.op === "capture" && hasSourceId(entry, skillSourceId) &&
       entry.body.split("\n").some((line) => line.trim() === "- kind: skill-runs"))
     if (!skillLogged) {
-      writeFileSync(log, `\n## [${new Date().toISOString()}] capture | Skill evaluation observations\n\n- source_id: ${skillSourceId}\n- kind: skill-runs\n- [Sanitized skill evaluation source](sources/${skillSourceName}); ${skillSnapshot.coverage.returnedFacts}/${skillSnapshot.coverage.storedFacts} facts returned.\n- This manual snapshot is bounded; population completeness, adherence, and causal effectiveness are not claimed.\n`, { flag: "a", mode: 0o600 })
+      writeFileSync(log, `\n## [${currentWikiTimestamp()}] capture | Skill evaluation observations\n\n- source_id: ${skillSourceId}\n- kind: skill-runs\n- [Sanitized skill evaluation source](sources/${skillSourceName}); ${skillSnapshot.coverage.returnedFacts}/${skillSnapshot.coverage.storedFacts} facts returned.\n- This manual snapshot is bounded; population completeness, adherence, and causal effectiveness are not claimed.\n`, { flag: "a", mode: 0o600 })
     }
     return {
       source: relative(root, rawPath), summary: relative(root, join(sources, sourcePage)),
@@ -821,7 +896,7 @@ export function captureSessionDigests(worktree: string, factsReport?: (digests: 
     if (nextIndex !== indexText.trimEnd()) replaceDerived(index, `${nextIndex}\n`)
     const logged = parseLog(readFileSync(log, "utf8")).some(entry => entry.op === "capture" && hasSourceId(entry, sourceId))
     if (!logged) {
-      writeFileSync(log, `\n## [${new Date().toISOString()}] capture | 세션 다이제스트\n\n- source_id: ${sourceId}\n- kind: session-digests\n- [원본 요약](sources/${pageName}); ${fresh.length}개 세션.\n- 의미적 ingest는 아직 실행하지 않았습니다.\n`, { flag: "a", mode: 0o600 })
+      writeFileSync(log, `\n## [${currentWikiTimestamp()}] capture | 세션 다이제스트\n\n- source_id: ${sourceId}\n- kind: session-digests\n- [원본 요약](sources/${pageName}); ${fresh.length}개 세션.\n- 의미적 ingest는 아직 실행하지 않았습니다.\n`, { flag: "a", mode: 0o600 })
     }
     // Mark the digests captured only after every write succeeded.
     for (const item of fresh) captured.add(item.sessionID)
@@ -850,33 +925,19 @@ function firstHeading(text: string): string | undefined {
 function storedRegisterTitle(root: string, id: string): string | undefined {
   const logPath = join(root, "knowledge", "wiki", "log.md")
   if (!existsSync(logPath)) return undefined
-  const entry = parseLog(readFileSync(logPath, "utf8")).find((e) => e.op === "register" && hasSourceId(e, id))
-  return entry ? unescapeMarkdown(entry.title) : undefined
-}
-
-function sourcePageText(title: string, id: string, ext: string, bytesLen: number, fileBaseName: string): string {
-  return [
-    `# ${markdown(title)}`,
-    "",
-    "> 이 페이지는 등록 시점에 결정적으로 생성되었습니다. 에이전트는 원본을 읽고 출처를 유지하면서 이 페이지를 확장할 수 있습니다.",
-    "",
-    `[불변 원본](../../raw/documents/${id}${ext}) · [인덱스](../index.md)`,
-    "",
-    `- source_id: ${id}`,
-    `- 형식: ${ext.slice(1)}; 바이트: ${bytesLen}`,
-    `- 원본 파일명: ${markdown(fileBaseName)}`,
-    "",
-    "## 지식 통합",
-    "",
-    "LLM이 ingest할 때 기존 위키 페이지와 비교하고, 새로 확인된 사실과 기존 주장과의 충돌을 출처 링크와 함께 기록합니다. 확인할 수 없는 내용은 미확정으로 남깁니다.",
-    "",
-  ].join("\n")
+  return wikiRegisterStoredTitle(readFileSync(logPath, "utf8"), id)
 }
 
 export type RegisterReceipt = { sourceId: string; kind: "documents"; source: string; summary: string; title: string; bytes: number; created: boolean }
 
 /** Registers an immutable local document as a wiki raw source. Compile/ingest into synthesis pages stays an LLM procedure. */
-export function registerWiki(worktree: string, file: string, opts: { title?: string } = {}): RegisterReceipt {
+function registerWikiInternal(
+  worktree: string,
+  file: string,
+  opts: { title?: string },
+  fixtureMetadata?: Readonly<{ timestamp: string }>,
+): RegisterReceipt {
+  if (fixtureMetadata && !validateWikiTimestamp(fixtureMetadata.timestamp)) throw new Error("Wiki log timestamp is outside its serialized bound")
   const root = realpathSync(worktree)
   const requestedPath = resolve(file)
   let stat: ReturnType<typeof lstatSync>
@@ -903,7 +964,8 @@ export function registerWiki(worktree: string, file: string, opts: { title?: str
   for (const required of [join(knowledge, "AGENTS.md"), join(knowledge, "wiki", "index.md"), join(knowledge, "wiki", "log.md")]) {
     if (!existsSync(required)) throw new Error("Wiki schema, index and log must exist before register")
   }
-  const lock = acquireLock(root)
+  const lockTimestamp = fixtureMetadata?.timestamp ?? currentWikiTimestamp()
+  const lock = acquireLock(root, lockTimestamp)
   try {
     // Validate every file this call appends/replaces before the first write, so a refusal leaves no partial source.
     const indexPath = join(knowledge, "wiki", "index.md")
@@ -923,24 +985,40 @@ export function registerWiki(worktree: string, file: string, opts: { title?: str
       const existing = readFileSync(rawPath)
       if (!existing.equals(bytes)) throw new Error("Immutable raw source hash mismatch")
     } else {
-      writeFileSync(rawPath, bytes, { flag: "wx", mode: 0o600 })
+      nodeFs.writeFileSync(rawPath, bytes, { flag: "wx", mode: 0o600 })
       created = true
     }
     const effectiveTitle = created ? candidateTitle : storedRegisterTitle(root, id) ?? candidateTitle
     const sourcesDir = safeDirectory(root, ["knowledge", "wiki", "sources"])
     const sourcePageName = `documents-${id}.md`
     const sourcePagePath = join(sourcesDir, sourcePageName)
-    createOnly(sourcePagePath, sourcePageText(effectiveTitle, id, ext, bytes.length, fileBaseName))
-    const indexLink = `sources/${sourcePageName}`
+    createOnly(sourcePagePath, renderWikiRegisterSourcePage(effectiveTitle, id, ext, bytes.length, fileBaseName))
     const indexText = readFileSync(indexPath, "utf8")
-    if (!indexText.includes(`](${indexLink})`)) replaceDerived(indexPath, `${indexText.trimEnd()}\n\n- [${markdown(effectiveTitle)}](${indexLink}) — 등록 문서, ${bytes.length} bytes.\n`)
+    const indexReplacement = renderWikiRegisterIndexReplacement(indexText, effectiveTitle, sourcePageName, bytes.length)
+    if (indexReplacement !== null) replaceDerived(indexPath, indexReplacement)
     const logText = readFileSync(logPath, "utf8")
-    const alreadyLogged = parseLog(logText).some((e) => e.op === "register" && hasSourceId(e, id))
+    const alreadyLogged = wikiRegisterLogHasSourceId(logText, id)
     if (!alreadyLogged) {
-      writeFileSync(logPath, `\n## [${new Date().toISOString()}] register | ${markdown(effectiveTitle)}\n\n- source_id: ${id}\n- [원본 요약](sources/${sourcePageName}); 의미적 ingest는 아직 실행하지 않았습니다.\n`, { flag: "a", mode: 0o600 })
+      const timestamp = fixtureMetadata?.timestamp ?? currentWikiTimestamp()
+      const append = renderWikiRegisterLogAppend(timestamp, effectiveTitle, id, sourcePageName)
+      nodeFs.writeFileSync(logPath, append, { flag: "a", mode: 0o600 })
     }
     return { sourceId: id, kind: "documents", source: relative(root, rawPath), summary: relative(root, sourcePagePath), title: effectiveTitle, bytes: bytes.length, created }
   } finally { unlinkSync(lock) }
+}
+
+export function registerWiki(worktree: string, file: string, opts: { title?: string } = {}): RegisterReceipt {
+  return registerWikiInternal(worktree, file, opts)
+}
+
+/** Same registration behavior for an isolated evaluator Wiki, with an explicitly bounded clock. */
+export function registerWikiForFixture(
+  worktree: string,
+  file: string,
+  opts: { title?: string },
+  metadata: Readonly<{ timestamp: string }>,
+): RegisterReceipt {
+  return registerWikiInternal(worktree, file, opts, metadata)
 }
 
 // -- Status ---------------------------------------------------------------------------------------------------------

@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
 import { createExecutionRunStore, ExecutionRunBusyError, ExecutionRunCorruptError, ExecutionRunUnresolvedError, hostRecoveryContext, persistedHostReference, settled, strictQuiescent } from "../src/hosts/run-state.ts"
 import type { ExecutionReference } from "../src/hosts/types.ts"
 import type { VerificationReference, VerificationResult } from "../src/orchestration/verifier.ts"
@@ -53,6 +54,12 @@ const baseIntent = (claim: ReturnType<ReturnType<typeof createExecutionRunStore>
 const intent = (claim: ReturnType<ReturnType<typeof createExecutionRunStore>["claim"]>, executionId: string) => ({ ...baseIntent(claim, executionId), kind: "host" as const, engine: "opencode", profile: "legacy-unowned" as const })
 const verifierInput = { inputSnapshotID: "snapshot-1", inputDigest: "a".repeat(64), deadlineAt: 100000, maxOutputChars: 4000 }
 const verifierIntent = (claim: ReturnType<ReturnType<typeof createExecutionRunStore>["claim"]>, executionId: string, profile: "legacy-unowned" | "linux-single-use" = "legacy-unowned") => ({ ...baseIntent(claim, executionId), kind: "verifier" as const, profile, ...verifierInput })
+const nativeLoadCanaryIntent = (claim: ReturnType<ReturnType<typeof createExecutionRunStore>["claim"]>, executionId: string, policyID: string) => ({
+  ...baseIntent(claim, executionId), taskId: `skillopt:target:canary:${executionId}`, role: "main", policyID,
+  kind: "host" as const, engine: "claude", profile: "legacy-unowned" as const,
+  controlProfile: "estimated-input-reactive-output-v1" as const, nativeExecution: true as const,
+  nativeLoadCanary: true as const, deadlineAt: Date.now() + 60_000, maxOutputChars: 32 * 1024,
+})
 const verifierRef = (executionID: string, profile: "legacy-unowned" | "linux-single-use"): VerificationReference => ({ kind: "verifier", executionID, profile, invocationID: `invocation-${executionID}`, ...verifierInput, ...(profile === "linux-single-use" ? { unit: "otter-verifier.service", bootID: "boot" } : {}) })
 const verification = (reference: VerificationReference): VerificationResult => ({ profile: reference.profile, parentExit: 0, timedOut: false, cancelled: false, isolationEstablished: reference.profile === "linux-single-use", domainState: reference.profile === "linux-single-use" ? "empty" : "unknown", integrity: "unchanged", output: "ok", proof: { reference, evidence: "boundary verified" } })
 
@@ -127,6 +134,139 @@ test("host vendor reference binding refuses execution-only IDs and invalid first
     }))).toThrow(ExecutionRunUnresolvedError)
     expect(readFileSync(path)).toEqual(beforeStaleBind)
   } finally { stale.cleanup() }
+})
+
+test("native CLI identity persists only the exact execution ID and is not generic vendor recovery evidence", () => {
+  const f = fixture()
+  try {
+    const claim = f.store.claim("owner", "instance", process.pid)
+    const nativeIntent = {
+      ...baseIntent(claim, "skillopt-request"),
+      taskId: "skillopt:optimizer:train:skillopt-request",
+      role: "optimizer",
+      policyID: `skillopt-native-v1:${"a".repeat(64)}`,
+      kind: "host" as const,
+      engine: "codex",
+      profile: "legacy-unowned" as const,
+      controlProfile: "estimated-input-reactive-output-v1" as const,
+      nativeExecution: true as const,
+    }
+    f.store.registerIntent(claim, nativeIntent)
+    expect(() => f.store.bindVendorRef(claim, "skillopt-request", JSON.stringify({
+      executionID: "skillopt-request", vendorSessionID: "invented",
+    }))).toThrow(TypeError)
+    f.store.bindNativeExecutionRef(claim, "skillopt-request")
+    const record = f.store.status().executions[0]!
+    expect(record.vendorRef).toBe(JSON.stringify({ executionID: "skillopt-request" }))
+    expect(record.boundaryRef).toEqual({ executionID: "skillopt-request" })
+    expect(persistedHostReference(record)).toBeUndefined()
+    expect(hostRecoveryContext(f.store.status(), { executionID: "skillopt-request" }, "codex", () => "policy"))
+      .toBeUndefined()
+
+    f.store.markHostDispatched(claim, "skillopt-request")
+    f.store.recordTerminal(claim, "skillopt-request", { outcome: "completed", terminalAt: 1 })
+    f.store.reconcile(claim, "skillopt-request", { outcome: "terminal", quiescent: true, evidence: "native handle confirmed terminal" })
+    f.store.assertQuiescent(claim)
+    f.store.release(claim)
+  } finally { f.cleanup() }
+})
+
+test("native load-canary identity accepts the actual main policy and keeps exact-ID dispatch and quiescence guards", () => {
+  const f = fixture()
+  try {
+    const policyID = createCliRuntime({ worktree: f.worktree, engine: "claude", model: "fixture-model" }).policy.resolve("main").id
+    const claim = f.store.claim("owner", "instance", process.pid)
+    const executionId = "load-canary"
+    f.store.registerIntent(claim, nativeLoadCanaryIntent(claim, executionId, policyID))
+    expect(f.store.status().executions[0]).toMatchObject({
+      executionId, taskId: `skillopt:target:canary:${executionId}`, role: "main", policyID,
+      nativeExecution: true, nativeLoadCanary: true, deadlineAt: expect.any(Number), maxOutputChars: 32 * 1024,
+    })
+    expect(() => f.store.bindVendorRef(claim, executionId, JSON.stringify({
+      executionID: executionId, vendorSessionID: "invented-provider-id",
+    }))).toThrow(TypeError)
+
+    f.store.bindNativeExecutionRef(claim, executionId)
+    const bound = f.store.status().executions[0]!
+    expect(bound.vendorRef).toBe(JSON.stringify({ executionID: executionId }))
+    expect(bound.boundaryRef).toEqual({ executionID: executionId })
+    expect(persistedHostReference(bound)).toBeUndefined()
+    expect(hostRecoveryContext(f.store.status(), { executionID: executionId }, "claude", () => policyID)).toBeUndefined()
+
+    f.store.markHostDispatched(claim, executionId)
+    expect(f.store.status().executions[0]?.hostDispatch).toBe("started")
+    expect(strictQuiescent(f.store.status().executions[0]!)).toBe(false)
+    expect(settled(f.store.status().executions[0]!)).toBe(false)
+    expect(() => f.store.assertQuiescent(claim)).toThrow(ExecutionRunUnresolvedError)
+    expect(() => f.store.release(claim)).toThrow(ExecutionRunUnresolvedError)
+
+    f.store.recordTerminal(claim, executionId, { outcome: "completed", terminalAt: Date.now() })
+    expect(settled(f.store.status().executions[0]!)).toBe(false)
+    expect(() => f.store.release(claim)).toThrow(ExecutionRunUnresolvedError)
+    f.store.reconcile(claim, executionId, { outcome: "terminal", quiescent: true, evidence: "fixture terminal observation" })
+    expect(strictQuiescent(f.store.status().executions[0]!)).toBe(true)
+    f.store.assertQuiescent(claim)
+    f.store.release(claim)
+    expect(f.store.status().claim).toBeUndefined()
+  } finally { f.cleanup() }
+})
+
+test("native load-canary marker rejects identity drift and cannot bypass broker-native policy rules", () => {
+  const f = fixture()
+  try {
+    const policyID = createCliRuntime({ worktree: f.worktree, engine: "claude", model: "fixture-model" }).policy.resolve("main").id
+    const claim = f.store.claim("owner", "instance", process.pid)
+    const path = join(f.executionDirectory, "state.json")
+    const valid = nativeLoadCanaryIntent(claim, "load-canary", policyID)
+    const missingDeadline = { ...valid }
+    delete (missingDeadline as Partial<typeof valid>).deadlineAt
+    const missingNativeExecution = { ...valid }
+    delete (missingNativeExecution as Partial<typeof valid>).nativeExecution
+    const unmarkedMain = { ...valid }
+    delete (unmarkedMain as Partial<typeof valid>).nativeLoadCanary
+    const invalid: unknown[] = [
+      { ...valid, role: "worker" },
+      { ...valid, role: "optimizer", taskId: `skillopt:optimizer:canary:${valid.executionId}` },
+      { ...valid, taskId: `skillopt:target:train:${valid.executionId}` },
+      { ...valid, executionId: "different-execution" },
+      { ...valid, engine: "opencode" },
+      { ...valid, profile: "linux-single-use" },
+      { ...valid, controlProfile: "wrong-control" },
+      { ...valid, controlProfile: undefined },
+      missingDeadline,
+      { ...valid, deadlineAt: Number.MAX_SAFE_INTEGER + 1 },
+      { ...valid, maxOutputChars: 32 * 1024 - 1 },
+      { ...valid, policyID: "" },
+      { ...valid, nativeLoadCanary: false },
+      { ...valid, nativeLoadCanary: "true" },
+      missingNativeExecution,
+      unmarkedMain,
+    ]
+    const before = readFileSync(path)
+    for (const malformed of invalid) {
+      expect(() => f.store.registerIntent(claim, malformed as any)).toThrow(TypeError)
+      expect(readFileSync(path)).toEqual(before)
+    }
+
+    const brokerIntent = {
+      ...baseIntent(claim, "skillopt-request"), taskId: "skillopt:optimizer:train:skillopt-request",
+      role: "optimizer", policyID: `skillopt-native-v1:${"a".repeat(64)}`,
+      kind: "host" as const, engine: "codex", profile: "legacy-unowned" as const,
+      controlProfile: "estimated-input-reactive-output-v1" as const, nativeExecution: true as const,
+    }
+    const invalidBroker: unknown[] = [
+      { ...brokerIntent, policyID: "ordinary-policy-id" },
+      { ...brokerIntent, policyID: `skillopt-native-v1:${"A".repeat(64)}` },
+      { ...brokerIntent, policyID: `skillopt-native-v1:${"a".repeat(63)}` },
+      { ...brokerIntent, role: "main", taskId: "skillopt:main:train:skillopt-request" },
+      { ...brokerIntent, taskId: "skillopt:target:train:skillopt-request" },
+      { ...brokerIntent, nativeLoadCanary: true },
+    ]
+    for (const malformed of invalidBroker) {
+      expect(() => f.store.registerIntent(claim, malformed as any)).toThrow(TypeError)
+      expect(readFileSync(path)).toEqual(before)
+    }
+  } finally { f.cleanup() }
 })
 
 test("late first host reference is recovery evidence after cancel or fence", () => {

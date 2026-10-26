@@ -41,6 +41,10 @@ import { incompleteArtifactSummary } from "../workflows/artifacts.ts"
 import { readSessionCommitted } from "../workflows/commit.ts"
 import { humanDecision } from "./operator.ts"
 import type { OperatorDecision } from "./operator.ts"
+import {
+  createNativeSkillOptForeground, foregroundReasonCode, readSkillOptForegroundArtifact,
+  readSkillOptForegroundInput, type SkillOptForegroundService,
+} from "../skillopt/foreground.ts"
 import { AdmissionRefusal, assertHostAdmission } from "./required-controls.ts"
 import { CODEX_SUPPORTED_VERSIONS } from "./codex-profile.ts"
 import { installedCodexVersion } from "./cli-transport.ts"
@@ -53,7 +57,7 @@ import { beginExecutionActivity } from "./runtime.ts"
 import { settled, type ExecutionRunStatus } from "./run-state.ts"
 import { EXECUTION_ROLES, LinuxAdmissionRefused, type ActionGate, type ChatAction, type ChatActionDecision, type ComboRoutes, type ExecutionRole, type ExecutionRuntime, type SkillToolProvider, type VerifyRunObservation } from "./types.ts"
 import type { AskPrompt, ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
-import { commandInsertion, interactiveActions, interactiveHelp, type InteractiveContext } from "./interactive-actions.ts"
+import { commandInsertion, interactiveActions, interactiveHelp, parseSkillOptCommand, type InteractiveContext, type SkillOptCommand } from "./interactive-actions.ts"
 import { fileComboStore, fileDefaultModelStore, validateComboRoutes, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
 import { COMBO_PRESETS, comboPresetSummary } from "./combo-presets.ts"
 import { runTerminalShell, type ShellResult } from "./operator-shell.ts"
@@ -881,6 +885,72 @@ function safeSkillAudit(
   })
 }
 
+function skillOptMetadataLine(operation: string, value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return terminalSafeText(`SkillOpt ${operation}: unavailable. No model run, apply, or rollback was started.\n`)
+  }
+  const record = value as Record<string, unknown>
+  const details: string[] = []
+  if (typeof record.state === "string" && /^[A-Z_]{1,40}$/u.test(record.state)) details.push(`state=${record.state}`)
+  if (typeof record.reasonCode === "string" && /^[a-z0-9_-]{1,80}$/u.test(record.reasonCode)) details.push(`reason=${record.reasonCode}`)
+  if (typeof record.runId === "string" && /^[A-Za-z0-9_-]{1,100}$/u.test(record.runId)) details.push(`runId=${record.runId}`)
+  if (Number.isSafeInteger(record.revision) && (record.revision as number) >= 0) details.push(`revision=${record.revision}`)
+  if (typeof record.pendingDispatch === "boolean") details.push(`pendingDispatch=${record.pendingDispatch}`)
+  if (typeof record.cancelled === "boolean") details.push(`cancelled=${record.cancelled}`)
+  if (typeof record.retainedUnresolvedExecution === "boolean") details.push(`retainedUnresolvedExecution=${record.retainedUnresolvedExecution}`)
+  const authorizationFlags = operation === "rollback"
+    ? ["candidateQualified", "publicationAuthorized", "rollbackAuthorized", "postRollbackHandoffAuthorized",
+      "modelExecutionStarted", "dispatchStarted", "optimizationSucceeded"] as const
+    : ["candidateQualified", "publicationAuthorized", "postApplyHandoffAuthorized", "modelExecutionStarted",
+      "dispatchStarted", "optimizationSucceeded"] as const
+  for (const key of authorizationFlags) {
+    if (typeof record[key] === "boolean") details.push(`${key}=${record[key]}`)
+  }
+  if (typeof record.controllerState === "string" && /^[A-Z_]{1,48}$/u.test(record.controllerState)) details.push(`controllerState=${record.controllerState}`)
+  if (typeof record.metricsStatus === "string" && /^[A-Z_]{1,48}$/u.test(record.metricsStatus)) details.push(`metricsStatus=${record.metricsStatus}`)
+  if (Number.isSafeInteger(record.reviewerCount) && (record.reviewerCount as number) >= 0) details.push(`reviewerCount=${record.reviewerCount}`)
+  for (const key of ["bindingSha256", "datasetSha256", "sourceExportSha256", "fixturePackSha256", "modelBindingsSha256",
+    "protocolSha256", "baselineSkillSha256", "scheduleSha256", "inputArtifactSha256", "digestWatermarkSha256", "candidateSha256"] as const) {
+    const value = record[key]
+    if (typeof value === "string" && /^[a-f0-9]{64}$/u.test(value)) details.push(`${key}=${value}`)
+  }
+  for (const key of ["targetRequests", "canaryReserve", "targetRequestCap", "consentExpiresAtMilliseconds",
+    "armExpiresAtMilliseconds", "dailyCooldownRemainingMilliseconds"] as const) {
+    const value = record[key]
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) details.push(`${key}=${value}`)
+  }
+  if (record.remaining && typeof record.remaining === "object" && !Array.isArray(record.remaining)) {
+    const remaining = record.remaining as Record<string, unknown>
+    const selected = ["target", "optimizer", "reviewer", "activeMilliseconds", "artifactBytes", "candidateSteps"]
+      .flatMap(key => typeof remaining[key] === "number" && Number.isSafeInteger(remaining[key]) && (remaining[key] as number) >= 0
+        ? [`${key}:${remaining[key]}`] : [])
+    if (selected.length) details.push(`remaining=${selected.join(",")}`)
+  }
+  if (record.requestCounts && typeof record.requestCounts === "object" && !Array.isArray(record.requestCounts)) {
+    const counts = record.requestCounts as Record<string, unknown>
+    const selected = ["charged", "dispatched", "unknown"].flatMap(group => {
+      const value = counts[group]
+      if (!value || typeof value !== "object" || Array.isArray(value)) return []
+      const roles = value as Record<string, unknown>
+      return ["target", "optimizer", "reviewer"].flatMap(role =>
+        typeof roles[role] === "number" && Number.isSafeInteger(roles[role]) && (roles[role] as number) >= 0
+          ? [`${group}.${role}:${roles[role]}`] : [])
+    })
+    if (selected.length) details.push(`requests=${selected.join(",")}`)
+  }
+  if (Array.isArray(record.requirements)) {
+    const requirements = record.requirements.slice(0, 16).filter((item): item is string => typeof item === "string" && /^[a-z0-9_-]{1,80}$/u.test(item))
+    if (requirements.length) details.push(`requirements=${requirements.join(",")}`)
+  }
+  const note = operation === "run" ? "Run does not publish or apply the candidate."
+    : operation === "apply" ? "No new optimization run was started by publication."
+      : operation === "rollback" ? "Rollback does not start a new model run or authorize publication."
+        : operation === "cleanup" ? "Cleanup only retires explicitly approved private experiment text; it does not execute or publish a model."
+      : operation === "automatic" ? "Automatic execution never publishes or applies the candidate."
+        : "No model run, apply, or rollback was started."
+  return terminalSafeText(`SkillOpt ${operation}: ${details.join(" · ") || "unavailable"}. ${note}\n`)
+}
+
 function skillCatalogLines(catalog: SkillCatalog): string[] {
   const lines = ["Skills available for explicit invocation:"]
   for (const entry of catalog.entries) {
@@ -946,6 +1016,7 @@ export async function runInteractiveSession(
   const abort = new AbortController()
   let sessionStore: SessionStore | undefined
   let attachedRuntime: ExecutionRuntime | undefined
+  let skillOptForeground: { runtime: ExecutionRuntime; owner: SessionStore; service: SkillOptForegroundService } | undefined
   let skillSession: SkillSession | undefined
   let retainedSDKSessionID: string | undefined
   let retainedViewSelection: { engine: string; model: string } | undefined
@@ -1869,6 +1940,17 @@ export async function runInteractiveSession(
         if (input === undefined) return { code: 0 }
         const message = input.trim()
         if (!message) continue
+        const skillOptCommand = parseSkillOptCommand(message)
+        if (skillOptCommand) {
+          if (skillOptCommand.operation === "invalid") {
+            terminal.write("Usage: /skillopt [status | prepare <input-path> | consent|arm|disarm|cancel|resume|run <run-id> [input-path] | apply|rollback|cleanup <run-id>]\n")
+          } else if (skillOptCommand.operation === "prepare" && !skillOptCommand.inputPath) {
+            terminal.write(skillOptMetadataLine("prepare", { state: "DATA_REQUIRED", reasonCode: "input_required", requirements: ["input_required"] }))
+          } else {
+            terminal.write("SkillOpt requires an admitted writable owner session; select a model and start a session first. No input was read and no state changed.\n")
+          }
+          continue
+        }
         if (message.startsWith("!")) {
           // No session exists yet: the run is shown but not recorded.
           const shellCommand = message.slice(1).trim()
@@ -2067,6 +2149,24 @@ export async function runInteractiveSession(
       controller: deps.createController(initialRuntime),
       conversation: deps.createConversation(initialRuntime, initialSessionID, initialContext?.messages, initialContext?.pinnedNote),
     }
+    function disposeNativeSkillOptService(): void {
+      if (!skillOptForeground) return
+      skillOptForeground.service.dispose()
+      skillOptForeground = undefined
+    }
+    function nativeSkillOptService(): SkillOptForegroundService {
+      if (!sessionStore || !attachedRuntime || retainedSDKSessionID || attachedRuntime !== selection.runtime) {
+        throw new Error("owner_session_unavailable")
+      }
+      sessionStore.assertOwner()
+      if (skillOptForeground && skillOptForeground.runtime === selection.runtime && skillOptForeground.owner === sessionStore) {
+        return skillOptForeground.service
+      }
+      disposeNativeSkillOptService()
+      const service = createNativeSkillOptForeground(selection.runtime, sessionStore)
+      skillOptForeground = { runtime: selection.runtime, owner: sessionStore, service }
+      return service
+    }
     let requestObservation: RequestObservation = { state: "not-observed" }
     let discoveryObservation: InteractiveViewFacts["discovery"] = startupDiscovery
     const currentViewIdentity = (): ViewIdentity => sessionStore
@@ -2159,12 +2259,39 @@ export async function runInteractiveSession(
         selection.runtime.linuxAdmission?.assertBootEpoch()
         await deps.admitRuntime(selection.runtime)
         if (sessionStore?.epoch !== epoch) throw new InteractiveLaunchError("Session attachment changed during Resume preflight.")
+        disposeNativeSkillOptService()
         sessionStore = resumeAdmission(selection.runtime, selection.sessionID, revision)
         await refreshSkillCatalog()
       },
       setOperation: controller => { operationAbort = controller },
       statusText: () => String(selection.controller.status(selection.sessionID)),
     })
+    async function withSkillOptOperation<T>(requiresExclusiveInput: boolean, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+      if (requiresExclusiveInput && !terminal.suspend) throw new Error("exclusive_terminal_input_unavailable")
+      const actionAbort = new AbortController()
+      const cancelAction = () => actionAbort.abort()
+      operationAbort = actionAbort
+      localModelOperation = true
+      abort.signal.addEventListener("abort", cancelAction, { once: true })
+      if (abort.signal.aborted) cancelAction()
+      let progressSuspended = false
+      let terminalSuspended = false
+      try {
+        progress.suspend()
+        progressSuspended = true
+        if (terminal.suspend) {
+          terminalSuspended = true
+          terminal.suspend()
+        }
+        return await operation(actionAbort.signal)
+      } finally {
+        abort.signal.removeEventListener("abort", cancelAction)
+        operationAbort = undefined
+        localModelOperation = false
+        try { if (terminalSuspended) terminal.resume?.() }
+        finally { if (progressSuspended) progress.resume() }
+      }
+    }
     const reportTurnCancellation = () => {
       const state = selection.runtime.runs.status()
       terminal.executionSnapshot?.(state, false)
@@ -2520,6 +2647,123 @@ export async function runInteractiveSession(
       }
     }
 
+    async function runSkillOptCommand(parsed: SkillOptCommand, actionContext: InteractiveContext): Promise<void> {
+      const usage = "Usage: /skillopt [status | prepare <input-path> | consent|arm|disarm|cancel|resume|run <run-id> [input-path] | apply|rollback|cleanup <run-id>]"
+      if (parsed.operation === "invalid") {
+        terminal.write(parsed.reason === "usage" ? `${usage}\n` : `Unknown SkillOpt action. ${usage}\n`)
+        return
+      }
+      if (parsed.operation === "status") {
+        try {
+          const status = await withSkillOptOperation(false, async () => nativeSkillOptService().status())
+          if (abort.signal.aborted) return
+          terminal.write(skillOptMetadataLine("status", status))
+        } catch (error) {
+          if (abort.signal.aborted) return
+          terminal.write(terminalSafeText(`SkillOpt status unavailable (${foregroundReasonCode(error)}). No model run, apply, or rollback was started.\n`))
+        }
+        return
+      }
+      if (parsed.operation === "prepare" && !parsed.inputPath) {
+        terminal.write(skillOptMetadataLine("prepare", { state: "DATA_REQUIRED", reasonCode: "input_required", requirements: ["input_required"] }))
+        return
+      }
+      if (actionContext !== "chat") {
+        terminal.write(`SkillOpt ${parsed.operation} refused: this session is held or observing another workflow; no inputs were read or state changed.\n`)
+        return
+      }
+      const guard = acquireSwitchGuard()
+      if (!guard.release) {
+        terminal.write(terminalSafeText(`SkillOpt ${parsed.operation} refused: ${boundedTerminalDiagnostic(guard.refusal ?? "execution ownership is unavailable").trim()} No inputs were read.\n`))
+        return
+      }
+      try {
+        const service = nativeSkillOptService()
+        if (parsed.operation === "apply" || parsed.operation === "rollback") {
+          const originalWrite = terminal.write
+          let result: Readonly<Record<string, unknown>>
+          // Publication emits its private operator preview directly to stderr. Keep the exact Terminal object and
+          // route any terminal writes away from the session transcript while the native canary is bound.
+          terminal.write = text => { process.stderr.write(terminalSafeText(text)) }
+          try {
+            result = await withSkillOptOperation(true, signal => parsed.operation === "rollback"
+              ? service.rollback(parsed.runId, terminal, signal)
+              : service.publish(parsed.runId, terminal, signal))
+          } finally {
+            terminal.write = originalWrite
+          }
+          if (abort.signal.aborted) return
+          terminal.write(skillOptMetadataLine(parsed.operation, result))
+          return
+        }
+        if (parsed.operation === "cleanup") {
+          const result = await withSkillOptOperation(true, signal => service.cleanup(parsed.runId, signal))
+          if (abort.signal.aborted) return
+          terminal.write(skillOptMetadataLine("cleanup", result))
+          return
+        }
+        const result = await withSkillOptOperation(parsed.operation !== "prepare", async signal => {
+          if (parsed.operation === "disarm" || parsed.operation === "cancel") {
+            // The current owner can stop an unstarted run using controller state alone. Never read artifact/source
+            // bytes before asking the service to perform that owner-checked direct stop.
+            const stop = parsed.operation === "disarm" ? service.disarm : service.cancel
+            const direct = await stop(parsed.runId, undefined, undefined, signal)
+            if (direct.state !== "DATA_REQUIRED" || direct.reasonCode !== "input_required") return direct
+            try {
+              const saved = parsed.inputPath
+                ? { input: readSkillOptForegroundInput(resolve(worktree, parsed.inputPath)), bindingSha256: undefined }
+                : readSkillOptForegroundArtifact(worktree, parsed.runId)
+              return stop(parsed.runId, saved.input, saved.bindingSha256, signal)
+            } catch (error) {
+              if (foregroundReasonCode(error) === "artifact_unavailable" || foregroundReasonCode(error) === "input_required") return direct
+              throw error
+            }
+          }
+
+          let input: unknown
+          let expectedBindingSha256: string | undefined
+          if (parsed.operation === "prepare") {
+            input = readSkillOptForegroundInput(resolve(worktree, parsed.inputPath!))
+          } else if ("inputPath" in parsed && parsed.inputPath) {
+            input = readSkillOptForegroundInput(resolve(worktree, parsed.inputPath))
+          } else {
+            try {
+              const saved = readSkillOptForegroundArtifact(worktree, parsed.runId)
+              input = saved.input
+              expectedBindingSha256 = saved.bindingSha256
+            } catch (error) {
+              if (foregroundReasonCode(error) !== "artifact_unavailable") throw error
+              return Object.freeze({ state: "DATA_REQUIRED", reasonCode: "input_required", requirements: Object.freeze(["input_required"]),
+                modelExecutionStarted: false, dispatchStarted: false, candidateQualified: false,
+                publicationAuthorized: false, postApplyHandoffAuthorized: false })
+            }
+          }
+          if (parsed.operation === "prepare") return service.prepare(input, signal)
+          if (parsed.operation === "consent") return service.consent(parsed.runId, input, expectedBindingSha256, signal)
+          if (parsed.operation === "arm") return service.arm(parsed.runId, input, expectedBindingSha256, signal)
+          if (parsed.operation === "resume") return service.resume(parsed.runId, input, expectedBindingSha256, signal)
+          return service.run(parsed.runId, input, expectedBindingSha256, signal)
+        })
+        if (abort.signal.aborted) return
+        terminal.write(skillOptMetadataLine(parsed.operation, result))
+      } catch (error) {
+        if (abort.signal.aborted) return
+        const reasonCode = foregroundReasonCode(error)
+        if (reasonCode === "operator_decision_aborted") {
+          terminal.write(`SkillOpt ${parsed.operation} cancelled; no decision was applied or retried.\n`)
+        } else {
+          const note = parsed.operation === "run" ? "Execution state may be unresolved; check status. No automatic retry occurred."
+            : parsed.operation === "apply" ? "Publication was not retried; check status before another action."
+              : parsed.operation === "rollback" ? "Rollback was not retried; check status before another action."
+                : parsed.operation === "cleanup" ? "Private cleanup was not retried; inspect status before another explicit action."
+              : "No model run, apply, or rollback was started."
+          terminal.write(terminalSafeText(`SkillOpt ${parsed.operation} refused (${reasonCode}). ${note}\n`))
+        }
+      } finally {
+        guard.release()
+      }
+    }
+
     /** Chat is held only because another session owns the active workflow; this session itself is clean. */
     function foreignWorkflowOnly(): boolean {
       try {
@@ -2570,6 +2814,11 @@ export async function runInteractiveSession(
         const controller = deps.createController(runtime)
         const conversation = deps.createConversation(runtime, selection.sessionID, prior.messages.length ? prior.messages : undefined, prior.pinnedNote)
         if (abort.signal.aborted) return false
+        try { disposeNativeSkillOptService() }
+        catch {
+          terminal.write("Model switch refused: the SkillOpt foreground service could not be safely disposed; current selection and ownership remain unchanged.\n")
+          return true
+        }
         // The admission check below requires no live local activity, so the guard's own activity is released first.
         guard.release()
         const changed = rebindAdmissionModel(runtime, selection.sessionID, store.epoch, { engine: nextEngine, model: nextModel, ...(Object.keys(nextRoutes).length ? { routes: nextRoutes } : {}) })
@@ -2670,6 +2919,11 @@ export async function runInteractiveSession(
         const context = retained ? restoredContext(sessionID) : { messages: carried, pinnedNote: carriedNote }
         const conversation = deps.createConversation(runtime, sessionID, context.messages.length ? context.messages : undefined, context.pinnedNote)
         if (abort.signal.aborted) return false
+        try { disposeNativeSkillOptService() }
+        catch {
+          terminal.write("Session switch refused: the SkillOpt foreground service could not be safely disposed; current session and ownership remain unchanged.\n")
+          return true
+        }
         const drafts = terminal.draftSnapshot?.()
         if (drafts) persist("notice", drafts)
         guard.release()
@@ -2785,6 +3039,11 @@ export async function runInteractiveSession(
       try {
         const drafts = terminal.draftSnapshot?.()
         if (drafts && sessionStore) persist("notice", drafts)
+        try { disposeNativeSkillOptService() }
+        catch {
+          terminal.write("Session restore refused: the SkillOpt foreground service could not be safely disposed; current session and ownership remain unchanged.\n")
+          return true
+        }
         terminal.queueAdmission?.(false)
         if (sessionStore) {
           guard!.release!()
@@ -2964,14 +3223,18 @@ export async function runInteractiveSession(
     while (!abort.signal.aborted) {
       if (persistenceFailed) throw new InteractiveLaunchError("Session transcript persistence failed; the session remains held.")
       let actionContext: InteractiveContext = "chat"
+      let automaticExecutionIdle = false
+      let queueAllowed = false
       if (retainedSDKSessionID) {
         terminal.queueAdmission?.(false)
         actionContext = "read-only"
       } else {
         workflowHost.syncStatus()
         const queueState = selection.runtime.runs.status()
+        automaticExecutionIdle = !queueState.claim &&
+          queueState.executions.every(execution => settled(execution) && !execution.fence)
         terminal.executionSnapshot?.(queueState, false)
-        const queueAllowed = !effectiveHold(worktree, selection.sessionID) && !readAnyWorkflowChecked(worktree).corrupt &&
+        queueAllowed = !effectiveHold(worktree, selection.sessionID) && !readAnyWorkflowChecked(worktree).corrupt &&
           !activeAnyWorkflow(worktree) && !queueState.claim && queueState.executions.every(settled)
         terminal.queueAdmission?.(queueAllowed && requestObservation.state !== "failed")
         actionContext = queueAllowed ? "chat" : foreignWorkflowOnly() ? "observer" : "held"
@@ -2981,9 +3244,28 @@ export async function runInteractiveSession(
       const promptTitle = retainedSDKSessionID
         ? `Retained SDK session ${retainedSDKSessionID} · read-only history`
         : `${selection.engine} · ${selection.model}`
-      const deferredCommand = workflowHost.takeDeferredCommand() ?? queuedChatMessage
-      queuedChatMessage = undefined
-      const text = deferredCommand ?? await withProgressSuspended(() => readInput(
+      const deferredCommand = workflowHost.takeDeferredCommand()
+      const queuedCommand = deferredCommand === undefined ? queuedChatMessage : undefined
+      if (deferredCommand === undefined) queuedChatMessage = undefined
+      const queuedInput = deferredCommand ?? queuedCommand
+      if (queuedInput === undefined && actionContext === "chat" && !retainedSDKSessionID &&
+          queueAllowed && automaticExecutionIdle && requestObservation.state !== "failed" && !abort.signal.aborted &&
+          !operationAbort && !localModelOperation && terminal.suspend && sessionStore &&
+          attachedRuntime === selection.runtime && skillOptForeground?.runtime === selection.runtime &&
+          skillOptForeground.owner === sessionStore && skillOptForeground.service.hasAutomaticArm()) {
+        const service = skillOptForeground.service
+        try {
+          const result = await withSkillOptOperation(true, signal => service.pollAutomatic(signal))
+          if (abort.signal.aborted) return signalExit(receivedSignal)
+          if (result) terminal.write(skillOptMetadataLine("automatic", result))
+        } catch (error) {
+          if (abort.signal.aborted) return signalExit(receivedSignal)
+          terminal.write(terminalSafeText(
+            `SkillOpt automatic refused (${foregroundReasonCode(error)}). No automatic retry occurred.\n`,
+          ))
+        }
+      }
+      const text = queuedInput ?? await withProgressSuspended(() => readInput(
         terminal, promptTitle,
         retainedSDKSessionID ? "Read-only history · /resume or /new to switch · /quit exit"
           : actionContext === "held" || actionContext === "observer" ? heldInputHint() : "Enter send · /help commands · /model switch · /quit exit",
@@ -3062,6 +3344,11 @@ export async function runInteractiveSession(
       }
 
       const [command, ...commandArgs] = message.split(/\s+/u)
+      const skillOptCommand = parseSkillOptCommand(message)
+      if (skillOptCommand) {
+        await runSkillOptCommand(skillOptCommand, actionContext)
+        continue
+      }
       if (["/search", "/expand", "/details", "/theme", "/ascii"].includes(command!)) {
         terminal.write(`${command} is a local full-screen TUI action; it is unavailable in readline and no model turn was dispatched.\n`)
         continue
@@ -3380,6 +3667,7 @@ export async function runInteractiveSession(
           await deps.admitRuntime(selection.runtime)
           if (abort.signal.aborted) continue
           if (!epoch || sessionStore?.epoch !== epoch) throw new InteractiveLaunchError("Session attachment changed during Resume preflight.")
+          disposeNativeSkillOptService()
           sessionStore = resumeAdmission(selection.runtime, selection.sessionID, current?.lastSeq)
           terminal.bindView?.(currentViewIdentity())
           await refreshSkillCatalog()
@@ -3992,6 +4280,8 @@ export async function runInteractiveSession(
     throw error
   } finally {
     sessionEnded = true
+    try { skillOptForeground?.service.dispose(); skillOptForeground = undefined }
+    catch { visibleWrite("SkillOpt helper cleanup did not complete; durable ownership state was left unchanged.\n") }
     checkpointStore?.dispose()
     checkpointStore = undefined
     skillSession?.close()

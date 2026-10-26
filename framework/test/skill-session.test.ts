@@ -5,24 +5,77 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
 import { createCliTools } from "../src/hosts/cli-tools.ts"
+import { chatExecuteMode } from "../src/config.ts"
+import type { CliNativeIdentity, CliTransportHandle } from "../src/hosts/cli-transport.ts"
+import { createCodexProfile } from "../src/hosts/codex-profile.ts"
+import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
+import type { ExecutionRequest } from "../src/hosts/types.ts"
 import { attachAdmission, detachAdmission, holdAdmission, resumeAdmission } from "../src/sessions/admission.ts"
 import type { SessionStore } from "../src/sessions/store.ts"
 import { pendingSkillPermissionActivityCount } from "../src/skills/activity.ts"
+import {
+  beginSkillLoaderWitness, bindSkillInvocation, consumeSkillLoaderWitness, finishSkillInvocation,
+  finishSkillLoaderWitness, registerSkillLoaderWitness as registerWitnessWithInstructions,
+  skillLoaderWitnessCompletion, skillLoaderWitnessRegistered,
+  type SkillInvocationContext,
+} from "../src/skills/context.ts"
+import { NATIVE_PROTOCOL_SHA256 } from "../src/skillopt/dataset.ts"
+import { buildNativeEvaluationPrompt, NATIVE_EVALUATION_PROTOCOL_SHA256 } from "../src/skillopt/evaluation.ts"
+import { sha256 } from "../src/skillopt/pilot.ts"
 import { resolveSkillRoots } from "../src/skills/roots.ts"
 import { claimPreparedSkillInvocation, SkillSession } from "../src/skills/session.ts"
 import { DEFAULT_SKILL_AUTO, NO_SKILL_TRUST, parseSkillAuto, parseSkillTrust, readSkillTrust, type SkillAutoPolicy, type SkillTrust } from "../src/skills/trust.ts"
 import { tempWorktree } from "./guards-helpers.ts"
+import { makeSkillOptCanaryFixture } from "./skillopt-canary-fixtures.ts"
 
 const SID = "skill_source_session"
+const WITNESS_SID = "skill_witness_session"
+const WITNESS_MODEL = "gpt-5.6-sol"
+const WITNESS_SKILL_TEXT = "---\nname: llm-wiki\ndescription: Inspect this project\nallowed-tools: [read]\n---\nUse the captured wiki instructions exactly.\r\n"
+let cachedWitnessCanary: Readonly<{ taskText: string; binding: Readonly<{
+  fixturePackSha256: string; fixtureId: string; fixtureSha256: string; taskSha256: string
+  evaluatorPromptSha256: string; evaluatorSystemSha256: string; protocolSha256: string; evaluatorSha256: string
+}>; systemInstructions: string
+}> | undefined
+
+function witnessCanary() {
+  if (cachedWitnessCanary) return cachedWitnessCanary
+  const fixture = makeSkillOptCanaryFixture()
+  const evaluatorPrompt = buildNativeEvaluationPrompt(fixture.fixture, WITNESS_SKILL_TEXT)
+  const systemPrefix = `${WITNESS_SKILL_TEXT}\n\n`
+  if (!evaluatorPrompt.system.startsWith(systemPrefix)) throw new Error("Synthetic evaluator prompt has an unexpected skill prefix")
+  const systemInstructions = evaluatorPrompt.system.slice(systemPrefix.length)
+  const taskText = evaluatorPrompt.user
+  cachedWitnessCanary = Object.freeze({
+    taskText,
+    systemInstructions,
+    binding: Object.freeze({
+      fixturePackSha256: fixture.packSha256,
+      fixtureId: fixture.fixture.id,
+      fixtureSha256: fixture.fixtureSha256,
+      taskSha256: sha256(taskText),
+      evaluatorPromptSha256: evaluatorPrompt.promptSha256,
+      evaluatorSystemSha256: sha256(systemInstructions),
+      protocolSha256: NATIVE_PROTOCOL_SHA256,
+      evaluatorSha256: NATIVE_EVALUATION_PROTOCOL_SHA256,
+    }),
+  })
+  return cachedWitnessCanary
+}
+
+function registerSkillLoaderWitness(context: SkillInvocationContext, binding: ReturnType<typeof witnessCanary>["binding"]) {
+  return registerWitnessWithInstructions(context, binding, witnessCanary().systemInstructions)
+}
 const signal = () => new AbortController().signal
 let fixture: ReturnType<typeof tempWorktree>
 let runtime: ReturnType<typeof createCliRuntime>
 let store: SessionStore
 let sessions: SkillSession[]
+let witnessSessionSequence = 0
 let choices: string[]
 let choose: (title: string, values: readonly string[], signal: AbortSignal) => Promise<number | undefined>
 
-function git(...args: string[]): void { gitIn(fixture.worktree, ...args) }
+function git(...args: string[]): string { return gitIn(fixture.worktree, ...args) }
 function gitIn(cwd: string, ...args: string[]): string {
   return execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", ...args], {
     cwd,
@@ -50,6 +103,80 @@ async function source(foreground = true, trust?: SkillTrust): Promise<SkillSessi
   return session
 }
 
+async function witnessFixture(options: { role?: "main" | "worker"; priorPreparation?: boolean; identityAfter?: CliNativeIdentity; omitPolicyModel?: boolean } = {}) {
+  put("llm-wiki", "Use the captured wiki instructions exactly.\r\n")
+  if (git("status", "--porcelain")) commit()
+  const roots = await resolveSkillRoots({ projectRoot: fixture.worktree })
+  const witnessRuntime = createCliRuntime({ worktree: fixture.worktree, engine: "codex", model: WITNESS_MODEL })
+  const witnessSessionID = `${WITNESS_SID}_${++witnessSessionSequence}`
+  const witnessStore = attachAdmission(witnessRuntime, witnessSessionID, { engine: "codex", model: WITNESS_MODEL })
+  const terminal = {
+    stdinIsTTY: true,
+    stderrIsTTY: true,
+    choose: async (title: string, values: readonly string[], abort: AbortSignal) => {
+      choices.push(title)
+      return choose(title, values, abort)
+    },
+  }
+  if (options.priorPreparation) {
+    const prior = await SkillSession.create({ roots, store: witnessStore, terminal, trust: NO_SKILL_TRUST }, signal())
+    sessions.push(prior)
+    await prior.prepare("llm-wiki", signal())
+    prior.close()
+  }
+  const session = await SkillSession.create({ roots, store: witnessStore, terminal, trust: NO_SKILL_TRUST }, signal())
+  sessions.push(session)
+  const prepared = await session.prepare("llm-wiki", signal())
+  const canary = witnessCanary()
+  const role = options.role ?? "main"
+  const policyConfig = options.omitPolicyModel
+    ? { ...witnessRuntime.config, models: { ...witnessRuntime.config.models, main: undefined } }
+    : witnessRuntime.config
+  const nativeContext = witnessRuntime.policy.resolve(role).nativeContext
+  const policy = createExecutionPolicy(policyConfig, {
+    planningOnlyMain: true,
+    chatExecuteMain: chatExecuteMode(witnessRuntime.config) !== "plan",
+    ...(nativeContext ? { nativeContext } : {}),
+    skillLoaderCanaryInstructions: canary.systemInstructions,
+  })
+  const scope = {
+    executionID: "witness-execution",
+    supervisorSessionID: witnessSessionID,
+    taskID: "witness-task",
+    attemptID: "witness-attempt",
+    generation: 1,
+    role,
+    title: "Loader witness fixture",
+    cwd: fixture.worktree,
+    text: canary.taskText,
+    deadlineAt: Date.now() + 60_000,
+    policy: policy.resolve(role),
+  }
+  const bound = bindSkillInvocation(prepared, scope, policy)
+  const request: ExecutionRequest = { ...scope, skillContext: bound.context, handlers: bound.handlers }
+  const codexProfile = createCodexProfile(WITNESS_MODEL)
+  const identity: CliNativeIdentity = Object.freeze({
+    engine: "codex",
+    requestedModel: WITNESS_MODEL,
+    runtimeIdentity: Object.freeze({ version: "0.163.0", executableSha256: "a".repeat(64) }),
+    profileIdentity: Object.freeze({ id: "codex-restricted-read.v1", sha256: codexProfile.catalogHash }),
+  })
+  const calls = { identity: 0, run: 0 }
+  const transport: CliTransportHandle = {
+    async run() { calls.run++; throw new Error("mock witness fixture must not dispatch native inference") },
+    async requestCancel() { return { requested: false, acknowledged: false, terminal: true, quiescent: true, evidence: "mock fixture" } },
+    async reconcile() { return { outcome: "terminal", quiescent: true, evidence: "mock transport fixture only" } },
+    async inspectIdentity() {
+      calls.identity++
+      return calls.identity === 1 ? identity : options.identityAfter ?? identity
+    },
+  }
+  const instructions = bound.instructions
+  const prompt = `Canary prefix: 한글🦦\n${instructions}\n${canary.systemInstructions}\n${canary.taskText}`
+  request.text = prompt
+  return { session, store: witnessStore, bound, request, policy, instructions, prompt, identity, transport, calls, codexProfile, canary }
+}
+
 beforeEach(() => {
   fixture = tempWorktree()
   fixture.worktree = realpathSync.native(fixture.worktree)
@@ -57,6 +184,7 @@ beforeEach(() => {
   runtime = createCliRuntime({ worktree: fixture.worktree, engine: "local", model: "fixture/model" })
   store = attachAdmission(runtime, SID, { engine: "local", model: "fixture/model" })
   sessions = []
+  witnessSessionSequence = 0
   choices = []
   choose = async () => 0
 })
@@ -457,6 +585,215 @@ test("hold cancellation settles the consent blocker and a late answer cannot gra
   answer(0)
   await Promise.resolve()
   expect(session.listGrants()).toEqual([])
+})
+
+test("native witness receipt binds captured bytes and the UTF-8 prompt span (mock transport evidence only)", async () => {
+  const f = await witnessFixture()
+  expect(f.request.policy).toBe(f.policy.resolve("main"))
+  expect(f.request.policy.system).toContain(f.canary.systemInstructions)
+  const observation = registerSkillLoaderWitness(f.bound.context, f.canary.binding)
+  expect(Object.isFrozen(observation)).toBe(true)
+  expect(skillLoaderWitnessCompletion(f.request, observation)).toBeUndefined()
+  expect(await beginSkillLoaderWitness(f.request, {
+    prompt: f.prompt, engine: "codex", model: WITNESS_MODEL,
+    codexProfileSha256: f.codexProfile.catalogHash, transport: f.transport,
+  })).toBe(observation)
+  await finishSkillLoaderWitness(f.request, observation, {
+    status: "completed", quiescent: true, responseKind: "final",
+    responseText: "synthetic mock response",
+    requestText: f.request.text,
+    reconciliation: await f.transport.reconcile(),
+  })
+  const completedReceipt = skillLoaderWitnessCompletion(f.request, observation)
+  expect(completedReceipt).toBeDefined()
+  expect(skillLoaderWitnessCompletion(f.request, observation)).toBe(completedReceipt)
+  finishSkillInvocation(f.bound.context)
+  const consume = consumeSkillLoaderWitness(observation)
+  const replay = expect(consumeSkillLoaderWitness(observation)).rejects.toThrow("already consumed")
+  const receipt = await consume
+  expect(receipt).toMatchObject({
+    version: "native-v1",
+    loaderDelivery: "observed",
+    behavioralCanary: "not-evaluated",
+    capture: { identity: "project:.agents/skills/llm-wiki", source: "project" },
+    native: { engine: "codex", requestedModel: WITNESS_MODEL, status: "completed", quiescent: true },
+  })
+  expect(receipt.instructions.span.startByte).toBe(Buffer.byteLength("Canary prefix: 한글🦦\n", "utf8"))
+  expect(receipt.instructions.span.endByte - receipt.instructions.span.startByte).toBe(Buffer.byteLength(f.instructions, "utf8"))
+  expect(receipt.instructions.span.sha256).toBe(receipt.capture.skillFileSha256)
+  expect(receipt.fileIdentity.beforeSha256).toBe(receipt.fileIdentity.afterSha256)
+  expect(receipt.canary).toEqual(f.canary.binding)
+  expect(receipt.evaluatorSystemInstructions).toBe(f.canary.systemInstructions)
+  expect(receipt.instructions.evaluatorSystem.utf8Sha256).toBe(f.canary.binding.evaluatorSystemSha256)
+  expect(completedReceipt).toBe(receipt)
+  expect(receipt.requestTextSha256).toBe(sha256(f.request.text))
+  expect(receipt.requestTextSha256).not.toBe(receipt.canary.taskSha256)
+  expect(receipt.response).toEqual({ sha256: sha256("synthetic mock response"), bytes: Buffer.byteLength("synthetic mock response", "utf8") })
+  expect(f.calls).toEqual({ identity: 2, run: 0 })
+  await replay
+})
+
+test("witness registration rejects copied contexts, audit-like data, duplicate observers and wrong roles", async () => {
+  const f = await witnessFixture()
+  expect(() => registerSkillLoaderWitness(f.bound.context, {
+    ...f.canary.binding, taskSha256: "0".repeat(64),
+  })).toThrow("canary task binding")
+  const observation = registerSkillLoaderWitness(f.bound.context, f.canary.binding)
+  expect(() => registerSkillLoaderWitness({ ...f.bound.context } as unknown as SkillInvocationContext, f.canary.binding)).toThrow("authentic skill context")
+  expect(() => registerSkillLoaderWitness({ ...f.bound.context, capture: undefined } as unknown as SkillInvocationContext, f.canary.binding)).toThrow("authentic skill context")
+  expect(() => registerSkillLoaderWitness(f.bound.context, f.canary.binding)).toThrow("authentic skill context")
+  await expect(consumeSkillLoaderWitness({ ...observation } as unknown as typeof observation)).rejects.toThrow("copied")
+
+  const worker = await witnessFixture({ role: "worker" })
+  expect(() => registerSkillLoaderWitness(worker.bound.context, worker.canary.binding)).toThrow("tool-free main request")
+})
+
+test("a restored-in-memory skill session cannot register a fresh loader witness", async () => {
+  const f = await witnessFixture({ priorPreparation: true })
+  expect(() => registerSkillLoaderWitness(f.bound.context, f.canary.binding)).toThrow("first skill preparation")
+})
+
+test("witness refuses evaluator instructions before captured skill instructions", async () => {
+  const f = await witnessFixture()
+  registerSkillLoaderWitness(f.bound.context, f.canary.binding)
+  await expect(beginSkillLoaderWitness(f.request, {
+    prompt: `${f.canary.systemInstructions}\n\n${f.instructions}\n\n${f.canary.taskText}`,
+    engine: "codex", model: WITNESS_MODEL,
+    codexProfileSha256: f.codexProfile.catalogHash, transport: f.transport,
+  })).rejects.toThrow("must follow the captured skill span")
+  expect(f.calls.run).toBe(0)
+})
+
+test("witness refuses a host route that differs from the owned session profile", async () => {
+  const f = await witnessFixture()
+  registerSkillLoaderWitness(f.bound.context, f.canary.binding)
+  await expect(beginSkillLoaderWitness(f.request, {
+    prompt: f.prompt, engine: "claude", model: "claude-fixture", transport: f.transport,
+  })).rejects.toThrow("native route")
+  expect(f.calls.identity).toBe(0)
+  expect(f.calls.run).toBe(0)
+})
+
+test("witness refuses an absent policy model before probing native identity", async () => {
+  const f = await witnessFixture({ omitPolicyModel: true })
+  registerSkillLoaderWitness(f.bound.context, f.canary.binding)
+  await expect(beginSkillLoaderWitness(f.request, {
+    prompt: f.prompt, engine: "codex", model: WITNESS_MODEL,
+    transport: f.transport, codexProfileSha256: f.codexProfile.catalogHash,
+  })).rejects.toThrow("native route")
+  expect(f.calls).toEqual({ identity: 0, run: 0 })
+})
+
+test("witness begin refuses scope drift, local engines, and source changes before any native dispatch", async () => {
+  const f = await witnessFixture()
+  registerSkillLoaderWitness(f.bound.context, f.canary.binding)
+  const input = {
+    prompt: f.prompt, engine: "codex" as const, model: WITNESS_MODEL,
+    codexProfileSha256: f.codexProfile.catalogHash, transport: f.transport,
+  }
+  await expect(beginSkillLoaderWitness({ ...f.request, executionID: "wrong-execution" }, input)).rejects.toThrow("another request")
+  writeFileSync(join(fixture.worktree, ".agents", "skills", "llm-wiki", "SKILL.md"),
+    "---\nname: llm-wiki\ndescription: Inspect this project\nallowed-tools: [read]\n---\nChanged after the real capture.\n")
+  await expect(beginSkillLoaderWitness(f.request, input)).rejects.toThrow("changed")
+  expect(f.calls.run).toBe(0)
+
+  const local = await witnessFixture()
+  registerSkillLoaderWitness(local.bound.context, local.canary.binding)
+  await expect(beginSkillLoaderWitness(local.request, {
+    prompt: local.prompt, engine: "local", model: WITNESS_MODEL,
+    transport: local.transport,
+  })).rejects.toThrow("Local engines")
+  expect(local.calls.identity).toBe(0)
+  expect(local.calls.run).toBe(0)
+})
+
+test("admission revocation invalidates an already registered witness", async () => {
+  const f = await witnessFixture()
+  registerSkillLoaderWitness(f.bound.context, f.canary.binding)
+  holdAdmission(fixture.worktree, f.store.sessionID, "witness-revoked")
+  expect(() => skillLoaderWitnessRegistered(f.request)).toThrow("expired")
+})
+
+test("source revision revocation invalidates a registered loader observation", async () => {
+  const f = await witnessFixture()
+  const observation = registerSkillLoaderWitness(f.bound.context, f.canary.binding)
+  f.session.revoke("llm-wiki")
+  expect(() => skillLoaderWitnessRegistered(f.request)).toThrow()
+  await expect(consumeSkillLoaderWitness(observation)).rejects.toThrow("failed closed")
+})
+
+test("failed, nonquiescent, and identity-drift native results never yield a receipt", async () => {
+  const failed = await witnessFixture()
+  const failedObservation = registerSkillLoaderWitness(failed.bound.context, failed.canary.binding)
+  await beginSkillLoaderWitness(failed.request, {
+    prompt: failed.prompt, engine: "codex", model: WITNESS_MODEL,
+    codexProfileSha256: failed.codexProfile.catalogHash, transport: failed.transport,
+  })
+  await expect(finishSkillLoaderWitness(failed.request, failedObservation, {
+    status: "failed", quiescent: true, responseKind: "invalid",
+    reconciliation: await failed.transport.reconcile(),
+  })).rejects.toThrow("not witness-eligible")
+  expect(skillLoaderWitnessCompletion(failed.request, failedObservation)).toBeUndefined()
+  await expect(consumeSkillLoaderWitness(failedObservation)).rejects.toThrow("failed closed")
+
+  const wrongRequest = await witnessFixture()
+  const wrongRequestObservation = registerSkillLoaderWitness(wrongRequest.bound.context, wrongRequest.canary.binding)
+  await beginSkillLoaderWitness(wrongRequest.request, {
+    prompt: wrongRequest.prompt, engine: "codex", model: WITNESS_MODEL,
+    codexProfileSha256: wrongRequest.codexProfile.catalogHash, transport: wrongRequest.transport,
+  })
+  await expect(finishSkillLoaderWitness(wrongRequest.request, wrongRequestObservation, {
+    status: "completed", quiescent: true, responseKind: "final",
+    responseText: "synthetic mock response",
+    requestText: `${wrongRequest.request.text} altered`,
+    reconciliation: await wrongRequest.transport.reconcile(),
+  })).rejects.toThrow("request text is absent, altered")
+  expect(skillLoaderWitnessCompletion(wrongRequest.request, wrongRequestObservation)).toBeUndefined()
+  await expect(consumeSkillLoaderWitness(wrongRequestObservation)).rejects.toThrow("failed closed")
+
+  const pending = await witnessFixture()
+  const pendingObservation = registerSkillLoaderWitness(pending.bound.context, pending.canary.binding)
+  await beginSkillLoaderWitness(pending.request, {
+    prompt: pending.prompt, engine: "codex", model: WITNESS_MODEL,
+    codexProfileSha256: pending.codexProfile.catalogHash, transport: pending.transport,
+  })
+  await expect(finishSkillLoaderWitness(pending.request, pendingObservation, {
+    status: "completed", quiescent: false, responseKind: "final",
+    responseText: "mock final response",
+    requestText: pending.request.text,
+    reconciliation: { outcome: "unknown", quiescent: false, evidence: "mock fixture remains unresolved" },
+  })).rejects.toThrow("not witness-eligible")
+  await expect(consumeSkillLoaderWitness(pendingObservation)).rejects.toThrow("failed closed")
+
+  const drifted = await witnessFixture({ identityAfter: Object.freeze({
+    ...pending.identity,
+    runtimeIdentity: Object.freeze({ ...pending.identity.runtimeIdentity, executableSha256: "b".repeat(64) }),
+  }) })
+  const driftedObservation = registerSkillLoaderWitness(drifted.bound.context, drifted.canary.binding)
+  await beginSkillLoaderWitness(drifted.request, {
+    prompt: drifted.prompt, engine: "codex", model: WITNESS_MODEL,
+    codexProfileSha256: drifted.codexProfile.catalogHash, transport: drifted.transport,
+  })
+  await expect(finishSkillLoaderWitness(drifted.request, driftedObservation, {
+    status: "completed", quiescent: true, responseKind: "final",
+    responseText: "mock final response",
+    requestText: drifted.request.text,
+    reconciliation: await drifted.transport.reconcile(),
+  })).rejects.toThrow("native runtime identity verification failed")
+  await expect(consumeSkillLoaderWitness(driftedObservation)).rejects.toThrow("failed closed")
+})
+
+test("duplicate native witness dispatch is refused before a second identity probe", async () => {
+  const f = await witnessFixture()
+  const observation = registerSkillLoaderWitness(f.bound.context, f.canary.binding)
+  const input = {
+    prompt: f.prompt, engine: "codex" as const, model: WITNESS_MODEL,
+    codexProfileSha256: f.codexProfile.catalogHash, transport: f.transport,
+  }
+  await beginSkillLoaderWitness(f.request, input)
+  await expect(beginSkillLoaderWitness(f.request, input)).rejects.toThrow("cannot be replayed or dispatched twice")
+  expect(f.calls).toEqual({ identity: 1, run: 0 })
+  await expect(consumeSkillLoaderWitness(observation)).rejects.toThrow("failed closed")
 })
 
 test("revoking an unanswered first invocation cancels its choice without granting later", async () => {
