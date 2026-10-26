@@ -1162,7 +1162,6 @@ test("model option injection and callback failures are bounded", async () => {
   expect(result.error).not.toContain("SECRET")
 })
 
-
 test("local retention is snapshotted into Ollama argv and omitted by default", async () => {
   installFakeCli("local", `process.stdout.write(JSON.stringify(process.argv.slice(2)))`)
   for (const keepAlive of [undefined, "0", "-1", "5m", "24h"]) {
