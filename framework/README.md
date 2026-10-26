@@ -1067,6 +1067,31 @@ early-exit record from disk at the commit, at the handoff, and on every display;
 commit or shows `incomplete`. Failed-attempt counts are committed, so Escape + `/continue` or a restart cannot reset the
 two-attempt limit.
 
+**Planning latency.** The CLI host offers `multiread` for up to eight independent reads in one model reply, with each
+file charged against the existing read-policy and tool-work budgets. The combined result is bounded to 32 KiB;
+a denied or failed member returns no file contents. Skill-bound and native-witness requests retain single reads,
+and the optional batch schema is omitted if it would crowd out an otherwise valid task.
+
+When a seeded ralplan exceeds its input budget, it can summarize the common specification once and reuse that
+derived context during the same uninterrupted driver run. Every reuse verifies the original specification hash;
+current plans and review findings remain separate. Resume starts with a fresh cache, and a stage that still overflows
+uses the existing bounded compaction path. Later reviews also receive bounded changed-plan excerpts alongside the
+full current plan; retries receive the previous format error. Review ordering and consensus requirements are unchanged.
+
+Session transcripts retain one content-free `timing` record per workflow turn, containing at most 64 CLI model-round
+observations and an explicit omitted count. Observations are buffered only while that turn is active; a crash can
+lose unflushed timing. Model observations contain elapsed milliseconds, input character count and tool-round index.
+Workflow records separate preflight, nested compaction and main dispatch time. A standalone seed-summary turn has
+`operation: "summary"`; `summaryCount` counts only additional compactions inside a turn. Dispatch time includes tool
+work and, for ordinary chat, can include approval waits; it is not pure inference time. Timing persistence happens
+after measurement, once per turn. These records contain no prompts, file bodies or tool arguments, are omitted from
+the restored conversation display, and never grant execution authority. Current readers accept earlier transcripts;
+older binaries without the `timing` record kind cannot replay newly instrumented sessions.
+
+Common seed reuse does not guarantee complete verbatim context: if the remaining stage-specific input still
+overflows, the existing fallback replaces it with a bounded whole-context summary. Summary fidelity remains a
+model-quality constraint even when source hashes and review receipts verify.
+
 **Consensus is not consent.** Reaching consensus shows `Architect CLEAR/APPROVE + Critic OKAY · execution pending`.
 *Stop here* ends with `planning complete; not executed`. *Execute via ultragoal* needs the exact typed text
 `EXECUTE <workflow id> <plan sha>` and immediately continues into ultragoal's unit review; each implementation unit still needs

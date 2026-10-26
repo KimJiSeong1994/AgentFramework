@@ -17,7 +17,8 @@ import { FdTree, fdStatKind, type FdDirectory, type FdEntry } from "../skills/fd
 import type { OtterConfig } from "../config.ts"
 import { memoryToolText } from "../wiki/recall.ts"
 
-export const CLI_TOOL_NAMES = ["read", "list", "glob", "grep", "memory", "skill", "write", "edit", "multiedit", "bash", "repo_search"] as const
+export const CLI_TOOL_NAMES = ["read", "multiread", "list", "glob", "grep", "memory", "skill", "write", "edit", "multiedit", "bash", "repo_search"] as const
+export const MAX_MULTIREAD_FILES = 8
 /** Upper bound on the edits one `multiedit` call may carry. */
 export const MAX_MULTIEDIT_EDITS = 20
 /** Upper bounds for a chat `bash` call: the command text and its time limit. */
@@ -43,6 +44,8 @@ export type CliToolsOptions = {
   beforeEffect?: () => void
   /** Offer the host-provided `skill` tool (only when the request carries a skill provider). */
   skillTool?: boolean
+  /** Skill-bound requests retain individually captured single-read capabilities. */
+  multiRead?: boolean
   /**
    * The request carries an ActionGate (chat execution, main role): main may then write/edit and run `bash`, each
    * approved by the host first. Without it, main and other read-only roles never get these tools.
@@ -116,6 +119,10 @@ export function validateCliToolInput(name: string, input: unknown): asserts inpu
           (input.maxLines !== undefined && (!Number.isSafeInteger(input.maxLines) || (input.maxLines as number) < 1 || (input.maxLines as number) > 2000))) {
         throw new CliToolInputError()
       }
+      return
+    case "multiread":
+      if (!hasExactKeys(input, ["reads"]) || !Array.isArray(input.reads) || input.reads.length < 1 || input.reads.length > MAX_MULTIREAD_FILES) throw new CliToolInputError()
+      for (const read of input.reads) validateCliToolInput("read", read)
       return
     case "list":
       if (!hasExactKeys(input, [], ["path"]) || (input.path !== undefined && !path(input.path))) throw new CliToolInputError()
@@ -713,6 +720,32 @@ function readFileTool(root: string, input: Record<string, unknown>, identity: Ro
   }
 }
 
+function validateReadTarget(root: string, input: Record<string, unknown>, identity: RootIdentity): void {
+  const fd = openScopedTarget(root, normalizeToolPath(input.path as string), constants.O_RDONLY | constants.O_NONBLOCK, identity)
+  try {
+    const stat = fstatSync(fd)
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_READ_BYTES) throw new Error("size")
+  } finally { closeSync(fd) }
+}
+
+function multiReadTool(root: string, reads: Record<string, unknown>[], identity: RootIdentity, beforeEffect?: () => void): CliToolOutput {
+  // Admit every target before reading any file; never return an earlier member on failure.
+  for (const read of reads) validateReadTarget(root, read, identity)
+  const results: Array<{ path: string; text: string }> = []
+  for (const read of reads) {
+    beforeEffect?.()
+    assertRootIdentity(root, identity)
+    const result = readFileTool(root, read, identity)
+    if (!result.ok) return result
+    results.push({ path: read.path as string, text: result.text })
+  }
+  beforeEffect?.()
+  assertRootIdentity(root, identity)
+  const text = JSON.stringify({ results })
+  if (Buffer.byteLength(text, "utf8") > MAX_TOOL_OUTPUT_BYTES) return { ok: false, error: "Tool refused: combined read output exceeds 32 KiB; request fewer files or narrower line ranges." }
+  return { ok: true, text }
+}
+
 function globTool(root: string, pattern: string, identity: RootIdentity): CliToolOutput {
   try {
     const normalizedPattern = normalizeToolPath(pattern)
@@ -835,6 +868,7 @@ function executeFileTool(
 ): CliToolOutput {
   switch (name) {
     case "read": return readFileTool(root, input, identity)
+    case "multiread": return multiReadTool(root, input.reads as Record<string, unknown>[], identity, beforeEffect)
     case "list": return listDirectory(root, normalizeToolPath((input.path as string | undefined) ?? "."), identity)
     case "glob": return globTool(root, input.pattern as string, identity)
     case "grep": {
@@ -894,6 +928,7 @@ export function createCliTools(options: CliToolsOptions): CliTools {
   const readOnly = !roleAllowsCliWrites(options.role) && !gatedMain
   // `skill` is not a role-policy tool: the host offers it only with a request-scoped skill provider (main role).
   const available = CLI_TOOL_NAMES.filter(name => name === "skill" ? options.skillTool === true
+    : name === "multiread" ? options.multiRead !== false && options.allowed.includes("read") && !options.denied.includes("read") && !options.denied.includes("multiread")
     : name === "repo_search" ? options.role === "main" && options.repoSearchProvider !== undefined && options.allowed.includes(name) && !options.denied.includes(name)
     : name === "bash" ? gatedMain && options.allowed.includes(name) && !options.denied.includes(name)
     // multiedit is the approved-chat batch of `edit`: same permission as edit, offered only to gated main.
@@ -907,6 +942,10 @@ export function createCliTools(options: CliToolsOptions): CliTools {
       try {
         validateCliToolInput(name, input)
         assertRootIdentity(root, rootIdentity)
+        if (name === "multiread") {
+          for (const read of input.reads as Record<string, unknown>[]) validateReadTarget(root, read, rootIdentity)
+          return true
+        }
         if (name === "memory" || name === "skill" || name === "bash" || name === "repo_search") return true
         if (name === "glob") normalizeToolPath(input.pattern as string)
         const relativePath = normalizeToolPath(name === "glob" ? "." : (input.path as string | undefined) ?? ".")

@@ -31,6 +31,85 @@ afterEach(() => {
 })
 
 describe("scoped CLI file tools", () => {
+  test("multiread batches bounded read-only file ranges without partial disclosure", () => {
+    writeFileSync(join(root, "a.txt"), "first\nsecond\n")
+    writeFileSync(join(root, "b.txt"), "third")
+    const input = { reads: [{ path: "a.txt", startLine: 2, maxLines: 1 }, { path: "b.txt" }] }
+    expect(tools.validate("multiread", input)).toBe(true)
+    const output = tools.execute("multiread", input)
+    expect(output.ok).toBe(true)
+    expect(JSON.parse(text(output))).toEqual({ results: [{ path: "a.txt", text: "second" }, { path: "b.txt", text: "third" }] })
+    const denied = tools.execute("multiread", { reads: [{ path: "a.txt" }, { path: "../outside.txt" }] })
+    expect(denied.ok).toBe(false)
+    expect(text(denied)).not.toContain("first")
+    expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("first\nsecond\n")
+  })
+
+  test("multiread rejects oversized batches and aggregate results", () => {
+    writeFileSync(join(root, "large.txt"), "x".repeat(20_000))
+    expect(() => tools.execute("multiread", { reads: Array.from({ length: 9 }, () => ({ path: "large.txt" })) })).toThrow()
+    const result = tools.execute("multiread", { reads: [{ path: "large.txt" }, { path: "large.txt" }] })
+    expect(result.ok).toBe(false)
+    expect(text(result)).toContain("combined read output")
+    expect(text(result)).not.toContain("x".repeat(50))
+  })
+
+  test("multiread checks cancellation between members", () => {
+    writeFileSync(join(root, "a.txt"), "private-first")
+    writeFileSync(join(root, "b.txt"), "private-second")
+    let checks = 0
+    const scoped = createCliTools({ root, role: "planner", allowed: ["read"], denied: [], beforeEffect() {
+      if (++checks === 2) throw new Error("cancelled")
+    } })
+    const result = scoped.execute("multiread", { reads: [{ path: "a.txt" }, { path: "b.txt" }] })
+    expect(checks).toBe(2)
+    expect(result.ok).toBe(false)
+    expect(text(result)).not.toContain("private-")
+  })
+
+  test("multiread refuses protected paths, symlinks, hardlinks and changed roots without partial output", () => {
+    writeFileSync(join(root, "a.txt"), "private-first")
+    writeFileSync(join(outside, "secret.txt"), "outside-secret")
+    symlinkSync(join(outside, "secret.txt"), join(root, "symlink.txt"))
+    linkSync(join(outside, "secret.txt"), join(root, "hardlink.txt"))
+    mkdirSync(join(root, ".otter"))
+    writeFileSync(join(root, ".otter/secret.txt"), "protected-secret")
+    for (const path of ["symlink.txt", "hardlink.txt", ".otter/secret.txt"]) {
+      const input = { reads: [{ path: "a.txt" }, { path }] }
+      expect(tools.validate("multiread", input)).toBe(false)
+      const output = tools.execute("multiread", input)
+      expect(output.ok).toBe(false)
+      expect(text(output)).not.toContain("private-first")
+      expect(text(output)).not.toContain("secret")
+    }
+    let checks = 0
+    const held = `${root}-held`
+    const scoped = createCliTools({ root, role: "planner", allowed: ["read"], denied: [], beforeEffect() {
+      if (++checks !== 2) return
+      renameSync(root, held)
+      mkdirSync(root)
+      writeFileSync(join(root, "a.txt"), "replacement-secret")
+    } })
+    try {
+      const output = scoped.execute("multiread", { reads: [{ path: "a.txt" }, { path: "a.txt" }] })
+      expect(output.ok).toBe(false)
+      expect(text(output)).toContain("root changed")
+      expect(text(output)).not.toContain("private-first")
+      expect(text(output)).not.toContain("replacement-secret")
+    } finally {
+      if (existsSync(held)) { rmSync(root, { recursive: true }); renameSync(held, root) }
+    }
+  })
+
+  test("multiread requires read permission and can be withheld from skill-bound calls", () => {
+    writeFileSync(join(root, "a.txt"), "a")
+    for (const scope of [{ allowed: ["multiread"], denied: [] }, { allowed: ["read"], denied: ["read"] }, { allowed: ["read"], denied: [], multiRead: false }]) {
+      const scoped = createCliTools({ root, role: "planner", ...scope })
+      expect(scoped.available).not.toContain("multiread")
+      expect(scoped.execute("multiread", { reads: [{ path: "a.txt" }] }).ok).toBe(false)
+    }
+  })
+
   test("workflow roles cannot gain writes from a broader caller-supplied allowlist", () => {
     writeFileSync(join(root, "existing.txt"), "original")
     for (const role of WORKFLOW_READ_ONLY_ROLES) {
