@@ -9,6 +9,7 @@ import { validateComboRoutes } from "./default-model.ts"
 import { CONFIG_MODEL_ROLES, type ComboRoutes, type ExecutionRole, type ExecutionRuntime } from "./types.ts"
 import type { CliProgressSink } from "./cli-progress.ts"
 import { currentMemoryConfig } from "../wiki/recall.ts"
+import { repoSearchAvailable } from "../repo-search/access.ts"
 
 export type CliRuntimeOptions = { worktree: string; engine: CliEngine; model: string; progress?: CliProgressSink
   /** Code-owned native skill-loader canary evaluator instructions; never sourced from user config or model output. */
@@ -74,6 +75,7 @@ export function createCliRuntime(options: CliRuntimeOptions): ExecutionRuntime {
     }), {
       planningOnlyMain: true,
       chatExecuteMain: chatExecuteMode(config) !== "plan",
+      repoSearch: chatExecuteMode(config) === "plan" && repoSearchAvailable(worktree),
       ...(nativeContext ? { nativeContext } : {}),
       skillLoaderCanaryInstructions: options.skillLoaderCanaryInstructions,
       ...(Object.keys(routePolicies).length ? { routes: routePolicies } : {}),

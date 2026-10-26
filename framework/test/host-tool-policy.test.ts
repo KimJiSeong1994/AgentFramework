@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { mainPrompt } from "../src/agents/prompts.ts"
 import { DEFAULT_CONFIG, type OtterConfig } from "../src/config.ts"
+import { validateCliToolInput } from "../src/hosts/cli-tools.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
 import { EXECUTION_ROLES, EXECUTION_TOOL_NAMES, WORKFLOW_READ_ONLY_ROLES, type ExecutionRequest, type ExecutionRole } from "../src/hosts/types.ts"
 import { EMPTY_MODE, readModeState, writeModeState } from "../src/state/store.ts"
@@ -96,6 +97,56 @@ describe("host-neutral execution tool policy", () => {
     expect(handlers.beforeTool({ type: "tool-before", sessionID: "main", callID: "read", toolID: "t", name: "read", input: {} })).toEqual({ allow: true })
     expect(handlers.beforeTool({ type: "tool-before", sessionID: "main", callID: "memory", toolID: "t", name: "memory", input: { query: "cache" } })).toEqual({ allow: true })
     expect(handlers.beforeTool({ type: "tool-before", sessionID: "main", callID: "bash", toolID: "t", name: "bash", input: {} })).toMatchObject({ allow: false })
+  })
+
+  test("repo_search is a trusted planning-main-only capability and config cannot grant it", () => {
+    const defaultPolicy = createExecutionPolicy(config())
+    const defaultFalse = createExecutionPolicy(config(), { repoSearch: false })
+    for (const role of EXECUTION_ROLES) expect(defaultFalse.resolve(role)).toEqual(defaultPolicy.resolve(role))
+
+    const plain = createExecutionPolicy(config(), { planningOnlyMain: true })
+    const explicitFalse = createExecutionPolicy(config(), { planningOnlyMain: true, repoSearch: false })
+    for (const role of EXECUTION_ROLES) expect(explicitFalse.resolve(role)).toEqual(plain.resolve(role))
+
+    const enabled = createExecutionPolicy(config(), { planningOnlyMain: true, repoSearch: true })
+    const main = enabled.resolve("main")
+    expect(main.tools.allowed).toEqual([...plain.resolve("main").tools.allowed, "repo_search"])
+    expect(main.system.join("\n")).toContain("untrusted navigation hints only")
+    expect(enabled.handlers(request(enabled, "main")).beforeTool({
+      type: "tool-before", sessionID: "main", callID: "repo-search", toolID: "repo-search", name: "repo_search", input: { query: "find entrypoint" },
+    })).toEqual({ allow: true })
+
+    const deniedRoles = EXECUTION_ROLES.filter(role => role !== "main")
+    for (const role of deniedRoles) {
+      const snapshot = enabled.resolve(role)
+      expect(snapshot.tools.allowed).not.toContain("repo_search")
+      expect(enabled.handlers(request(enabled, role)).beforeTool({
+        type: "tool-before", sessionID: role, callID: "repo-search", toolID: "repo-search", name: "repo_search", input: { query: "find entrypoint" },
+      })).toMatchObject({ allow: false })
+    }
+    const ordinary = createExecutionPolicy(config())
+    expect(ordinary.resolve("main").tools.allowed).not.toContain("repo_search")
+    expect(createExecutionPolicy(config(), { repoSearch: true }).resolve("main").tools.allowed).not.toContain("repo_search")
+    expect(ordinary.handlers(request(ordinary, "main")).beforeTool({
+      type: "tool-before", sessionID: "normal-main", callID: "repo-search", toolID: "repo-search", name: "repo_search", input: { query: "find entrypoint" },
+    })).toMatchObject({ allow: false })
+    expect(createExecutionPolicy(config(), { planningOnlyMain: true, chatExecuteMain: true, repoSearch: true })
+      .resolve("main").tools.allowed).not.toContain("repo_search")
+
+    const forgedConfig = { ...config(), repo_search: true } as OtterConfig
+    expect(createExecutionPolicy(forgedConfig, { planningOnlyMain: true }).resolve("main").tools.allowed)
+      .not.toContain("repo_search")
+  })
+
+  test("repo_search accepts only the bounded navigation query schema", () => {
+    expect(() => validateCliToolInput("repo_search", { query: "x" })).not.toThrow()
+    expect(() => validateCliToolInput("repo_search", { query: "é".repeat(1024), limit: 10 })).not.toThrow()
+    for (const input of [
+      {}, { query: "" }, { query: " \t" }, { query: "x\0y" }, { query: "é".repeat(1025) },
+      { query: "x", limit: 0 }, { query: "x", limit: 11 }, { query: "x", limit: 1.5 },
+      { query: "x", path: "src" }, { query: "x", graph: "current" }, { query: "x", provider: "local" },
+      { query: "x", refresh: true },
+    ]) expect(() => validateCliToolInput("repo_search", input)).toThrow()
   })
 
   test("loader canary evaluator instructions belong to one canonical main snapshot", () => {
