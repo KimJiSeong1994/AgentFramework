@@ -4,6 +4,7 @@ import type { DeepInterviewWorkflow } from "./types.ts"
 
 export const DI_THRESHOLD = 0.05
 export const DI_THRESHOLD_SOURCE = "otter-default"
+export const DI_DEFAULT_THRESHOLD = 0.20
 export const DI_MAX_ROUNDS = 100
 export const DI_EARLY_EXIT_ROUND = 3
 export const DI_MAX_ANSWER_CHARS = 10_000
@@ -33,6 +34,11 @@ export type RoundRecord = {
   ambiguity?: number
   band?: Band
   shapeChange?: boolean
+  /** Code-selected task agenda; absent on pre-agenda interviews. */
+  agendaID?: string
+  questionKey?: string
+  /** Model observations grounded in the transcript; never user approval. */
+  evidence?: string[]
 }
 
 export type PendingPanel = {
@@ -64,6 +70,8 @@ export type DeepInterviewData = {
   type?: ProjectType
   threshold: number
   thresholdSource: string
+  /** Absent on legacy interviews: preserve their original threshold and 100-round contract. */
+  questionPolicy?: { maxRounds: number; maxPerAgenda: number }
   round: number
   topology: { confirmed: boolean; components: Component[]; receiptRef?: string }
   rounds: RoundRecord[]
@@ -79,6 +87,8 @@ export type DeepInterviewData = {
   closureOverrides: Array<{ round: number; gaps: string[] }>
   /** Open gaps folded into the next question (closure gaps, missing scope). */
   gaps: string[]
+  /** Closure-owned task targets, not a model-supplied permission to reopen other agendas. */
+  reopenAgendaIDs?: string[]
   restatement?: { goal: string; receiptRef: string }
   earlyExit?: { round: number; ambiguity: number; reason: "finish" | "cap"; receiptRef: string }
   cap?: { round: number; ambiguity: number; decided: boolean }
@@ -87,9 +97,34 @@ export type DeepInterviewData = {
 
 export function newData(request: string): DeepInterviewData {
   return {
-    v: 1, request: request.slice(0, DI_REQUEST_MAX), threshold: DI_THRESHOLD, thresholdSource: DI_THRESHOLD_SOURCE, round: 0,
+    v: 1, request: request.slice(0, DI_REQUEST_MAX), threshold: DI_DEFAULT_THRESHOLD, thresholdSource: "otter-agenda-default", round: 0,
+    questionPolicy: { maxRounds: 12, maxPerAgenda: 2 },
     topology: { confirmed: false, components: [] }, rounds: [], panels: [], lateralReviews: 0, panelFailures: 0, closureOverrides: [], gaps: [],
   }
+}
+
+export const questionLimit = (d: DeepInterviewData): number => d.questionPolicy?.maxRounds ?? DI_MAX_ROUNDS
+
+export function agendaProgress(d: DeepInterviewData) {
+  return d.topology.components.map(component => {
+    const rounds = d.rounds.filter(round => round.agendaID === component.id)
+    const last = rounds.findLast(round => round.ambiguity !== undefined)
+    const status = last?.ambiguity !== undefined && last.ambiguity <= d.threshold ? "ready" as const
+      : rounds.length >= (d.questionPolicy?.maxPerAgenda ?? DI_MAX_ROUNDS) ? "exhausted" as const : "pending" as const
+    return { ...component, asked: rounds.length, ambiguity: last?.ambiguity, status }
+  })
+}
+
+export function nextAgenda(d: DeepInterviewData) {
+  if (!d.questionPolicy || d.round >= questionLimit(d)) return undefined
+  const agendas = agendaProgress(d)
+  if (d.gaps.length && d.reopenAgendaIDs) return agendas.find(item => d.reopenAgendaIDs!.includes(item.id) && item.asked < d.questionPolicy!.maxPerAgenda)
+  return agendas.find(item => item.status === "pending")
+    ?? (d.gaps.length ? agendas.find(item => item.asked < d.questionPolicy!.maxPerAgenda) : undefined)
+}
+
+export function questionBudgetReached(d: DeepInterviewData): boolean {
+  return d.round >= questionLimit(d) || (d.questionPolicy !== undefined && nextAgenda(d) === undefined)
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value)
@@ -110,6 +145,24 @@ export function dataOf(wf: Pick<DeepInterviewWorkflow, "data">): DeepInterviewDa
     !Number.isSafeInteger(d.lateralReviews) || !Number.isSafeInteger(d.panelFailures) ||
     (d.type !== undefined && d.type !== "greenfield" && d.type !== "brownfield")) throw new Error("invalid deep-interview state")
   if (d.panels !== undefined && (!Array.isArray(d.panels) || d.panels.length > DI_MAX_ROUNDS)) throw new Error("invalid deep-interview state")
+  if (d.questionPolicy !== undefined) {
+    const p = d.questionPolicy
+    if (!isObject(p) || !Number.isSafeInteger(p.maxRounds) || (p.maxRounds as number) < 1 || (p.maxRounds as number) > 12 ||
+      !Number.isSafeInteger(p.maxPerAgenda) || (p.maxPerAgenda as number) < 1 || (p.maxPerAgenda as number) > 2 ||
+      !Number.isFinite(d.threshold) || d.threshold < 0 || d.threshold > 1 || (d.round as number) > (p.maxRounds as number)) throw new Error("invalid deep-interview question policy")
+    const ids = new Set<string>()
+    for (const component of d.topology.components) {
+      if (!isObject(component) || typeof component.id !== "string" || !component.id || ids.has(component.id) || typeof component.description !== "string") throw new Error("invalid deep-interview agenda")
+      ids.add(component.id)
+    }
+    if (d.reopenAgendaIDs !== undefined && (!Array.isArray(d.reopenAgendaIDs) || d.reopenAgendaIDs.length === 0 ||
+      new Set(d.reopenAgendaIDs).size !== d.reopenAgendaIDs.length || d.reopenAgendaIDs.some(id => typeof id !== "string" || !ids.has(id)))) throw new Error("invalid deep-interview closure agendas")
+    if (d.rounds.length !== d.round || d.rounds.some((round, index) => !isObject(round) || round.n !== index + 1 ||
+      typeof round.agendaID !== "string" || !ids.has(round.agendaID) ||
+      (round.questionKey !== undefined && (typeof round.questionKey !== "string" || round.questionKey.length > 2000)) ||
+      (round.evidence !== undefined && (!Array.isArray(round.evidence) || round.evidence.length > 8 || !round.evidence.every(item => typeof item === "string" && item.length <= 500))))) throw new Error("invalid deep-interview agenda rounds")
+    for (const id of ids) if (d.rounds.filter(round => (round as RoundRecord).agendaID === id).length > (p.maxPerAgenda as number)) throw new Error("deep-interview agenda budget exceeded")
+  }
   if (d.seed !== undefined) {
     const s = d.seed as Record<string, unknown>
     if (!isObject(s) || s.source !== "autoresearch" || typeof s.verdictPath !== "string" || typeof s.verdictSha !== "string" ||

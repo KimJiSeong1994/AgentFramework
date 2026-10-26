@@ -477,7 +477,7 @@ export type StageEvent =
   | { type: "topology"; components: Array<{ id: string; description: string }>; project: "greenfield" | "brownfield" }
   | { type: "score"; goal: number; constraints: number; criteria: number; context?: number; weakest: string; shape_change?: boolean; evidence: string[] }
   | { type: "panel_finding"; finding: string; rationale: string[]; suggested_options: string[]; confidence: "high" | "medium" | "low" }
-  | { type: "closure"; pass: boolean; gaps: string[] }
+  | { type: "closure"; pass: boolean; gaps: string[]; agenda_ids?: string[] }
   | { type: "restatement"; goal: string }
   | { type: "plan_doc"; sections: Array<{ title: string; body: string }> }
   | { type: "goals"; goals: Array<{ title: string; objective: string }> }
@@ -509,7 +509,7 @@ const SHAPES: Readonly<Record<StageEventType, Shape>> = {
   topology: { required: ["components", "project"], optional: [] },
   score: { required: ["goal", "constraints", "criteria", "weakest", "evidence"], optional: ["context", "shape_change"] },
   panel_finding: { required: ["finding", "rationale", "suggested_options", "confidence"], optional: [] },
-  closure: { required: ["pass", "gaps"], optional: [] },
+  closure: { required: ["pass", "gaps"], optional: ["agenda_ids"] },
   restatement: { required: ["goal"], optional: [] },
   plan_doc: { required: ["sections"], optional: [] },
   lane_verdict: { required: ["findings"], optional: ["status", "decision", "verdict", "suspect"] },
@@ -613,7 +613,9 @@ function buildEvent(type: StageEventType, r: Record<string, unknown>): StageEven
         !upper(["high", "medium", "low"], r.confidence)) return "stage event panel_finding is invalid"
       return { type, finding: r.finding, rationale: r.rationale, suggested_options: r.suggested_options, confidence: r.confidence }
     case "closure":
-      return typeof r.pass === "boolean" && isTextList(r.gaps, 16) ? { type, pass: r.pass, gaps: r.gaps } : "stage event closure is invalid"
+      return typeof r.pass === "boolean" && isTextList(r.gaps, 16) &&
+        (r.agenda_ids === undefined || (isTextList(r.agenda_ids, 16, 64) && new Set(r.agenda_ids).size === r.agenda_ids.length))
+        ? { type, pass: r.pass, gaps: r.gaps, ...(r.agenda_ids === undefined ? {} : { agenda_ids: r.agenda_ids }) } : "stage event closure is invalid"
     case "restatement":
       return isText(r.goal, 2_000) ? { type, goal: r.goal } : "stage event restatement is invalid"
     case "plan_doc": {

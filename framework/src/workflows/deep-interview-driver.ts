@@ -17,6 +17,7 @@ import { commitRevision, readCommitted, type CommitEvent } from "./commit.ts"
 import {
   choiceInputSha, closureInputSha, dataOf, DI_MAX_ANSWER_CHARS, DI_REQUEST_MAX, earlyExitRefusal, finalAmbiguity, newData, nextStep, reduce, renderSpec,
   restatementInputSha, roundFileRelative, sha256Text, specRelative, topologyInputSha,
+  agendaProgress, nextAgenda, questionLimit, bandOf,
   type Component, type DeepInterviewData, type DiEvent, type DiStep, type Persona, type ProjectType, type ReduceResult,
 } from "./deep-interview.ts"
 import { DI_CLOSURE_PROMPT, DI_CRYSTALLIZE_PROMPT, DI_PANEL_PROMPTS, DI_QUESTION_PROMPT, DI_RESTATEMENT_PROMPT, DI_SCORER_PROMPT, DI_TOPOLOGY_PROMPT, type StagePrompt } from "./prompts/index.ts"
@@ -138,7 +139,8 @@ export type DiIo = {
   /** Inline terminal chooser: the selected index. */
   choose(title: string, choices: readonly string[], signal?: AbortSignal): Promise<number | undefined>
   /** The next chat line is the answer to the open question; `/finish` is the early-exit request. */
-  readAnswer(open: { round: number; question: string; options?: string[]; recommended?: number }, signal?: AbortSignal): Promise<DiAnswer | undefined>
+  readAnswer(open: { round: number; question: string; options?: string[]; recommended?: number;
+    agenda?: { id: string; description: string; index: number; total: number; question: number; limit: number } }, signal?: AbortSignal): Promise<DiAnswer | undefined>
   /** Free-text operator note for an Adjust choice. */
   readNote(title: string, signal?: AbortSignal): Promise<string | undefined>
   notice?(text: string): void
@@ -179,13 +181,13 @@ function readRound(worktree: string, wf: DeepInterviewWorkflow, n: number, part:
 
 function transcriptOf(worktree: string, wf: DeepInterviewWorkflow, d: DeepInterviewData): string {
   if (d.rounds.length === 0) return "(no rounds yet)"
-  const clip = (text: string, latest: boolean) => (latest || text.length <= OLD_ROUND_CHARS ? text : `${text.slice(0, OLD_ROUND_CHARS)} [...]`)
+  const clip = (text: string, latest: boolean) => (latest || text.length <= OLD_ROUND_CHARS ? text : `${text.slice(0, 1000)}\n[... middle omitted ...]\n${text.slice(-500)}`)
   return d.rounds.map((round, index) => {
     const latest = index === d.rounds.length - 1
     const q = readRound(worktree, wf, round.n, "question", round.questionSha)
     const a = round.answerSha === undefined ? "(not answered)" : readRound(worktree, wf, round.n, "answer", round.answerSha)
     const scored = round.ambiguity === undefined ? "" : ` [ambiguity ${round.ambiguity}, band ${round.band}]`
-    return `Round ${round.n}${scored}\nQ: ${clip(q, latest)}\nA: ${clip(a, latest)}`
+    return `Round ${round.n}${round.agendaID ? ` [agenda ${round.agendaID}]` : ""}${scored}\nQ: ${clip(q, latest)}\nA: ${clip(a, latest)}`
   }).join("\n\n")
 }
 
@@ -195,7 +197,24 @@ const section = (label: string, text: string) => `${MARK}${label} ===\n${text.tr
 type Context = { text: string; source: string; rebuild(summary: string): string }
 function compose(prompt: StagePrompt, sections: ReadonlyArray<readonly [string, string]>): Context {
   const source = sections.map(([label, text]) => section(label, text)).join("\n")
-  return { text: `${prompt.text}${source}`, source, rebuild: summary => `${prompt.text}${section("SUMMARIZED CONTEXT", summary)}` }
+  const pinned = sections.filter(([label]) => ["ACTIVE AGENDA", "TASK AGENDAS", "QUESTION BUDGET"].includes(label)).map(([label, text]) => section(label, text)).join("\n")
+  return { text: `${prompt.text}${source}`, source, rebuild: summary => `${prompt.text}${pinned}${section("SUMMARIZED CONTEXT", summary)}` }
+}
+
+function agendaContext(d: DeepInterviewData, activeID?: string): Array<readonly [string, string]> {
+  if (!d.questionPolicy) return []
+  const agendas = agendaProgress(d)
+  const active = agendas.find(item => item.id === activeID)
+  return [
+    ["TASK AGENDAS", agendas.map(item => `- ${item.id}: ${item.description.slice(0, 160)}; ${item.status}; questions ${item.asked}/${d.questionPolicy!.maxPerAgenda}`).join("\n")],
+    ["ACTIVE AGENDA", active ? `${active.id}: ${active.description.slice(0, 500)}` : "Whole-interview audit: cover all task agendas."],
+    ["QUESTION BUDGET", `${d.round}/${questionLimit(d)} questions used overall; at most ${d.questionPolicy.maxPerAgenda} per agenda. Limits are caps, not targets. Settled agendas need no further questions.`],
+    ["RECORDED EVIDENCE", "Model observations, not consent; excerpts only. Full records are protected and not available through file tools. Use the verified transcript excerpts below; omitted content is not evidence of an unanswered question. Preserve any unresolved uncertainty in closure instead of inventing a decision.\n" +
+      (d.rounds.filter(round => round.evidence?.length).map(round => {
+        const evidence = round.evidence!.join("; ")
+        return `Round ${round.n}, agenda ${round.agendaID}: ${evidence.slice(0, 180)}${evidence.length > 180 ? " […]" : ""}`
+      }).join("\n") || "none")],
+  ]
 }
 
 const componentsText = (components: readonly Component[]) => components.length ? components.map(c => `- ${c.id}: ${c.description}`).join("\n") : "- none"
@@ -226,6 +245,7 @@ export function panelContext(worktree: string, wf: DeepInterviewWorkflow, person
     ["PANEL INPUT", `panel input sha: ${pending.inputSha}\nround: ${pending.round}\nambiguity: ${round.ambiguity} (band ${round.band}, threshold ${d.threshold})\ntriggers: ${pending.triggers.join(", ")}\nontology escalation requested: ${pending.ontology ? "yes" : "no"}\nweakest dimension: ${round.weakest ?? "unknown"}`],
     ["REQUEST", d.request],
     ["TOPOLOGY", `${d.type ?? "unknown"}\n${componentsText(d.topology.components)}`],
+    ...agendaContext(d, round.agendaID),
     ["TRANSCRIPT", transcriptOf(worktree, wf, d)],
   ])
 }
@@ -302,7 +322,7 @@ export async function runDeepInterview(runtime: ExecutionRuntime, sessionID: str
     // ---- human steps
     if (step.kind === "cap_choice") {
       const index = await io.choose(
-        `Maximum interview rounds (${step.round}) reached at ambiguity ${step.ambiguity}, above the ${d.threshold} threshold. Nothing is executed. Closure and restatement still run if you crystallize.`,
+        `${d.questionPolicy ? "Task agenda question budget" : "Maximum interview rounds"} (${step.round}) reached at ambiguity ${step.ambiguity} (threshold ${d.threshold}). Nothing is executed. Closure and restatement still run if you crystallize.${d.questionPolicy ? `\n${agendaContext(d)[0]![1]}\nOpen gaps: ${listed(d.gaps)}` : ""}`,
         ["Crystallize with current clarity", "Exit the interview"], options.signal)
       if (index === undefined) return { status: "awaiting", wf: current }
       const choice = index === 0 ? "crystallize" as const : "exit" as const
@@ -313,7 +333,12 @@ export async function runDeepInterview(runtime: ExecutionRuntime, sessionID: str
     }
     if (step.kind === "await_answer") {
       const question = readRound(worktree, current, step.round, "question", d.rounds.find(r => r.n === step.round)?.questionSha)
-      const answer = await io.readAnswer({ round: step.round, question, ...readQuestionOptions(worktree, current, step.round) }, options.signal)
+      const record = d.rounds.find(round => round.n === step.round)!
+      const agendas = agendaProgress(d)
+      const index = agendas.findIndex(item => item.id === record.agendaID)
+      const agenda = d.questionPolicy && index >= 0 ? { id: agendas[index]!.id, description: agendas[index]!.description, index: index + 1,
+        total: agendas.length, question: agendas[index]!.asked, limit: d.questionPolicy.maxPerAgenda } : undefined
+      const answer = await io.readAnswer({ round: step.round, question, ...(agenda ? { agenda } : {}), ...readQuestionOptions(worktree, current, step.round) }, options.signal)
       if (answer === undefined) return { status: "awaiting", wf: current }
       if (answer.kind === "finish") {
         const refusal = earlyExitRefusal(current)
@@ -355,9 +380,12 @@ export async function runDeepInterview(runtime: ExecutionRuntime, sessionID: str
           break
         case "question": {
           item = "question"; role = "interviewer"; prompt = DI_QUESTION_PROMPT
-          const last = [...d.rounds].reverse().find(r => r.ambiguity !== undefined)
+          const active = nextAgenda(d)
+          const last = [...d.rounds].reverse().find(r => r.ambiguity !== undefined && (!active || r.agendaID === active.id))
           context = compose(prompt, [
             ["REQUEST", d.request], ["TOPOLOGY", `${d.type ?? "unknown"}\n${componentsText(d.topology.components)}`],
+            ...agendaContext(d, active?.id),
+            ...(d.attempt ? [["PREVIOUS QUESTION ATTEMPT", d.attempt.reasons.join("\n")] as const] : []),
             ["WEAKEST DIMENSION", last?.weakest ?? "goal (no round scored yet)"], ["PANEL FINDINGS", listed(panelFindings(worktree, current, d))],
             ["CLOSURE GAPS", listed(d.gaps)], ["TRANSCRIPT", transcriptOf(worktree, current, d)],
           ])
@@ -367,6 +395,7 @@ export async function runDeepInterview(runtime: ExecutionRuntime, sessionID: str
           item = "scoring"; role = "interviewer"; prompt = DI_SCORER_PROMPT
           context = compose(prompt, [
             ["REQUEST", d.request], ["PROJECT TYPE", d.type ?? "unknown"], ["TOPOLOGY", componentsText(d.topology.components)], ["TRANSCRIPT", transcriptOf(worktree, current, d)],
+            ...agendaContext(d, d.rounds.at(-1)?.agendaID),
           ])
           break
         case "panel":
@@ -377,6 +406,7 @@ export async function runDeepInterview(runtime: ExecutionRuntime, sessionID: str
           item = "closure"; role = "architect"; prompt = DI_CLOSURE_PROMPT
           context = compose(prompt, [
             ["LOCKED REQUEST", d.request], ["CONFIRMED COMPONENTS", componentsText(d.topology.components)], ["AMBIGUITY", `${finalAmbiguity(d)} (threshold ${d.threshold})`],
+            ...agendaContext(d),
             ["EARLY EXIT", d.earlyExit ? `${d.earlyExit.reason} at round ${d.earlyExit.round}` : "none"], ["TRANSCRIPT", transcriptOf(worktree, current, d)],
           ])
           break
@@ -384,6 +414,7 @@ export async function runDeepInterview(runtime: ExecutionRuntime, sessionID: str
           item = "restate"; role = "interviewer"; prompt = DI_RESTATEMENT_PROMPT
           context = compose(prompt, [
             ["LOCKED REQUEST", d.request], ["CONFIRMED COMPONENTS", componentsText(d.topology.components)], ["TRANSCRIPT", transcriptOf(worktree, current, d)],
+            ...agendaContext(d),
             ...(restateDraft ? [["PREVIOUS RESTATEMENT", restateDraft] as const] : []), ...(restateNote ? [["OPERATOR NOTE", restateNote] as const] : []),
           ])
           break
@@ -391,7 +422,8 @@ export async function runDeepInterview(runtime: ExecutionRuntime, sessionID: str
           item = "crystallize"; role = "interviewer"; prompt = DI_CRYSTALLIZE_PROMPT
           context = compose(prompt, [
             ["CONFIRMED GOAL", d.restatement?.goal ?? ""], ["CONFIRMED COMPONENTS", componentsText(d.topology.components)], ["OPEN GAPS", listed(d.gaps)],
-            ["EARLY EXIT", d.earlyExit ? `${d.earlyExit.reason}: ambiguity ${d.earlyExit.ambiguity} above the ${d.threshold} threshold` : "none"], ["TRANSCRIPT", transcriptOf(worktree, current, d)],
+            ...agendaContext(d),
+            ["EARLY EXIT", d.earlyExit ? `${d.earlyExit.reason}: ambiguity ${d.earlyExit.ambiguity} (threshold ${d.threshold}); retain unresolved agendas and closure gaps` : "none"], ["TRANSCRIPT", transcriptOf(worktree, current, d)],
           ])
           break
         default: return { status: "blocked", wf: current, reason: "no model step" }
@@ -461,11 +493,15 @@ export async function runDeepInterview(runtime: ExecutionRuntime, sessionID: str
         const one = only(parsed.events, "question")
         if (!one.ok) return { kind: "attempt", reason: one.reason }
         const round = step.round
+        const questionKey = one.value.text.normalize("NFKC").toLocaleLowerCase().replace(/[\p{P}\p{Z}\s]+/gu, " ").trim()
+        const event: DiEvent = { type: "question_asked", round, questionSha: sha256Text(one.value.text), questionKey }
+        const built = reduce(wf, event, { worktree })
+        if (!built.ok) return { kind: "attempt", reason: built.text }
         const questionSha = writeText(worktree, roundFileRelative(wf.sessionID, wf.id, round, "question"), one.value.text)
         if (one.value.options) {
           writeText(worktree, questionOptionsRelative(wf.sessionID, wf.id, round), JSON.stringify({ options: one.value.options, ...(one.value.recommended === undefined ? {} : { recommended: one.value.recommended }) }))
         }
-        return done(commit(wf, { type: "question_asked", round, questionSha }))
+        return done(commit(wf, { ...event, questionSha }))
       }
       case "scoring": {
         const one = only(parsed.events, "score")
@@ -490,15 +526,19 @@ export async function runDeepInterview(runtime: ExecutionRuntime, sessionID: str
         const one = only(parsed.events, "closure")
         if (!one.ok) return { kind: "attempt", reason: one.reason }
         if (one.value.pass && one.value.gaps.length > 0) return { kind: "attempt", reason: "closure passed but listed gaps" }
-        const receiptRef = ref("panel", `closure-r${d.round}-${outputTag}`, closureInputSha(wf, d), { round: d.round, pass: one.value.pass, gaps: one.value.gaps, promptSha: prompt.sha256, outputSha: sha256Text(output) })
-        return done(commit(wf, { type: "closure_result", pass: one.value.pass, gaps: one.value.gaps, receiptRef }))
+        const agendaIDs = one.value.agenda_ids
+        if (d.questionPolicy && !one.value.pass && !agendaIDs?.length) return { kind: "attempt", reason: "failed closure must name the task agendas needing clarification in agenda_ids" }
+        if (agendaIDs?.some(id => !d.topology.components.some(component => component.id === id)) || (one.value.pass && agendaIDs?.length)) return { kind: "attempt", reason: "closure agenda targets must name confirmed unresolved task agendas" }
+        const targets = agendaIDs === undefined ? {} : { agendaIDs }
+        const receiptRef = ref("panel", `closure-r${d.round}-${outputTag}`, closureInputSha(wf, d), { round: d.round, pass: one.value.pass, gaps: one.value.gaps, ...targets, promptSha: prompt.sha256, outputSha: sha256Text(output) })
+        return done(commit(wf, { type: "closure_result", pass: one.value.pass, gaps: one.value.gaps, ...targets, receiptRef }))
       }
       case "restate": {
         const one = only(parsed.events, "restatement")
         if (!one.ok) return { kind: "attempt", reason: one.reason }
         const goal = one.value.goal
         restateDraft = goal
-        const afterLimit = d.earlyExit !== undefined || d.round >= 100
+        const afterLimit = d.earlyExit !== undefined || d.round >= questionLimit(d)
         const choices = afterLimit ? ["Yes, crystallize", "Adjust wording"] : ["Yes, crystallize", "Adjust wording", "Missing scope"]
         const index = await io.choose(`${goal}\nIf someone read only this line, would they reach the same outcome you have in mind?`, choices, options.signal)
         if (index === undefined) return { kind: "awaiting" }
@@ -559,6 +599,8 @@ export type DiView = {
   band?: string
   threshold: number
   thresholdSource: string
+  agendas: ReturnType<typeof agendaProgress>
+  questionLimit: number
   panel: Array<{ persona: Persona; state: "verified" | "missing" | "incomplete" }>
   earlyExit?: string
   /** Recomputed from disk: every panel/closure/choice record the interview rests on. */
@@ -581,9 +623,11 @@ export function deepInterviewView(wf: DeepInterviewWorkflow, worktree: string): 
   const incomplete = panel.filter(item => item.state === "incomplete").map(item => item.persona)
   const check = deepInterviewEvidence(worktree, wf)
   const marker = check.problems.length ? " · incomplete records" : ""
-  const line = `deep-interview · ${wf.stage} · ${wf.phase}${last ? ` · ambiguity ${last.ambiguity} (${last.band})` : ""}${incomplete.length ? ` · incomplete panel records: ${incomplete.join(", ")}` : ""}${marker}`
+  const ambiguity = finalAmbiguity(d)
+  const line = `deep-interview · ${wf.stage} · ${wf.phase}${ambiguity !== undefined ? ` · ambiguity ${ambiguity} (${bandOf(ambiguity, d.threshold)})` : ""}${incomplete.length ? ` · incomplete panel records: ${incomplete.join(", ")}` : ""}${marker}`
   return {
-    stage: wf.stage, phase: wf.phase, round: d.round, ...(last ? { ambiguity: last.ambiguity, band: last.band } : {}), threshold: d.threshold,
+    stage: wf.stage, phase: wf.phase, round: d.round, ...(last ? { ambiguity: finalAmbiguity(d), band: bandOf(finalAmbiguity(d)!, d.threshold) } : {}), threshold: d.threshold,
+    agendas: d.questionPolicy ? agendaProgress(d) : [], questionLimit: questionLimit(d),
     thresholdSource: d.thresholdSource, panel, evidence: evidenceSummary(check), evidenceOk: check.problems.length === 0, ...(d.earlyExit ? { earlyExit: `${d.earlyExit.reason} at round ${d.earlyExit.round}` } : {}), line,
   }
 }

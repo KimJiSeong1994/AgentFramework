@@ -3789,7 +3789,7 @@ export async function runInteractiveSession(
           continue
         }
         const request = (explicitSkill[2] ?? "").trim()
-        if (!request) {
+        if (!request && protectedWorkflow.workflow !== "ultragoal") {
           visibleWrite(`Usage: /skill:${protectedWorkflow.name} <request>\n`)
           continue
         }

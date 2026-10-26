@@ -11,10 +11,11 @@ import { LinuxAdmissionRefused, type ExecutionOutcome, type ExecutionRequest, ty
 import { canonicalPlanJson, canonicalPlanSha, planMdPath, type Plan } from "../src/flow/plan.ts"
 import { clearReviewSession } from "../src/flow/review.ts"
 import { currentOwner } from "../src/flow/owner.ts"
-import { eventsPath, FlowTransactionBusyError, flowDir, readEvents, readWorkflow, newWorkflow, planJsonPath, workflowPath, withFlowTransaction } from "../src/flow/state.ts"
+import { appendEvents, eventsPath, FlowTransactionBusyError, flowDir, readEvents, readWorkflow, newWorkflow, planJsonPath, workflowPath, withFlowTransaction } from "../src/flow/state.ts"
 import { writeWorkflow, rewriteCommitted } from "./commit-fixture.ts"
-import { repairOnLoad, startWorkflow, stopHeartbeat } from "../src/flow/runtime.ts"
+import { repairOnLoad, requestStop, startWorkflow, stopHeartbeat } from "../src/flow/runtime.ts"
 import { __setCommitFaultHook } from "../src/workflows/commit.ts"
+import { startRalplan } from "../src/workflows/ralplan-driver.ts"
 import { registerSkillPermissionActivity } from "../src/skills/activity.ts"
 import { observeStopSettlement } from "../src/flow/runtime.ts"
 import { boundPlanSkills, ledgerPath, readLedger, writeLedger } from "../src/state/ledger.ts"
@@ -933,6 +934,61 @@ describe("external foreground imported-plan controller", () => {
     const before = readFileSync(workflowPath(wt.worktree), "utf8")
     await expect(f.controller.resume(SESSION)).rejects.toThrow("role critic is not schedulable by plan workflows")
     expect(readFileSync(workflowPath(wt.worktree), "utf8")).toBe(before)
+  })
+
+  test.each(["unknown origin", "audit-only origin", "mismatched session", "mismatched attempt", "mismatched role", "unsettled origin"])("recovery refuses historical role exemption with %s", async invalid => {
+    const f = fixture()
+    let originID = "historical-ralplan"
+    let originRevision = 1
+    if (invalid === "audit-only origin") {
+      originRevision = withFlowTransaction(wt.worktree, tx => appendEvents(tx, [{ wf: originID, type: "created", actor: "code", data: { kind: "ralplan" } }]))
+    } else if (invalid !== "unknown origin") {
+      const origin = startRalplan(f.runtime, SESSION, "earlier planning")
+      if (!origin.ok) throw new Error(origin.text)
+      originID = origin.wf.id
+      originRevision = origin.wf.lastSeq
+      requestStop(f.runtime, SESSION, "cancel", "fixture predecessor complete")
+    }
+    const submitted = await f.controller.importPlan(SESSION, save())
+    if (!submitted.result.ok) throw new Error(submitted.result.text)
+    expect((await approve(f.controller, submitted.result.wf.id, submitted.planSha)).ok).toBe(true)
+    const originEvents = readEvents(wt.worktree, originID)
+    if (invalid === "unknown origin") expect(originEvents).toEqual([])
+    else {
+      expect(originEvents[0]).toMatchObject({ type: "created", actor: "code", data: { kind: "ralplan" } })
+      expect(originEvents[0]!.seq).toBeLessThanOrEqual(originRevision)
+      expect(originEvents[0]!.audit === true).toBe(invalid === "audit-only origin")
+    }
+    const claim = f.runtime.runs.claim(SESSION, f.runtime.instance, process.pid)
+    f.runtime.runs.registerIntent(claim, {
+      executionId: "historical-critic", ownerSession: SESSION, taskId: "task", attemptId: "attempt",
+      generation: claim.generation, role: "critic", cwd: wt.worktree,
+      policyID: f.runtime.policy.resolve("critic").id, kind: "host", engine: f.runtime.host.identity.engine, profile: "legacy-unowned",
+      workflowBinding: {
+        workflowID: originID, revision: originRevision, kind: "ralplan", stage: "critic", promptSha: "a".repeat(64),
+        role: invalid === "mismatched role" ? "planner" : "critic",
+        attemptId: invalid === "mismatched attempt" ? "other-attempt" : "attempt",
+        supervisorSessionID: invalid === "mismatched session" ? "other-session" : SESSION, epoch: null,
+      },
+    })
+    f.runtime.runs.recordTerminal(claim, "historical-critic", { outcome: "completed", terminalAt: Date.now() })
+    f.runtime.runs.reconcile(claim, "historical-critic", { outcome: "terminal", quiescent: true, evidence: "fixture settled" })
+    f.runtime.runs.release(claim)
+    if (invalid === "unsettled origin") {
+      const path = join(executionRunDirectory(wt.worktree), "state.json")
+      const state = JSON.parse(readFileSync(path, "utf8"))
+      const execution = state.executions.find((item: { executionId: string }) => item.executionId === "historical-critic")
+      delete execution.terminal
+      delete execution.reconciliation
+      writeFileSync(path, JSON.stringify(state))
+    }
+    const before = readFileSync(workflowPath(wt.worktree), "utf8")
+    const ledgerBefore = JSON.stringify(readLedger(wt.worktree, SESSION))
+    const requestCount = f.requests.length
+    await expect(f.controller.resume(SESSION)).rejects.toThrow("role critic is not schedulable by plan workflows")
+    expect(readFileSync(workflowPath(wt.worktree), "utf8")).toBe(before)
+    expect(JSON.stringify(readLedger(wt.worktree, SESSION))).toBe(ledgerBefore)
+    expect(f.requests).toHaveLength(requestCount)
   })
 
   test("restart refuses persisted execution-only references without adapter recovery or replay", async () => {

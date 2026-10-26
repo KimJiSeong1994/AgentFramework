@@ -6,7 +6,7 @@ import { isAttachmentEpoch, pidAlive } from "../flow/owner.ts"
 import { resumePaused, type ResumeView } from "../flow/resume.ts"
 import { applyEvent, approveWorkflow, observeStopSettlement, requestStop, resolveAuthority, settleOwned, startWorkflow, type AnyFlowResult, type FlowResult } from "../flow/runtime.ts"
 import { flowOn, renderStatus, statusJson } from "../flow/status.ts"
-import { activeAnyWorkflow, activeWorkflow, readAnyWorkflowChecked, readWorkflow, workflowEngineRefusal, type Workflow } from "../flow/state.ts"
+import { activeAnyWorkflow, activeWorkflow, readAnyWorkflowChecked, readEvents, readWorkflow, workflowEngineRefusal, type Workflow } from "../flow/state.ts"
 import { sessionActivityBlocker } from "./runtime.ts"
 import { getQueue, type QueueOrigin, type QueueRun } from "../orchestration/queue.ts"
 import { createTaskWorktree, hasPlanWorktreeState, planIsolationAvailability, planWorktreeScope, reopenPlanWorktree, type TaskWorktree } from "../orchestration/worktree.ts"
@@ -22,7 +22,7 @@ import { consumeOperatorDecision, type OperatorDecision } from "./operator.ts"
 import { assertHostAdmission } from "./required-controls.ts"
 import { isCancelPending, isStopPending, TERMINAL, type WorkflowEnvelope } from "../workflows/types.ts"
 import { assertUnitCurrent, isUnitKind, planSubject, sameSubject, unitFor, unitTag, type ApprovedExecutionUnit } from "../workflows/execution-unit.ts"
-import { kindAllowsRole, narrowPlan } from "../workflows/registry.ts"
+import { isWorkflowKind, kindAllowsRole, narrowPlan } from "../workflows/registry.ts"
 
 const HOST_ENGINE_MISMATCH = "host engine identity mismatch; recovery refused"
 const HOST_POLICY_MISMATCH = "host policy identity evidence is absent or mismatched; recovery refused"
@@ -238,8 +238,18 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
 
   /** The kind registry owns role scheduling: a host execution under a role the kind may not schedule is refused. */
   function assertKindRoles(wf: WorkflowEnvelope, sessionID: string): void {
+    let history: ReturnType<typeof readEvents> | undefined
     for (const execution of runtime.runs.status().executions) {
       if (execution.ownerSession === sessionID && execution.kind === "host" && !kindAllowsRole(wf.kind, execution.role)) {
+        const origin = execution.workflowBinding
+        // Completed stage work belongs to its original kind, not the successor's
+        // scheduling policy. This grants no authority to dispatch new work.
+        if (settled(execution) && origin?.workflowID && origin.workflowID !== wf.id &&
+          origin.supervisorSessionID === sessionID && origin.role === execution.role &&
+          origin.attemptId === execution.attemptId && origin.revision !== null && origin.revision > 0 && origin.revision < wf.lastSeq &&
+          isWorkflowKind(origin.kind) && kindAllowsRole(origin.kind, execution.role) &&
+          (history ??= readEvents(root)).some(event => event.wf === origin.workflowID && event.audit !== true && event.type === "created" && event.actor === "code" &&
+            event.data?.kind === origin.kind && event.seq <= origin.revision!)) continue
         throw new Error(`role ${execution.role} is not schedulable by ${wf.kind} workflows; recovery refused`)
       }
     }

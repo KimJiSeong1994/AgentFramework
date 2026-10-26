@@ -11,6 +11,7 @@ import { verifyReceiptRef } from "./receipts.ts"
 import { REGISTRY } from "./registry.ts"
 import {
   BANDS, BASE_PERSONAS, DI_EARLY_EXIT_ROUND, DI_MAX_ATTEMPTS, DI_MAX_ANSWER_CHARS, DI_MAX_ROUNDS, DI_ONTOLOGY_ROUND, DI_STALL_SPREAD, DI_THRESHOLD, dataOf,
+  agendaProgress, nextAgenda, questionBudgetReached, questionLimit,
   type Band, type Component, type DeepInterviewData, type Dimensions, type PendingPanel, type Persona, type ProjectType, type RoundRecord,
 } from "./deep-interview-data.ts"
 import type { DeepInterviewStage, DeepInterviewWorkflow, Phase } from "./types.ts"
@@ -131,7 +132,7 @@ export function nextStep(wf: DeepInterviewWorkflow, worktree: string): DiStep {
     case "intake": case "topology": return { kind: "topology" }
     case "question":
       if (d.cap && !d.cap.decided) return { kind: "cap_choice", round: d.cap.round, ambiguity: d.cap.ambiguity }
-      if (d.round >= DI_MAX_ROUNDS) return { kind: "blocked", reason: `the ${DI_MAX_ROUNDS}-round cap is reached; no further question is asked` }
+      if (questionBudgetReached(d)) return { kind: "blocked", reason: "the question budget is reached; no further question is asked" }
       return { kind: "question", round: d.round + 1 }
     case "answer": return { kind: "await_answer", round: d.round }
     case "scoring": return { kind: "scoring", round: d.round }
@@ -151,13 +152,13 @@ export function nextStep(wf: DeepInterviewWorkflow, worktree: string): DiStep {
 // ------------------------------------------------------------------------------------------------ transitions
 export type DiEvent =
   | { type: "topology_confirmed"; projectType: ProjectType; components: Component[]; receiptRef: string }
-  | { type: "question_asked"; round: number; questionSha: string }
+  | { type: "question_asked"; round: number; questionSha: string; questionKey?: string }
   | { type: "answer_recorded"; round: number; answerSha: string; chars: number; source: "user" | "agent" }
   | { type: "scores_recorded"; round: number; scores: Dimensions; weakest: string; shapeChange: boolean; evidence: string[]; synthesized?: boolean }
   | { type: "panel_result"; persona: Persona; receiptRef: string }
   | { type: "cap_decided"; choice: "crystallize" | "exit"; receiptRef: string }
   | { type: "early_exit_confirmed"; receiptRef: string }
-  | { type: "closure_result"; pass: boolean; gaps: string[]; receiptRef: string }
+  | { type: "closure_result"; pass: boolean; gaps: string[]; agendaIDs?: string[]; receiptRef: string }
   | { type: "restatement_confirmed"; goal: string; receiptRef: string }
   | { type: "restatement_missing_scope"; receiptRef: string }
   | { type: "spec_written"; path: string; sha256: string }
@@ -179,13 +180,15 @@ export function panelInputSha(wf: Pick<DeepInterviewWorkflow, "id">, d: DeepInte
   return sha256Text(JSON.stringify({
     wid: wf.id, round: round.n, ambiguity: round.ambiguity, band: round.band, triggers: requirement.triggers, personas: requirement.personas,
     ontology: requirement.ontology, q: round.questionSha, a: round.answerSha, components: d.topology.components,
+    ...(d.questionPolicy ? { agendaID: round.agendaID, evidence: round.evidence, agendas: agendaProgress(d) } : {}),
   }))
 }
 
 /** Closure audits the locked request and the confirmed components; the receipt binds this hash. */
 export function closureInputSha(wf: Pick<DeepInterviewWorkflow, "id">, d: DeepInterviewData): string {
   const last = lastScored(d)
-  return sha256Text(JSON.stringify({ wid: wf.id, round: d.round, request: d.request, type: d.type, components: d.topology.components, ambiguity: last?.ambiguity, a: last?.answerSha, gaps: d.gaps }))
+  return sha256Text(JSON.stringify({ wid: wf.id, round: d.round, request: d.request, type: d.type, components: d.topology.components, ambiguity: last?.ambiguity, a: last?.answerSha, gaps: d.gaps,
+    ...(d.questionPolicy ? { policy: d.questionPolicy, agendas: agendaProgress(d), reopenAgendaIDs: d.reopenAgendaIDs, evidence: d.rounds.map(r => r.evidence ?? []) } : {}) }))
 }
 
 export const restatementInputSha = (goal: string): string => sha256Text(goal)
@@ -194,6 +197,7 @@ export const choiceInputSha = (wf: Pick<DeepInterviewWorkflow, "id">, subject: s
 
 /** Final ambiguity of the last scored round, or undefined before any scoring. */
 export function finalAmbiguity(d: DeepInterviewData): number | undefined {
+  if (d.questionPolicy && d.rounds.some(round => round.ambiguity !== undefined)) return Math.max(...agendaProgress(d).map(item => item.ambiguity ?? 1))
   return lastScored(d)?.ambiguity
 }
 
@@ -203,7 +207,8 @@ export function earlyExitRefusal(wf: DeepInterviewWorkflow): string | undefined 
   if (wf.phase !== "planning" && wf.phase !== "reviewing") return `cannot finish while the interview is ${wf.phase}`
   if (wf.stopIntent) return `workflow ${wf.stopIntent.kind} is pending`
   if (d.earlyExit) return "early exit is already recorded; closure and restatement still run"
-  if (d.round < DI_EARLY_EXIT_ROUND) return `early exit is available from round ${DI_EARLY_EXIT_ROUND}; answer the current question`
+  const earliest = d.questionPolicy ? 1 : DI_EARLY_EXIT_ROUND
+  if (d.round < earliest) return `early exit is available from round ${earliest}; answer the current question`
   if (wf.stage !== "answer" && wf.stage !== "question") return "panels, scoring and closure cannot be bypassed; wait for the current step to complete"
   const ambiguity = finalAmbiguity(d)
   if (ambiguity === undefined) return "no scored round yet"
@@ -239,9 +244,15 @@ function panelsComplete(worktree: string, wf: DeepInterviewWorkflow, d: DeepInte
 
 /** Next stage after a scored round (and its panel, if one was required). */
 function routeScored(wf: DeepInterviewWorkflow, d: DeepInterviewData, ambiguity: number): { stage: DeepInterviewStage; data: DeepInterviewData } {
-  if (ambiguity <= d.threshold) return { stage: "closure", data: d }
-  if (d.round >= DI_MAX_ROUNDS) return { stage: "question", data: { ...d, cap: { round: d.round, ambiguity, decided: false } } }
+  const overall = finalAmbiguity(d) ?? ambiguity
+  if (overall <= d.threshold) return { stage: "closure", data: d }
+  if (questionBudgetReached(d)) return { stage: "question", data: { ...d, cap: { round: d.round, ambiguity: overall, decided: false } } }
   return { stage: "question", data: d }
+}
+
+/** Closure can reopen a decision, but cannot grant another question budget. */
+function reopen(d: DeepInterviewData): DeepInterviewData {
+  return questionBudgetReached(d) ? { ...d, cap: { round: d.round, ambiguity: finalAmbiguity(d) ?? 1, decided: false } } : d
 }
 
 /**
@@ -294,6 +305,7 @@ function reduceInner(wf: DeepInterviewWorkflow, event: DiEvent, ctx: ReduceConte
       if (stage !== "topology" && stage !== "intake") return refuse(`topology_confirmed is not valid at stage ${stage}`)
       if (d.topology.confirmed) return refuse("topology is confirmed exactly once")
       if (event.components.length === 0 || event.components.length > 16) return refuse("topology needs 1-16 components")
+      if (new Set(event.components.map(component => component.id)).size !== event.components.length) return refuse("task agenda ids must be unique")
       const bad = receiptOk(ctx.worktree, wf, event.receiptRef, { kind: "choice", inputSha: topologyInputSha(event.projectType, event.components), action: "choice-topology" })
       if ("error" in bad) return refuse(bad.error)
       const next: DeepInterviewData = { ...d, type: event.projectType, topology: { confirmed: true, components: event.components, receiptRef: event.receiptRef } }
@@ -306,11 +318,15 @@ function reduceInner(wf: DeepInterviewWorkflow, event: DiEvent, ctx: ReduceConte
       if (stage !== "question") return refuse(`question_asked is not valid at stage ${stage}`)
       if (!d.topology.confirmed) return refuse("topology must be confirmed before any question")
       if (d.cap && !d.cap.decided) return refuse("the round cap needs a Crystallize/Exit decision before anything else")
-      if (d.round >= DI_MAX_ROUNDS || event.round !== d.round + 1) return refuse(`question round ${event.round} is not the next round`)
+      if (questionBudgetReached(d) || event.round !== d.round + 1) return refuse(`question round ${event.round} is not the next round or exceeds its agenda budget`)
+      if (event.questionKey !== undefined && (event.questionKey.length > 2000 || !event.questionKey.trim())) return refuse("invalid question key")
+      const agenda = nextAgenda(d)
+      if (d.questionPolicy && event.questionKey && d.rounds.some(round => round.agendaID === agenda?.id && round.questionKey === event.questionKey)) return refuse("this agenda question was already asked; use the recorded answer")
       const incomplete = panelsComplete(ctx.worktree, wf, d)
       if (incomplete) return refuse(incomplete)
       const { pendingPanel: _p, ...rest } = d
-      const next: DeepInterviewData = { ...rest, round: event.round, rounds: [...d.rounds, { n: event.round, questionSha: event.questionSha }] }
+      const next: DeepInterviewData = { ...rest, round: event.round, rounds: [...d.rounds, { n: event.round, questionSha: event.questionSha,
+        ...(agenda ? { agendaID: agenda.id } : {}), ...(event.questionKey ? { questionKey: event.questionKey } : {}) }] }
       return { ok: true, wf: withData(wf, "answer", undefined, next), events: [ev(wf, "question_asked", "code", from, "planning", { round: event.round, questionSha: event.questionSha })], receipts: [] }
     }
     case "answer_recorded": {
@@ -326,13 +342,15 @@ function reduceInner(wf: DeepInterviewWorkflow, event: DiEvent, ctx: ReduceConte
       let ambiguity: number
       try { ambiguity = ambiguityOf(d.type, event.scores) } catch (error) { return refuse((error as Error).message) }
       const band = bandOf(ambiguity, d.threshold)
-      const scored = d.rounds.filter(r => r.ambiguity !== undefined)
+      const active = d.rounds.find(r => r.n === event.round)
+      const scored = d.rounds.filter(r => r.ambiguity !== undefined && (!d.questionPolicy || r.agendaID === active?.agendaID))
       const prev = scored.at(-1)
       const scores: Dimensions = d.type === "brownfield" ? event.scores : { goal: event.scores.goal, constraints: event.scores.constraints, criteria: event.scores.criteria }
-      const rounds = d.rounds.map(r => r.n === event.round ? { ...r, scores, weakest: event.weakest, ambiguity, band, shapeChange: event.shapeChange } : r)
+      const rounds = d.rounds.map(r => r.n === event.round ? { ...r, scores, weakest: event.weakest, ambiguity, band, shapeChange: event.shapeChange,
+        evidence: event.evidence.slice(0, 8).map(item => item.slice(0, 500)) } : r)
       const record = rounds.find(r => r.n === event.round)!
       const requirement = panelRequirement({
-        prevBand: prev?.band, band, history: [...scored.map(r => r.ambiguity!), ambiguity], round: event.round, threshold: d.threshold,
+        prevBand: prev?.band, band, history: [...scored.map(r => r.ambiguity!), ambiguity], round: d.questionPolicy ? scored.length + 1 : event.round, threshold: d.threshold,
         shapeChange: event.shapeChange, synthesized: event.synthesized === true,
       })
       const base: DeepInterviewData = { ...d, rounds }
@@ -401,15 +419,24 @@ function reduceInner(wf: DeepInterviewWorkflow, event: DiEvent, ctx: ReduceConte
       const bad = receiptOk(ctx.worktree, wf, event.receiptRef, { kind: "panel", inputSha: closureInputSha(wf, d), action: `closure-r${d.round}-*` })
       if ("error" in bad) return refuse(bad.error)
       if (bad.body.pass !== event.pass || JSON.stringify(bad.body.gaps) !== JSON.stringify(event.gaps) || bad.body.round !== d.round) return refuse("closure result does not match its receipt")
+      if (JSON.stringify(bad.body.agendaIDs) !== JSON.stringify(event.agendaIDs)) return refuse("closure agenda targets do not match their receipt")
+      if (event.agendaIDs && (new Set(event.agendaIDs).size !== event.agendaIDs.length || event.agendaIDs.some(id => !d.topology.components.some(component => component.id === id)))) return refuse("closure agenda targets must name confirmed task agendas")
+      if (event.pass && event.agendaIDs?.length) return refuse("a passed closure cannot reopen agendas")
+      if (d.questionPolicy && !event.pass && !event.agendaIDs?.length) return refuse("failed closure must name the task agendas needing clarification")
       const { pendingPanel: _p, ...rest } = d
       const closed: DeepInterviewData = { ...rest, closure: { round: d.round, pass: event.pass, receiptRef: event.receiptRef } }
       const events = [ev(wf, "closure_result", "code", from, "reviewing", { round: d.round, pass: event.pass, gaps: event.gaps })]
-      if (event.pass) return { ok: true, wf: withData(wf, "restate", undefined, { ...closed, gaps: [] }), events, receipts: [event.receiptRef] }
+      if (event.pass) {
+        const { reopenAgendaIDs: _targets, ...ready } = closed
+        return { ok: true, wf: withData(wf, "restate", undefined, { ...ready, gaps: [] }), events, receipts: [event.receiptRef] }
+      }
       const gaps = event.gaps.length > 0 ? event.gaps : ["closure audit failed without naming a gap"]
-      const overridden: DeepInterviewData = { ...closed, closureOverrides: [...d.closureOverrides, { round: d.round, gaps }], gaps }
+      const { reopenAgendaIDs: _targets, ...unresolved } = closed
+      const overridden: DeepInterviewData = { ...unresolved, closureOverrides: [...d.closureOverrides, { round: d.round, gaps }], gaps,
+        ...(event.agendaIDs?.length ? { reopenAgendaIDs: event.agendaIDs } : {}) }
       // After an operator-chosen early exit or the round cap no further question exists: the gaps are recorded in the spec.
       if (d.earlyExit) return { ok: true, wf: withData(wf, "restate", undefined, overridden), events, receipts: [event.receiptRef] }
-      return { ok: true, wf: withData(wf, "question", undefined, overridden), events, receipts: [event.receiptRef] }
+      return { ok: true, wf: withData(wf, "question", undefined, reopen(overridden)), events, receipts: [event.receiptRef] }
     }
     case "restatement_confirmed": {
       if (stage !== "restate") return refuse(`restatement_confirmed is not valid at stage ${stage}`)
@@ -422,12 +449,12 @@ function reduceInner(wf: DeepInterviewWorkflow, event: DiEvent, ctx: ReduceConte
     }
     case "restatement_missing_scope": {
       if (stage !== "restate") return refuse(`restatement_missing_scope is not valid at stage ${stage}`)
-      if (d.earlyExit || d.round >= DI_MAX_ROUNDS) return refuse("no further question is available after an early exit or the round cap")
+      if (d.earlyExit || d.round >= questionLimit(d)) return refuse("no further question is available after an early exit or the round cap")
       const bad = receiptOk(ctx.worktree, wf, event.receiptRef, { kind: "choice", inputSha: choiceInputSha(wf, "missing-scope", d.round), action: "choice-missing-scope" })
       if ("error" in bad) return refuse(bad.error)
       const { closure: _c, ...rest } = d
       return {
-        ok: true, wf: withData(wf, "question", undefined, { ...rest, gaps: [...d.gaps, "the operator reports missing scope; ask what is missing"] }),
+        ok: true, wf: withData(wf, "question", undefined, reopen({ ...rest, gaps: [...d.gaps, "the operator reports missing scope; ask what is missing"] })),
         events: [ev(wf, "restatement_missing_scope", "user_command", from, "planning", { round: d.round })], receipts: [event.receiptRef],
       }
     }
@@ -456,7 +483,7 @@ export type SpecStatus = "PASSED" | "BELOW_THRESHOLD_EARLY_EXIT" | "ROUND_CAP_EX
 
 export function specStatus(d: DeepInterviewData): SpecStatus {
   const ambiguity = finalAmbiguity(d)
-  if (d.earlyExit && (ambiguity === undefined || ambiguity > d.threshold)) return d.earlyExit.reason === "cap" ? "ROUND_CAP_EXIT" : "BELOW_THRESHOLD_EARLY_EXIT"
+  if (d.earlyExit && (d.questionPolicy || ambiguity === undefined || ambiguity > d.threshold)) return d.earlyExit.reason === "cap" ? "ROUND_CAP_EXIT" : "BELOW_THRESHOLD_EARLY_EXIT"
   return "PASSED"
 }
 
@@ -478,12 +505,12 @@ export function renderSpec(wf: DeepInterviewWorkflow, d: DeepInterviewData, body
     `- Generated: ${new Date(generatedAt).toISOString()}`,
     `- Status: ${specStatus(d)}`,
     `- Closure: ${d.closure ? `${d.closure.pass ? "passed" : "FAILED (gaps recorded below)"} audit at round ${d.closure.round}` : "not run"}${d.closureOverrides.length > 0 ? `; ${d.closureOverrides.length} override(s)` : ""}`,
-    `- Early Exit: ${d.earlyExit ? `${d.earlyExit.reason} at round ${d.earlyExit.round}, ambiguity ${pct(d.earlyExit.ambiguity)} above threshold` : "none"}`,
+    `- Early Exit: ${d.earlyExit ? `${d.earlyExit.reason} at round ${d.earlyExit.round}, ambiguity ${pct(d.earlyExit.ambiguity)}${d.earlyExit.ambiguity > d.threshold ? " above threshold" : "; remaining gaps require review"}` : "none"}`,
     `- Lateral Reviews: ${d.lateralReviews}`,
     `- Lateral Panel Failures: ${d.panelFailures}`,
     `- Restated Goal: ${d.restatement?.goal ?? ""}`,
     ``,
-    `## Clarity Breakdown`,
+    d.questionPolicy ? `## Latest Agenda Clarity` : `## Clarity Breakdown`,
     `| Dimension | Score |`,
     `|---|---|`,
     `| Goal | ${last?.scores?.goal ?? "n/a"} |`,
@@ -494,6 +521,16 @@ export function renderSpec(wf: DeepInterviewWorkflow, d: DeepInterviewData, body
     `## Topology`,
     ...d.topology.components.map(c => `- ${c.id}: ${c.description}`),
     ``,
+    ...(d.questionPolicy ? [
+      `## Task Agendas`,
+      `Question budget: ${d.round}/${questionLimit(d)} overall; ${d.questionPolicy.maxPerAgenda} per agenda. Ready means sufficient clarity, not approval to execute.`,
+      ...agendaProgress(d).flatMap(item => [
+        `### ${item.id}: ${item.description}`,
+        `- Status: ${item.status}; questions: ${item.asked}/${d.questionPolicy!.maxPerAgenda}; ambiguity: ${pct(item.ambiguity)}`,
+        ...d.rounds.filter(round => round.agendaID === item.id).map(round => `- Round ${round.n}: question ${round.questionSha}; answer ${round.answerSha ?? "unanswered"}`),
+      ]),
+      ``,
+    ] : []),
     ...(d.gaps.length > 0 ? [`## Open Gaps`, ...d.gaps.map(gap => `- ${gap}`), ``] : []),
     body.trim(),
     ``,
