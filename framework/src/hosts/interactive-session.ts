@@ -2257,7 +2257,17 @@ export async function runInteractiveSession(
       sessionID: () => selection.sessionID,
       persist: (kind, data) => { persist(kind, data) },
       readInput: (input, signal) => withProgressSuspended(() => readInput(terminal, input.title, input.hint, input.prompt, signal)),
-      runApprovedUnit: (sessionID, signal, resumed) => selection.controller.runApprovedUnit(sessionID, signal, resumed),
+      runApprovedUnit: async (sessionID, signal, resumed) => {
+        try { return await selection.controller.runApprovedUnit(sessionID, signal, resumed) }
+        catch (error) {
+          if (!(error instanceof PlanIsolationUnavailableError)) throw error
+          if (!await chooseInPlace(error, signal ?? abort.signal)) {
+            selection.controller.cancel(sessionID)
+            throw error
+          }
+          return selection.controller.runApprovedUnit(sessionID, signal, resumed, { inPlace: true })
+        }
+      },
       finishIsolation: async workflowID => {
         if (selection.controller.pendingPlanWorktree?.(selection.sessionID) === workflowID) await offerPlanWorktree(workflowID)
       },
@@ -2423,6 +2433,16 @@ export async function runInteractiveSession(
       terminal.write(terminalSafeText(`Combo: ${selection.engine} / ${selection.model} with ${count} role route${count === 1 ? "" : "s"} (/model combo show lists them). ${COMBO_SCOPE_NOTE}\n`))
     }
 
+    async function chooseInPlace(error: PlanIsolationUnavailableError, signal: AbortSignal): Promise<boolean> {
+      terminal.write(terminalSafeText(`${error.message}. Nothing has run yet. In-place edits land directly in your checkout and cannot be reviewed or discarded as one patch.\n`))
+      const picked = await chooseDecision(terminal, `Plan worktree unavailable: ${error.reason === "no-git" ? "not a git repository" : "no commit yet"}`,
+        ["Run in place in my checkout", "Cancel"], signal)
+      terminal.resume?.()
+      const inPlace = picked === 0 && !signal.aborted
+      persist("workflow-choice", { text: inPlace ? "Operator chose to run in place in the checkout (no plan worktree available)." : "Operator cancelled the run (no plan worktree available).", planIsolation: inPlace ? "in-place" : "cancelled", reason: error.reason })
+      return inPlace
+    }
+
     async function runOwned(resumed: boolean) {
       if (persistenceFailed) throw new InteractiveLaunchError("Session transcript persistence failed; the session remains held.")
       if (effectiveHold(worktree, selection.sessionID)) throw new InteractiveLaunchError("Session held; explicit Resume required.")
@@ -2433,14 +2453,8 @@ export async function runInteractiveSession(
       try { result = await start(false) }
       catch (error) {
         if (!(error instanceof PlanIsolationUnavailableError)) throw error
-        // No commit / not a git repository: never a silent fallback. The human picks, and the pick is recorded.
-        terminal.write(terminalSafeText(`${error.message}. Nothing has run yet. In-place edits land directly in your checkout and cannot be reviewed or discarded as one patch.\n`))
-        const picked = await chooseDecision(terminal, `Plan worktree unavailable: ${error.reason === "no-git" ? "not a git repository" : "no commit yet"}`,
-          ["Run in place in my checkout", "Cancel"], abort.signal)
-        terminal.resume?.()
-        const inPlace = picked === 0
-        persist("workflow-choice", { text: inPlace ? "Operator chose to run in place in the checkout (no plan worktree available)." : "Operator cancelled the run (no plan worktree available).", planIsolation: inPlace ? "in-place" : "cancelled", reason: error.reason })
-        if (!inPlace) return undefined
+        // No commit / not a git repository: never a silent fallback.
+        if (!await chooseInPlace(error, abort.signal)) return undefined
         result = await start(true)
       }
       if (observedTasks) {

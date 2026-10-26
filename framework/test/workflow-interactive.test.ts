@@ -4,6 +4,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { execFileSync } from "node:child_process"
 import { runInteractiveSession, type InteractiveDependencies, type Terminal } from "../src/hosts/interactive-session.ts"
 import { stopHeartbeat } from "../src/flow/runtime.ts"
 import { readEvents } from "../src/flow/state.ts"
@@ -16,7 +17,7 @@ import { activeAnyWorkflow } from "../src/flow/state.ts"
 import { resumeAdmission } from "../src/sessions/admission.ts"
 import type { ExecutionOutcome, ExecutionRequest, ExecutionRuntime } from "../src/hosts/types.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
-import { fullScript, scriptedHost, scriptedRuntime } from "./workflow-fixture.ts"
+import { fullScript, scriptedHost, scriptedRuntime, stage } from "./workflow-fixture.ts"
 import { executeConfirmation } from "../src/workflows/ralplan-driver.ts"
 import { ralplanDataOf } from "../src/workflows/ralplan.ts"
 import { approveUnitConfirmation, ultragoalDataOf } from "../src/workflows/ultragoal.ts"
@@ -25,7 +26,7 @@ let wt: ReturnType<typeof tempGitWorktree>
 beforeEach(() => { wt = tempGitWorktree(); wt.worktree = realpathSync(wt.worktree) })
 afterEach(() => { stopHeartbeat(); wt.cleanup() })
 
-type Options = { lines: Array<string | undefined | (() => string)>; choices?: number[]; script?: Record<string, string[]>; plainReadline?: boolean; ask?: (prompt: any) => unknown; controls?: Record<string, "interrupt" | "cancel">; uuidBase?: number; worker?: (request: ExecutionRequest) => ExecutionOutcome }
+type Options = { isolate?: boolean; lines: Array<string | undefined | (() => string)>; choices?: number[]; script?: Record<string, string[]>; plainReadline?: boolean; ask?: (prompt: any) => unknown; controls?: Record<string, "interrupt" | "cancel">; uuidBase?: number; worker?: (request: ExecutionRequest) => ExecutionOutcome }
 
 async function session(options: Options) {
   const lines = [...options.lines]
@@ -36,7 +37,7 @@ async function session(options: Options) {
   const chooses: Array<{ title: string; values: readonly string[] }> = []
   const fixture = scriptedRuntime(wt.worktree, options.script ?? fullScript())
   if (options.worker) {
-    fixture.runtime.config.chat.worktree = "off"
+    fixture.runtime.config.chat.worktree = options.isolate ? "plan" : "off"
     const prepare = fixture.host.prepare.bind(fixture.host)
     fixture.host.prepare = async request => {
       const handle = await prepare(request)
@@ -341,6 +342,36 @@ describe("deep-interview then ralplan through the interactive session", () => {
     const tasks = readLedger(wt.worktree, "otter-fixture0").tasks
     expect(tasks).toHaveLength(1)
     expect(tasks[0]).toMatchObject({ status: "done", verify_result: { command: "sh check.sh", ok: true, exitCode: 0 } })
+  })
+
+  test.each([0, 1])("approved unit offers explicit in-place recovery without a first commit; choice %j", async choice => {
+    execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/unborn-recovery"], { cwd: wt.worktree })
+    writeFileSync(join(wt.worktree, "check.sh"), "test -f implemented.txt\n")
+    let workers = 0
+    const approval = () => {
+      const wf = committed()!
+      if (wf.kind !== "ultragoal") throw new Error("expected ultragoal")
+      return approveUnitConfirmation(wf.id, ultragoalDataOf(wf).pending!.subject.sha256)
+    }
+    const script = fullScript()
+    script["ug.decompose"] = [JSON.stringify({ type: "goals", goals: [{ title: "One", objective: "First change" }, { title: "Two", objective: "Second change" }] })]
+    script["ug.unit_plan"] = [stage.unitPlan, stage.unitPlan]
+    script["ug.unit_review"] = [stage.critic, stage.critic]
+    const s = await session({
+      script,
+      isolate: true,
+      lines: ["/skill:ultragoal build the widget", approval, ...(choice === 0 ? [approval] : []), "/quit"],
+      choices: [choice, 0],
+      worker: request => {
+        workers++
+        expect(request.cwd).toBe(wt.worktree)
+        writeFileSync(join(request.cwd, "implemented.txt"), "done\n")
+        return { status: "completed", text: "Open issues: none" }
+      },
+    })
+    expect(s.chooses.filter(item => item.title.includes("Plan worktree unavailable"))).toHaveLength(choice === 0 ? 2 : 1)
+    expect(workers).toBe(choice === 0 ? 2 : 0)
+    expect(committed()?.phase).toBe(choice === 0 ? "done" : "cancelled")
   })
 
   test("starting ultragoal with a new request preserves the pending plan", async () => {

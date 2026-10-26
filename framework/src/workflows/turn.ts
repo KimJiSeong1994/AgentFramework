@@ -6,6 +6,7 @@
 // a stale binding yields a diagnostic result only, and late model output is never a state transition. The model returns
 // typed stage events (parseStageEvents); lifecycle, owner and receipt fields are rejected outright.
 import { randomUUID } from "node:crypto"
+import { hasPlanWorktreeState, reopenPlanWorktree } from "../orchestration/worktree.ts"
 import { assertHostAdmission } from "../hosts/required-controls.ts"
 import { beginExecutionActivity } from "../hosts/runtime.ts"
 import { adoptForeignStop, observeStopSettlement } from "../flow/runtime.ts"
@@ -38,6 +39,8 @@ export type TurnBudget = { maxChars: number; reserveChars: number }
 
 export type TurnRequest = {
   title: string
+  /** Code-owned requirement: never fall back to the checkout if an existing workflow tree disappears. */
+  requirePlanWorktree?: boolean
   /** Full request text. It MUST begin with the bound prompt text. */
   text: string
   budget: TurnBudget
@@ -247,7 +250,14 @@ async function dispatch(runtime: ExecutionRuntime, input: Dispatch): Promise<Tur
   const executionID = randomUUID()
   const attemptID = randomUUID()
   const policy = runtime.policy.resolve(binding.role)
-  const cwd = runtime.worktree
+  // State/receipts remain rooted in the source checkout. Code tools inspect the authenticated
+  // cumulative implementation tree once an ultragoal has begun isolated execution.
+  let cwd = runtime.worktree
+  if (binding.kind === "ultragoal" && binding.workflowID && (request.requirePlanWorktree || hasPlanWorktreeState(runtime.worktree, sessionID, binding.workflowID))) {
+    cwd = (await reopenPlanWorktree(runtime.worktree, sessionID, binding.workflowID, runtime.config.delegate.diff_exclude)).path
+    if (checkStale()) return { status: "diagnostic", reason: stale! }
+    if (signal?.aborted) throw new Error("conversation cancelled")
+  }
   const deadlineAt = Date.now() + runtime.config.delegate.task_ttl_ms
   const claim: ExecutionClaim = runtime.runs.claim(sessionID, runtime.instance, process.pid)
   let registered = false
@@ -473,6 +483,7 @@ async function executeWorkflowTurn(runtime: ExecutionRuntime, binding: TurnBindi
       const summaryPrompt = summarizerFor(binding.kind)
       const summaryText = `${summaryPrompt.text}${source}`
       const summarizeRequest: TurnRequest = {
+        requirePlanWorktree: request.requirePlanWorktree,
         title: `${request.title} (summarize)`, text: summaryText, budget: request.budget, label: request.label, cancelCause: request.cancelCause,
       }
       const summaryBinding: TurnBinding = { ...binding, prompt: summaryPrompt, role: summaryPrompt.role }

@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
+import { appendFileSync } from "node:fs"
+import { join } from "node:path"
 import { createPlanningTimingCollector, MAX_MODEL_TIMINGS, planningTiming, validPlanningTiming } from "../src/telemetry/planning.ts"
 import { openSession, replaySession } from "../src/sessions/store.ts"
 import { createCliProgressPresenter } from "../src/hosts/cli-progress.ts"
 import { restoreTranscript } from "../src/tui/session-transcript.ts"
 import { TranscriptModel } from "../src/tui/transcript-model.ts"
+import { TuiApp } from "../src/tui/app.ts"
+import { sessionDir } from "../src/state/store.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
 
 let wt: ReturnType<typeof tempGitWorktree>
@@ -67,4 +71,49 @@ test("timing records persist and replay without entering the restored conversati
   const restored = restoreTranscript(new TranscriptModel("timing_session"), replay.records)
   expect(restored.history).toEqual(["Plan this change."])
   store.release({ workflowQuiescent: true, evidence: "timing fixture complete", workflowID: null, revision: null })
+})
+
+test("hidden timing records do not consume conversation pages or search offsets", () => {
+  const store = openSession(wt.worktree, "timing_pages", { engine: "fixture", model: "fixture" })
+  const app = new TuiApp()
+  const ui = app as any
+  ui.dimensions = () => ({ columns: 100, rows: 30 })
+  ui.driver.write = () => {}
+  try {
+    store.append("user", { text: "Previous question" }, "question")
+    store.append("assistant", { text: "Previous answer" }, "answer")
+    for (let i = 0; i < 200; i++) store.append("timing", planningTiming("workflow", workflow)!)
+    const visible = { excludeKinds: ["timing"] as const, limit: 1 }
+    const latest = replaySession(wt.worktree, store.sessionID, { ...visible, order: "desc" })
+    expect(latest).toMatchObject({ complete: true, totalRecords: 202, nextOffset: 1, records: [{ eventID: "answer" }] })
+    const previous = replaySession(wt.worktree, store.sessionID, { ...visible, order: "desc", offset: latest.nextOffset })
+    expect(previous.records.map(record => record.eventID)).toEqual(["question"])
+    expect(previous.nextOffset).toBeUndefined()
+    expect(replaySession(wt.worktree, store.sessionID, { ...visible, order: "asc" }).records[0]?.eventID).toBe("question")
+    expect(replaySession(wt.worktree, store.sessionID, { ...visible, query: "Previous answer" }).records[0]?.eventID).toBe("answer")
+    expect(replaySession(wt.worktree, store.sessionID, { ...visible, query: "completed" }).records).toEqual([])
+    expect(replaySession(wt.worktree, store.sessionID, { kind: "timing", limit: 300 }).records).toHaveLength(200)
+    expect(() => replaySession(wt.worktree, store.sessionID, { excludeKinds: ["invalid"] as never })).toThrow("invalid transcript kind filter")
+    app.bindSession(store.sessionID)
+    app.transcriptSource(options => replaySession(wt.worktree, store.sessionID, options))
+    ui.draw()
+    expect(ui.renderedTranscript.join("\n")).toContain("Previous answer")
+    expect(app.draftSnapshot().draft).toBe("")
+    expect(ui.editor.history).toEqual(["Previous question"])
+  } finally {
+    app.close()
+    store.release({ workflowQuiescent: true, evidence: "timing pagination fixture complete", workflowID: null, revision: null })
+  }
+})
+
+test("excluding timing from display still rejects a corrupt timing record", () => {
+  const store = openSession(wt.worktree, "timing_corruption", { engine: "fixture", model: "fixture" })
+  store.append("assistant", { text: "Valid answer" })
+  store.release({ workflowQuiescent: true, evidence: "timing integrity fixture complete", workflowID: null, revision: null })
+  appendFileSync(join(sessionDir(wt.worktree, store.sessionID), "segments000001.jsonl"), JSON.stringify({
+    seq: 2, eventID: "corrupt-timing", kind: "timing", data: { ...planningTiming("workflow", workflow), durationMs: -1 },
+  }) + "\n")
+  for (const order of ["asc", "desc"] as const) {
+    expect(replaySession(wt.worktree, store.sessionID, { order, excludeKinds: ["timing"] }).complete).toBe(false)
+  }
 })

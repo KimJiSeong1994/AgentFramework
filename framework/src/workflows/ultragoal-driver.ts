@@ -5,6 +5,7 @@
 // only when every goal's checkpoint proof re-verifies in the commit transaction.
 import { join, resolve } from "node:path"
 import { currentOwner } from "../flow/owner.ts"
+import { hasPlanWorktreeState, planWorktreeScope, worktreeRoot } from "../orchestration/worktree.ts"
 import { canonicalPlanJson, coercePlan, planToTasks, UNIT_LIMITS, validatePlan, type Plan } from "../flow/plan.ts"
 import { insertApprovedUnitTasks } from "../flow/runtime.ts"
 import { assertFlowTxWorktree, newWorkflowId, readAnyWorkflowForWrite, rotate, withFlowTransaction, workflowReadError } from "../flow/state.ts"
@@ -167,6 +168,28 @@ function goalOf(worktree: string, wf: UltragoalWorkflow, goalId: string): { id: 
   return goal
 }
 
+/** Prior execution evidence can require an existing tree, but never authorize a directory. */
+function requiresPlanWorktree(runtime: Pick<ExecutionRuntime, "worktree" | "runs">, wf: UltragoalWorkflow): boolean {
+  const root = runtime.worktree
+  if (hasPlanWorktreeState(root, wf.sessionID, wf.id)) return true
+  const data = ultragoalDataOf(wf)
+  let required = false
+  for (const progress of Object.values(data.progress)) {
+    for (const key of new Set([progress.lastCheckpoint, progress.lastAttemptCheckpoint])) {
+      if (!key) continue
+      const checkpoint = JSON.parse(readRecordedText(root, wf, key)) as CheckpointDoc
+      if (checkpoint.worktree.isolatedAs) required = true
+    }
+  }
+  // Before the first checkpoint exists, queue intents still bind the dispatched task to its tree.
+  const tasks = new Set(data.current?.taskIds ?? [])
+  const expected = join(worktreeRoot(root), wf.sessionID, planWorktreeScope(wf.id))
+  required ||= runtime.runs.status().executions.some(execution => execution.ownerSession === wf.sessionID &&
+    tasks.has(execution.taskId) && execution.cwd === expected && execution.hostDispatch === "started")
+  if (required) throw new Error("workflow implementation worktree is missing; isolated execution cannot be reviewed in the source checkout")
+  return false
+}
+
 /** What the model is shown for this step. Every file read is hash-verified; a changed file fails the stage visibly. */
 export function buildTurn(runtime: Pick<ExecutionRuntime, "worktree">, wf: UltragoalWorkflow): TurnPlan {
   const worktree = runtime.worktree
@@ -317,8 +340,6 @@ function blocked(wf: UltragoalWorkflow, reason: string): UltragoalRunResult {
   return { status: wf.phase === "stuck" ? "stuck" : "blocked", wf, reason }
 }
 
-const STOP_TEXT = /pause|cancel|stop/i
-
 /**
  * Run the workflow until it needs a human (unit approval), finishes or gets stuck. Every iteration re-reads the committed
  * state, so a pause, cancel, revision change or foreign write turns the next step into `stale`/`blocked` without
@@ -353,6 +374,8 @@ export async function runUltragoal(
     }
 
     if (step.kind === "verify") {
+      requiresPlanWorktree(runtime, current)
+
       const outcome = commitUltragoal(worktree, current, fresh => {
         const found = ultragoalDataOf(fresh).current!
         const ledger = readLedger(worktree, fresh.sessionID)
@@ -378,6 +401,8 @@ export async function runUltragoal(
     }
 
     if (step.kind === "checkpoint") {
+      requiresPlanWorktree(runtime, current)
+
       const outcome = commitUltragoal(worktree, current, fresh => {
         const data = ultragoalDataOf(fresh)
         const found = data.current!
@@ -399,7 +424,8 @@ export async function runUltragoal(
 
     // model turn
     let turn: TurnPlan
-    try { turn = buildTurn(runtime, current) }
+    let requirePlanWorktree: boolean
+    try { requirePlanWorktree = requiresPlanWorktree(runtime, current); turn = buildTurn(runtime, current) }
     catch (error) {
       const failed = failureCommit(runtime, current, `context unavailable: ${(error as Error).message}`, true)
       if (!failed.ok) return { status: "stale", wf: current, reason: failed.text }
@@ -413,6 +439,7 @@ export async function runUltragoal(
     let result: Awaited<ReturnType<typeof runWorkflowTurn>>
     try {
       result = await runWorkflowTurn(runtime, binding, {
+        requirePlanWorktree,
         title: `ultragoal ${turn.stage}`, text: turn.context.text, budget: ULTRAGOAL_TURN_BUDGET, label: "ultragoal",
         cancelCause: `ultragoal ${turn.stage} cancelled`, compact: { source: turn.context.source, rebuild: turn.context.rebuild },
       }, options.signal)
@@ -457,7 +484,7 @@ async function executeUnit(runtime: ExecutionRuntime, controller: UnitController
   catch (error) {
     const message = (error as Error).message ?? String(error)
     const after = committedUltragoal(runtime, current.sessionID, current.id)
-    if (!STOP_TEXT.test(message)) {
+    if (!options.signal?.aborted && (typeof after === "string" || (!after.stopIntent && after.phase !== "paused" && !TERMINAL.has(after.phase)))) {
       // Not a stop: record a visible stuck at unit_execute (recording mode is not needed; no stop is pending).
       if (typeof after !== "string" && after.stage === "unit_execute" && after.phase === "executing" && !after.stopIntent) {
         const stuck = commitUltragoal(worktree, after, fresh => reduce(fresh, { type: "runner_failed", reason: message }))

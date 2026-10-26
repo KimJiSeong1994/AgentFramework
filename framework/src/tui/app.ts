@@ -270,7 +270,7 @@ export class TuiApp implements Terminal {
   private reloadTranscript(restoreDraft = false): void {
     if (!this.source) return
     try {
-      const replay = this.source({ order: "desc", offset: this.pageOffset, limit: this.pageSize, query: this.transcriptQuery })
+      const replay = this.source({ order: "desc", offset: this.pageOffset, limit: this.pageSize, query: this.transcriptQuery, excludeKinds: ["timing"] })
       if (!replay.complete) throw new Error("Transcript replay incomplete; session remains held.")
       const model = new TranscriptModel(this.transcript.sessionID)
       const ordinalFor = (executionID: string, callID: string) => this.ordinalFor(executionID, callID)
