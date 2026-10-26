@@ -327,10 +327,16 @@ function sameStat(a: FdStat, b: FdStat): boolean {
     a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs
 }
 
-function assertPathStillNamesDirectory(directory: FdDirectory): void {
+/** A root's parent anchors its pathname; its unrelated children are outside the snapshot. */
+function sameDirectoryIdentity(a: FdStat, b: FdStat): boolean {
+  return a.dev === b.dev && a.ino === b.ino && a.mode === b.mode
+}
+
+function assertPathStillNamesDirectory(directory: FdDirectory, identityOnly = false): void {
   try {
     const named = fromNodeStat(lstatSync(directory.path, { bigint: true }))
-    if (modeKind(named.mode) !== "directory" || !sameStat(named, nativeFstat(directory.fd))) {
+    const compare = identityOnly ? sameDirectoryIdentity : sameStat
+    if (modeKind(named.mode) !== "directory" || !compare(named, nativeFstat(directory.fd))) {
       throw new FdTreeError("race", `directory path no longer names its held fd: ${directory.path}`)
     }
   } catch (error) {
@@ -339,7 +345,7 @@ function assertPathStillNamesDirectory(directory: FdDirectory): void {
   }
 }
 
-function validateLayout(fd: number): void {
+function validateLayout(fd: number, identityOnly = false): void {
   const nativeStat = nativeFstat(fd)
   let nodeStat: FdStat
   try {
@@ -347,7 +353,8 @@ function validateLayout(fd: number): void {
   } catch (error) {
     throw new FdTreeError("unsupported", `Node cannot validate native fstat layout: ${error instanceof Error ? error.message : String(error)}`)
   }
-  if (!sameStat(nativeStat, nodeStat)) {
+  const compare = identityOnly ? sameDirectoryIdentity : sameStat
+  if (!compare(nativeStat, nodeStat)) {
     throw new FdTreeError("unsupported", `native stat layout validation failed for ${PROFILE.name}`)
   }
 }
@@ -549,11 +556,12 @@ export class FdTree {
       anchorFd = native.openat(PROFILE.atFdcwd, ptr(pathBytes(parentPath)), PROFILE.oDirectory | PROFILE.oNoFollow | PROFILE.oCloexec, 0)
       if (anchorFd < 0) throw mapErrno(errnoNumber(), "open trusted root parent failed")
       try {
-        validateLayout(anchorFd)
+        // The root itself below still validates the complete layout and content metadata.
+        validateLayout(anchorFd, true)
         const parentStat = nativeFstat(anchorFd)
         const nodeParent = fromNodeStat(fstatSync(anchorFd, { bigint: true }))
         const parentAfter = fromNodeStat(lstatSync(parentPath, { bigint: true }))
-        if (!sameStat(parentBefore, parentStat) || !sameStat(parentStat, nodeParent) || !sameStat(parentAfter, parentStat)) {
+        if (!sameDirectoryIdentity(parentBefore, parentStat) || !sameDirectoryIdentity(parentStat, nodeParent) || !sameDirectoryIdentity(parentAfter, parentStat)) {
           throw new FdTreeError("race", "trusted root parent changed while opening")
         }
         anchor = Object.freeze({ fd: anchorFd, path: parentPath, stat: parentStat, name })
@@ -639,8 +647,10 @@ export class FdTree {
     this.#assertOpen()
     for (const directory of this.#directories.slice(checkpoint.directoryIndex)) {
       directory.assertOpen()
-      assertPathStillNamesDirectory(directory)
-      if (!sameStat(directory.openedStat, nativeFstat(directory.fd))) throw new FdTreeError("race", `held directory changed: ${directory.path}`)
+      const isAnchor = directory === this.root.parent
+      const compare = isAnchor ? sameDirectoryIdentity : sameStat
+      assertPathStillNamesDirectory(directory, isAnchor)
+      if (!compare(directory.openedStat, nativeFstat(directory.fd))) throw new FdTreeError("race", `held directory changed: ${directory.path}`)
       if (directory.parent && directory.name && !sameStat(directory.openedStat, nativeFstatat(directory.parent.fd, directory.name))) {
         throw new FdTreeError("race", `directory path changed: ${directory.relativePath}`)
       }
@@ -914,9 +924,11 @@ export class FdTree {
     this.#assertOpen()
     for (const directory of this.#directories) {
       directory.assertOpen()
-      assertPathStillNamesDirectory(directory)
+      const isAnchor = directory === this.root.parent
+      const compare = isAnchor ? sameDirectoryIdentity : sameStat
+      assertPathStillNamesDirectory(directory, isAnchor)
       const openedNow = nativeFstat(directory.fd)
-      if (!sameStat(directory.openedStat, openedNow)) throw new FdTreeError("race", `held directory changed: ${directory.path}`)
+      if (!compare(directory.openedStat, openedNow)) throw new FdTreeError("race", `held directory changed: ${directory.path}`)
       if (directory.parent && directory.name) {
         const namedNow = nativeFstatat(directory.parent.fd, directory.name)
         if (!sameStat(directory.openedStat, namedNow)) throw new FdTreeError("race", `directory path changed: ${directory.relativePath}`)

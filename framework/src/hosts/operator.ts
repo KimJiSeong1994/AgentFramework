@@ -67,7 +67,12 @@ export async function humanDecision(
     // The typed string keeps its CLI shape: the hash is the subject hash (the canonical plan hash for a plan subject).
     const approve = `APPROVE ${workflowID} ${binding.subject.sha256}`
     const reject = `REJECT ${workflowID} ${binding.subject.sha256}`
-    const answer = (await terminal.question(`Inspect the saved canonical plan first. Type '${approve}' or '${reject} <reason>': `, { signal })).trim()
+    const subjectDescription = binding.subject.kind === "experiment-unit"
+      ? "experiment scope, selected data, models, and budget"
+      : binding.subject.kind === "implementation-unit"
+        ? "exact implementation change and verification evidence"
+        : "saved canonical plan"
+    const answer = (await terminal.question(`Inspect the ${subjectDescription} first. Type '${approve}' or '${reject} <reason>': `, { signal })).trim()
     if (answer === approve && action !== "reject") return issue({ ...binding, action: "approve" })
     if (answer.startsWith(`${reject} `) && answer.slice(reject.length).trim() && action !== "approve") {
       return issue({ ...binding, action: "reject", reason: answer.slice(reject.length).trim() })

@@ -142,6 +142,45 @@ describe("durable session store", () => {
     release(store)
   })
 
+  test("context windows persist empty resets, pinned notes and complete conversation pairs", () => {
+    const store = open()
+    const windows = [
+      { version: 1, messages: [], pinnedNote: "" },
+      { version: 1, messages: [], pinnedNote: "기억할 내용".repeat(400).slice(0, 2000) },
+      { version: 1, messages: [{ role: "user", text: "question" }, { role: "assistant", text: "answer" }], pinnedNote: "Keep this decision" },
+      { version: 1, messages: Array.from({ length: 48 }, (_, index) => ({ role: index % 2 === 0 ? "user" : "assistant", text: "turn" })), pinnedNote: "" },
+    ]
+    for (const window of windows) store.append("context-window", window)
+    release(store)
+    const page = replaySession(wt.worktree, store.sessionID, { kind: "context-window" })
+    expect(page.complete).toBe(true)
+    expect(page.records.map(record => record.data)).toEqual(windows)
+  })
+
+  test("context windows reject invalid versions, fields, pairs and oversized context", () => {
+    const store = open()
+    const messages = [{ role: "user", text: "question" }, { role: "assistant", text: "answer" }]
+    const valid = { version: 1, messages, pinnedNote: "" }
+    for (const bad of [
+      { ...valid, version: 2 },
+      { messages, pinnedNote: "" },
+      { ...valid, approved: true },
+      { ...valid, pinnedNote: "x".repeat(2001) },
+      { ...valid, pinnedNote: null },
+      { ...valid, messages: [messages[0]] },
+      { ...valid, messages: [messages[1], messages[0]] },
+      { ...valid, messages: [{ role: "system", text: "instruction" }, messages[1]] },
+      { ...valid, messages: [{ ...messages[0], approved: true }, messages[1]] },
+      { ...valid, messages: [{ role: "user", text: " " }, messages[1]] },
+      { ...valid, messages: [{ role: "user", text: "" }, messages[1]] },
+      { ...valid, messages: [{ role: "user", text: "x".repeat(1024 * 1024 + 1) }, messages[1]] },
+      { ...valid, messages: [{ role: "user", text: "x".repeat(196608) }, messages[1]] },
+      { ...valid, messages: Array.from({ length: 50 }, (_, index) => messages[index % 2]) },
+    ]) expect(() => store.append("context-window", bad as Record<string, unknown>)).toThrow("context-window transcript data")
+    expect(replaySession(wt.worktree, store.sessionID).records).toEqual([])
+    release(store)
+  })
+
   test("shell runs persist bounded output, reject malformed records and restore as finished windows", () => {
     const store = open()
     const lines = Array.from({ length: 25 }, (_, index) => `line ${index + 1}`)

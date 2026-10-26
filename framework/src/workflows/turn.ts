@@ -60,12 +60,13 @@ export type TurnResult =
 
 const MAX_LATE_TEXT = 2_000
 
-export type ModelRequestFailureCategory = "model_failed" | "empty_response" | "response_budget"
+export type ModelRequestFailureCategory = "model_failed" | "empty_response" | "response_budget" | "input_budget"
 
 const MODEL_REQUEST_DIAGNOSTICS: Readonly<Record<ModelRequestFailureCategory, string>> = {
   model_failed: "The model request failed after execution stopped. Check the selected model or CLI, then submit the draft again manually.",
   empty_response: "The model returned no usable response after execution stopped. Review the draft, then submit it again manually.",
   response_budget: "The model response exceeded the configured response budget. Shorten the draft, then submit it again manually.",
+  input_budget: "The request exceeds the conversation context budget. This conversation request was not sent to the model. Shorten the draft or skill instructions; for local models, review /context status, /context unpin or /context budget, then submit again manually.",
 }
 /**
  * Why a host execution failed, from its fixed failure string (never provider text). Lets a user and the telemetry tell
@@ -79,6 +80,7 @@ export type HostFailureReason =
 const HOST_FAILURE_PATTERNS: ReadonlyArray<readonly [RegExp, HostFailureReason]> = [
   [/^Claude CLI login required; run claude auth login$/u, "auth_required"],
   [/^Codex (?:native profile verification failed|private profile state verification failed|version\/profile probe refused inference)$/u, "profile_version"],
+  [/^native runtime identity verification failed$/u, "profile_version"],
   [/^native tool activity refused$/u, "native_tool_refused"],
   [/^invalid native CLI output$|^native CLI result incomplete$/u, "invalid_native_output"],
   [/^native CLI process failed$/u, "process_failure"],
@@ -113,13 +115,13 @@ const HOST_FAILURE_HINTS: Readonly<Partial<Record<HostFailureReason, string>>> =
   deadline: "The request ran out of time.",
   transport: "The model CLI did not complete the request.",
   auth_required: "Claude CLI authentication is required. Run claude auth login.",
-  profile_version: "The Codex CLI version or native profile could not be verified.",
+  profile_version: "The CLI runtime or native profile could not be verified.",
   native_tool_refused: "Otter refused unexpected native CLI tool activity.",
   invalid_native_output: "The native CLI returned invalid or incomplete output.",
   process_failure: "The native CLI process failed before completing the request.",
 }
 
-/** Issued only after settlement; the display diagnostic is fixed, not provider text. */
+/** Issued before dispatch or after settlement; the display diagnostic is fixed, not provider text. */
 export class ModelRequestError extends Error {
   readonly category: ModelRequestFailureCategory
   readonly diagnostic: string

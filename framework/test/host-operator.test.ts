@@ -49,16 +49,20 @@ test("plain marker objects, spreads, and JSON copies cannot be consumed", async 
 })
 
 const ptyEnvironment = { PATH: process.env.PATH ?? "/usr/bin:/bin", TERM: "dumb" }
-const hasPythonPty = spawnSync("python3", ["-c", "import pty"], {
+const hasPythonPty = spawnSync("python3", ["-I", "-S", "-B", "-c", "import pty"], {
   env: ptyEnvironment, timeout: 2_000,
 }).status === 0
 if (!hasPythonPty) console.warn("Operator PTY verification not run: Python pty is unavailable")
 
-test.skipIf(!hasPythonPty)("real pseudo-terminal subprocess issues a terminal-bound receipt", () => {
+test.skipIf(!hasPythonPty).each([
+  ["plan", "saved canonical plan"],
+  ["experiment-unit", "experiment scope, selected data, models, and budget"],
+  ["implementation-unit", "exact implementation change and verification evidence"],
+] as const)("real pseudo-terminal binds a %s receipt to its displayed scope", (subjectKind, description) => {
   const operatorPath = fileURLToPath(new URL("../src/hosts/operator.ts", import.meta.url))
   const source = `
 const { humanDecision, consumeOperatorDecision } = await import(${JSON.stringify(operatorPath)});
-const receipt = await humanDecision("approve", { sessionID: "ses_pty", workflowID: "wf_pty", expectedRevision: 3, subject: { kind: "plan", id: "wf_pty", sha256: "sha_pty" } });
+const receipt = await humanDecision("approve", { sessionID: "ses_pty", workflowID: "wf_pty", expectedRevision: 3, subject: { kind: ${JSON.stringify(subjectKind)}, id: "wf_pty", sha256: "sha_pty" } });
 console.log("RESULT:" + JSON.stringify(consumeOperatorDecision(receipt)));
 `
   const harness = `
@@ -107,16 +111,17 @@ sys.exit(os.waitstatus_to_exitcode(status))
 `
   const cwd = mkdtempSync(join(tmpdir(), "otter-operator-pty-"))
   try {
-    const result = spawnSync("python3", ["-c", harness, process.execPath, source], {
+    const result = spawnSync("python3", ["-I", "-S", "-B", "-c", harness, process.execPath, source], {
       cwd, env: ptyEnvironment, encoding: "utf8", timeout: 5_000,
     })
     if (result.error || result.status !== 0) {
       throw new Error(`PTY fixture failed: ${result.error?.message ?? result.status}\n${result.stderr}\n${result.stdout}`)
     }
     const match = result.stdout.match(/RESULT:(\{[^\r\n]+\})/)
+    expect(result.stdout).toContain(`Inspect the ${description} first.`)
     expect(match).not.toBeNull()
     expect(JSON.parse(match![1]!)).toMatchObject({
-      action: "approve", sessionID: "ses_pty", workflowID: "wf_pty", expectedRevision: 3, subject: { kind: "plan", id: "wf_pty", sha256: "sha_pty" },
+      action: "approve", sessionID: "ses_pty", workflowID: "wf_pty", expectedRevision: 3, subject: { kind: subjectKind, id: "wf_pty", sha256: "sha_pty" },
     })
   } finally {
     rmSync(cwd, { recursive: true, force: true })

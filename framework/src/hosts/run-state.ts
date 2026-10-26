@@ -14,6 +14,10 @@ export type ExecutionIntent = {
   engine?: string
   profile?: VerificationProfile
   controlProfile?: ControlProfile
+  /** A native CLI request with a code-owned identity and no invented provider reference. */
+  nativeExecution?: true
+  /** Narrow main-role load-canary marker; policy identity remains the runtime's opaque ID. */
+  nativeLoadCanary?: true
   inputSnapshotID?: string
   inputDigest?: string
   deadlineAt?: number
@@ -57,6 +61,7 @@ export interface ExecutionRunStore {
   claim(ownerSession: string, instance: string, pid: number): ExecutionClaim
   registerIntent(claim: ExecutionClaim, execution: ExecutionIntent): void
   bindVendorRef(claim: ExecutionClaim, executionId: string, vendorRef: string): void
+  bindNativeExecutionRef(claim: ExecutionClaim, executionId: string): void
   bindVerifierRef(claim: ExecutionClaim, executionId: string, reference: VerificationReference): void
   markVerifierDispatched(claim: ExecutionClaim, executionId: string): void
   markHostDispatched(claim: ExecutionClaim, executionId: string): void
@@ -155,6 +160,20 @@ export function persistedHostReference(record: ExecutionRecord): ExecutionRefere
     !isDeepStrictEqual(reference, record.boundaryRef)) return undefined
   return reference
 }
+
+/** The exact local execution ID is durable identity, not a vendor ID or restart quiescence proof. */
+function persistedNativeExecutionReference(record: ExecutionRecord): ExecutionReference | undefined {
+  if (record.nativeExecution !== true || record.kind !== "host" || record.profile !== "legacy-unowned" ||
+      (record.engine !== "codex" && record.engine !== "claude") ||
+      record.controlProfile !== "estimated-input-reactive-output-v1" || !text(record.vendorRef)) return undefined
+  const expected = { executionID: record.executionId }
+  try {
+    const parsed: unknown = JSON.parse(record.vendorRef)
+    if (!object(parsed) || Object.keys(parsed).length !== 1 || parsed.executionID !== record.executionId ||
+        !record.boundaryRef || !isDeepStrictEqual(parsed, expected) || !isDeepStrictEqual(record.boundaryRef, expected)) return undefined
+    return expected
+  } catch { return undefined }
+}
 export function assertPreparedHostReference(value: unknown, executionID: string): asserts value is ExecutionReference {
   if (!object(value) || value.executionID !== executionID) {
     throw new TypeError("execution host returned an invalid reference")
@@ -210,6 +229,16 @@ const recordShape = (value: unknown): value is ExecutionRecord => {
   if (("kind" in value || "profile" in value) &&
     ((value.kind !== "host" && value.kind !== "verifier") || !profileShape(value.profile))) return false
   if ("controlProfile" in value && (value.kind !== "host" || value.controlProfile !== "estimated-input-reactive-output-v1")) return false
+  if ("nativeLoadCanary" in value && (value.nativeLoadCanary !== true || value.nativeExecution !== true)) return false
+  if ("nativeExecution" in value) {
+    if (value.nativeExecution !== true || value.kind !== "host" || value.profile !== "legacy-unowned" ||
+        (value.engine !== "codex" && value.engine !== "claude") || value.controlProfile !== "estimated-input-reactive-output-v1") return false
+    if (value.nativeLoadCanary === true) {
+      if (value.role !== "main" || value.taskId !== `skillopt:target:canary:${value.executionId}` ||
+          !integer(value.deadlineAt) || value.maxOutputChars !== 32 * 1024) return false
+    } else if (!["target", "optimizer", "reviewer"].includes(value.role as string) ||
+        !nativeTaskIDShape(value) || !/^skillopt-native-v1:[a-f0-9]{64}$/.test(value.policyID as string)) return false
+  }
   if (value.kind === "host" && !text(value.engine)) return false
   if (value.kind === "verifier" && "engine" in value) return false
   if (value.kind === "verifier" && (!text(value.inputSnapshotID) || typeof value.inputDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.inputDigest) ||
@@ -218,10 +247,12 @@ const recordShape = (value: unknown): value is ExecutionRecord => {
     Object.keys(x).length === 9 && (x.workflowID === null || text(x.workflowID)) && (x.revision === null || (typeof x.revision === "number" && Number.isSafeInteger(x.revision) && x.revision >= 0)) &&
     text(x.kind) && text(x.stage) && text(x.role) && typeof x.promptSha === "string" && /^[a-f0-9]{64}$/.test(x.promptSha) &&
     text(x.attemptId) && text(x.supervisorSessionID) && (x.epoch === null || text(x.epoch)))) return false
-  if (value.kind !== "verifier" && ["inputSnapshotID", "inputDigest", "deadlineAt", "maxOutputChars"].some(key => key in value)) return false
+  if (value.kind !== "verifier" && (["inputSnapshotID", "inputDigest"].some(key => key in value) ||
+      (value.nativeLoadCanary !== true && ["deadlineAt", "maxOutputChars"].some(key => key in value)))) return false
   if (!optional(value, "boundaryRef", x => value.kind === "host" ? hostRefShape(x) && x.executionID === value.executionId :
     value.kind === "verifier" && verifierRefShape(x) && x.executionID === value.executionId && x.profile === value.profile &&
     x.inputSnapshotID === value.inputSnapshotID && x.inputDigest === value.inputDigest && x.deadlineAt === value.deadlineAt && x.maxOutputChars === value.maxOutputChars)) return false
+  if (value.nativeExecution === true && value.vendorRef !== undefined && !persistedNativeExecutionReference(value as ExecutionRecord)) return false
   if (!optional(value, "descendantRisk", x => value.kind === "verifier" && value.profile === "legacy-unowned" && x === "unproven")) return false
   if (value.kind === "verifier" && value.profile === "legacy-unowned" && value.descendantRisk !== "unproven") return false
   if (value.kind === "verifier" && ("vendorRef" in value || "processRisk" in value)) return false
@@ -243,6 +274,14 @@ const recordShape = (value: unknown): value is ExecutionRecord => {
   return optional(value, "reconciliation", x => object(x) && (x.outcome === "running" || x.outcome === "terminal" || x.outcome === "unknown") && typeof x.quiescent === "boolean" && (!x.quiescent || x.outcome === "terminal") && text(x.evidence) && timestamp(x.at) &&
     optional(x, "verification", y => verificationShape(y) && validProof(value as ExecutionRecord, y) && (value.kind !== "verifier" || y.output.length <= (value.maxOutputChars as number))) &&
     (!x.quiescent || value.kind !== "verifier" || (verificationShape(x.verification) && verifiedBoundary(value as ExecutionRecord, x.verification))))
+}
+function nativeTaskIDShape(value: Record<string, unknown>): boolean {
+  if (typeof value.taskId !== "string" || typeof value.executionId !== "string" || typeof value.role !== "string") return false
+  const prefix = `skillopt:${value.role}:`
+  const suffix = `:${value.executionId}`
+  if (!value.taskId.startsWith(prefix) || !value.taskId.endsWith(suffix)) return false
+  const phase = value.taskId.slice(prefix.length, value.taskId.length - suffix.length)
+  return ["train", "dev", "final", "safety", "canary"].includes(phase)
 }
 
 /** Claim-specific pid liveness semantics, shared with read-only status projection. */
@@ -426,7 +465,7 @@ export function createExecutionRunStore(worktree: string): ExecutionRunStore {
       mutate(s => {
         validate(s, claim)
         const e = execution(s, id)
-        if (e.kind !== "host" || !hostRefShape(parsed) || parsed.executionID !== id || !hostReferenceHasVendorID(parsed)) {
+        if (e.kind !== "host" || e.nativeExecution === true || !hostRefShape(parsed) || parsed.executionID !== id || !hostReferenceHasVendorID(parsed)) {
           throw new TypeError("invalid host reference")
         }
         const nextReference = parsed
@@ -460,6 +499,22 @@ export function createExecutionRunStore(worktree: string): ExecutionRunStore {
         return true
       }, changed => changed)
     },
+    bindNativeExecutionRef(claim, id) {
+      bounded(id, "executionID")
+      mutate(state => {
+        validate(state, claim)
+        const e = execution(state, id)
+        if (e.kind !== "host" || e.nativeExecution !== true || e.profile !== "legacy-unowned" ||
+            (e.engine !== "codex" && e.engine !== "claude") || e.controlProfile !== "estimated-input-reactive-output-v1" ||
+            e.generation !== claim.generation || e.ownerSession !== claim.ownerSession || e.hostDispatch !== undefined ||
+            e.vendorRef !== undefined || e.boundaryRef !== undefined || e.cancel || e.fence || e.terminal || e.reconciliation) {
+          throw new ExecutionRunUnresolvedError("native execution reference is not eligible for binding")
+        }
+        const reference: ExecutionReference = { executionID: id }
+        e.vendorRef = JSON.stringify(reference)
+        e.boundaryRef = reference
+      })
+    },
     bindVerifierRef(claim, id, reference) { mutate(s => { validate(s, claim); const e = execution(s, id); if (e.kind !== "verifier" || e.verifierDispatch !== "prepared" || e.terminal || !verifierRefShape(reference) || reference.executionID !== id || reference.profile !== e.profile || reference.inputSnapshotID !== e.inputSnapshotID || reference.inputDigest !== e.inputDigest || reference.deadlineAt !== e.deadlineAt || reference.maxOutputChars !== e.maxOutputChars || (e.boundaryRef && !sameBoundary(e, reference))) throw new TypeError("invalid verifier reference"); e.boundaryRef = { ...reference } }) },
     markVerifierDispatched(claim, id) {
       mutate(s => {
@@ -478,7 +533,7 @@ export function createExecutionRunStore(worktree: string): ExecutionRunStore {
         const e = execution(s, id)
         const referenceInvalid = e.vendorRef === undefined
           ? e.boundaryRef !== undefined
-          : !persistedHostReference(e)
+          : !persistedHostReference(e) && !persistedNativeExecutionReference(e)
         if (e.kind !== "host" || e.generation !== claim.generation || e.ownerSession !== claim.ownerSession ||
           referenceInvalid || e.cancel || e.fence || e.terminal || e.reconciliation || e.hostDispatch !== undefined) {
           throw new ExecutionRunUnresolvedError("host execution is not eligible for dispatch")

@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import type { CoreDeps } from "../src/deps.ts"
 import { activateSkillCampaign, listSkillObservations, skillObservationBindingHash } from "../src/telemetry/skills.ts"
+import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
 import { beginExecutionActivity, createExecutionRuntime } from "../src/hosts/runtime.ts"
 import type { ExecutionHost } from "../src/hosts/types.ts"
 import { tempWorktree } from "./guards-helpers.ts"
@@ -51,6 +52,58 @@ test("host factory receives the exact runtime policy and run store once without 
   expect(runtime.verificationProfile).toBe("legacy-unowned")
   expect(await runtime.verifier.preflight("legacy-unowned")).toEqual({ compatible: true, problems: [] })
   expect(runtime.linuxAdmission).toBeUndefined()
+})
+
+test("runtime forwards only the internal loader-canary instructions into the canonical main snapshot", () => {
+  const config = structuredClone(DEFAULT_CONFIG)
+  const before = JSON.stringify(config)
+  const instructions = "Code-owned loader-canary evaluator instructions."
+  const runtime = createExecutionRuntime(deps(config), () => host(), {
+    planningOnlyMain: true,
+    skillLoaderCanaryInstructions: instructions,
+  })
+  const snapshot = runtime.policy.resolve("main")
+  expect(runtime.policy.resolve("main")).toBe(snapshot)
+  expect(snapshot.system).toEqual(expect.arrayContaining([instructions]))
+  expect(snapshot.id).not.toBe(createExecutionRuntime(deps(config), () => host(), { planningOnlyMain: true }).policy.resolve("main").id)
+  expect(JSON.stringify(config)).toBe(before)
+})
+
+test("public CLI runtime binds only supplied loader-canary instructions to the canonical main policy", () => {
+  const configDirectory = join(wt.worktree, ".otter")
+  mkdirSync(configDirectory, { recursive: true })
+  const configPath = join(configDirectory, "otter.jsonc")
+  const configText = '{ "chat": { "execute": "plan" }, "models": { "main": "local/configured-model" } }\n'
+  writeFileSync(configPath, configText)
+  const instructions = "Code-owned evaluator instructions for this one native loader canary."
+  let transportCreations = 0
+  const createRuntime = (skillLoaderCanaryInstructions?: string) => createCliRuntime({
+    worktree: wt.worktree,
+    engine: "local",
+    model: "fixture-model",
+    createTransport() {
+      transportCreations++
+      throw new Error("policy construction must not create or dispatch a transport")
+    },
+    ...(skillLoaderCanaryInstructions === undefined ? {} : { skillLoaderCanaryInstructions }),
+  })
+
+  const ordinary = createRuntime()
+  const ordinaryAgain = createRuntime()
+  expect(ordinary.policy.resolve("main").system).toHaveLength(1)
+  expect(ordinary.policy.resolve("main").system[0]).not.toContain(instructions)
+  expect(ordinary.policy.resolve("main").id).toBe(ordinaryAgain.policy.resolve("main").id)
+
+  const witnessed = createRuntime(instructions)
+  const main = witnessed.policy.resolve("main")
+  expect(main).toBe(witnessed.policy.resolve("main"))
+  expect(main.system).toEqual([...ordinary.policy.resolve("main").system, instructions])
+  expect(main.id).not.toBe(ordinary.policy.resolve("main").id)
+  expect(witnessed.policy.resolve("worker")).toEqual(ordinary.policy.resolve("worker"))
+  expect(readFileSync(configPath, "utf8")).toBe(configText)
+  expect(transportCreations).toBe(0)
+  expect(() => createRuntime("\0")).toThrow("invalid skill loader canary instructions")
+  expect(transportCreations).toBe(0)
 })
 
 test("independent runtime factory calls are not cached and preserve verifier selection", async () => {

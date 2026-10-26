@@ -10,14 +10,12 @@
 
 ```sh
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/KimJiSeong1994/AgentFramework/master/install.sh | bash
-otter
+curl -fsSL https://raw.githubusercontent.com/KimJiSeong1994/AgentFramework/master/install.sh | bash otter
 ```
 
 ```powershell
 # Windows (PowerShell, WSL2 사용)
-irm https://raw.githubusercontent.com/KimJiSeong1994/AgentFramework/master/install.ps1 | iex
-otter
+irm https://raw.githubusercontent.com/KimJiSeong1994/AgentFramework/master/install.ps1 | iex otter
 ```
 
 ## 1. 실행 이력이 자산이 된다

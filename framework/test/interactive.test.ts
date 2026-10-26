@@ -3,8 +3,10 @@ import { spawnSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { PassThrough } from "node:stream"
+import * as readline from "node:readline/promises"
 import { launchInteractive, parseInteractiveArgs, validModelID, type InteractiveDependencies, type Terminal } from "../src/hosts/interactive.ts"
-import type { TerminalControl } from "../src/hosts/interactive-session.ts"
+import { defaultDependencies, type TerminalControl } from "../src/hosts/interactive-session.ts"
 import type { ShellResult } from "../src/hosts/operator-shell.ts"
 import type { EngineInfo } from "../src/hosts/engine-update.ts"
 import { createChatCheckpoints } from "../src/hosts/chat-checkpoint.ts"
@@ -31,13 +33,21 @@ import { humanDecision, type OperatorDecision } from "../src/hosts/operator.ts"
 import { planBinding, withTerminalLine } from "./operator-helpers.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
 import { DEFAULT_CONFIG } from "../src/config.ts"
-import { interactiveActions } from "../src/hosts/interactive-actions.ts"
+import {
+  NATIVE_FIXTURE_PACK_SCHEMA, NATIVE_PROTECTED_CHANGES, NATIVE_WIKI_CONTRACT,
+  NATIVE_WIKI_SPLIT_MINIMUMS, NATIVE_WIKI_SPLITS, NATIVE_WIKI_STRATA,
+} from "../src/skillopt/dataset.ts"
+import * as skillOptForegroundModule from "../src/skillopt/foreground.ts"
+import { SKILLOPT_FOREGROUND_INPUT_SCHEMA } from "../src/skillopt/foreground.ts"
+import * as cliTransportModule from "../src/hosts/cli-transport.ts"
+import { PILOT_SKILL } from "../src/skillopt/pilot.ts"
+import { interactiveActions, interactiveHelp, parseSkillOptCommand } from "../src/hosts/interactive-actions.ts"
 import type { ComboLookup, DefaultModelLookup } from "../src/hosts/default-model.ts"
 import type { AuthState } from "../src/hosts/engine-auth.ts"
 import { CODEX_SUPPORTED_VERSIONS } from "../src/hosts/codex-profile.ts"
 import { getOwnedSession, inspectSessionAttachment, openSession, replaySession, readSessionMetadata, type ReplayOptions, type ReplayResult } from "../src/sessions/store.ts"
 import { sessionDir } from "../src/state/store.ts"
-import type { ConversationMessage, SkillConversationInvocation } from "../src/hosts/plan-conversation.ts"
+import type { ConversationMessage, SkillConversationInvocation, ConversationContextState } from "../src/hosts/plan-conversation.ts"
 import type { SkillToolProvider } from "../src/hosts/types.ts"
 
 let wt: ReturnType<typeof tempGitWorktree>
@@ -55,8 +65,10 @@ type HarnessOptions = {
   fullscreen?: boolean
   scopeChoice?: number | null
   gitTopLevel?: string | undefined
-  beforeRead?: (prompt: string, signal?: AbortSignal) => void
+  beforeRead?: (prompt: string, signal?: AbortSignal, inputLines?: Array<string | undefined>) => void
+  onTurn?: (text: string) => void
   beforeWrite?: (text: string) => void
+  onTerminalSuspend?: () => void
   choose?: (title: string, choices: readonly string[], signal: AbortSignal, presentation?: ChoicePresentation) => Promise<number | undefined>
   beforeRun?: (signal?: AbortSignal) => void
   /** Plan-worktree fixture: `run`/`resume` report an isolated run and the controller exposes review/apply/discard. */
@@ -96,6 +108,8 @@ type HarnessOptions = {
   /** User skill policy (default: no trust, automatic selection off) and the automatic selector (default: abstain). */
   skillPolicy?: SkillTrustLookup
   selectSkill?: (input: AutoSkillSelectInput) => Promise<AutoSkillSelection> | AutoSkillSelection
+  /** Use a real CLI runtime for source-service routing tests; the fixture conversation still never invokes its host. */
+  useRealRuntime?: boolean
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -138,7 +152,7 @@ function harness(options: HarnessOptions = {}) {
     transcriptSources: Array<(options: ReplayOptions) => ReplayResult>
     queueAdmissions: boolean[]
     controllerCreations: number
-    conversationRestores: Array<{ sessionID: string; prior?: readonly ConversationMessage[] }>
+    conversationRestores: Array<{ sessionID: string; prior?: readonly ConversationMessage[]; pinnedNote?: string }>
     defaultModel: DefaultModelLookup
     defaultModelWrites: Array<{ engine: string; model: string } | null>
     combo: ComboLookup
@@ -160,7 +174,7 @@ function harness(options: HarnessOptions = {}) {
     fullscreen: options.fullscreen ?? false,
     readLine: async (prompt, signal) => {
       calls.prompts.push(prompt)
-      options.beforeRead?.(prompt, signal)
+      options.beforeRead?.(prompt, signal, lines)
       if (signal?.aborted) return undefined
       return lines.shift()
     },
@@ -179,7 +193,7 @@ function harness(options: HarnessOptions = {}) {
     transcriptSource: source => { calls.transcriptSources.push(source) },
     viewSnapshot: facts => { calls.viewFacts.push(facts) },
     write: (text) => { calls.output.push(text); options.beforeWrite?.(text) },
-    suspend: () => { calls.events.push("terminal.suspend") },
+    suspend: () => { calls.events.push("terminal.suspend"); options.onTerminalSuspend?.() },
     resume: () => { calls.events.push("terminal.resume") },
     close: () => { calls.events.push("terminal.close") },
   }
@@ -276,6 +290,10 @@ function harness(options: HarnessOptions = {}) {
       calls.runtime = selected
       calls.runtimes.push(selected)
       if (progress) calls.progressSinks.push(progress)
+      if (options.useRealRuntime) {
+        return createCliRuntime({ worktree, engine: engine as "local" | "codex" | "claude", model,
+          ...(progress ? { progress } : {}) })
+      }
       return {
         worktree,
         directory: worktree,
@@ -298,11 +316,11 @@ function harness(options: HarnessOptions = {}) {
       } as unknown as ExecutionRuntime
     },
     admitRuntime: async () => { calls.events.push("admitRuntime") },
-    createConversation: (runtime, sessionID, prior) => {
+    createConversation: (runtime, sessionID, prior, pinnedNote) => {
       calls.events.push("conversation")
       calls.sessionID = sessionID
       calls.sessionIDs.push(sessionID)
-      calls.conversationRestores.push({ sessionID, ...(prior ? { prior } : {}) })
+      calls.conversationRestores.push({ sessionID, ...(prior ? { prior } : {}), ...(pinnedNote ? { pinnedNote } : {}) })
       const selectedRuntime = runtime as ExecutionRuntime & { selectedEngine: string; selectedModel: string; progress?: CliProgressSink }
       if (options.failConversationFor?.(selectedRuntime.selectedEngine, selectedRuntime.selectedModel)) {
         throw new Error("fixture conversation setup failed")
@@ -312,6 +330,7 @@ function harness(options: HarnessOptions = {}) {
         turn: async (text, _signal, _skill, _skillTool, actionGate) => {
           calls.events.push("turn")
           calls.turns.push(text)
+          options.onTurn?.(text)
           calls.gates.push(actionGate)
           if (actionGate && options.onGate) await options.onGate(actionGate)
           calls.turnBindings.push({ engine: selectedRuntime.selectedEngine, model: selectedRuntime.selectedModel, sessionID, text })
@@ -415,6 +434,121 @@ function harness(options: HarnessOptions = {}) {
   }
 }
 
+function nativeAutomaticTestInput(root: string): { inputPath: string; sourceContent: string } {
+  const sourceContent = "PRIVATE_AUTOMATIC_POLL_SOURCE_SENTINEL\n"
+  const sourceHash = createHash("sha256").update(sourceContent).digest("hex")
+  const sourcePath = `knowledge/raw/documents/${sourceHash}.md`
+  const absoluteSource = join(root, sourcePath)
+  mkdirSync(dirname(absoluteSource), { recursive: true, mode: 0o700 })
+  writeFileSync(absoluteSource, sourceContent, { mode: 0o600 })
+  const skillPath = join(root, PILOT_SKILL)
+  mkdirSync(dirname(skillPath), { recursive: true, mode: 0o700 })
+  writeFileSync(skillPath, "# llm-wiki\n\nPrivate synthetic baseline for idle polling tests.\n", { mode: 0o600 })
+
+  const fixturePack = {
+    schema: NATIVE_FIXTURE_PACK_SCHEMA,
+    contract: NATIVE_WIKI_CONTRACT,
+    fixtures: NATIVE_WIKI_SPLITS.flatMap(split =>
+      Array.from({ length: NATIVE_WIKI_SPLIT_MINIMUMS[split] }, (_unused, index) => {
+        const stratum = NATIVE_WIKI_STRATA[index % NATIVE_WIKI_STRATA.length]!
+        const id = `idle-${split}-${index}`
+        const sourceID = `source-${id}`
+        const slotID = `slot-${id}`
+        const leftID = `fact-${id}-left`
+        const rightID = `fact-${id}-right`
+        const leftStatement = `Evidence fact A for ${id}.`
+        const rightStatement = `Evidence fact B for ${id}.`
+        const fixtureSource = `${leftStatement}\n${rightStatement}\n`
+        const existingContent = stratum === "dedup-resume" || stratum === "ownership-injection"
+          ? `Existing approved bytes for ${id}.\n` : ""
+        return {
+          id,
+          familyId: `family-${id}`,
+          lineage: [`lineage-${id}`],
+          split,
+          stratum,
+          authorship: "agent-authored" as const,
+          sources: [{ id: sourceID, provenance: "raw" as const, content: fixtureSource,
+            sha256: createHash("sha256").update(fixtureSource).digest("hex") }],
+          task: `Prepare a bounded wiki update for [[slot:${slotID}]] using only its cited evidence.`,
+          outputSlots: [{ id: slotID, kind: "page" as const, existingContent }],
+          assertions: {
+            facts: [
+              { id: leftID, slotId: slotID, statement: leftStatement, sourceIds: [sourceID] },
+              { id: rightID, slotId: slotID, statement: rightStatement, sourceIds: [sourceID] },
+            ],
+            citations: [{ factId: leftID, sourceId: sourceID }, { factId: rightID, sourceId: sourceID }],
+            contradictions: stratum === "correction-conflict"
+              ? [{ leftFactId: leftID, rightFactId: rightID, expected: "mark-unknown" as const }] : [],
+            deduplication: stratum === "dedup-resume" ? [{ slotId: slotID, expected: "reuse-existing" as const }] : [],
+            ownership: stratum === "ownership-injection" ? [{ slotId: slotID, expected: "preserve-existing" as const }] : [],
+          },
+          forbiddenChanges: [...NATIVE_PROTECTED_CHANGES],
+        }
+      }),
+    ),
+  }
+  const input = {
+    schema: SKILLOPT_FOREGROUND_INPUT_SCHEMA,
+    models: {
+      generator: { engine: "codex" as const, requestedModel: nativeCodexTestModel },
+      target: { engine: "claude" as const, requestedModel: "claude-target-idle-test" },
+      reviewer: { engine: "claude" as const, requestedModel: "claude-review-idle-test" },
+    },
+    selections: [{ path: sourcePath }],
+    fixturePack,
+  }
+  const inputPath = join(root, "native idle input.json")
+  writeFileSync(inputPath, JSON.stringify(input), { flag: "wx", mode: 0o600 })
+  return { inputPath, sourceContent }
+}
+
+function expectNoNativeSkillOptPayload(text: string): void {
+  expect(text).not.toMatch(/["']fixturePack["']\s*:/u)
+  expect(text).not.toMatch(/["']modelBindings["']\s*:/u)
+  expect(text).not.toMatch(/["']candidateSkill["']\s*:/u)
+  expect(text).not.toContain("Evidence fact A for idle-train-0.")
+  expect(text).not.toContain("PRIVATE_AUTOMATIC_POLL_SOURCE_SENTINEL")
+}
+
+async function withNativeApprovalReceipts<T>(action: () => Promise<T>): Promise<T> {
+  const input = new PassThrough()
+  const output = new PassThrough()
+  const originalCreate = readline.createInterface
+  const stdinTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+  const stderrTTY = Object.getOwnPropertyDescriptor(process.stderr, "isTTY")
+  if (process.stdin.isTTY !== true) Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
+  if (process.stderr.isTTY !== true) Object.defineProperty(process.stderr, "isTTY", { configurable: true, value: true })
+  const intercepted = spyOn(readline, "createInterface").mockImplementation(() => originalCreate({ input, output, terminal: false }))
+  let prompt = ""
+  let approvalsSent = 0
+  output.on("data", (chunk: Buffer) => {
+    prompt += chunk.toString("utf8")
+    const matches = [...prompt.matchAll(/APPROVE ([A-Za-z0-9_-]+) ([a-f0-9]{64})/gu)]
+    while (approvalsSent < matches.length) {
+      const match = matches[approvalsSent++]!
+      const receipt = `${match[1]} ${match[2]}`
+      queueMicrotask(() => input.write(`APPROVE ${receipt}\n`))
+    }
+  })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const pending = action()
+    return await Promise.race([pending, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("scripted native approval prompt did not complete")), 2_000)
+    })])
+  } finally {
+    if (timer) clearTimeout(timer)
+    intercepted.mockRestore()
+    input.destroy()
+    output.destroy()
+    if (stdinTTY) Object.defineProperty(process.stdin, "isTTY", stdinTTY)
+    else Reflect.deleteProperty(process.stdin, "isTTY")
+    if (stderrTTY) Object.defineProperty(process.stderr, "isTTY", stderrTTY)
+    else Reflect.deleteProperty(process.stderr, "isTTY")
+  }
+}
+
 /** `modelLoads` simulates the main model calling the `skill` tool for these names during the turn. */
 function useRealSkillCoordinator(h: ReturnType<typeof harness>, modelLoads: string[] | ((turn: number) => string[]) = []) {
   const handoffs: Array<{ text: string; sessionID: string; invocation?: SkillConversationInvocation; skillTool?: SkillToolProvider; loads?: Array<{ name: string; ok: boolean; text?: string; error?: string }> }> = []
@@ -493,7 +627,470 @@ function routesBesideMain(preset: (typeof COMBO_PRESETS)[number]): ComboRoutes {
   return Object.fromEntries(Object.entries(preset.routes).filter(([, route]) => route.engine !== preset.main.engine || route.model !== preset.main.model)) as ComboRoutes
 }
 
+const nativeCodexTestModel = COMBO_PRESETS[0]!.main.model
+
 describe("interactive terminal", () => {
+  test("SkillOpt slash parser keeps paths literal and preserves spaces without shell tokenization", () => {
+    expect(parseSkillOptCommand("/skillopt")).toEqual({ operation: "status" })
+    expect(parseSkillOptCommand("/skillopt status")).toEqual({ operation: "status" })
+    expect(parseSkillOptCommand("/skillopt prepare ./evidence folder/in;jection.json"))
+      .toEqual({ operation: "prepare", inputPath: "./evidence folder/in;jection.json" })
+    expect(parseSkillOptCommand("/skillopt consent run-123 ./evidence folder/input.json"))
+      .toEqual({ operation: "consent", runId: "run-123", inputPath: "./evidence folder/input.json" })
+    expect(parseSkillOptCommand("/skillopt run run-123 ./evidence folder/input.json"))
+      .toEqual({ operation: "run", runId: "run-123", inputPath: "./evidence folder/input.json" })
+    expect(parseSkillOptCommand("/skillopt apply run-123")).toEqual({ operation: "apply", runId: "run-123" })
+    expect(parseSkillOptCommand("/skillopt apply run-123 extra")).toEqual({ operation: "invalid", reason: "usage" })
+    expect(parseSkillOptCommand("/skillopt rollback run-123")).toEqual({ operation: "rollback", runId: "run-123" })
+    expect(parseSkillOptCommand("/skillopt rollback run-123 ./input.json")).toEqual({ operation: "invalid", reason: "usage" })
+    expect(parseSkillOptCommand("/skillopt cleanup run-123")).toEqual({ operation: "cleanup", runId: "run-123" })
+    expect(parseSkillOptCommand("/skillopt cleanup run-123 extra")).toEqual({ operation: "invalid", reason: "usage" })
+    expect(parseSkillOptCommand("/skillopt cancel run-123")).toEqual({ operation: "cancel", runId: "run-123" })
+    expect(parseSkillOptCommand("/skillopt consent")).toEqual({ operation: "invalid", reason: "usage" })
+    expect(parseSkillOptCommand("/skillopt run")).toEqual({ operation: "invalid", reason: "usage" })
+    expect(parseSkillOptCommand("/skillopt apply")).toEqual({ operation: "invalid", reason: "usage" })
+    expect(parseSkillOptCommand("/skilloptimizer status")).toBeUndefined()
+    expect(interactiveHelp()).toContain("only in the same live owner session after that session's publication")
+    expect(interactiveHelp()).toContain("/skillopt cleanup` requires explicit approval in the current TUI owner session")
+    expect(interactiveHelp()).toContain("bun scripts/otter-skillopt.ts cleanup --run <run-id>")
+    expect(interactiveHelp()).toContain("standalone CLI apply/rollback is not available")
+  })
+
+  test("SkillOpt prepare without input reports data required and preserves the composer", async () => {
+    const h = harness({ lines: ["/skillopt prepare", "/model local qwen3:8b", "ordinary follow-up", "/quit"] })
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)).toEqual({ code: 0 })
+    expect(h.calls.output.join(" ")).toContain("SkillOpt prepare: state=DATA_REQUIRED")
+    expect(h.calls.output.join(" ")).toContain("input_required")
+    expect(h.calls.turns).toEqual(["ordinary follow-up"])
+    expect(h.calls.runtimes).toHaveLength(2)
+    expect(h.calls.turnBindings).toMatchObject([{ engine: "local", model: "qwen3:8b", text: "ordinary follow-up" }])
+    expect(h.calls.runCount).toBe(0)
+  })
+
+  test("bare SkillOpt status reads the native service and emits allowlisted metadata only", async () => {
+    const h = harness({ useRealRuntime: true, lines: ["/skillopt", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: nativeCodexTestModel }, h.deps)
+    const output = h.calls.output.join("")
+    expect(output).toMatch(/SkillOpt status: state=[A-Z_]+/u)
+    expect(output).not.toContain("targetPhaseCounts")
+    expectNoNativeSkillOptPayload(output)
+    expect(h.calls.turns).toEqual([])
+    expect(h.calls.runCount).toBe(0)
+  })
+
+  test("SkillOpt prepare dispatches to the real source service and reports only DATA_REQUIRED metadata", async () => {
+    const directory = join(wt.worktree, "private evidence")
+    mkdirSync(directory)
+    const inputPath = join(directory, "native input.json")
+    writeFileSync(inputPath, JSON.stringify({
+      schema: SKILLOPT_FOREGROUND_INPUT_SCHEMA,
+      models: {
+        generator: { engine: "codex", requestedModel: nativeCodexTestModel },
+        target: { engine: "claude", requestedModel: "claude-target-test" },
+        reviewer: { engine: "claude", requestedModel: "claude-review-test" },
+      },
+      fixturePack: { schema: NATIVE_FIXTURE_PACK_SCHEMA, contract: NATIVE_WIKI_CONTRACT, fixtures: [] },
+    }), { flag: "wx", mode: 0o600 })
+    const h = harness({ useRealRuntime: true, lines: [`/skillopt prepare ${inputPath}`, "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: nativeCodexTestModel }, h.deps)
+    const output = h.calls.output.join("")
+    expect(output).toContain("SkillOpt prepare: state=DATA_REQUIRED")
+    expect(output).toContain("requirements=split_minimums,strata_coverage")
+    expect(output).not.toContain(inputPath)
+    expectNoNativeSkillOptPayload(output)
+    expect(h.calls.turns).toEqual([])
+    expect(h.calls.runCount).toBe(0)
+    const transcript = JSON.stringify(replaySession(wt.worktree, h.calls.sessionID!, { order: "asc" }).records)
+    expect(transcript).not.toContain(inputPath)
+    expectNoNativeSkillOptPayload(transcript)
+  })
+
+  test("SkillOpt follow-up commands dispatch through the signal-aware service and restore TTY on refusals", async () => {
+    const directory = join(wt.worktree, "private follow-up evidence")
+    mkdirSync(directory)
+    const inputPath = join(directory, "native input.json")
+    writeFileSync(inputPath, JSON.stringify({
+      schema: SKILLOPT_FOREGROUND_INPUT_SCHEMA,
+      models: {
+        generator: { engine: "codex", requestedModel: nativeCodexTestModel },
+        target: { engine: "claude", requestedModel: "claude-target-test" },
+        reviewer: { engine: "claude", requestedModel: "claude-review-test" },
+      },
+      fixturePack: { schema: NATIVE_FIXTURE_PACK_SCHEMA, contract: NATIVE_WIKI_CONTRACT, fixtures: [] },
+    }), { flag: "wx", mode: 0o600 })
+    const operations = ["consent", "arm", "disarm", "cancel", "resume", "run"] as const
+    const h = harness({ useRealRuntime: true, lines: [
+      ...operations.map(operation => `/skillopt ${operation} not-a-run-id ${inputPath}`), "/quit",
+    ] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: nativeCodexTestModel }, h.deps)
+    const output = h.calls.output.join("")
+    expect(output.match(/refused \(run_id_invalid\)/gu)).toHaveLength(operations.length)
+    expect(output).not.toContain(inputPath)
+    expectNoNativeSkillOptPayload(output)
+    const transcript = JSON.stringify(replaySession(wt.worktree, h.calls.sessionID!, { order: "asc" }).records)
+    expect(transcript).not.toContain(inputPath)
+    expectNoNativeSkillOptPayload(transcript)
+    expect(h.calls.events.filter(event => event === "terminal.suspend")).toHaveLength(operations.length)
+    expect(h.calls.events.filter(event => event === "terminal.resume")).toHaveLength(operations.length)
+    expect(h.calls.turns).toEqual([])
+    expect(h.calls.runCount).toBe(0)
+  })
+
+  test("SkillOpt apply refuses without the live qualified-run receipt and restores terminal without model calls", async () => {
+    const runId = "00000000-0000-4000-8000-000000000001"
+    const h = harness({ useRealRuntime: true, lines: [`/skillopt apply ${runId}`, "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: nativeCodexTestModel }, h.deps)
+    const output = h.calls.output.join("")
+    expect(output).toContain("SkillOpt apply: state=BLOCKED")
+    expect(output).toContain("qualified_run_receipt_unavailable")
+    expect(output).not.toContain("COMMITTED")
+    expect(h.calls.events.filter(event => event === "terminal.suspend")).toHaveLength(1)
+    expect(h.calls.events.filter(event => event === "terminal.resume")).toHaveLength(1)
+    expect(h.calls.turns).toEqual([])
+    expect(h.calls.runCount).toBe(0)
+  })
+
+  test("SkillOpt rollback requires this live owner's published capability and preserves the protected bytes", async () => {
+    const root = realpathSync.native(wt.worktree)
+    const { inputPath, sourceContent } = nativeAutomaticTestInput(root)
+    const baselinePath = join(root, PILOT_SKILL)
+    const baselineBefore = readFileSync(baselinePath)
+    let rollbackTerminal: Terminal | undefined
+    let modelRuns = 0
+    const createService = skillOptForegroundModule.createNativeSkillOptForeground
+    const factory = spyOn(skillOptForegroundModule, "createNativeSkillOptForeground")
+    factory.mockImplementation((runtime, owner) => {
+      const service = createService(runtime, owner)
+      return Object.freeze({
+        ...service,
+        async rollback(runId, terminal, signal) {
+          rollbackTerminal = terminal
+          return service.rollback(runId, terminal, signal)
+        },
+      })
+    })
+    const transport = spyOn(cliTransportModule, "createCliTransport")
+    transport.mockImplementation(options => ({
+      async inspectIdentity() {
+        if (options.engine === "local") return undefined
+        return Object.freeze({
+          engine: options.engine,
+          requestedModel: options.model,
+          runtimeIdentity: Object.freeze({ version: "interactive rollback metadata", executableSha256: "e".repeat(64) }),
+          profileIdentity: Object.freeze({ id: `${options.engine}-rollback-test`, sha256: "f".repeat(64) }),
+        })
+      },
+      async run() {
+        modelRuns += 1
+        throw new Error("rollback refusal must not execute a model")
+      },
+      async requestCancel() { return { requested: false, acknowledged: false, terminal: false, quiescent: false } },
+      async reconcile() { return { outcome: "unknown" as const, quiescent: false, evidence: "rollback refusal test transport" } },
+    }))
+    let queuedRollback = false
+    let h: ReturnType<typeof harness>
+    h = harness({
+      lines: [`/skillopt prepare ${inputPath}`, "/quit"],
+      beforeRead: (_prompt, _signal, lines) => {
+        if (queuedRollback) return
+        const prepared = /SkillOpt prepare: state=PREPARED · runId=([A-Za-z0-9_-]+)/u.exec(h.calls.output.join(""))
+        if (!prepared || !lines) return
+        queuedRollback = true
+        lines.unshift(`/skillopt rollback ${prepared[1]}`)
+      },
+    })
+    useRealRuntime(h)
+    try {
+      await launchInteractive({ worktree: wt.worktree, engine: "codex", model: nativeCodexTestModel }, h.deps)
+      const output = h.calls.output.join("")
+      expect(queuedRollback).toBe(true)
+      expect(output).toContain("SkillOpt prepare: state=PREPARED")
+      expect(output).toContain("SkillOpt rollback: state=BLOCKED")
+      expect(output).toContain("published_context_unavailable")
+      expect(output).toContain("rollbackAuthorized=false")
+      expect(output).toContain("postRollbackHandoffAuthorized=false")
+      expect(output).not.toContain("ROLLED_BACK")
+      expect(output).not.toContain(inputPath)
+      expect(output).not.toContain(sourceContent)
+      expectNoNativeSkillOptPayload(output)
+      expect(rollbackTerminal).toBe(h.deps.terminal)
+      expect(readFileSync(baselinePath)).toEqual(baselineBefore)
+      expect(modelRuns).toBe(0)
+      expect(h.calls.runCount).toBe(0)
+      // Prepare and rollback each restore their terminal ownership; an unarmed idle poll adds no handoff.
+      expect(h.calls.events.filter(event => event === "terminal.suspend" || event === "terminal.resume")).toEqual([
+        "terminal.suspend", "terminal.resume", "terminal.suspend", "terminal.resume",
+      ])
+      const transcript = JSON.stringify(replaySession(wt.worktree, h.calls.sessionID!, { order: "asc" }).records)
+      expect(transcript).not.toContain(inputPath)
+      expect(transcript).not.toContain(sourceContent)
+      expectNoNativeSkillOptPayload(transcript)
+    } finally {
+      transport.mockRestore()
+      factory.mockRestore()
+    }
+  })
+
+  test("SkillOpt cleanup routes through the real service, refuses unexpired and absent runs, and keeps paths private", async () => {
+    const root = realpathSync.native(wt.worktree)
+    const { inputPath, sourceContent } = nativeAutomaticTestInput(root)
+    const baselinePath = join(root, PILOT_SKILL)
+    const baselineBefore = readFileSync(baselinePath)
+    const unknownRunId = "00000000-0000-4000-8000-000000000099"
+    let preparedRunId: string | undefined
+    let inputArtifactPath: string | undefined
+    let inputArtifactBefore: Buffer | undefined
+    const cleanupCalls: string[] = []
+    const inspectCountsAtCleanup: number[] = []
+    const inputReadCountsAtCleanup: number[] = []
+    const artifactReadCountsAtCleanup: number[] = []
+    let identityChecks = 0
+    let identityChecksBeforeCleanup: number | undefined
+    let modelRuns = 0
+    let inputReads = 0
+    let artifactReads = 0
+    const inputReader = skillOptForegroundModule.readSkillOptForegroundInput
+    const artifactReader = skillOptForegroundModule.readSkillOptForegroundArtifact
+    const inputReaderSpy = spyOn(skillOptForegroundModule, "readSkillOptForegroundInput").mockImplementation(path => {
+      inputReads += 1
+      return inputReader(path)
+    })
+    const artifactReaderSpy = spyOn(skillOptForegroundModule, "readSkillOptForegroundArtifact").mockImplementation((worktree, runId) => {
+      artifactReads += 1
+      return artifactReader(worktree, runId)
+    })
+    const createService = skillOptForegroundModule.createNativeSkillOptForeground
+    const factory = spyOn(skillOptForegroundModule, "createNativeSkillOptForeground")
+    factory.mockImplementation((runtime, owner) => {
+      const service = createService(runtime, owner)
+      return Object.freeze({
+        ...service,
+        async cleanup(runId, signal) {
+          cleanupCalls.push(runId)
+          inspectCountsAtCleanup.push(identityChecks)
+          inputReadCountsAtCleanup.push(inputReads)
+          artifactReadCountsAtCleanup.push(artifactReads)
+          return service.cleanup(runId, signal)
+        },
+      })
+    })
+    const transport = spyOn(cliTransportModule, "createCliTransport")
+    transport.mockImplementation(options => ({
+      async inspectIdentity() {
+        identityChecks += 1
+        if (options.engine === "local") return undefined
+        return Object.freeze({
+          engine: options.engine,
+          requestedModel: options.model,
+          runtimeIdentity: Object.freeze({ version: "interactive cleanup metadata", executableSha256: "9".repeat(64) }),
+          profileIdentity: Object.freeze({ id: `${options.engine}-cleanup-test`, sha256: "8".repeat(64) }),
+        })
+      },
+      async run() {
+        modelRuns += 1
+        throw new Error("cleanup must not execute a model")
+      },
+      async requestCancel() { return { requested: false, acknowledged: false, terminal: false, quiescent: false } },
+      async reconcile() { return { outcome: "unknown" as const, quiescent: false, evidence: "cleanup refusal test transport" } },
+    }))
+    let insertedCleanup = false
+    let h: ReturnType<typeof harness>
+    h = harness({
+      lines: [`/skillopt prepare ${inputPath}`, "/quit"],
+      beforeRead: (_prompt, _signal, lines) => {
+        if (insertedCleanup) return
+        const prepared = /SkillOpt prepare: state=PREPARED · runId=([A-Za-z0-9_-]+)/u.exec(h.calls.output.join(""))
+        if (!prepared || !lines) return
+        insertedCleanup = true
+        preparedRunId = prepared[1]!
+        inputArtifactPath = skillOptForegroundModule.foregroundArtifactPath(root, preparedRunId)
+        inputArtifactBefore = readFileSync(inputArtifactPath)
+        identityChecksBeforeCleanup = identityChecks
+        lines.unshift(`/skillopt cleanup ${preparedRunId}`, `/skillopt cleanup ${unknownRunId}`)
+      },
+    })
+    useRealRuntime(h)
+    try {
+      await launchInteractive({ worktree: wt.worktree, engine: "codex", model: nativeCodexTestModel }, h.deps)
+      const output = h.calls.output.join("")
+      expect(insertedCleanup).toBe(true)
+      if (!preparedRunId || !inputArtifactPath || !inputArtifactBefore || identityChecksBeforeCleanup === undefined) {
+        throw new Error("real cleanup fixture was not prepared")
+      }
+      expect(cleanupCalls).toEqual([preparedRunId, unknownRunId])
+      expect(output).toContain("SkillOpt cleanup refused (private-text-cleanup-not-expired)")
+      expect(output).toContain("SkillOpt cleanup refused (run-stale)")
+      expect(output).not.toContain("CONSENT_REQUIRED")
+      expect(output).not.toContain(inputPath)
+      expect(output).not.toContain(inputArtifactPath!)
+      expect(output).not.toContain(sourceContent)
+      expect(output).not.toContain("PRIVATE_AUTOMATIC_POLL_SOURCE_SENTINEL")
+      expectNoNativeSkillOptPayload(output)
+      expect(inputReads).toBe(1)
+      expect(artifactReads).toBe(0)
+      expect(inputReadCountsAtCleanup).toEqual([1, 1])
+      expect(artifactReadCountsAtCleanup).toEqual([0, 0])
+      expect(inspectCountsAtCleanup).toEqual([identityChecksBeforeCleanup, identityChecksBeforeCleanup])
+      expect(identityChecks).toBe(identityChecksBeforeCleanup)
+      expect(h.calls.events.filter(event => event === "terminal.suspend" || event === "terminal.resume")).toEqual([
+        "terminal.suspend", "terminal.resume", "terminal.suspend", "terminal.resume", "terminal.suspend", "terminal.resume",
+      ])
+      expect(modelRuns).toBe(0)
+      expect(h.calls.runCount).toBe(0)
+      expect(readFileSync(baselinePath)).toEqual(baselineBefore)
+      expect(readFileSync(inputArtifactPath!)).toEqual(Buffer.from(inputArtifactBefore))
+      const transcript = JSON.stringify(replaySession(wt.worktree, h.calls.sessionID!, { order: "asc" }).records)
+      expect(transcript).not.toContain(inputPath)
+      expect(transcript).not.toContain(inputArtifactPath!)
+      expect(transcript).not.toContain(sourceContent)
+      expectNoNativeSkillOptPayload(transcript)
+    } finally {
+      transport.mockRestore()
+      factory.mockRestore()
+      inputReaderSpy.mockRestore()
+      artifactReaderSpy.mockRestore()
+    }
+  })
+
+  test("SkillOpt cleanup refuses held and observer sessions before service or artifact access", async () => {
+    const factory = spyOn(skillOptForegroundModule, "createNativeSkillOptForeground")
+    const inputReader = spyOn(skillOptForegroundModule, "readSkillOptForegroundInput")
+    const artifactReader = spyOn(skillOptForegroundModule, "readSkillOptForegroundArtifact")
+    const runId = "00000000-0000-4000-8000-000000000099"
+    let observerWorktree: ReturnType<typeof tempGitWorktree> | undefined
+    try {
+      withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow("otter-fixture-session",
+        { instance: "fixture", pid: process.pid }, "command", "held cleanup", "codex")))
+      const held = harness({ lines: [`/skillopt cleanup ${runId}`, "/quit"] })
+      await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, held.deps)
+      expect(held.calls.actionContexts).toContain("held")
+      expect(held.calls.output.join(" ")).toContain("SkillOpt cleanup refused: this session is held or observing")
+      expect(held.calls.events).not.toContain("terminal.suspend")
+
+      observerWorktree = tempGitWorktree()
+      withFlowTransaction(observerWorktree.worktree, tx => writeWorkflow(tx, newWorkflow("another-session",
+        { instance: "other-instance", pid: process.pid }, "command", "observer cleanup", "codex")))
+      const observer = harness({ lines: [`/skillopt cleanup ${runId}`, "/quit"] })
+      observer.deps.cwd = observerWorktree.worktree
+      observer.deps.gitTopLevel = () => observerWorktree!.worktree
+      await launchInteractive({ worktree: observerWorktree.worktree, engine: "codex", model: "gpt-5-codex" }, observer.deps)
+      expect(observer.calls.actionContexts).toContain("observer")
+      expect(observer.calls.output.join(" ")).toContain("SkillOpt cleanup refused: this session is held or observing")
+      expect(observer.calls.events).not.toContain("terminal.suspend")
+
+      expect(factory).not.toHaveBeenCalled()
+      expect(inputReader).not.toHaveBeenCalled()
+      expect(artifactReader).not.toHaveBeenCalled()
+      expect(held.calls.runCount + observer.calls.runCount).toBe(0)
+      expect(held.calls.turns).toEqual([])
+      expect(observer.calls.turns).toEqual([])
+    } finally {
+      factory.mockRestore()
+      inputReader.mockRestore()
+      artifactReader.mockRestore()
+      observerWorktree?.cleanup()
+    }
+  })
+
+  test("Ctrl-C during a rollback check restores the terminal before exit and preserves the protected bytes", async () => {
+    const root = realpathSync.native(wt.worktree)
+    nativeAutomaticTestInput(root)
+    const baselinePath = join(root, PILOT_SKILL)
+    const baselineBefore = readFileSync(baselinePath)
+    const runId = "00000000-0000-4000-8000-000000000001"
+    let h: ReturnType<typeof harness>
+    h = harness({
+      useRealRuntime: true,
+      lines: [`/skillopt rollback ${runId}`, "must stay queued"],
+      onTerminalSuspend: () => h.emitSignal("SIGINT"),
+    })
+    const result = await launchInteractive({ worktree: wt.worktree, engine: "codex", model: nativeCodexTestModel }, h.deps)
+    expect(result.code).toBe(130)
+    expect(h.calls.events.filter(event => event === "terminal.suspend")).toHaveLength(1)
+    expect(h.calls.events.filter(event => event === "terminal.resume")).toHaveLength(1)
+    expect(h.calls.prompts).toHaveLength(1)
+    expect(h.calls.turns).toEqual([])
+    expect(h.calls.runCount).toBe(0)
+    expect(readFileSync(baselinePath)).toEqual(baselineBefore)
+  })
+
+  test("SkillOpt run without input evidence is DATA_REQUIRED and does not invoke a model", async () => {
+    const runId = randomUUID()
+    const h = harness({ useRealRuntime: true, lines: [`/skillopt run ${runId}`, "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: nativeCodexTestModel }, h.deps)
+    const output = h.calls.output.join("")
+    expect(output).toContain("SkillOpt run: state=DATA_REQUIRED")
+    expect(output).toContain("reason=input_required")
+    expect(output).not.toContain("COMMITTED")
+    expect(h.calls.events.filter(event => event === "terminal.suspend")).toHaveLength(1)
+    expect(h.calls.events.filter(event => event === "terminal.resume")).toHaveLength(1)
+    expect(h.calls.turns).toEqual([])
+    expect(h.calls.runCount).toBe(0)
+  })
+
+  test("Escape aborts SkillOpt reentry without applying a decision or leaving progress/TTY suspended", async () => {
+    const directory = join(wt.worktree, "private cancelled evidence")
+    mkdirSync(directory)
+    const inputPath = join(directory, "native input.json")
+    writeFileSync(inputPath, JSON.stringify({
+      schema: SKILLOPT_FOREGROUND_INPUT_SCHEMA,
+      models: {
+        generator: { engine: "codex", requestedModel: nativeCodexTestModel },
+        target: { engine: "claude", requestedModel: "claude-target-test" },
+        reviewer: { engine: "claude", requestedModel: "claude-review-test" },
+      },
+      fixturePack: { schema: NATIVE_FIXTURE_PACK_SCHEMA, contract: NATIVE_WIKI_CONTRACT, fixtures: [] },
+    }), { flag: "wx", mode: 0o600 })
+    let h: ReturnType<typeof harness>
+    h = harness({ useRealRuntime: true, lines: [
+      `/skillopt consent not-a-run-id ${inputPath}`, "/quit",
+    ], onTerminalSuspend: () => h.calls.control?.("interrupt") })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: nativeCodexTestModel }, h.deps)
+    const output = h.calls.output.join("")
+    expect(output).toContain("SkillOpt consent cancelled; no decision was applied or retried.")
+    expect(h.calls.events).toContain("terminal.suspend")
+    expect(h.calls.events).toContain("terminal.resume")
+    expect(h.calls.runCount).toBe(0)
+    expect(h.calls.turns).toEqual([])
+  })
+
+  test("Ctrl-C aborts SkillOpt reentry and restores the terminal before shutdown", async () => {
+    const directory = join(wt.worktree, "private signal evidence")
+    mkdirSync(directory)
+    const inputPath = join(directory, "native input.json")
+    writeFileSync(inputPath, JSON.stringify({
+      schema: SKILLOPT_FOREGROUND_INPUT_SCHEMA,
+      models: {
+        generator: { engine: "codex", requestedModel: nativeCodexTestModel },
+        target: { engine: "claude", requestedModel: "claude-target-test" },
+        reviewer: { engine: "claude", requestedModel: "claude-review-test" },
+      },
+      fixturePack: { schema: NATIVE_FIXTURE_PACK_SCHEMA, contract: NATIVE_WIKI_CONTRACT, fixtures: [] },
+    }), { flag: "wx", mode: 0o600 })
+    let h: ReturnType<typeof harness>
+    h = harness({ useRealRuntime: true, lines: [
+      `/skillopt consent not-a-run-id ${inputPath}`, "/quit",
+    ], onTerminalSuspend: () => {
+      for (const listener of h.calls.signalListeners.get("SIGINT") ?? []) listener()
+    } })
+    const result = await launchInteractive({ worktree: wt.worktree, engine: "codex", model: nativeCodexTestModel }, h.deps)
+    expect(result.code).toBe(130)
+    expect(h.calls.events).toContain("terminal.suspend")
+    expect(h.calls.events).toContain("terminal.resume")
+    expect(h.calls.turns).toEqual([])
+    expect(h.calls.runCount).toBe(0)
+    expect(h.calls.signalListeners.get("SIGINT")?.size ?? 0).toBe(0)
+  })
+
+  test("SkillOpt run/apply require run IDs and do not get default authority", async () => {
+    const h = harness({ lines: ["/skillopt run", "/skillopt apply", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    const output = h.calls.output.join(" ")
+    expect(output.match(/Usage: \/skillopt/gu)).toHaveLength(2)
+    expect(h.calls.turns).toEqual([])
+    expect(h.calls.runCount).toBe(0)
+  })
+
   test("lists catalog metadata and explicitly dispatches only an ordinary skill with a safe source audit", async () => {
     const directory = join(wt.worktree, ".agents", "skills", "inspect")
     mkdirSync(directory, { recursive: true })
@@ -726,12 +1323,27 @@ describe("interactive terminal", () => {
     const writer = retainedSDKHistory("sdk-blocked-commands", true)
     const metadataPath = join(sessionDir(wt.worktree, writer.sessionID), "metadata.json")
     const metadataBefore = readFileSync(metadataPath)
+    const foregroundFactory = spyOn(skillOptForegroundModule, "createNativeSkillOptForeground")
+    const foregroundInputReader = spyOn(skillOptForegroundModule, "readSkillOptForegroundInput")
+    const foregroundArtifactReader = spyOn(skillOptForegroundModule, "readSkillOptForegroundArtifact")
+    const retainedInputPath = "/not-read-in-retained-history.json"
     const h = harness({ lines: [
       `/resume ${writer.sessionID}`, "must not be sent", "/continue", "/cancel", "/model", "/plan change it",
-      "/status", "/search history", "/expand 1", "/skills", "/sessions", "/cancel", "/new", "fresh CLI message", "/quit",
+      "/status", "/search history", "/expand 1", "/skills", "/skillopt rollback 00000000-0000-4000-8000-000000000001",
+      `/skillopt cleanup 00000000-0000-4000-8000-000000000001`, `/skillopt prepare ${retainedInputPath}`,
+      "/sessions", "/cancel", "/new", "fresh CLI message", "/quit",
     ] })
 
-    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "fixture" }, h.deps)
+    try {
+      await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "fixture" }, h.deps)
+      expect(foregroundFactory).not.toHaveBeenCalled()
+      expect(foregroundInputReader).not.toHaveBeenCalled()
+      expect(foregroundArtifactReader).not.toHaveBeenCalled()
+    } finally {
+      foregroundFactory.mockRestore()
+      foregroundInputReader.mockRestore()
+      foregroundArtifactReader.mockRestore()
+    }
 
     expect(h.calls.turns).toEqual(["fresh CLI message"])
     expect(h.calls.turnBindings).toMatchObject([{ sessionID: "otter-fixture-session-2", text: "fresh CLI message" }])
@@ -742,16 +1354,19 @@ describe("interactive terminal", () => {
     expect(h.calls.controllerCancelCalls).toBe(0)
     expect(h.calls.discoveries).toHaveLength(0)
     expect(h.calls.runCount).toBe(0)
+    expect(h.calls.output.join("")).not.toContain(retainedInputPath)
     expect(h.calls.conversationRestores).toHaveLength(2)
     expect(h.calls.conversationRestores[1]).toEqual({ sessionID: "otter-fixture-session-2" })
     expect(readSessionMetadata(wt.worktree, "otter-fixture-session-2")).toMatchObject({ engine: "codex", model: "fixture" })
     expect(readFileSync(metadataPath)).toEqual(metadataBefore)
     expect(h.calls.output.join("")).toContain(`Retained SDK session ${writer.sessionID} · read-only history`)
     expect(h.calls.output.join("")).toContain("command or message was not applied")
+    expect(h.calls.output.join("")).toContain(`Retained SDK session ${writer.sessionID} is read-only; command or message was not applied.`)
     expect(h.calls.output.join("")).toContain("Skill catalog is unavailable in retained read-only SDK history")
     expect(h.calls.output.join("")).toContain("tool-start ·")
     expect(h.calls.queueAdmissions).toContain(false)
     expect(h.calls.events.filter(event => event === "sessionChanged").length).toBeGreaterThanOrEqual(2)
+    expect(h.calls.output.join(" ")).not.toContain("SkillOpt automatic:")
     expect(readSessionMetadata(wt.worktree, "otter-fixture-session")?.held).toBe(true)
     writer.assertOwner()
     releaseTestSession(writer)
@@ -964,7 +1579,7 @@ describe("interactive terminal", () => {
   test("bare startup refuses chat and workflow work until selection while local help stays available", async () => {
     let h: ReturnType<typeof harness>
     h = harness({
-      lines: ["hello", "/skill:ralplan make a plan", "/invalid", "/model codex bad model", "/model codex -bad", "/theme dark", "/details", "/help", "/quit"],
+      lines: ["hello", "/skill:ralplan make a plan", "/invalid", "/skillopt status", "/skillopt prepare", "/model codex bad model", "/model codex -bad", "/theme dark", "/details", "/help", "/quit"],
       beforeRead() {
         expect(h.calls.runtimes).toHaveLength(0)
         expect(h.calls.discoveries).toEqual([])
@@ -981,6 +1596,9 @@ describe("interactive terminal", () => {
     expect(h.calls.turns).toEqual([])
     expect(h.calls.runCount).toBe(0)
     expect(output).toContain("No model selected; use /model to choose an engine and model. Nothing was sent.")
+    expect(output).toContain("SkillOpt requires an admitted writable owner session")
+    expect(output).toContain("SkillOpt prepare: state=DATA_REQUIRED")
+    expect(output).toContain("input_required")
     expect(output).toContain("Usage: /model or /model <local|codex|claude> <native-id>")
     expect(output).toContain("Commands (unselected):")
     expect(output).toContain("/model [engine native-id | default ... | combo ...]")
@@ -1050,7 +1668,7 @@ describe("interactive terminal", () => {
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     const commands = h.calls.choices.find(choice => choice.title === "Commands")!.values
       .map(value => value.split(" ")[0])
-    expect(commands).toEqual(["/help", "/model", "/memory", "/login", "/sessions", "/resume", "/engines", "/theme", "/ascii", "!", "/quit"])
+    expect(commands).toEqual(["/help", "/model", "/memory", "/local", "/context", "/login", "/sessions", "/resume", "/engines", "/theme", "/ascii", "!", "/quit"])
     expect(h.calls.runtimes).toEqual([])
     expect(h.calls.discoveries).toEqual([])
     expect(h.calls.turns).toEqual([])
@@ -2371,6 +2989,240 @@ describe("interactive terminal", () => {
     h.deps.createRuntime = options => createCliRuntime(options)
     h.deps.admitRuntime = async () => {}
   }
+
+  test("idle checkpoints do not create a SkillOpt service before an explicit operation", async () => {
+    const factory = spyOn(skillOptForegroundModule, "createNativeSkillOptForeground")
+    try {
+      const h = harness({ lines: ["ordinary chat", "/quit"] })
+      await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+      expect(h.calls.turns).toEqual(["ordinary chat"])
+      expect(factory).not.toHaveBeenCalled()
+      expect(h.calls.output.join("")).not.toContain("SkillOpt automatic:")
+    } finally {
+      factory.mockRestore()
+    }
+  })
+
+  test("an unarmed preflight-only service does not trigger lazy identity or helper setup", async () => {
+    const inputPath = join(realpathSync.native(wt.worktree), "invalid-native-input.json")
+    writeFileSync(inputPath, "{}", { flag: "wx", mode: 0o600 })
+    let pollCount = 0
+    const createService = skillOptForegroundModule.createNativeSkillOptForeground
+    const factory = spyOn(skillOptForegroundModule, "createNativeSkillOptForeground")
+    factory.mockImplementation((runtime, owner) => {
+      const service = createService(runtime, owner)
+      return Object.freeze({
+        ...service,
+        async pollAutomatic(signal) {
+          pollCount += 1
+          return service.pollAutomatic(signal)
+        },
+      })
+    })
+    const transport = spyOn(cliTransportModule, "createCliTransport")
+    const h = harness({ lines: [`/skillopt prepare ${inputPath}`, "ordinary chat", "/quit"] })
+    useRealRuntime(h)
+    try {
+      await launchInteractive({ worktree: wt.worktree, engine: "codex", model: nativeCodexTestModel }, h.deps)
+      expect(h.calls.output.join("")).toContain("SkillOpt prepare refused")
+      expect(pollCount).toBe(0)
+      expect(h.calls.events.filter(event => event === "terminal.suspend")).toHaveLength(1)
+      expect(h.calls.events.filter(event => event === "terminal.resume")).toHaveLength(1)
+      expect(transport).not.toHaveBeenCalled()
+      expect(h.calls.turns).toEqual(["ordinary chat"])
+      expect(h.calls.runCount).toBe(0)
+      expect(h.calls.output.join("")).not.toContain("SkillOpt automatic:")
+    } finally {
+      transport.mockRestore()
+      factory.mockRestore()
+    }
+  })
+
+  test("an armed automatic check uses genuine consent, stays idle for missing digests, and yields to queued chat", async () => {
+    const root = realpathSync.native(wt.worktree)
+    const { inputPath, sourceContent } = nativeAutomaticTestInput(root)
+    const sourceHash = createHash("sha256").update(sourceContent).digest("hex")
+    const knowledge = join(root, "knowledge")
+    mkdirSync(join(knowledge, "wiki", "reports"), { recursive: true })
+    mkdirSync(join(knowledge, "wiki", "sources"), { recursive: true })
+    writeFileSync(join(knowledge, "AGENTS.md"), "# rules\n")
+    writeFileSync(join(knowledge, "wiki", "sources", `documents-${sourceHash}.md`), "# Native input source\n")
+    writeFileSync(join(knowledge, "wiki", "index.md"),
+      `# Index\n\n- [Note](sources/documents-${sourceHash}.md)\n`)
+    writeFileSync(join(knowledge, "wiki", "log.md"),
+      `# Log\n\n## [2026-10-20T00:00:00Z] register | Note\n\n- source_id: ${sourceHash}\n`)
+    writeFileSync(join(knowledge, "wiki", "reports", "tool-outcomes.md"), "# report\n")
+    mkdirSync(join(root, ".otter"), { recursive: true })
+    writeFileSync(join(root, ".otter", "otter.jsonc"), JSON.stringify({
+      chat: { intent: "off", execute: "ask" }, memory: { engine: "off" },
+    }))
+
+    let pollCount = 0
+    let pollCountAtQueuedTurn: number | undefined
+    let inferenceRuns = 0
+    const createService = skillOptForegroundModule.createNativeSkillOptForeground
+    const factory = spyOn(skillOptForegroundModule, "createNativeSkillOptForeground")
+    factory.mockImplementation((runtime, owner) => {
+      const service = createService(runtime, owner)
+      return Object.freeze({
+        ...service,
+        async pollAutomatic(signal) {
+          pollCount += 1
+          return service.pollAutomatic(signal)
+        },
+      })
+    })
+    const transport = spyOn(cliTransportModule, "createCliTransport")
+    transport.mockImplementation(options => ({
+      async inspectIdentity() {
+        if (options.engine === "local") return undefined
+        return Object.freeze({
+          engine: options.engine,
+          requestedModel: options.model,
+          runtimeIdentity: Object.freeze({ version: "interactive idle test metadata", executableSha256: "a".repeat(64) }),
+          profileIdentity: Object.freeze({ id: `${options.engine}-idle-test`, sha256: "b".repeat(64) }),
+        })
+      },
+      async run() {
+        inferenceRuns += 1
+        throw new Error("automatic idle test must not execute a model")
+      },
+      async requestCancel() { return { requested: false, acknowledged: false, terminal: false, quiescent: false } },
+      async reconcile() { return { outcome: "unknown" as const, quiescent: false, evidence: "idle metadata-only test transport" } },
+    }))
+    let insertedConsent = false
+    const lines = [`/skillopt prepare ${inputPath}`, "/wiki ingest", "/quit"]
+    const h = harness({
+      lines,
+      beforeRead: (_prompt, _signal, inputLines) => {
+        if (insertedConsent) return
+        const prepared = /SkillOpt prepare: state=PREPARED · runId=([A-Za-z0-9_-]+)/u.exec(h.calls.output.join(""))
+        if (!prepared || !inputLines) return
+        insertedConsent = true
+        inputLines.unshift(`/skillopt consent ${prepared[1]}`, `/skillopt arm ${prepared[1]}`)
+      },
+      onTurn: text => {
+        if (text.startsWith("Integrate the pending wiki sources")) pollCountAtQueuedTurn = pollCount
+      },
+    })
+    useRealRuntime(h)
+    try {
+      await withNativeApprovalReceipts(() => launchInteractive(
+        { worktree: wt.worktree, engine: "codex", model: nativeCodexTestModel }, h.deps,
+      ))
+      const output = h.calls.output.join("")
+      expect(insertedConsent).toBe(true)
+      expect(output).toContain("SkillOpt consent: state=CONSENTED")
+      expect(output).toContain("SkillOpt arm: state=ARMED")
+      expect(output).toContain("SkillOpt automatic: state=ARMED")
+      expect(output).toContain("reason=digest-threshold")
+      expect(output).toContain("dispatchStarted=false")
+      expect(output).toContain("candidateQualified=false")
+      expect(output).toContain("publicationAuthorized=false")
+      expect(h.calls.turns).toHaveLength(1)
+      expect(h.calls.turns[0]).toContain("Integrate the pending wiki sources")
+      expect(pollCountAtQueuedTurn).toBe(1)
+      expect(pollCount).toBe(2)
+      expect(inferenceRuns).toBe(0)
+      expect(h.calls.runCount).toBe(0)
+      expect(output).not.toContain(inputPath)
+      expect(output).not.toContain(sourceContent)
+      expectNoNativeSkillOptPayload(output)
+    } finally {
+      transport.mockRestore()
+      factory.mockRestore()
+    }
+  })
+
+  test("aborting an idle SkillOpt poll waits for terminal restoration and reads no queued input", async () => {
+    const { inputPath } = nativeAutomaticTestInput(realpathSync.native(wt.worktree))
+    let pollCount = 0
+    let inferenceRuns = 0
+    const pollSignals: boolean[] = []
+    const createService = skillOptForegroundModule.createNativeSkillOptForeground
+    const factory = spyOn(skillOptForegroundModule, "createNativeSkillOptForeground")
+    factory.mockImplementation((runtime, owner) => {
+      const service = createService(runtime, owner)
+      return Object.freeze({
+        ...service,
+        async pollAutomatic(signal) {
+          pollCount += 1
+          pollSignals.push(signal?.aborted === true)
+          return service.pollAutomatic(signal)
+        },
+      })
+    })
+    const transport = spyOn(cliTransportModule, "createCliTransport")
+    transport.mockImplementation(options => ({
+      async inspectIdentity() {
+        if (options.engine === "local") return undefined
+        return Object.freeze({
+          engine: options.engine,
+          requestedModel: options.model,
+          runtimeIdentity: Object.freeze({ version: "interactive abort test metadata", executableSha256: "c".repeat(64) }),
+          profileIdentity: Object.freeze({ id: `${options.engine}-abort-test`, sha256: "d".repeat(64) }),
+        })
+      },
+      async run() {
+        inferenceRuns += 1
+        throw new Error("aborted idle poll must not execute a model")
+      },
+      async requestCancel() { return { requested: false, acknowledged: false, terminal: false, quiescent: false } },
+      async reconcile() { return { outcome: "unknown" as const, quiescent: false, evidence: "idle abort test transport" } },
+    }))
+    let insertedConsent = false
+    let suspendCount = 0
+    const lines = ["preserved prior history", `/skillopt prepare ${inputPath}`, "/quit"]
+    let pendingInputs: Array<string | undefined> | undefined
+    let h: ReturnType<typeof harness>
+    h = harness({
+      lines,
+      beforeRead: (_prompt, _signal, inputLines) => {
+        pendingInputs = inputLines
+        if (insertedConsent) return
+        const prepared = /SkillOpt prepare: state=PREPARED · runId=([A-Za-z0-9_-]+)/u.exec(h.calls.output.join(""))
+        if (!prepared || !inputLines) return
+        insertedConsent = true
+        inputLines.unshift(`/skillopt consent ${prepared[1]}`, `/skillopt arm ${prepared[1]}`)
+      },
+      onTerminalSuspend: () => {
+        suspendCount += 1
+        if (suspendCount === 4) h.emitSignal("SIGINT")
+      },
+    })
+    useRealRuntime(h)
+    h.deps.terminal!.draftSnapshot = () => ({ draft: "preserved draft sentinel", queued: ["preserved typed-queue sentinel"] })
+    try {
+      const result = await withNativeApprovalReceipts(() => launchInteractive(
+        { worktree: wt.worktree, engine: "codex", model: nativeCodexTestModel }, h.deps,
+      ))
+      expect(result.code).toBe(130)
+      expect(insertedConsent).toBe(true)
+      expect(pollCount).toBe(1)
+      expect(pollSignals).toEqual([true])
+      expect(suspendCount).toBe(4)
+      expect(h.calls.prompts).toHaveLength(4)
+      expect(h.calls.events.filter(event => event === "terminal.suspend")).toHaveLength(4)
+      expect(h.calls.events.filter(event => event === "terminal.resume")).toHaveLength(4)
+      expect(h.calls.runCount).toBe(0)
+      expect(inferenceRuns).toBe(0)
+      expect(h.calls.turns).toEqual(["preserved prior history"])
+      expect(pendingInputs).toEqual(["/quit"])
+      expect(h.calls.closedSessions).toEqual(h.calls.sessionIDs)
+      expect(h.calls.defaultModelWrites).toEqual([])
+      expect(readSessionMetadata(wt.worktree, h.calls.sessionID!)).toMatchObject({
+        engine: "codex", model: nativeCodexTestModel,
+      })
+      const transcript = JSON.stringify(replaySession(wt.worktree, h.calls.sessionID!, { order: "asc" }).records)
+      expect(transcript).toContain("preserved prior history")
+      expect(transcript).toContain("preserved draft sentinel")
+      expect(transcript).toContain("preserved typed-queue sentinel")
+    } finally {
+      transport.mockRestore()
+      factory.mockRestore()
+    }
+  })
+
   const typoCombo: ComboLookup = { state: "configured", routes: { architect: { engine: "codex", model: "gpt-typo" } }, sources: { architect: "user" } }
 
   test("an unknown Codex slug in the saved combo is reported at startup and not applied (real runtime)", async () => {
@@ -2439,6 +3291,266 @@ describe("interactive terminal", () => {
     expect(output).toContain("Saved combo route architect")
     expect(output).toContain("It applies when a model is selected.")
     expect(output).not.toContain("starts a new session")
+  })
+
+  function withContextControls(h: ReturnType<typeof harness>) {
+    const create = h.deps.createConversation!
+    h.deps.createConversation = (runtime, sessionID, prior, pinnedNote) => {
+      const original = create(runtime, sessionID, prior, pinnedNote)
+      let state: ConversationContextState = { messages: (prior ?? []).map(m => ({ ...m })), pinnedNote: pinnedNote ?? "" }
+      return {
+        ...original,
+        contextState: () => structuredClone(state),
+        contextReport: () => ({ inputTokens: 8192, conversationTokens: 5120, usedTokens: 1000, pairs: state.messages.length / 2, pinnedNote: state.pinnedNote, droppedPairs: 0 }),
+        replaceContext: next => { state = structuredClone(next) },
+        async turn(...args) {
+          const result = await original.turn(...args)
+          state.messages.push({ role: "user", text: args[0] }, { role: "assistant", text: result.text })
+          return result
+        },
+      }
+    }
+    return h
+  }
+
+  test("/context pin and compact persist across resume without deleting transcript or dispatching commands", async () => {
+    const note = "API  호환성\n  유지"
+    const first = withContextControls(harness({ lines: ["hello", `/context pin ${note}`, "/context compact 0", "/context", "/quit"], turns: [{ text: "hello back" }] }))
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, first.deps)
+    expect(first.calls.turns).toEqual(["hello"])
+    const records = replaySession(wt.worktree, "otter-fixture-session", { order: "asc" }).records
+    expect(records.some(r => r.kind === "user" && r.data.text === "hello")).toBe(true)
+    expect(records.filter(r => r.kind === "context-window").at(-1)?.data).toEqual({ version: 1, messages: [], pinnedNote: note })
+    const second = withContextControls(harness({ lines: ["/context", "/quit"] }))
+    await launchInteractive({ worktree: wt.worktree, resume: "otter-fixture-session" }, second.deps)
+    expect(second.calls.conversationRestores[0]).toEqual({ sessionID: "otter-fixture-session", prior: [], pinnedNote: note })
+    expect(second.calls.output.join("")).toContain("0 complete pairs")
+    expect(second.calls.output.join("")).toContain(note)
+    expect(second.calls.turns).toEqual([])
+  })
+
+  test("context pin survives a model switch and /new starts with no pin", async () => {
+    const h = withContextControls(harness({ lines: ["/context pin keep this", "/model local native-next", "/context", "/new", "/context", "/quit"] }))
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.conversationRestores[1]?.pinnedNote).toBe("keep this")
+    expect(h.calls.conversationRestores[2]?.pinnedNote).toBeUndefined()
+    expect(h.calls.output.join("")).toContain("Pinned note: none")
+    expect(h.calls.turns).toEqual([])
+  })
+
+  function useProductionContext(h: ReturnType<typeof harness>) {
+    useRealRuntime(h)
+    mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".otter", "otter.jsonc"), JSON.stringify({
+      chat: { intent: "off", execute: "plan" }, memory: { engine: "off" },
+      local_model: { context_input_tokens: 8192 },
+    }))
+    const prompts: Array<{ model: string; text: string }> = []
+    h.deps.createConversation = defaultDependencies().createConversation
+    h.deps.createRuntime = options => createCliRuntime({ ...options, createTransport(request) {
+      return {
+        async run() {
+          prompts.push({ model: options.model, text: request.prompt })
+          const text = JSON.stringify({ type: "final", text: "Context response completed." })
+          request.onText?.(text)
+          return { status: "completed", text, quiescent: true }
+        },
+        async reconcile() { return { outcome: "terminal", quiescent: true, evidence: "fixture completed" } },
+        async requestCancel() { return { requested: true, acknowledged: true, terminal: true, quiescent: true } },
+      }
+    } })
+    return prompts
+  }
+
+  test.each(["x".repeat(25000), "가".repeat(8000)])("production context factory keeps the session open after oversized input (%#)", async oversized => {
+    const note = "Keep the API contract"
+    const h = harness({ lines: ["First valid request", `/context pin ${note}`, oversized, "/context status", "Next valid request", "/quit"] })
+    const prompts = useProductionContext(h)
+    h.deps.terminal!.draftSnapshot = () => ({ draft: "", queued: [] })
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).toEqual({ code: 0 })
+    expect(prompts).toHaveLength(2)
+    expect(prompts[1]!.text).toContain("First valid request")
+    expect(prompts[1]!.text).toContain(note)
+    expect(prompts[1]!.text).not.toContain(oversized)
+    expect(h.calls.drafts).toContain(oversized)
+    expect(h.calls.output.join("")).toContain("This conversation request was not sent to the model")
+    expect(h.calls.viewFacts.some(fact => fact.request.state === "failed" && fact.request.category.state === "known" && fact.request.category.value === "input_budget")).toBe(true)
+    const records = replaySession(wt.worktree, h.calls.boundSessions[0]!, { order: "asc" }).records
+    expect(records.filter(record => record.kind === "assistant")).toHaveLength(2)
+    expect(records.filter(record => record.kind === "context-window").at(-1)?.data.pinnedNote).toBe(note)
+  })
+
+  test("production context factory allows unpinning after pinned context exceeds a reduced budget", async () => {
+    const h = harness({ lines: [`/context pin ${"가".repeat(2000)}`, "Too much pinned context", "/context unpin", "Try after unpinning", "/quit"] })
+    const prompts = useProductionContext(h)
+    writeFileSync(join(wt.worktree, ".otter", "otter.jsonc"), JSON.stringify({
+      chat: { intent: "off", execute: "plan" }, memory: { engine: "off" }, local_model: { context_input_tokens: 4096 },
+    }))
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).toEqual({ code: 0 })
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]!.text).toContain("Try after unpinning")
+    expect(prompts[0]!.text).not.toContain("Too much pinned context")
+    expect(h.calls.output.join("")).toContain("This conversation request was not sent to the model")
+  })
+
+  test("production context factory releases the claim after explicit skill context exceeds the budget", async () => {
+    const directory = join(wt.worktree, ".agents", "skills", "inspect")
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(join(directory, "SKILL.md"), `---\nname: inspect\ndescription: Inspect this project\nallowed-tools: [read]\n---\n${"가".repeat(2000)}\n`)
+    const h = harness({ lines: ["/skill:inspect inspect files", "Continue without the skill", "/quit"], choose: async () => 0 })
+    const prompts = useProductionContext(h)
+    writeFileSync(join(wt.worktree, ".otter", "otter.jsonc"), JSON.stringify({
+      chat: { intent: "off", execute: "plan" }, memory: { engine: "off" }, local_model: { context_input_tokens: 4096 },
+    }))
+    const createRuntime = h.deps.createRuntime!
+    let runtime: ReturnType<typeof createRuntime> | undefined
+    h.deps.createRuntime = options => { runtime = createRuntime(options); return runtime }
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).toEqual({ code: 0 })
+    expect(h.calls.output.join("")).toContain("This conversation request was not sent to the model")
+    expect(h.calls.choices).toHaveLength(1)
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]!.text).toContain("Continue without the skill")
+    expect(runtime!.runs.status().claim).toBeUndefined()
+    expect(runtime!.runs.status().executions).toHaveLength(1)
+  })
+
+  test("production context factory preserves the pinned note in resumed inference and its next checkpoint", async () => {
+    const note = "PIN-RESUME-428: API  호환성\n  유지"
+    const oldInput = "OLD-CONTEXT-764: previous discussion"
+    const first = harness({ lines: [oldInput, `/context pin ${note}`, "/context compact 0", "/quit"] })
+    const firstPrompts = useProductionContext(first)
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, first.deps)).toEqual({ code: 0 })
+    expect(firstPrompts).toHaveLength(1)
+    const sessionID = first.calls.boundSessions[0]!
+    const before = replaySession(wt.worktree, sessionID, { order: "asc" }).records
+    expect(before.filter(record => record.kind === "context-window").at(-1)?.data).toEqual({ version: 1, messages: [], pinnedNote: note })
+    expect(before.some(record => record.kind === "user" && record.data.text === oldInput)).toBe(true)
+
+    const resumed = harness({ lines: ["/continue", "RESUME", "What reference should I retain?", "/quit"] })
+    const resumedPrompts = useProductionContext(resumed)
+    expect(await launchInteractive({ worktree: wt.worktree, resume: sessionID }, resumed.deps)).toEqual({ code: 0 })
+    expect(resumedPrompts).toHaveLength(1)
+    const checkpoint = replaySession(wt.worktree, sessionID, { order: "asc", kind: "context-window" }).records.at(-1)?.data
+    expect({ promptHasPin: resumedPrompts[0]!.text.includes(note), checkpointPin: checkpoint?.pinnedNote }).toEqual({ promptHasPin: true, checkpointPin: note })
+    expect(resumedPrompts[0]!.text).not.toContain(oldInput)
+    expect(checkpoint?.messages).toEqual([
+      { role: "user", text: "What reference should I retain?" },
+      { role: "assistant", text: "Context response completed." },
+    ])
+  })
+
+  test("production context factory preserves the pin after model switching and clears it for new sessions", async () => {
+    const note = "PIN-SWITCH-914: retain the API contract"
+    const h = harness({ lines: [`/context pin ${note}`, "/model local native-next", "Continue with the reference.", "/new", "Start a clean discussion.", "/quit"] })
+    const prompts = useProductionContext(h)
+    expect(await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)).toEqual({ code: 0 })
+    expect(prompts).toHaveLength(2)
+    expect(prompts.map(prompt => prompt.model)).toEqual(["native-next", "native-next"])
+    expect(h.calls.boundSessions).toHaveLength(3)
+    const switched = replaySession(wt.worktree, h.calls.boundSessions[1]!, { order: "asc", kind: "context-window" }).records.at(-1)?.data
+    const fresh = replaySession(wt.worktree, h.calls.boundSessions[2]!, { order: "asc", kind: "context-window" }).records.at(-1)?.data
+    expect({ promptHasPin: prompts[0]!.text.includes(note), checkpointPin: switched?.pinnedNote }).toEqual({ promptHasPin: true, checkpointPin: note })
+    expect(prompts[1]!.text).not.toContain(note)
+    expect(prompts[1]!.text).not.toContain("Continue with the reference.")
+    expect(fresh).toEqual({ version: 1, pinnedNote: "", messages: [
+      { role: "user", text: "Start a clean discussion." },
+      { role: "assistant", text: "Context response completed." },
+    ] })
+  })
+
+  test("/context rechecks live claims before trimming and budgets can be set before selection", async () => {
+    const status: NonNullable<HarnessOptions["executionStatus"]> = { generation: 0, executions: [] }
+    const h = withContextControls(harness({ lines: ["/context compact 0", "/quit"], executionStatus: status, beforeRead() {
+      status.claim = { ownerSession: "other", instance: "other", pid: 1, generation: 1 }
+    } }))
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, h.deps)
+    expect(h.calls.output.join("")).toContain("Context changes require an idle conversation")
+    expect(replaySession(wt.worktree, "otter-fixture-session", { kind: "context-window" }).records).toEqual([])
+    const unselected = harness({ lines: ["/context budget 16384", "/quit"] })
+    let budget = 8192
+    await launchInteractive({ worktree: wt.worktree }, { ...unselected.deps, contextBudget: {
+      read: () => budget, save: value => { budget = value ?? 8192; return "/user/config" },
+    } })
+    expect(budget).toBe(16384)
+    expect(unselected.calls.runtimes).toEqual([])
+  })
+
+  test("/context optimize uses the selected local model and persists both settings without inference", async () => {
+    const h = harness({ lines: ["/context optimize long", "/context", "/quit"] })
+    let tokens = 8192
+    let target = 70
+    const operations: string[][] = []
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, { ...h.deps,
+      contextBudget: {
+        read: () => tokens, save: value => { tokens = value ?? 8192; return "/user/config" },
+        readTrimTarget: () => target,
+        saveOptimization: (value, percent) => { tokens = value ?? 8192; target = percent ?? 70; return "/user/config" },
+      },
+      localModel: { read: () => null, save: () => "/user/config", run: async argv => {
+        operations.push([...argv])
+        return "NAME    CONTEXT\nnative:latest    65536\nother:latest    8192"
+      } },
+    })
+    expect(tokens).toBe(32768)
+    expect(target).toBe(85)
+    expect(operations).toEqual([["ps"]])
+    expect(h.calls.output.join("")).toContain("Observed native: 65536")
+    expect(h.calls.output.join("")).toContain("Automatic trim target: 85%")
+    expect(h.calls.turns).toEqual([])
+  })
+
+  test("/local configures retention before selection and unloads only from idle chat without model turns", async () => {
+    let keepAlive: string | null | undefined
+    const operations: string[][] = []
+    const store = {
+      read: () => keepAlive,
+      save: (value: string | null) => { keepAlive = value; return "/user/otter.jsonc" },
+      run: async (argv: readonly string[]) => { operations.push([...argv]); return "NAME SIZE PROCESSOR UNTIL" },
+    }
+    const unselected = harness({ lines: ["/local", "/local profile speed", "/local unload native", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree }, { ...unselected.deps, localModel: store })
+    expect(unselected.calls.output.join("")).toContain("Saved local model keepalive -1")
+    expect(unselected.calls.output.join("")).toContain("before a model is selected")
+    expect(unselected.calls.runtimes).toHaveLength(0)
+    expect(operations).toEqual([["ps"]])
+    const chat = harness({ lines: ["/local unload", "/quit"] })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, { ...chat.deps, localModel: store })
+    expect(chat.calls.output.join("")).toContain("Unloaded native")
+    expect(chat.calls.turns).toEqual([])
+    expect(operations).toEqual([["ps"], ["stop", "native"]])
+    const held = harness({ lines: ["/local unload native", "/quit"], executionStatus: { generation: 1, claim: { ownerSession: "other", instance: "other", pid: 1, generation: 1 }, executions: [] } })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, { ...held.deps, localModel: store })
+    expect(held.calls.output.join("")).toContain("while this session is held")
+    expect(operations).toHaveLength(2)
+  })
+
+  test("/local unload rechecks claims acquired while input was pending", async () => {
+    const status: NonNullable<HarnessOptions["executionStatus"]> = { generation: 0, executions: [] }
+    let runs = 0
+    const h = harness({ lines: ["/local unload", "/quit"], executionStatus: status, beforeRead() {
+      status.claim = { ownerSession: "another", instance: "another", pid: 1, generation: 1 }
+    } })
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, { ...h.deps, localModel: {
+      read: () => undefined, save: () => "unused", run: async () => { runs++; return "" },
+    } })
+    expect(h.calls.output.join("")).toContain("while this session is held")
+    expect(runs).toBe(0)
+  })
+
+  test("Escape cancels /local status without a model turn or a workflow cancellation", async () => {
+    const h = harness({ lines: ["/local", "/quit"] })
+    let cancelled = false
+    await launchInteractive({ worktree: wt.worktree, engine: "local", model: "native" }, { ...h.deps, localModel: {
+      read: () => undefined, save: () => "unused", run: async (_argv, _worktree, signal) => {
+        h.calls.control?.("interrupt")
+        cancelled = signal?.aborted === true
+        if (cancelled) throw new Error("cancelled")
+        return "not cancelled"
+      },
+    } })
+    expect(cancelled).toBe(true)
+    expect(h.calls.output.join("")).toContain("Status unavailable: cancelled")
+    expect(h.calls.turns).toEqual([])
   })
 
   test("/memory selects the recall engine from the composer, before and during a session, without a model turn", async () => {
@@ -2541,6 +3653,7 @@ describe("interactive terminal", () => {
     expect(h.calls.sessionIDs).toEqual(["otter-fixture-session", "otter-fixture-session-2"])
     expect(h.calls.discoveries).toEqual([{ engine: "codex", worktree: realpathSync(wt.worktree) }])
     expect(h.calls.output.join("")).toContain("Commands (chat):\n/help — show contextual commands and keys")
+    expect(h.calls.output.join("")).toContain("/skillopt [status | prepare <input-path> | consent|arm|disarm|cancel|resume|run <run-id> [input-path] | apply|rollback|cleanup <run-id>]")
     expect(h.calls.output.join("")).toContain("New conversation: no earlier turns to carry.")
   })
 
@@ -2795,10 +3908,18 @@ describe("interactive terminal", () => {
     const path = workflowPath(wt.worktree)
     withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow("another-session",
       { instance: "fixture", pid: process.pid }, "command", "active plan", "codex")))
-    const active = harness({ lines: ["/help", "/model local qwen3:8b", "hello", "/quit"] })
+    const active = harness({ lines: ["/help", "/skillopt consent not-a-run-id /not-read-in-observer.json", "/skillopt prepare /not-read-in-observer.json", "/skillopt run not-a-run-id /not-read-in-observer.json", "/skillopt apply 00000000-0000-4000-8000-000000000001", "/skillopt rollback 00000000-0000-4000-8000-000000000001", "/skillopt cleanup 00000000-0000-4000-8000-000000000001", "/model local qwen3:8b", "hello", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, active.deps)
     expect(active.calls.actionContexts).toContain("observer")
     expect(active.calls.output.find(text => text.includes("Commands (observer):")) ?? "").toContain("/model")
+    expect(active.calls.output.find(text => text.includes("Commands (observer):")) ?? "").toContain("/skillopt")
+    expect(active.calls.output.join(" ")).toContain("SkillOpt prepare refused: this session is held or observing")
+    expect(active.calls.output.join(" ")).toContain("SkillOpt consent refused: this session is held or observing")
+    expect(active.calls.output.join(" ")).toContain("SkillOpt run refused: this session is held or observing")
+    expect(active.calls.output.join(" ")).toContain("SkillOpt apply refused: this session is held or observing")
+    expect(active.calls.output.join(" ")).toContain("SkillOpt rollback refused: this session is held or observing")
+    expect(active.calls.output.join(" ")).toContain("SkillOpt cleanup refused: this session is held or observing")
+    expect(active.calls.output.join(" ")).toContain("no inputs were read or state changed")
     expect(active.calls.runtimes).toHaveLength(2)
     expect(active.calls.runtimes[1]).toMatchObject({ engine: "local", model: "qwen3:8b" })
     expect(active.calls.turnBindings).toEqual([])
@@ -2816,18 +3937,26 @@ describe("interactive terminal", () => {
 
   test("held workflow and claim contexts hide /model and refuse typed switches before discovery", async () => {
     expect(interactiveActions("held").some(action => action.id === "model")).toBe(false)
+    expect(interactiveActions("held").some(action => action.id === "skillopt")).toBe(true)
     expect(interactiveActions("observer").some(action => action.id === "model")).toBe(true)
+    expect(interactiveActions("observer").some(action => action.id === "skillopt")).toBe(true)
 
     // This session's own held workflow (not another session's) keeps /model refused.
     withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow("otter-fixture-session",
       { instance: "fixture", pid: process.pid }, "command", "active plan", "codex")))
-    const workflow = harness({ lines: ["/help", "/model local qwen3:8b", "hello", "/quit"] })
+    const workflow = harness({ lines: ["/help", "/skillopt consent not-a-run-id /not-read-while-held.json", "/skillopt prepare /not-read-while-held.json", "/skillopt run not-a-run-id /not-read-while-held.json", "/skillopt apply 00000000-0000-4000-8000-000000000001", "/skillopt rollback 00000000-0000-4000-8000-000000000001", "/skillopt cleanup 00000000-0000-4000-8000-000000000001", "/model local qwen3:8b", "hello", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, workflow.deps)
     const workflowHelp = workflow.calls.output.find(text => text.includes("Commands (held):"))
     expect(workflowHelp).toBeDefined()
     expect(workflowHelp ?? "").not.toContain("/model")
     expect(workflow.calls.actionContexts).toContain("held")
     expect(workflow.calls.output.join(" ")).toContain("Model selection is unavailable while this session is held")
+    expect(workflow.calls.output.join(" ")).toContain("SkillOpt prepare refused: this session is held or observing")
+    expect(workflow.calls.output.join(" ")).toContain("SkillOpt consent refused: this session is held or observing")
+    expect(workflow.calls.output.join(" ")).toContain("SkillOpt run refused: this session is held or observing")
+    expect(workflow.calls.output.join(" ")).toContain("SkillOpt apply refused: this session is held or observing")
+    expect(workflow.calls.output.join(" ")).toContain("SkillOpt rollback refused: this session is held or observing")
+    expect(workflow.calls.output.join(" ")).toContain("SkillOpt cleanup refused: this session is held or observing")
     expect(workflow.calls.discoveries).toEqual([])
     expect(workflow.calls.runtimes).toHaveLength(1)
     expect(workflow.calls.sessionIDs).toEqual(["otter-fixture-session"])
@@ -2841,7 +3970,7 @@ describe("interactive terminal", () => {
         claim: { ownerSession: "another-session", instance: "other-instance", pid: 1, generation: 1 },
         executions: [],
       }
-      const claimed = harness({ lines: ["/help", "/model local qwen3:8b", "hello", "/quit"], executionStatus: claim })
+      const claimed = harness({ lines: ["/help", "/skillopt consent not-a-run-id /not-read-under-claim.json", "/skillopt prepare /not-read-under-claim.json", "/skillopt run not-a-run-id /not-read-under-claim.json", "/skillopt apply 00000000-0000-4000-8000-000000000001", "/skillopt rollback 00000000-0000-4000-8000-000000000001", "/skillopt cleanup 00000000-0000-4000-8000-000000000001", "/model local qwen3:8b", "hello", "/quit"], executionStatus: claim })
       claimed.deps.cwd = claimWorktree.worktree
       claimed.deps.gitTopLevel = () => claimWorktree.worktree
       await launchInteractive({ worktree: claimWorktree.worktree, engine: "codex", model: "gpt-5-codex" }, claimed.deps)
@@ -2851,6 +3980,12 @@ describe("interactive terminal", () => {
       expect(claimHelp ?? "").not.toContain("/model")
       expect(claimed.calls.actionContexts).toContain("held")
       expect(claimed.calls.output.join(" ")).toContain("Model selection is unavailable while this session is held")
+      expect(claimed.calls.output.join(" ")).toContain("SkillOpt prepare refused: this session is held or observing")
+      expect(claimed.calls.output.join(" ")).toContain("SkillOpt consent refused: this session is held or observing")
+      expect(claimed.calls.output.join(" ")).toContain("SkillOpt run refused: this session is held or observing")
+      expect(claimed.calls.output.join(" ")).toContain("SkillOpt apply refused: this session is held or observing")
+      expect(claimed.calls.output.join(" ")).toContain("SkillOpt rollback refused: this session is held or observing")
+      expect(claimed.calls.output.join(" ")).toContain("SkillOpt cleanup refused: this session is held or observing")
       expect(claimed.calls.discoveries).toEqual([])
       expect(claimed.calls.runtimes).toHaveLength(1)
       expect(claimed.calls.sessionIDs).toEqual([claimSessionID])

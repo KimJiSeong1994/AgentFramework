@@ -1,5 +1,5 @@
 import { constants } from "node:fs"
-import { accessSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { accessSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { TextDecoder } from "node:util"
@@ -8,11 +8,13 @@ import { spawnSync } from "node:child_process"
 import { createVendorProcess, vendorProcessEnvironment, type VendorProcessHandle, type VendorProcessResult } from "./vendor-process.ts"
 import type { ExecutionCancelResult, ExecutionReconciliation } from "./types.ts"
 import { CODEX_INSTRUCTIONS, CODEX_VERSION, CODEX_SUPPORTED_VERSIONS, codexProfileArgv, createCodexProfile } from "./codex-profile.ts"
+import { isLocalKeepAlive } from "../config.ts"
 
 export type CliEngine = "local" | "codex" | "claude"
 
 export type CliTransportOptions = {
   engine: CliEngine
+  localKeepAlive?: string
   model: string
   prompt: string
   deadlineAt: number
@@ -25,13 +27,55 @@ export type CliTransportResult = {
   text: string
   quiescent: boolean
   error?: string
+  /** Only counters actually reported by a successful native CLI result; absent fields remain unknown. */
+  usage?: CliObservedUsage
 }
+
+export type CliObservedUsage = Readonly<{
+  inputTokens?: number
+  outputTokens?: number
+  cachedInputTokens?: number
+  cacheCreationTokens?: number
+  /** Vendor-reported estimate, not proof of subscription charges or billed provider requests. */
+  reportedCostUsd?: number
+}>
+
+type CliObservedUsageFieldShape = Readonly<
+  | { kind: "counter"; codexSource: string | null; claudeSource: string; maxSerializedBytes: 16 }
+  | { kind: "reported-cost"; maxSerializedBytes: 32 }
+>
+
+// Exhaustive against CliObservedUsage: additions/removals must update both source normalization and byte accounting.
+const OBSERVED_USAGE_FIELD_SHAPES = {
+  inputTokens: { kind: "counter", codexSource: "input_tokens", claudeSource: "input_tokens", maxSerializedBytes: 16 },
+  outputTokens: { kind: "counter", codexSource: "output_tokens", claudeSource: "output_tokens", maxSerializedBytes: 16 },
+  cachedInputTokens: { kind: "counter", codexSource: "cached_input_tokens", claudeSource: "cache_read_input_tokens", maxSerializedBytes: 16 },
+  cacheCreationTokens: { kind: "counter", codexSource: null, claudeSource: "cache_creation_input_tokens", maxSerializedBytes: 16 },
+  reportedCostUsd: { kind: "reported-cost", maxSerializedBytes: 32 },
+} as const satisfies Record<keyof CliObservedUsage, CliObservedUsageFieldShape>
+
+/** Conservative JSON byte bound for the closed set of fields that observedNativeUsage can return. */
+export function nativeObservedUsageCanonicalByteBound(): number {
+  const fields = Object.entries(OBSERVED_USAGE_FIELD_SHAPES) as [keyof CliObservedUsage, CliObservedUsageFieldShape][]
+  const fieldBytes = fields.reduce((total, [key, shape]) =>
+    total + Buffer.byteLength(JSON.stringify(key), "utf8") + 1 + shape.maxSerializedBytes, 0)
+  return 2 + Math.max(0, fields.length - 1) + fieldBytes
+}
+
+export type CliNativeIdentity = Readonly<{
+  engine: "codex" | "claude"
+  requestedModel: string
+  runtimeIdentity: Readonly<{ version: string; executableSha256: string }>
+  profileIdentity: Readonly<{ id: string; sha256: string }>
+}>
 
 export type CliTransportHandle = {
   run(): Promise<CliTransportResult>
   requestCancel(reason: string, deadlineAt: number): Promise<ExecutionCancelResult>
   reconcile(): Promise<ExecutionReconciliation>
   preflight?(): Promise<{ compatible: boolean; nativePolicyHash?: string }>
+  /** Before run: owned version probe. After success: remeasure pinned bytes, never mint retrospective identity. */
+  inspectIdentity?(): Promise<CliNativeIdentity | undefined>
 }
 
 export type CliTransportPreflight = { compatible: boolean; nativePolicyHash?: string }
@@ -60,6 +104,7 @@ const SAFE_ERRORS = {
   claudeLogin: "Claude CLI login required; run claude auth login",
   tool: "native tool activity refused",
   profile: "Codex native profile verification failed",
+  identity: "native runtime identity verification failed",
   profileState: "Codex private profile state verification failed",
   outputLimit: "output byte limit reached",
   callback: "output callback failed",
@@ -83,6 +128,7 @@ type NativeProtocol = {
   readonly incomplete: boolean
   readonly outputText: string
   readonly outputLimitReached: boolean
+  readonly usage?: CliObservedUsage
 }
 
 type OwnedScratchDirectory = {
@@ -135,7 +181,8 @@ function safeOptions(options: CliTransportOptions): CliTransportOptions {
       typeof options.prompt !== "string" || !isWellFormedUtf16(options.prompt) || Buffer.byteLength(options.prompt, "utf8") > MAX_PROMPT_BYTES ||
       !Number.isSafeInteger(options.deadlineAt) || options.deadlineAt < 0 || options.deadlineAt - Date.now() > MAX_EXECUTION_MS ||
       !Number.isSafeInteger(options.maxOutputBytes) || options.maxOutputBytes < 0 || options.maxOutputBytes > MAX_OUTPUT_BYTES ||
-      (options.onText !== undefined && typeof options.onText !== "function")) {
+      (options.onText !== undefined && typeof options.onText !== "function") ||
+      (options.localKeepAlive !== undefined && !isLocalKeepAlive(options.localKeepAlive))) {
     throw new TypeError(SAFE_ERRORS.options)
   }
   return { ...options }
@@ -445,6 +492,26 @@ function utf8Chunk(value: string, start: number, maxBytes: number): string {
   return value.slice(start, end)
 }
 
+function observedNativeUsage(value: unknown, engine: "codex" | "claude", reportedCost?: unknown): CliObservedUsage | undefined {
+  const usage: { -readonly [K in keyof CliObservedUsage]: CliObservedUsage[K] } = {}
+  if (isRecord(value)) {
+    for (const [target, shape] of Object.entries(OBSERVED_USAGE_FIELD_SHAPES) as
+      [keyof CliObservedUsage, CliObservedUsageFieldShape][]) {
+      if (shape.kind !== "counter") continue
+      const source = engine === "codex" ? shape.codexSource : shape.claudeSource
+      if (source === null) continue
+      const count = value[source]
+      if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) usage[target] = count
+    }
+  }
+  const costShape = OBSERVED_USAGE_FIELD_SHAPES.reportedCostUsd
+  if (costShape.kind === "reported-cost" && typeof reportedCost === "number" &&
+      Number.isFinite(reportedCost) && reportedCost >= 0) {
+    usage.reportedCostUsd = reportedCost
+  }
+  return Object.keys(usage).length ? Object.freeze(usage) : undefined
+}
+
 function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: () => void): NativeProtocol {
   const outputBlocks: Buffer[] = []
   let outputBlock = Buffer.allocUnsafe(CALLBACK_CHUNK_BYTES)
@@ -463,6 +530,7 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
   let claudeDeltaText = ""
   let lastClaudeMessageText: string | undefined
   let localDecoder: TextDecoder | undefined
+  let usage: CliObservedUsage | undefined
 
   const outputText = (): string => {
     const blocks = outputBlockUsed > 0 ? [...outputBlocks, outputBlock.subarray(0, outputBlockUsed)] : outputBlocks
@@ -567,6 +635,7 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
     }
     if (type === "turn.completed") {
       if (!codexTurnStarted || (record.usage !== undefined && !isRecord(record.usage))) fail()
+      usage = observedNativeUsage(record.usage, "codex")
       terminalSeen = true
       return
     }
@@ -731,6 +800,7 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
         terminalSeen = true
         return
       }
+      usage = observedNativeUsage(record.usage, "claude", record.total_cost_usd)
       const emitted = outputText()
       if (record.result === emitted || (record.result.length > 0 && emitted.endsWith(record.result))) {
         terminalSeen = true
@@ -826,6 +896,7 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
     get incomplete(): boolean { return incomplete },
     get outputText(): string { return outputText() },
     get outputLimitReached(): boolean { return outputLimitReached },
+    get usage(): CliObservedUsage | undefined { return usage },
   }
 }
 
@@ -856,12 +927,13 @@ function statusFromProcess(result: VendorProcessResult, protocol: NativeProtocol
     return { status: "incomplete", text, quiescent: true, error: SAFE_ERRORS.incomplete }
   }
   if (result.status !== "completed") return { status: "incomplete", text, quiescent: true, error: SAFE_ERRORS.incomplete }
-  return { status: "completed", text, quiescent: true }
+  return { status: "completed", text, quiescent: true, ...(protocol.usage ? { usage: protocol.usage } : {}) }
 }
 
-type CodexProbeResult = {
+type NativeProbeResult = {
   compatible: boolean
   nativePolicyHash?: string
+  version?: string
   quiescent: boolean
   cancelled: boolean
   error?: string
@@ -872,6 +944,38 @@ function supportedCodexVersion(result: VendorProcessResult): boolean {
       result.stdout.truncated || result.stderr.truncated || result.stderr.text.trim().length > 0) return false
   const output = result.stdout.text.trim()
   return CODEX_SUPPORTED_VERSIONS.some(version => output === `codex-cli ${version}`)
+}
+
+function nativeExecutableDigest(executable: string): string {
+  const fd = openSync(executable, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  try {
+    const before = fstatSync(fd, { bigint: true })
+    const uid = process.geteuid?.()
+    // Package managers may hard-link installed CLI binaries. This is a read-only TCB measurement,
+    // not a publication target; bind stable descriptor bytes and never rewrite the executable.
+    if (uid === undefined || !before.isFile() || before.nlink < 1n || before.size < 1n || before.size > 512n * 1024n * 1024n ||
+        (before.uid !== 0n && before.uid !== BigInt(uid)) || (before.mode & 0o022n) !== 0n || (before.mode & 0o111n) === 0n) {
+      throw new Error(SAFE_ERRORS.profile)
+    }
+    const hash = createHash("sha256")
+    const buffer = Buffer.allocUnsafe(64 * 1024)
+    let bytes = 0
+    for (;;) {
+      const count = readSync(fd, buffer, 0, buffer.length, bytes)
+      if (!count) break
+      bytes += count
+      if (BigInt(bytes) > before.size) throw new Error(SAFE_ERRORS.profile)
+      hash.update(buffer.subarray(0, count))
+    }
+    const after = fstatSync(fd, { bigint: true })
+    const named = lstatSync(executable, { bigint: true })
+    if (named.isSymbolicLink() || named.dev !== after.dev || named.ino !== after.ino || named.nlink !== after.nlink || after.nlink !== before.nlink ||
+        after.size !== before.size || BigInt(bytes) !== before.size || after.mtimeNs !== before.mtimeNs ||
+        after.ctimeNs !== before.ctimeNs || named.mtimeNs !== after.mtimeNs || named.ctimeNs !== after.ctimeNs) {
+      throw new Error(SAFE_ERRORS.profile)
+    }
+    return hash.digest("hex")
+  } finally { closeSync(fd) }
 }
 
 /**
@@ -903,7 +1007,8 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
   let finalResult: CliTransportResult | undefined
   let scratch: OwnedScratchDirectory | undefined
   let codexState: OwnedCodexScratchState | undefined
-  let probePromise: Promise<CodexProbeResult> | undefined
+  let probePromise: Promise<NativeProbeResult> | undefined
+  let observedIdentity: CliNativeIdentity | undefined
   let activeProcessKind: "probe" | "inference" | undefined
   let stopReason: "output-limit" | undefined
 
@@ -918,8 +1023,8 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
     return true
   }
 
-  const runCodexVersionProbe = async (): Promise<CodexProbeResult> => {
-    if (options.engine !== "codex" || !codexProfile || !profileIntegrity(codexProfile) ||
+  const runNativeVersionProbe = async (): Promise<NativeProbeResult> => {
+    if (options.engine === "local" || (options.engine === "codex" && (!codexProfile || !profileIntegrity(codexProfile))) ||
         (process.platform !== "darwin" && process.platform !== "linux")) {
       return { compatible: false, quiescent: true, cancelled: false, error: SAFE_ERRORS.profile }
     }
@@ -970,18 +1075,22 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
     if (!result.quiescent) {
       return { compatible: false, quiescent: false, cancelled: result.status === "cancelled", error: SAFE_ERRORS.process }
     }
-    const versionMatches = supportedCodexVersion(result)
+    const claudeVersion = options.engine === "claude" && result.status === "completed" && result.code === 0 &&
+      result.captureComplete && !result.stdout.truncated && !result.stderr.truncated && !result.stderr.text.trim()
+      ? /^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?) \(Claude Code\)$/.exec(result.stdout.text.trim())?.[1] : undefined
+    const versionMatches = options.engine === "codex" ? supportedCodexVersion(result) : claudeVersion !== undefined
+    const version = options.engine === "codex" ? result.stdout.text.trim().slice("codex-cli ".length) : claudeVersion
     if (!cleanupScratch()) return { compatible: false, quiescent: true, cancelled: result.status === "cancelled", error: SAFE_ERRORS.cleanup }
     processHandle = undefined
     activeProcessKind = undefined
     if (result.status === "cancelled") return { compatible: false, quiescent: true, cancelled: true, error: SAFE_ERRORS.process }
-    if (!versionMatches) return { compatible: false, quiescent: true, cancelled: false, error: SAFE_ERRORS.profile }
-    return { compatible: true, nativePolicyHash: codexProfile.catalogHash, quiescent: true, cancelled: false }
+    if (!versionMatches) return { compatible: false, quiescent: true, cancelled: false, error: options.engine === "codex" ? SAFE_ERRORS.profile : SAFE_ERRORS.identity }
+    return { compatible: true, ...(codexProfile ? { nativePolicyHash: codexProfile.catalogHash } : {}), version, quiescent: true, cancelled: false }
   }
 
-  const ensureCodexVersionProbe = async (): Promise<CodexProbeResult> => {
+  const ensureNativeVersionProbe = async (): Promise<NativeProbeResult> => {
     if (probePromise) return probePromise
-    const pending = runCodexVersionProbe()
+    const pending = runNativeVersionProbe()
     probePromise = pending
     try { return await pending }
     finally { if (probePromise === pending) probePromise = undefined }
@@ -1005,14 +1114,23 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
         return finalResult
       }
 
-      if (options.engine === "codex") {
-        const probe = await ensureCodexVersionProbe()
+      if (options.engine === "codex" || observedIdentity || probePromise) {
+        const probe = await ensureNativeVersionProbe()
         if (cancelledBeforeRun || probe.cancelled) {
           finalResult = { status: probe.quiescent ? "cancelled" : "unresolved", text: "", quiescent: probe.quiescent, error: probe.error }
           return finalResult
         }
-        if (!probe.compatible || probe.nativePolicyHash !== codexProfile?.catalogHash) {
-          finalResult = { status: probe.quiescent ? "failed" : "unresolved", text: "", quiescent: probe.quiescent, error: probe.error ?? SAFE_ERRORS.profile }
+        if (!probe.compatible || (options.engine === "codex" && probe.nativePolicyHash !== codexProfile?.catalogHash) ||
+            (observedIdentity && probe.version !== observedIdentity.runtimeIdentity.version)) {
+          finalResult = { status: probe.quiescent ? "failed" : "unresolved", text: "", quiescent: probe.quiescent, error: probe.error ?? (observedIdentity ? SAFE_ERRORS.identity : SAFE_ERRORS.profile) }
+          return finalResult
+        }
+      }
+      if (observedIdentity) {
+        try {
+          if (nativeExecutableDigest(executable) !== observedIdentity.runtimeIdentity.executableSha256) throw new Error(SAFE_ERRORS.identity)
+        } catch {
+          finalResult = { status: "failed", text: "", quiescent: true, error: SAFE_ERRORS.identity }
           return finalResult
         }
       }
@@ -1047,6 +1165,10 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
           scratch = createScratchDirectory()
           if (!hasOwnedScratchIdentity(scratch)) throw new Error(SAFE_ERRORS.cleanup)
           const argv = nativeArgv(options.engine, options.model, scratch.path)
+          if (options.engine === "local" && options.localKeepAlive !== undefined) {
+            // Ollama's CLI parses Go durations: negative residency needs a unit even though config uses -1.
+            argv.push("--keepalive", options.localKeepAlive === "-1" ? "-1m" : options.localKeepAlive)
+          }
           protocol = createNativeProtocol(options, stopAtOutputLimit)
           processHandle = createVendorProcess({
             executable,
@@ -1096,6 +1218,13 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
       }
 
       finalResult = statusFromProcess(processResult, protocol)
+      if (observedIdentity && finalResult.status === "completed") {
+        try {
+          if (nativeExecutableDigest(executable) !== observedIdentity.runtimeIdentity.executableSha256) throw new Error(SAFE_ERRORS.identity)
+        } catch {
+          finalResult = { status: "failed", text: finalResult.text, quiescent: true, error: SAFE_ERRORS.identity }
+        }
+      }
       return finalResult
     },
 
@@ -1147,10 +1276,38 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
   if (options.engine === "codex") {
     handle.preflight = async (): Promise<CliTransportPreflight> => {
       if (runCalled || cancelledBeforeRun) return { compatible: false }
-      const result = await ensureCodexVersionProbe()
+      const result = await ensureNativeVersionProbe()
       return result.compatible && result.nativePolicyHash
         ? { compatible: true, nativePolicyHash: result.nativePolicyHash }
         : { compatible: false }
+    }
+  }
+  if (options.engine !== "local") {
+    const engine = options.engine
+    handle.inspectIdentity = async () => {
+      if (cancelledBeforeRun) return undefined
+      if (runCalled) {
+        if (!observedIdentity || finalResult?.status !== "completed" || !finalResult.quiescent) return undefined
+        try {
+          return nativeExecutableDigest(executable) === observedIdentity.runtimeIdentity.executableSha256 ? observedIdentity : undefined
+        } catch { return undefined }
+      }
+      let executableSha256: string
+      try { executableSha256 = nativeExecutableDigest(executable) } catch { return undefined }
+      const probe = await ensureNativeVersionProbe()
+      if (runCalled || cancelledBeforeRun || !probe.compatible || !probe.version || !probe.quiescent) return undefined
+      try { if (nativeExecutableDigest(executable) !== executableSha256) return undefined } catch { return undefined }
+      const profileSha256 = engine === "codex" ? probe.nativePolicyHash : createHash("sha256")
+        .update(JSON.stringify({ schema: "claude-native-no-tools.v1", argv: nativeArgv(engine, options.model, "/__SCRATCH__") }), "utf8").digest("hex")
+      if (!profileSha256) return undefined
+      const identity: CliNativeIdentity = Object.freeze({
+        engine, requestedModel: options.model,
+        runtimeIdentity: Object.freeze({ version: probe.version, executableSha256 }),
+        profileIdentity: Object.freeze({ id: engine === "codex" ? "codex-restricted-read.v1" : "claude-native-no-tools.v1", sha256: profileSha256 }),
+      })
+      if (observedIdentity && JSON.stringify(observedIdentity) !== JSON.stringify(identity)) return undefined
+      observedIdentity = identity
+      return identity
     }
   }
 

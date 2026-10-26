@@ -40,8 +40,16 @@ export type SkillConsent = "prompt" | "never"
 
 declare const preparedSkillBrand: unique symbol
 export type PreparedSkillInvocation = Readonly<{ name: string; contentHash: string; [preparedSkillBrand]: never }>
-type PreparedState = { session: SkillSession; capture: SkillCapture; lease: AdmissionLease; revision: number; claimed: boolean }
+type PreparedState = {
+  session: SkillSession
+  capture: SkillCapture
+  lease: AdmissionLease
+  revision: number
+  claimed: boolean
+  freshWitnessInvocation: boolean
+}
 const preparedInvocations = new WeakMap<object, PreparedState>()
+const skillSessionStores = new WeakSet<object>()
 
 export class SkillAdmissionError extends Error {
   constructor(message: string) { super(message); this.name = "SkillAdmissionError" }
@@ -74,6 +82,8 @@ export class SkillSession {
   private readonly pendingCaptures = new Map<AbortController, string | undefined>()
   private readonly invocationControllers = new Map<AbortController, string>()
   private readonly lifecycle = new AbortController()
+  private readonly freshWitnessAttachment: boolean
+  private preparedInvocationCount = 0
   private lease?: AdmissionLease
   private closed = false
 
@@ -82,6 +92,8 @@ export class SkillSession {
     this.store = input.store
     this.terminal = input.terminal
     this.trust = input.trust ?? NO_SKILL_TRUST
+    this.freshWitnessAttachment = !input.store.restored && !skillSessionStores.has(input.store)
+    skillSessionStores.add(input.store)
     this.assertOwned()
   }
 
@@ -344,6 +356,8 @@ export class SkillSession {
    */
   async prepare(name: string, signal: AbortSignal, options: { consent?: "prompt" | "never" } = {}): Promise<PreparedSkillInvocation> {
     if (!NAME.test(name)) throw new SkillAdmissionError("Exactly one valid ordinary skill name is required.")
+    const freshWitnessInvocation = this.freshWitnessAttachment && !this.store.restored && this.preparedInvocationCount === 0
+    this.preparedInvocationCount++
     const consent = options.consent ?? "prompt"
     const lease = this.requireLease()
     const revision = this.revisions.get(name) ?? 0
@@ -381,7 +395,9 @@ export class SkillSession {
     this.assertLease(lease, signal)
     this.assertRevision(name, revision)
     const prepared = Object.freeze({ name: capture.name, contentHash: capture.contentHash }) as PreparedSkillInvocation
-    preparedInvocations.set(prepared, { session: this, capture, lease, revision, claimed: false })
+    preparedInvocations.set(prepared, {
+      session: this, capture, lease, revision, claimed: false, freshWitnessInvocation,
+    })
     return prepared
   }
 
@@ -467,7 +483,14 @@ export class SkillSession {
 }
 
 /** One-use handoff to the execution builder; a copied or persisted identity is never accepted. */
-export function claimPreparedSkillInvocation(value: unknown): Readonly<{ session: SkillSession; capture: SkillCapture; lease: AdmissionLease; revision: number; text: string }> {
+export function claimPreparedSkillInvocation(value: unknown): Readonly<{
+  session: SkillSession
+  capture: SkillCapture
+  lease: AdmissionLease
+  revision: number
+  text: string
+  freshWitnessInvocation: boolean
+}> {
   const state = value && typeof value === "object" ? preparedInvocations.get(value) : undefined
   if (!state || state.claimed || !state.session.authorizes(state.capture, state.lease, state.revision)) {
     throw new SkillAdmissionError("Skill invocation is absent, copied, expired, or already bound.")
@@ -475,5 +498,9 @@ export function claimPreparedSkillInvocation(value: unknown): Readonly<{ session
   state.claimed = true
   const bytes = readCapturedSkill(state.capture)
   if (!bytes) throw new SkillAdmissionError("Captured skill instructions are unavailable.")
-  return Object.freeze({ session: state.session, capture: state.capture, lease: state.lease, revision: state.revision, text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes) })
+  return Object.freeze({
+    session: state.session, capture: state.capture, lease: state.lease, revision: state.revision,
+    text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes),
+    freshWitnessInvocation: state.freshWitnessInvocation,
+  })
 }

@@ -82,6 +82,17 @@ roles without a route use the main model. /model combo (or the "combo" entry in 
 user's route for that role as a whole object. Every new session (a plain /model switch, /new, apply) takes its routes from the
 currently saved combo, normalized against the new main model; an invalid combo is reported and not applied. /resume and the
 common-engine recovery commands use the session's pinned routes from its metadata, never current config.
+Context memory: /context shows local conversation estimates and the input budget.
+/context budget <4096-65536>|default sets Otter's input window. /context optimize [speed|balanced|long|default]
+configures the input budget and automatic trimming using the loaded model context.
+Settings are shared across local models and local combo routes; check smaller-context models before using them.
+/context pin <text> keeps a note through trimming; /context unpin removes it.
+/context compact [pairs] keeps the newest pairs (default 4) and pinned note while preserving the full transcript.
+Old local conversation pairs are removed in batches when needed. These are estimates, not exact model tokens.
+Local model resources: /local shows loaded Ollama models and retention. /local profile memory|balanced|speed|default
+sets release-after-response, 5m idle, indefinite retention, or the server default; /local keepalive 10m sets a custom
+duration (0 releases, -1 retains). /local unload [model] frees a model and its runtime prompt cache while chat is idle.
+Settings apply to subsequent local CLI inference; installed model files and conversations are kept.
 Memory: /memory shows the engine that links requests to knowledge/wiki pages for the memory tool (default auto: the
 Claude CLI with claude-haiku-5-5, else the Codex CLI with gpt-5.6-luna; no local model server needed); /memory test
 times one fresh recall; /memory auto, /memory claude [model], /memory codex [slug], /memory local <ollama-model>,

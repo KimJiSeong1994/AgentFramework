@@ -62,6 +62,7 @@ export type JudgeRequest = {
   engine: JudgeEngine
   /** Native model for claude/codex/local; unused by jev. */
   model?: string
+  localKeepAlive?: string
   /** OpenJev root endpoint; only for jev. */
   endpoint?: string
   /** Classifier name shown to a CLI model, and the OpenJev question key. */
@@ -108,6 +109,7 @@ async function judgeCli(request: JudgeRequest & { engine: "claude" | "codex" | "
   try {
     transport = (request.transport ?? createCliTransport)({
       engine: request.engine, model: request.model, prompt, deadlineAt: request.deadlineAt, maxOutputBytes: MAX_CLI_OUTPUT_BYTES,
+      ...(request.engine === "local" && request.localKeepAlive != null ? { localKeepAlive: request.localKeepAlive } : {}),
     })
   } catch { return { ok: false, reason: "unavailable" } }
   const cancel = () => { void transport.requestCancel(request.cancelReason, Date.now() + 2000).catch(() => {}) }
