@@ -131,6 +131,79 @@ Every execution is approved by the local human, one action at a time or one plan
   tokens); local defaults to 24,000 conversation characters and an 8,192-token input estimate (configurable with
   `/context budget`). OpenCode keeps its existing 24,000-character conversation window.
 
+### Optional repository graph search (`repo_search`)
+
+Repository graph search is separate from wiki `memory` and skill routing. It is
+off by default. Only planning main can receive the capability after a local
+operator explicitly builds an approved index; project configuration cannot enable
+it. Existing opt-in deep-interview routing and execution approval remain unchanged.
+The initial host integration is CLI chat with `chat.execute: "plan"`; execution
+chat, workers, workflow roles, and the OpenCode plugin do not receive this tool.
+Recreate the chat runtime after building an index (for example, select the model
+again) so its frozen policy can discover the approved capability.
+
+The initial runtime supports macOS arm64 with the python.org Python 3.13.2 framework
+at `/Library/Frameworks/Python.framework/Versions/3.13` and `uv`. Other platforms
+fail closed; there is no unsandboxed fallback. From `framework/`:
+
+```sh
+bun run repo-search:setup --approve
+bun run repo-search:build --approve --root framework/src --root framework/test
+```
+
+Setup explicitly downloads the commit-pinned Graphify dependency set. Build and
+query then run offline under a deny-default Seatbelt profile. Setup never indexes
+the repository; search never installs, builds, refreshes, or starts an HTTP/MCP
+server. The runtime is stored under
+`~/.local/share/otter/repo-search-runtime/`; indexes are stored separately under
+`~/.local/share/otter/repo-search/`, bound to the canonical worktree.
+Setup verifies the Python Software Foundation signing identity of the native
+interpreter components and the exact interpreter version/architecture, then pins
+the installed non-site standard-library bytes. This is not a claim that the
+entire pre-existing Python installation matches a pristine installer. A changed
+interpreter or standard library invalidates the runtime. The profile admits
+OS/interpreter/runtime files, explicit inputs, and (for builds only) output writes.
+macOS dyld also requires opening `/`, exposing root entry names; arbitrary
+descendant content and metadata remain denied. Setup uses a private HOME/cache
+without ambient Git credentials.
+
+Build roots are relative to the Git top-level, even when the command is run from
+`framework/`. Only tracked regular `.ts`, `.tsx`, and `.py` source files are
+eligible. Knowledge/session data, documents, media, credentials, generated/vendor
+files, symlinks, and hardlinks are excluded. Untracked files are not indexed.
+Dirty tracked bytes are included; changed/deleted/newly tracked eligible files
+invalidate freshness. A failed refresh does not replace the active generation.
+Refreshing requires the same explicit build command and approval.
+
+`repo_search` accepts only `{query, limit?}` (at most 2,048 UTF-8 query bytes,
+1–10 results). Missing, stale, incompatible, or corrupt indexes do not trigger
+background work. Results are bounded untrusted navigation references, not
+instructions or proof: confirm paths, relationships, and claims with source
+reading/search or LSP. Graphify uses lexical ranking plus graph traversal, not a
+vector index. Semantic extraction, LLM deduplication, query logging, PR tools, and
+generic MCP serving are not exposed.
+
+**Privacy boundary:** local indexing does not mean the whole conversation is
+offline. Returned references can enter the currently selected model's context,
+including a cloud model. Review the approved corpus accordingly.
+
+Qualification commands (from `framework/`; neither installs dependencies):
+
+```sh
+OTTER_REPO_SEARCH_RUNTIME_TEST=1 bun test test/repo-search-runtime.test.ts test/repo-search-security.test.ts
+OTTER_REPO_SEARCH_BENCHMARK=1 bun test test/repo-search-benchmark.test.ts
+```
+
+Explicit runtime qualification fails when prerequisites are absent. Ordinary test
+runs skip the real-runtime/benchmark cases unless their opt-in variable is set.
+The fixed 30-question repository evaluation uses 10 identifier, 10 English, and
+10 Korean queries. On the 479-file approved corpus, file Recall@5 was respectively
+100%, 70%, and 0% (literal-token file-scan baseline: 100%, 50%, and 0%).
+This small retrieval-only experiment does not measure model reasoning or token
+savings. Use identifiers/English source terms for graph queries; raw Korean
+semantic matching is not established. The recorded run is available in
+[`artifacts/repo-search-evaluation.json`](../artifacts/repo-search-evaluation.json).
+
 ### Session history (`/history`, `/facts`, `/wiki`)
 
 - Every executed CLI tool (codex/claude/local) joins `tool-outcomes.sqlite` like OpenCode tool events (identity, tool,

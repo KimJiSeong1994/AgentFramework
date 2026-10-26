@@ -1,0 +1,482 @@
+{
+  "schema": 1,
+  "graphifyCommit": "92741d162b2094ffc2fed58cfbd8ee823e9da62c",
+  "sourceFingerprint": "c84d89bee15cbfaecd92358de8c7e9e25b62b5d7870cdcb66da1200bbaa3f70d",
+  "scope": "file retrieval only; no model/token-cost experiment",
+  "files": 479,
+  "queries": 30,
+  "groups": [
+    {
+      "group": "symbol",
+      "queries": 10,
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1
+    },
+    {
+      "group": "english",
+      "queries": 10,
+      "graphRecallAt5": 0.7,
+      "baselineRecallAt5": 0.5
+    },
+    {
+      "group": "korean",
+      "queries": 10,
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 0
+    }
+  ],
+  "averageGraphMilliseconds": 2179.204184766667,
+  "averageBaselineMilliseconds": 3.1048666999992443,
+  "results": [
+    {
+      "group": "symbol",
+      "query": "createExecutionPolicy",
+      "expected": "framework/src/hosts/tool-policy.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2448.7904169999997,
+      "baselineMilliseconds": 1.2514579999997295,
+      "graphOutputBytes": 811,
+      "graphPaths": [
+        "framework/src/hosts/tool-policy.ts",
+        "framework/test/host-controller.test.ts",
+        "framework/test/workflow-autoresearch.test.ts",
+        "framework/test/workflow-ultragoal.test.ts",
+        "framework/src/hosts/opencode-runtime.ts"
+      ]
+    },
+    {
+      "group": "symbol",
+      "query": "createCliTools",
+      "expected": "framework/src/hosts/cli-tools.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2236.2645,
+      "baselineMilliseconds": 1.9749590000001263,
+      "graphOutputBytes": 744,
+      "graphPaths": [
+        "framework/src/hosts/cli-tools.ts",
+        "framework/src/hosts/cli-host.ts",
+        "framework/src/hosts/cli-tools.ts",
+        "framework/test/skill-session.test.ts",
+        "framework/test/skill-context.test.ts"
+      ]
+    },
+    {
+      "group": "symbol",
+      "query": "createExecutionRuntime",
+      "expected": "framework/src/hosts/runtime.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2245.7215830000005,
+      "baselineMilliseconds": 1.7526670000006561,
+      "graphOutputBytes": 800,
+      "graphPaths": [
+        "framework/src/hosts/runtime.ts",
+        "framework/test/skillopt-controller.test.ts",
+        "framework/test/skillopt-campaign.test.ts",
+        "framework/test/workflow-deep-interview.test.ts",
+        "framework/src/state/store.ts"
+      ]
+    },
+    {
+      "group": "symbol",
+      "query": "createCliRuntime",
+      "expected": "framework/src/hosts/cli-runtime.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2200.6417500000007,
+      "baselineMilliseconds": 1.9855419999985315,
+      "graphOutputBytes": 743,
+      "graphPaths": [
+        "framework/src/hosts/cli-runtime.ts",
+        "framework/src/hosts/interactive-session.ts",
+        "framework/test/interactive.test.ts",
+        "framework/src/hosts/cli.ts",
+        "framework/test/cli-host.test.ts"
+      ]
+    },
+    {
+      "group": "symbol",
+      "query": "memoryToolText",
+      "expected": "framework/src/wiki/recall.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2175.9744580000006,
+      "baselineMilliseconds": 1.8601660000003903,
+      "graphOutputBytes": 714,
+      "graphPaths": [
+        "framework/src/wiki/recall.ts",
+        "framework/src/hosts/cli-tools.ts",
+        "framework/src/wiki/recall.ts",
+        "framework/test/memory.test.ts",
+        "framework/src/hosts/cli-tools.ts"
+      ]
+    },
+    {
+      "group": "symbol",
+      "query": "loadConfig",
+      "expected": "framework/src/config.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2219.9847089999985,
+      "baselineMilliseconds": 1.1664999999993597,
+      "graphOutputBytes": 755,
+      "graphPaths": [
+        "framework/src/config.ts",
+        "framework/src/hosts/interactive-session.ts",
+        "framework/src/hosts/interactive-session.ts",
+        "framework/src/config.ts",
+        "scripts/otter-live-core-queue.ts"
+      ]
+    },
+    {
+      "group": "symbol",
+      "query": "validateCliToolInput",
+      "expected": "framework/src/hosts/cli-tools.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2167.490249999999,
+      "baselineMilliseconds": 1.227375000000393,
+      "graphOutputBytes": 726,
+      "graphPaths": [
+        "framework/src/hosts/cli-tools.ts",
+        "framework/src/hosts/cli-host.ts",
+        "framework/src/hosts/cli-tools.ts",
+        "framework/src/hosts/cli-host.ts",
+        "framework/src/hosts/cli-host.ts"
+      ]
+    },
+    {
+      "group": "symbol",
+      "query": "probeWorkerContainment",
+      "expected": "framework/src/skillopt/host.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2183.1375000000007,
+      "baselineMilliseconds": 1.7162089999983436,
+      "graphOutputBytes": 747,
+      "graphPaths": [
+        "framework/src/skillopt/host.ts",
+        "framework/src/skillopt/campaign.ts",
+        "framework/src/skillopt/trainer.ts",
+        "framework/src/skillopt/host.ts",
+        "framework/test/skillopt-containment.test.ts"
+      ]
+    },
+    {
+      "group": "symbol",
+      "query": "prepareWorkerProfile",
+      "expected": "framework/src/skillopt/host.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2175.8286660000012,
+      "baselineMilliseconds": 2.021874999998545,
+      "graphOutputBytes": 745,
+      "graphPaths": [
+        "framework/src/skillopt/host.ts",
+        "framework/src/skillopt/campaign.ts",
+        "framework/src/skillopt/trainer.ts",
+        "framework/src/skillopt/host.ts",
+        "framework/test/skillopt-containment.test.ts"
+      ]
+    },
+    {
+      "group": "symbol",
+      "query": "beginExecutionActivity",
+      "expected": "framework/src/hosts/runtime.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2236.0852920000034,
+      "baselineMilliseconds": 0.6099580000009155,
+      "graphOutputBytes": 764,
+      "graphPaths": [
+        "framework/src/hosts/runtime.ts",
+        "framework/src/hosts/interactive-session.ts",
+        "framework/src/hosts/interactive-session.ts",
+        "framework/src/orchestration/queue.ts",
+        "framework/src/workflows/turn.ts"
+      ]
+    },
+    {
+      "group": "english",
+      "query": "planning main read only tool allowlist",
+      "expected": "framework/src/hosts/tool-policy.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2225.075249999998,
+      "baselineMilliseconds": 6.907458000001498,
+      "graphOutputBytes": 736,
+      "graphPaths": [
+        "framework/test/workflow-transaction.test.ts",
+        "framework/src/hosts/tool-policy.ts",
+        "framework/src/workflows/autoresearch.ts",
+        "framework/test/pty/interactive-fixture.ts",
+        "framework/test/worktree.test.ts"
+      ]
+    },
+    {
+      "group": "english",
+      "query": "file path symlink protection worktree identity",
+      "expected": "framework/src/hosts/cli-tools.ts",
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2208.5932089999988,
+      "baselineMilliseconds": 5.30883299999914,
+      "graphOutputBytes": 752,
+      "graphPaths": [
+        "framework/test/config-hook.test.ts",
+        "framework/test/execution-authority-fixture.test.ts",
+        "framework/src/skillopt/private-cleanup.ts",
+        "scripts/otter-linux-verifier-queue.ts",
+        "framework/src/skills/fd-tree.ts"
+      ]
+    },
+    {
+      "group": "english",
+      "query": "create CLI runtime selected model routes",
+      "expected": "framework/src/hosts/cli-runtime.ts",
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2215.7541660000024,
+      "baselineMilliseconds": 8.929457999998704,
+      "graphOutputBytes": 712,
+      "graphPaths": [
+        "scripts/otter-skill-load-eval.ts",
+        "framework/test/model-rebind.test.ts",
+        "framework/src/hosts/combo-presets.ts",
+        "framework/test/workflow-live-smoke.ts",
+        "framework/test/chat-params.test.ts"
+      ]
+    },
+    {
+      "group": "english",
+      "query": "wiki memory recall query prefetch",
+      "expected": "framework/src/wiki/recall.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2216.555625000001,
+      "baselineMilliseconds": 6.266584000000876,
+      "graphOutputBytes": 691,
+      "graphPaths": [
+        "framework/src/wiki/recall.ts",
+        "framework/src/wiki/recall.ts",
+        "framework/src/wiki/recall.ts",
+        "framework/src/wiki/recall.ts",
+        "framework/src/data/format.ts"
+      ]
+    },
+    {
+      "group": "english",
+      "query": "load user project configuration",
+      "expected": "framework/src/config.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2193.6101249999992,
+      "baselineMilliseconds": 6.016834000001836,
+      "graphOutputBytes": 716,
+      "graphPaths": [
+        "scripts/otter-skill-load-eval.ts",
+        "framework/src/config.ts",
+        "framework/src/config.ts",
+        "scripts/skillopt_runner.py",
+        "framework/src/config.ts"
+      ]
+    },
+    {
+      "group": "english",
+      "query": "worker sandbox containment probes",
+      "expected": "framework/src/skillopt/host.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2207.7762499999953,
+      "baselineMilliseconds": 8.656332999998995,
+      "graphOutputBytes": 752,
+      "graphPaths": [
+        "framework/test/skillopt-promotion.test.ts",
+        "framework/test/skill-fd-tree.test.ts",
+        "framework/src/harness/probe.ts",
+        "framework/src/skillopt/host.ts",
+        "framework/test/skillopt-containment.test.ts"
+      ]
+    },
+    {
+      "group": "english",
+      "query": "cancel session execution activity",
+      "expected": "framework/src/hosts/runtime.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2238.2400000000052,
+      "baselineMilliseconds": 4.139291999999841,
+      "graphOutputBytes": 731,
+      "graphPaths": [
+        "framework/src/hosts/runtime.ts",
+        "framework/src/skillopt/broker.ts",
+        "framework/test/workflow-interactive.test.ts",
+        "framework/src/workflows/execution-unit.ts",
+        "framework/src/flow/runtime.ts"
+      ]
+    },
+    {
+      "group": "english",
+      "query": "validate tool input query bounds",
+      "expected": "framework/src/hosts/cli-tools.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2228.089874999998,
+      "baselineMilliseconds": 5.262416999998095,
+      "graphOutputBytes": 725,
+      "graphPaths": [
+        "framework/test/chat-params.test.ts",
+        "framework/test/tui-render-cache.test.ts",
+        "framework/src/hosts/cli-tools.ts",
+        "framework/src/skillopt/controller.ts",
+        "framework/src/data/format.ts"
+      ]
+    },
+    {
+      "group": "english",
+      "query": "CLI tool schemas and dispatch",
+      "expected": "framework/src/hosts/cli-host.ts",
+      "graphRecallAt5": 1,
+      "baselineRecallAt5": 1,
+      "graphMilliseconds": 2245.2229579999985,
+      "baselineMilliseconds": 7.345042000000831,
+      "graphOutputBytes": 715,
+      "graphPaths": [
+        "framework/src/workflows/turn.ts",
+        "framework/src/skillopt/broker.ts",
+        "framework/test/skillopt-host.test.ts",
+        "framework/test/tool-hooks.test.ts",
+        "framework/src/hosts/cli-host.ts"
+      ]
+    },
+    {
+      "group": "english",
+      "query": "planning conversation memory prefetch",
+      "expected": "framework/src/hosts/plan-conversation.ts",
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2199.0899169999975,
+      "baselineMilliseconds": 4.741499999996449,
+      "graphOutputBytes": 712,
+      "graphPaths": [
+        "framework/src/wiki/recall.ts",
+        "framework/test/workflow-transaction.test.ts",
+        "scripts/otter-skill-tool-smoke.ts",
+        "framework/test/memory.test.ts",
+        "framework/src/config.ts"
+      ]
+    },
+    {
+      "group": "korean",
+      "query": "계획 단계에서 허용하는 읽기 전용 도구는 어디서 정하나",
+      "expected": "framework/src/hosts/tool-policy.ts",
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2100.753749999996,
+      "baselineMilliseconds": 1.9890830000003916,
+      "graphOutputBytes": 353,
+      "graphPaths": []
+    },
+    {
+      "group": "korean",
+      "query": "심볼릭 링크로 저장소 밖 파일을 읽지 못하게 막는 코드",
+      "expected": "framework/src/hosts/cli-tools.ts",
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2082.415832999999,
+      "baselineMilliseconds": 1.8467499999969732,
+      "graphOutputBytes": 353,
+      "graphPaths": []
+    },
+    {
+      "group": "korean",
+      "query": "선택한 모델로 실행 환경을 만드는 위치",
+      "expected": "framework/src/hosts/cli-runtime.ts",
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2079.5845000000045,
+      "baselineMilliseconds": 1.2704579999990528,
+      "graphOutputBytes": 353,
+      "graphPaths": []
+    },
+    {
+      "group": "korean",
+      "query": "위키 기억을 질문에 맞게 불러오는 기능",
+      "expected": "framework/src/wiki/recall.ts",
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2109.278084000005,
+      "baselineMilliseconds": 1.2717909999992116,
+      "graphOutputBytes": 353,
+      "graphPaths": []
+    },
+    {
+      "group": "korean",
+      "query": "사용자 설정과 프로젝트 설정을 합치는 곳",
+      "expected": "framework/src/config.ts",
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2108.826584000002,
+      "baselineMilliseconds": 1.2617499999978463,
+      "graphOutputBytes": 353,
+      "graphPaths": []
+    },
+    {
+      "group": "korean",
+      "query": "작업자 샌드박스 격리를 검증하는 부분",
+      "expected": "framework/src/skillopt/host.ts",
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2101.661,
+      "baselineMilliseconds": 1.1020419999986188,
+      "graphOutputBytes": 353,
+      "graphPaths": []
+    },
+    {
+      "group": "korean",
+      "query": "세션 실행 취소와 진행 상태를 관리하는 코드",
+      "expected": "framework/src/hosts/runtime.ts",
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2082.4430829999983,
+      "baselineMilliseconds": 1.4588340000045719,
+      "graphOutputBytes": 353,
+      "graphPaths": []
+    },
+    {
+      "group": "korean",
+      "query": "도구 입력의 길이와 필드를 검사하는 곳",
+      "expected": "framework/src/hosts/cli-tools.ts",
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2077.127916999998,
+      "baselineMilliseconds": 1.2477080000026035,
+      "graphOutputBytes": 353,
+      "graphPaths": []
+    },
+    {
+      "group": "korean",
+      "query": "도구 요청을 실제 실행으로 연결하는 부분",
+      "expected": "framework/src/hosts/cli-host.ts",
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2094.495625000003,
+      "baselineMilliseconds": 1.2672499999971478,
+      "graphOutputBytes": 353,
+      "graphPaths": []
+    },
+    {
+      "group": "korean",
+      "query": "계획 대화에서 기억을 미리 불러오는 위치",
+      "expected": "framework/src/hosts/plan-conversation.ts",
+      "graphRecallAt5": 0,
+      "baselineRecallAt5": 0,
+      "graphMilliseconds": 2071.612666999994,
+      "baselineMilliseconds": 1.28987499998766,
+      "graphOutputBytes": 353,
+      "graphPaths": []
+    }
+  ]
+}

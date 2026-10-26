@@ -54,6 +54,19 @@ test("host factory receives the exact runtime policy and run store once without 
   expect(runtime.linuxAdmission).toBeUndefined()
 })
 
+test("runtime forwards an explicit repo-search grant only to planning main", () => {
+  const plain = createExecutionRuntime(deps(), () => host(), { planningOnlyMain: true })
+  const enabled = createExecutionRuntime(deps(), () => host(), { planningOnlyMain: true, repoSearch: true })
+  expect(plain.policy.resolve("main").tools.allowed).not.toContain("repo_search")
+  expect(enabled.policy.resolve("main").tools.allowed).toContain("repo_search")
+  expect(enabled.policy.resolve("main").id).not.toBe(plain.policy.resolve("main").id)
+  for (const role of ["worker", "reviewer", "planner", "architect", "critic"] as const) {
+    expect(enabled.policy.resolve(role).tools.allowed).not.toContain("repo_search")
+  }
+  const executing = createExecutionRuntime(deps(), () => host(), { planningOnlyMain: true, chatExecuteMain: true, repoSearch: true })
+  expect(executing.policy.resolve("main").tools.allowed).not.toContain("repo_search")
+})
+
 test("runtime forwards only the internal loader-canary instructions into the canonical main snapshot", () => {
   const config = structuredClone(DEFAULT_CONFIG)
   const before = JSON.stringify(config)

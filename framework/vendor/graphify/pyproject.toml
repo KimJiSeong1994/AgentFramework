@@ -1,0 +1,11 @@
+[project]
+name = "gjc-graphify-bridge"
+version = "0.1.0"
+description = "Pinned Graphify runtime for the local repository-search bridge"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "graphifyy @ git+https://github.com/Graphify-Labs/graphify.git@92741d162b2094ffc2fed58cfbd8ee823e9da62c",
+]
+
+[tool.uv]
+package = false
