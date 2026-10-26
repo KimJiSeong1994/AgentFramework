@@ -2005,8 +2005,9 @@ def run_workflow_di(temp_root: Path):
         session.mode_proof["statusDeepInterviewTopology"] = True
         pick_workflow_choice(session, "Confirm topology")
         session.mode_proof["inlineTopologyChoice"] = True
-        submit_answer(session, "Question 1:", "the widget must render")
-        submit_answer(session, "Question 2:", "it must be tested")
+        session.wait_screen("Task 1/1")
+        submit_answer(session, "question 1/2", "the widget must render")
+        submit_answer(session, "question 2/2", "it must be tested")
         wait_workflow_status(session, "deep-interview · panel")
         session.mode_proof["statusPanel"] = True
         pick_workflow_choice(session, "Yes, crystallize")

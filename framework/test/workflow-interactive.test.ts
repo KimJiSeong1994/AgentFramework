@@ -14,15 +14,18 @@ import { createExecutionRuntime } from "../src/hosts/runtime.ts"
 import { readSessionMetadata, replaySession } from "../src/sessions/store.ts"
 import { activeAnyWorkflow } from "../src/flow/state.ts"
 import { resumeAdmission } from "../src/sessions/admission.ts"
-import type { ExecutionRuntime } from "../src/hosts/types.ts"
+import type { ExecutionOutcome, ExecutionRequest, ExecutionRuntime } from "../src/hosts/types.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
 import { fullScript, scriptedHost, scriptedRuntime } from "./workflow-fixture.ts"
+import { executeConfirmation } from "../src/workflows/ralplan-driver.ts"
+import { ralplanDataOf } from "../src/workflows/ralplan.ts"
+import { approveUnitConfirmation, ultragoalDataOf } from "../src/workflows/ultragoal.ts"
 
 let wt: ReturnType<typeof tempGitWorktree>
 beforeEach(() => { wt = tempGitWorktree(); wt.worktree = realpathSync(wt.worktree) })
 afterEach(() => { stopHeartbeat(); wt.cleanup() })
 
-type Options = { lines: Array<string | undefined>; choices?: number[]; script?: Record<string, string[]>; plainReadline?: boolean; ask?: (prompt: any) => unknown; controls?: Record<string, "interrupt" | "cancel">; uuidBase?: number }
+type Options = { lines: Array<string | undefined | (() => string)>; choices?: number[]; script?: Record<string, string[]>; plainReadline?: boolean; ask?: (prompt: any) => unknown; controls?: Record<string, "interrupt" | "cancel">; uuidBase?: number; worker?: (request: ExecutionRequest) => ExecutionOutcome }
 
 async function session(options: Options) {
   const lines = [...options.lines]
@@ -32,6 +35,26 @@ async function session(options: Options) {
   const asks: unknown[] = []
   const chooses: Array<{ title: string; values: readonly string[] }> = []
   const fixture = scriptedRuntime(wt.worktree, options.script ?? fullScript())
+  if (options.worker) {
+    fixture.runtime.config.chat.worktree = "off"
+    const prepare = fixture.host.prepare.bind(fixture.host)
+    fixture.host.prepare = async request => {
+      const handle = await prepare(request)
+      if (request.role === "worker" || request.role === "reviewer") {
+        let done = false
+        return {
+          ...handle,
+          run: async () => {
+            const result = request.role === "worker" ? options.worker!(request) : { status: "completed" as const, text: "ACCEPT" }
+            done = true
+            return result
+          },
+          reconcile: async () => ({ outcome: done ? "terminal" as const : "unknown" as const, quiescent: done, evidence: "fixture worker completed" }),
+        }
+      }
+      return handle
+    }
+  }
   const conversationTurns: string[] = []
   let control: ((action: "interrupt" | "cancel") => void) | undefined
   const terminal: Terminal = {
@@ -39,8 +62,8 @@ async function session(options: Options) {
     // A `controls` key is a sentinel line: it delivers that key control (Escape = interrupt) and then reads on.
     readLine: async () => {
       let line = lines.shift()
-      while (line !== undefined && options.controls?.[line]) { control?.(options.controls[line]!); line = lines.shift() }
-      return line
+      while (line !== undefined && typeof line === "string" && options.controls?.[line]) { control?.(options.controls[line]!); line = lines.shift() }
+      return typeof line === "function" ? line() : line
     },
     controls: (handler: (action: any) => void) => { control = handler },
     ...(options.plainReadline ? {} : {
@@ -130,20 +153,20 @@ describe("deep-interview then ralplan through the interactive session", () => {
     expect(activeAnyWorkflow(wt.worktree)).toMatchObject({ id: owner.id, sessionID: owner.sessionID, phase: "planning" })
   })
 
-  test("/finish is wired: from round 3 above the threshold it warns, records the early exit and still runs closure and the restatement", async () => {
+  test("/finish is wired: after one scored round above the threshold it warns, records the early exit and still runs closure and the restatement", async () => {
     const script = fullScript()
-    script["di.interviewer.question"] = ["Q1", "Q2", "Q3", "Q4"].map(text => JSON.stringify({ type: "question", text }))
-    // ambiguity .5 (progress), .35 (progress), .2 (refined: a band change, so one researcher/contrarian/simplifier panel)
-    script["di.scorer"] = [0.5, 0.65, 0.8].map(v => JSON.stringify({ type: "score", goal: v, constraints: v, criteria: v, context: v, weakest: "goal", evidence: ["e"] }))
+    script["di.interviewer.question"] = ["Q1", "Q2"].map(text => JSON.stringify({ type: "question", text }))
+    // One scored answer leaves ambiguity .5 above the agenda threshold.
+    script["di.scorer"] = [0.5].map(v => JSON.stringify({ type: "score", goal: v, constraints: v, criteria: v, context: v, weakest: "goal", evidence: ["e"] }))
     const s = await session({
-      lines: ["/skill:deep-interview build the widget", "a1", "a2", "a3", "/finish", "/quit"],
+      lines: ["/skill:deep-interview build the widget", "a1", "/finish", "/quit"],
       // topology Confirm, then "Finish early", then restate Yes, then consensus Decide later
       choices: [0, 0, 0, 2],
       script,
     })
     expect(s.exit.code).toBe(0)
     const early = s.chooses.find(item => item.values[0] === "Finish early")
-    expect(early?.title).toContain("above the 0.05 threshold")
+    expect(early?.title).toContain("above the 0.2 threshold")
     expect(s.chooses.some(item => item.values[0] === "Yes, crystallize")).toBe(true)
     expect(s.seen.some(item => item.promptId === "di.closure")).toBe(true)
     const wf = committed()!
@@ -198,11 +221,11 @@ describe("deep-interview then ralplan through the interactive session", () => {
       ask: () => replies.shift(),
     })
     expect(s.asks[0]).toEqual({
-      question: "Question 1: Which store?", options: [{ label: "SQLite" }, { label: "Postgres" }, { label: "Files" }], recommended: 1, allowCustom: true,
+      question: "Task 1/1 · core: the core engine · question 1/2: Which store?", options: [{ label: "SQLite" }, { label: "Postgres" }, { label: "Files" }], recommended: 1, allowCustom: true,
     })
     expect(s.asks).toHaveLength(2)
     expect(roundAnswers()).toEqual(["Files", "typed fallback"])
-    expect(s.output).toContain("Question 2:\nWhich UI?")
+    expect(s.output).toContain("Task 1/1 · core: the core engine · question 2/2:\nWhich UI?")
   })
 
   test("terminal.ask: a /command typed into the Other editor runs as a command and is never recorded as an answer", async () => {
@@ -221,14 +244,15 @@ describe("deep-interview then ralplan through the interactive session", () => {
 
   test("terminal.ask: /finish typed into the Other editor ends the interview early instead of being an answer", async () => {
     const script = optionScript()
-    script["di.interviewer.question"] = ["Q1", "Q2", "Q3", "Q4"].map(text => JSON.stringify({ type: "question", text, options: ["x", "y"] }))
-    script["di.scorer"] = [0.5, 0.65, 0.8].map(v => JSON.stringify({ type: "score", goal: v, constraints: v, criteria: v, context: v, weakest: "goal", evidence: ["e"] }))
-    const replies = [{ kind: "option", index: 0 }, { kind: "option", index: 0 }, { kind: "option", index: 0 }, { kind: "custom", text: "/finish" }]
+    script["di.interviewer.question"] = ["Q1", "Q2"].map(text => JSON.stringify({ type: "question", text, options: ["x", "y"] }))
+    script["di.scorer"] = [0.5].map(v => JSON.stringify({ type: "score", goal: v, constraints: v, criteria: v, context: v, weakest: "goal", evidence: ["e"] }))
+    const replies = [{ kind: "option", index: 0 }, { kind: "custom", text: "/finish" }]
     const s = await session({
       lines: ["/skill:deep-interview build the widget", "/quit"],
       script, choices: [0, 0, 0, 2], ask: () => replies.shift(),
     })
     expect(s.chooses.some(item => item.values[0] === "Finish early")).toBe(true)
+    expect(roundAnswers()).toEqual(["x"])
     expect(roundAnswers()).not.toContain("/finish")
   })
 
@@ -240,6 +264,119 @@ describe("deep-interview then ralplan through the interactive session", () => {
     })
     expect(roundAnswers()).toEqual(["bespoke", "CLI"])
     expect(s.exit.code).toBe(0)
+  })
+
+  test.each(["", "wrong approval"])("confirmed planning automatically reaches unit approval without /continue; unit input %j stays pending", async unitInput => {
+    const s = await session({
+      lines: ["/skill:deep-interview build the widget", ...answers, () => {
+        const wf = committed()!
+        if (wf.kind !== "ralplan") throw new Error("expected pending ralplan")
+        return executeConfirmation(wf.id, ralplanDataOf(wf).consensus!.planSha)
+      }, unitInput, "/quit"],
+      choices: [0, 0, 1],
+    })
+    expect(s.exit.code).toBe(0)
+    expect(s.seen.filter(item => item.promptId.startsWith("ug.")).map(item => item.promptId))
+      .toEqual(["ug.decompose", "ug.unit_plan", "ug.unit_review"])
+    expect(committed()).toMatchObject({ kind: "ultragoal", stage: "unit_approval", phase: "pending_approval" })
+    expect(s.output).toContain(unitInput ? "Unit approval refused" : "Unit not approved")
+    expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
+    expect(readFileSync(join(wt.worktree, "README.md"), "utf8")).toBe("fixture\n")
+  })
+
+  test.each([false, true])("confirmed planning and typed unit approval execute a file change through the queue and verifier; explicit ultragoal %j", async explicitStart => {
+    writeFileSync(join(wt.worktree, "check.sh"), "test \"$(cat README.md)\" = implemented\n")
+    let workers = 0
+    const s = await session({
+      lines: ["/skill:deep-interview build the widget", ...answers, ...(explicitStart ? ["/skill:ultragoal"] : []), () => {
+        const wf = committed()!
+        if (wf.kind !== "ralplan") throw new Error("expected pending ralplan")
+        return executeConfirmation(wf.id, ralplanDataOf(wf).consensus!.planSha)
+      }, () => {
+        const wf = committed()!
+        if (wf.kind !== "ultragoal") throw new Error("expected pending ultragoal")
+        expect(workers).toBe(0)
+        expect(readFileSync(join(wt.worktree, "README.md"), "utf8")).toBe("fixture\n")
+        return approveUnitConfirmation(wf.id, ultragoalDataOf(wf).pending!.subject.sha256)
+      }, "/quit"],
+      choices: explicitStart ? [0, 0, 2, 1, 1] : [0, 0, 1, 1],
+      worker: request => {
+        expect(request.text).toContain("README.md")
+        workers++
+        writeFileSync(join(wt.worktree, "README.md"), "implemented\n")
+        return { status: "completed", text: "Open issues: none" }
+      },
+    })
+    expect(s.exit.code).toBe(0)
+    expect(s.chooses.filter(item => item.title.includes("stuck"))).toEqual([])
+    expect(workers).toBe(1)
+    expect(readFileSync(join(wt.worktree, "README.md"), "utf8")).toBe("implemented\n")
+    expect(s.output).toContain("Ultragoal complete")
+    expect(committed()).toMatchObject({ kind: "ultragoal", phase: "done" })
+    const tasks = readLedger(wt.worktree, "otter-fixture0").tasks
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0]).toMatchObject({ status: "done", verify_result: { command: "sh check.sh", ok: true, exitCode: 0 } })
+  })
+
+  test("starting ultragoal with a new request preserves the pending plan", async () => {
+    const s = await session({
+      lines: ["/skill:ralplan original objective", "/skill:ultragoal different objective", "/quit"], choices: [2],
+    })
+    expect(s.output).toContain("new request has not replaced its objective")
+    const wf = committed()!
+    expect(wf).toMatchObject({ kind: "ralplan", stage: "pending_execution" })
+    if (wf.kind !== "ralplan") throw new Error("expected ralplan")
+    expect(ralplanDataOf(wf).request).toBe("original objective")
+    expect(s.seen.some(item => item.promptId.startsWith("ug."))).toBe(false)
+  })
+
+  test("bare ultragoal cannot take another session's pending plan", async () => {
+    await session({ lines: ["/skill:ralplan original objective", "/quit"], choices: [2] })
+    const owner = committed()!
+    const s = await session({ lines: ["/skill:ultragoal", "/quit"], uuidBase: 100 })
+    expect(s.output).toContain("workflow belongs to")
+    expect(committed()).toMatchObject({ id: owner.id, sessionID: owner.sessionID, kind: "ralplan" })
+    expect(s.seen).toHaveLength(0)
+  })
+
+  test("bare ultragoal continues its pending unit without starting another workflow", async () => {
+    const s = await session({ lines: ["/skill:ultragoal ship it", "", "/skill:ultragoal", "wrong approval", "/quit"] })
+    expect(s.output).toContain("Unit approval refused")
+    expect(committed()).toMatchObject({ kind: "ultragoal", stage: "unit_approval", phase: "pending_approval" })
+    expect(readEvents(wt.worktree).filter(event => event.type === "created")).toHaveLength(1)
+    expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
+  })
+
+  test("bare ultragoal cannot bypass an unfinished interview", async () => {
+    const s = await session({ lines: ["/skill:deep-interview build it", "/skill:ultragoal", "/quit"], choices: [0] })
+    expect(committed()).toMatchObject({ kind: "deep-interview", stage: "answer" })
+    expect(readEvents(wt.worktree).filter(event => event.type === "created")).toHaveLength(1)
+    expect(s.seen.some(item => item.promptId.startsWith("ug."))).toBe(false)
+  })
+
+  test("bare ultragoal cannot bypass a paused plan", async () => {
+    const s = await session({
+      lines: ["/skill:ralplan original objective", "/pause", "/skill:ultragoal", "/quit"], choices: [2],
+    })
+    expect(s.output).toContain("Session held: use /continue")
+    expect(committed()).toMatchObject({ kind: "ralplan", phase: "paused" })
+    expect(s.seen.some(item => item.promptId.startsWith("ug."))).toBe(false)
+  })
+
+  test.each([
+    { choice: 0, confirmation: undefined, phase: "done" },
+    { choice: 2, confirmation: undefined, phase: "pending_approval" },
+    { choice: 1, confirmation: "", phase: "pending_approval" },
+    { choice: 1, confirmation: "wrong text", phase: "pending_approval" },
+  ])("planning choice $choice with confirmation '$confirmation' cannot start execution", async ({ choice, confirmation, phase }) => {
+    const s = await session({
+      lines: ["/skill:ralplan plan the widget", ...(confirmation === undefined ? [] : [confirmation]), "/quit"],
+      choices: [choice],
+    })
+    expect(s.exit.code).toBe(0)
+    expect(committed()).toMatchObject({ kind: "ralplan", phase })
+    expect(s.seen.some(item => item.promptId.startsWith("ug."))).toBe(false)
+    expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
   })
 
   test("/skill:ralplan alone starts exactly one ralplan; typed confirmation of execution refuses without ultragoal", async () => {

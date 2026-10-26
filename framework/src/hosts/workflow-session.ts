@@ -84,6 +84,7 @@ export function workflowStatusLine(worktree: string, wf: WorkflowEnvelope): stri
     if (wf.kind === "deep-interview") {
       const view = deepInterviewView(wf as DeepInterviewWorkflow, worktree)
       if (view.round > 0) parts.push(`round ${view.round}`)
+      if (view.agendas.length) parts.push(`agendas ${view.agendas.filter(item => item.status === "ready").length}/${view.agendas.length} ready`, `questions ${view.round}/${view.questionLimit}`)
       if (view.ambiguity !== undefined) parts.push(`ambiguity ${Number(view.ambiguity.toFixed(3))} ${view.band}`)
       const stale = view.panel.filter(item => item.state === "incomplete").map(item => item.persona)
       if (stale.length) parts.push(`incomplete panel records: ${stale.join(", ")}`)
@@ -229,13 +230,16 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
         if (pending) { const answer = pending; pending = undefined; return answer }
         const active = signal ?? ctx.processSignal
         const options = open.options
+        const questionTitle = open.agenda
+          ? `Task ${open.agenda.index}/${open.agenda.total} · ${open.agenda.id}: ${open.agenda.description.slice(0, 100)} · question ${open.agenda.question}/${open.agenda.limit}`
+          : `Question ${open.round}`
         const fresh = shown !== open.round
         if (fresh) {
           shown = open.round
           const ask = terminal.ask
           if (options && options.length > 0 && ask) {
             const picked = await ask.call(terminal, {
-              question: terminalSafeText(`Question ${open.round}: ${open.question}`),
+              question: terminalSafeText(`${questionTitle}: ${open.question}`),
               options: options.map(label => ({ label: terminalSafeText(label) })),
               ...(open.recommended === undefined ? {} : { recommended: open.recommended }),
               allowCustom: true,
@@ -254,16 +258,16 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
               ctx.persist("user", { text })
               return { kind: "answer", text }
             }
-            write(`Question ${open.round}:\n${open.question}`)
+            write(`${questionTitle}:\n${open.question}`)
           } else {
-            write(`Question ${open.round}:\n${open.question}`)
+            write(`${questionTitle}:\n${open.question}`)
           }
           if (options && options.length > 0) {
             write(`${options.map((label, i) => `  ${i + 1}) ${label}${open.recommended === i ? " (Recommended)" : ""}`).join("\n")}\nType a number or your own answer; /finish ends early.`)
           }
         }
         for (;;) {
-          const line = await ctx.readInput({ title: `deep-interview · round ${open.round}`, hint: ANSWER_HINT, prompt: "You> " }, active)
+          const line = await ctx.readInput({ title: `deep-interview · ${questionTitle}`, hint: ANSWER_HINT, prompt: "You> " }, active)
           if (line === undefined || active.aborted) return undefined
           const text = line.trim()
           if (!text) continue
@@ -361,7 +365,7 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
   }
 
   // ---------------------------------------------------------------------------------------- ralplan
-  async function offerExecution(wf: RalplanWorkflow): Promise<void> {
+  async function offerExecution(wf: RalplanWorkflow): Promise<string | undefined> {
     const data = ralplanDataOf(wf)
     const line = consensusLine(worktree, wf) ?? "consensus unverified"
     const pending = wf.artifacts.find(ref => ref.key === "pending-approval.md")?.path
@@ -379,6 +383,11 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
       if (typed === undefined || typed.trim() === "") { write("Execution not confirmed; the plan stays pending."); return }
       const confirmed = confirmExecute(ctx.runtime(), ctx.sessionID(), wf.id, wf.lastSeq, typed)
       write(confirmed.ok ? "Connected to ultragoal: nothing runs until each unit is reviewed and you approve it with its own typed receipt." : `Execution not started: ${confirmed.text}`)
+      if (confirmed.ok) {
+        const successor = activeAnyWorkflow(worktree)
+        if (successor?.kind === "ultragoal" && successor.sessionID === wf.sessionID
+          && successor.lineage?.predecessor.kind === "ralplan" && successor.lineage.predecessor.id === wf.id) return successor.id
+      }
     } else {
       write("The plan stays pending; /continue offers the choice again.")
     }
@@ -392,7 +401,11 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
       const wf = committedKind(workflowID, "ralplan")
       switch (result.status) {
         case "pending_execution":
-          if (wf) { show(wf); await offerExecution(wf) }
+          if (wf) {
+            show(wf)
+            const successorID = await offerExecution(wf)
+            if (successorID) return driveUltragoal(successorID)
+          }
           syncStatus()
           return { quit }
         case "done": write(PLANNING_COMPLETE_TEXT); syncStatus(); return { quit }
@@ -550,6 +563,31 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
     if (refusal) { write(`Protected workflow ${descriptor.name} is not available: ${refusal}.`); return { quit } }
     ctx.persist("user", { text: `/skill:${descriptor.name}${request ? ` ${request}` : ""}` })
     const runtime = ctx.runtime()
+    if (kind === "ultragoal") {
+      const active = activeAnyWorkflow(worktree)
+      if (active) {
+        if (active.sessionID !== ctx.sessionID()) {
+          write(`ultragoal was not started: workflow belongs to ${active.sessionID}; use /resume ${active.sessionID}.`)
+          return { quit }
+        }
+        if (request.trim()) {
+          write(`ultragoal was not started: ${active.kind} ${active.id} is already active. The new request has not replaced its objective. Use /skill:ultragoal without a request to continue the existing plan, or /status to inspect it.`)
+          return { quit }
+        }
+        if (active.stopIntent || active.phase === "paused" || effectiveHold(worktree, ctx.sessionID())) {
+          write("ultragoal was not started: the workflow is held or stopping; use /continue for its recovery choices.")
+          return { quit }
+        }
+        if (active.kind === "ralplan" && active.stage === "pending_execution" && active.phase === "pending_approval") {
+          write(`Continuing existing plan ${active.id}: ${ralplanDataOf(active).request}`)
+          return driveRalplan(active.id)
+        }
+        if (active.kind === "ultragoal") return driveUltragoal(active.id)
+        write(`ultragoal was not started: ${active.kind} ${active.id} is at ${active.stage}; complete its planning with /continue first.`)
+        return { quit }
+      }
+      if (!request.trim()) { write("Usage: /skill:ultragoal <request>"); return { quit } }
+    }
     const started = kind === "deep-interview"
       ? startDeepInterview(runtime, ctx.sessionID(), request)
       : kind === "ralplan" ? startRalplan(runtime, ctx.sessionID(), request)

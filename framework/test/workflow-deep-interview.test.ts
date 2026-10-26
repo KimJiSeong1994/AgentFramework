@@ -18,7 +18,7 @@ import { stateRoot } from "../src/state/store.ts"
 import { sha256 } from "../src/workflows/artifacts.ts"
 import { commitRevision, readCommitted } from "../src/workflows/commit.ts"
 import {
-  ambiguityOf, bandOf, dataOf, DI_MAX_ROUNDS, earlyExitRefusal, newData, nextStep, panelInputSha, panelRequirement, reduce, roundFileRelative,
+  agendaProgress, ambiguityOf, bandOf, dataOf, DI_MAX_ROUNDS, finalAmbiguity, earlyExitRefusal, newData, nextStep, panelInputSha, panelRequirement, reduce, roundFileRelative,
   sha256Text, specRelative, stalled, topologyInputSha, type DeepInterviewData, type DiEvent,
 } from "../src/workflows/deep-interview.ts"
 import {
@@ -62,7 +62,7 @@ const q = (text = "What exactly must it do?") => j({ type: "question", text })
 const score = (goal: number, constraints: number, criteria: number, context: number, extra: Record<string, unknown> = {}) =>
   j({ type: "score", goal, constraints, criteria, context, weakest: "goal", evidence: ["e"], ...extra })
 const finding = (persona: string) => j({ type: "panel_finding", finding: `SENTINEL-${persona}`, rationale: ["because"], suggested_options: ["option"], confidence: "high" })
-const closure = (pass = true, gaps: string[] = []) => j({ type: "closure", pass, gaps })
+const closure = (pass = true, gaps: string[] = [], agendaIDs: string[] | undefined = pass ? undefined : ["core"]) => j({ type: "closure", pass, gaps, ...(agendaIDs ? { agenda_ids: agendaIDs } : {}) })
 const restate = (goal = "Build the engine with tests.") => j({ type: "restatement", goal })
 const body = j({ type: "message", text: "## Goal\nBuild it.\n## Acceptance Criteria\n- tests pass" })
 const answer = (text = "an answer"): DiAnswer => ({ kind: "answer", text })
@@ -107,7 +107,7 @@ function makeIo(options: IoOptions = {}) {
   const choices = [...(options.choices ?? [])]
   const answers = [...(options.answers ?? [])]
   const notes = [...(options.notes ?? [])]
-  const log = { chooses: [] as Array<{ title: string; choices: readonly string[] }>, notices: [] as string[], questions: [] as string[], opens: [] as Array<{ round: number; question: string; options?: string[]; recommended?: number }> }
+  const log = { chooses: [] as Array<{ title: string; choices: readonly string[] }>, notices: [] as string[], questions: [] as string[], opens: [] as Array<Parameters<DiIo["readAnswer"]>[0]> }
   const io: DiIo = {
     async choose(title, list) { log.chooses.push({ title, choices: list }); options.onChoose?.(title, list); return choices.shift() ?? 0 },
     async readAnswer(open) { log.questions.push(open.question); log.opens.push(open); return answers.shift() },
@@ -121,6 +121,15 @@ function begin(h: Harness, request = "build the widget"): DeepInterviewWorkflow 
   const started = startDeepInterview(h.runtime, SID, request)
   if (!started.ok) throw new Error(started.text)
   return started.wf
+}
+// Historical fixtures deliberately omit the optional policy to exercise persisted legacy interviews.
+function legacyData(request: string): DeepInterviewData {
+  const { questionPolicy: _policy, ...data } = newData(request)
+  return { ...data, threshold: 0.05, thresholdSource: "otter-default" }
+}
+function beginLegacy(h: Harness): DeepInterviewWorkflow {
+  const wf = begin(h)
+  return withFlowTransaction(wt.worktree, tx => commitRevision(tx, { ...wf, data: legacyData("build the widget") }, [{ wf: wf.id, type: "legacy_fixture", actor: "code" }])) as DeepInterviewWorkflow
 }
 const committed = (): DeepInterviewWorkflow => {
   const read = readCommitted(wt.worktree)
@@ -167,7 +176,7 @@ function seed(patch: (d: DeepInterviewData) => DeepInterviewData, stage: DeepInt
   // A real topology choice receipt: the completion re-check verifies it like any other record.
   const topologyRef = writeReceipt(wt.worktree, { kind: "choice", wid: fresh.id, sid: SID, revision: 0, action: "choice-topology", inputSha: topologyInputSha("brownfield", components), body: { choice: "confirm" } })
   const base: DeepInterviewData = {
-    ...newData("seeded request"), type: "brownfield", round: rounds.length ? rounds.at(-1)!.n : 0,
+    ...legacyData("seeded request"), type: "brownfield", round: rounds.length ? rounds.at(-1)!.n : 0,
     topology: { confirmed: true, components, receiptRef: topologyRef }, rounds: records as never,
   }
   const wf = { ...fresh, stage, phase, data: patch(base) } as DeepInterviewWorkflow
@@ -208,7 +217,7 @@ describe("ambiguity is computed by code from component scores", () => {
     await run(h, wf, makeIo({ answers: [answer()] }).io, { stopBefore: "panel" })
     expect(dataNow().rounds[0]).toMatchObject({ ambiguity: 0.22, band: "refined" })
     const scored = readEvents(wt.worktree, wf.id).find(event => event.type === "scores_recorded")!
-    expect(scored.data).toMatchObject({ ambiguity: 0.22, threshold: 0.05 })
+    expect(scored.data).toMatchObject({ ambiguity: 0.22, threshold: 0.2 })
   })
 })
 
@@ -343,6 +352,7 @@ describe("one question per round", () => {
 })
 
 describe("question options", () => {
+  const agenda = (question: number) => ({ id: "core", description: "the core engine", index: 1, total: 1, question, limit: 2 })
   const withOptions = (): Script => happy({
     "di.interviewer.question": [
       j({ type: "question", text: "Which store?", options: ["SQLite", "Postgres"], recommended: 1 }),
@@ -355,8 +365,8 @@ describe("question options", () => {
     const wf = begin(h)
     const io = makeIo({ answers: twoAnswers() })
     expect((await run(h, wf, io.io)).status).toBe("done")
-    expect(io.log.opens[0]).toEqual({ round: 1, question: "Which store?", options: ["SQLite", "Postgres"], recommended: 1 })
-    expect(io.log.opens[1]).toEqual({ round: 2, question: "Q2" })
+    expect(io.log.opens[0]).toEqual({ round: 1, agenda: agenda(1), question: "Which store?", options: ["SQLite", "Postgres"], recommended: 1 })
+    expect(io.log.opens[1]).toEqual({ round: 2, agenda: agenda(2), question: "Q2" })
     const questionPath = join(wt.worktree, roundFileRelative(SID, wf.id, 1, "question"))
     expect(readFileSync(questionPath, "utf8")).toBe("Which store?")
     expect(dataNow().rounds[0]!.questionSha).toBe(sha256Text("Which store?"))
@@ -373,12 +383,12 @@ describe("question options", () => {
       writeFileSync(file, bad)
       const again = makeIo({ answers: [] })
       await run(h, committed(), again.io)
-      expect(again.log.opens[0]).toEqual({ round: 1, question: "Which store?" })
+      expect(again.log.opens[0]).toEqual({ round: 1, agenda: agenda(1), question: "Which store?" })
     }
     writeFileSync(file, JSON.stringify({ options: ["A", "B"], recommended: 9 }))
     const again = makeIo({ answers: [] })
     await run(h, committed(), again.io)
-    expect(again.log.opens[0]).toEqual({ round: 1, question: "Which store?", options: ["A", "B"] })
+    expect(again.log.opens[0]).toEqual({ round: 1, agenda: agenda(1), question: "Which store?", options: ["A", "B"] })
   })
 })
 
@@ -535,7 +545,7 @@ describe("panel independence and binding", () => {
 
   test("the next question folds the verified panel findings and still asks one question", async () => {
     const h = harness(happy({ "di.scorer": [score(0.6, 0.6, 0.6, 0.6), score(0.9, 0.8, 0.7, 0.6), score(1, 1, 1, 1)], "di.interviewer.question": [q("Q1"), q("Q2"), q("Q3")] }))
-    const wf = begin(h)
+    const wf = beginLegacy(h)
     // ambiguity .4 (progress) then .22 (refined): a band change panel precedes question 3
     await run(h, wf, makeIo({ answers: [answer(), answer(), answer()] }).io)
     const third = h.seen.filter(item => item.promptId === "di.interviewer.question")[2]!
@@ -552,11 +562,11 @@ describe("panel independence and binding", () => {
       "di.panel.contrarian": [finding("contrarian"), finding("contrarian"), finding("contrarian")],
       "di.panel.simplifier": [finding("simplifier"), finding("simplifier"), finding("simplifier")],
     }))
-    const wf = begin(h)
+    const wf = beginLegacy(h)
     await run(h, wf, makeIo({ answers: [answer(), answer(), answer(), answer()] }).io)
     const panels = readEvents(wt.worktree, wf.id).filter(event => event.type === "panel_required").map(event => (event.data as { triggers: string[] }).triggers[0])
     expect(panels).toEqual(["band:initial->progress", "band:progress->refined", "band:refined->ready"])
-    const upward = reduce({ ...committed(), stage: "scoring", phase: "planning", data: { ...newData("x"), type: "brownfield", round: 2, topology: { confirmed: true, components: [{ id: "c", description: "d" }] }, rounds: [{ n: 1, questionSha: "a", scores: { goal: 1, constraints: 1, criteria: 1, context: 1 }, ambiguity: 0.22, band: "refined" }, { n: 2, questionSha: "b", answerSha: "c" }] } } as unknown as DeepInterviewWorkflow,
+    const upward = reduce({ ...committed(), stage: "scoring", phase: "planning", data: { ...legacyData("x"), type: "brownfield", round: 2, topology: { confirmed: true, components: [{ id: "c", description: "d" }] }, rounds: [{ n: 1, questionSha: "a", scores: { goal: 1, constraints: 1, criteria: 1, context: 1 }, ambiguity: 0.22, band: "refined" }, { n: 2, questionSha: "b", answerSha: "c" }] } } as unknown as DeepInterviewWorkflow,
       { type: "scores_recorded", round: 2, scores: { goal: 0.3, constraints: 0.3, criteria: 0.3, context: 0.3 }, weakest: "goal", shapeChange: false, evidence: [] }, { worktree: wt.worktree })
     expect(upward.ok && eventTypesOf(upward)).toContain("panel_required")
   })
@@ -631,7 +641,7 @@ describe("closure and restatement precede the spec", () => {
       "di.scorer": [score(0.9, 0.8, 0.7, 0.6), score(1, 1, 1, 1), score(1, 1, 1, 1)],
       "di.closure": [closure(false, ["no acceptance coverage for core"]), closure(true)],
     }))
-    const wf = begin(h)
+    const wf = beginLegacy(h)
     const result = await run(h, wf, makeIo({ answers: [answer(), answer(), answer()] }).io)
     expect(result.status).toBe("done")
     const d = dataNow()
@@ -666,7 +676,7 @@ describe("closure and restatement precede the spec", () => {
       "di.scorer": [score(0.9, 0.8, 0.7, 0.6), score(1, 1, 1, 1), score(1, 1, 1, 1)],
       "di.closure": [closure(), closure()], "di.restate": [restate(), restate()],
     }))
-    const wf = begin(h)
+    const wf = beginLegacy(h)
     const result = await run(h, wf, makeIo({ answers: [answer(), answer(), answer()], choices: [0, 2, 0] }).io)
     expect(result.status).toBe("done")
     expect(eventTypes(wf.id)).toContain("restatement_missing_scope")
@@ -695,7 +705,7 @@ describe("done requires a verified spec.md", () => {
     const text = bytes.toString("utf8")
     expect(text).toContain(`Spec path: ${ref.path}`)
     expect(text).toContain("Final Ambiguity Score: 0.0%")
-    expect(text).toContain("Threshold: 0.05 (otter-default)")
+    expect(text).toContain("Threshold: 0.2 (otter-agenda-default)")
     expect(text).toContain("Status: PASSED")
     expect(text).toContain("Early Exit: none")
     expect(text).toContain("Build it.")
@@ -744,7 +754,7 @@ describe("early exit (/finish)", () => {
       "di.interviewer.question": [q("Q1"), q("Q2"), q("Q3")],
       "di.scorer": [score(0.9, 0.8, 0.7, 0.6), score(0.9, 0.8, 0.7, 0.6)],
     }))
-    const wf = begin(h)
+    const wf = beginLegacy(h)
     const io = makeIo({ answers: [{ kind: "finish" }, answer(), { kind: "finish" }, answer(), { kind: "finish" }, { kind: "finish" }], choices: [0, 1, 0, 0] })
     // rounds 1-2 refuse /finish; at round 3 the first /finish -> "Keep interviewing", the second -> Finish early; then restate Yes
     const result = await run(h, wf, io.io)
@@ -849,7 +859,7 @@ describe("start and exclusivity", () => {
   test("starts one deep-interview with the fixed threshold and source; a second start is refused naming the occupant", () => {
     const h = harness({})
     const wf = begin(h)
-    expect(dataOf(wf)).toMatchObject({ threshold: 0.05, thresholdSource: "otter-default", round: 0 })
+    expect(dataOf(wf)).toMatchObject({ threshold: 0.2, thresholdSource: "otter-agenda-default", questionPolicy: { maxRounds: 12, maxPerAgenda: 2 }, round: 0 })
     expect(wf).toMatchObject({ kind: "deep-interview", stage: "topology", phase: "planning" })
     expect(startDeepInterview(h.runtime, SID, "again")).toMatchObject({ ok: false, text: expect.stringContaining(`deep-interview workflow ${wf.id} is active`) })
     expect(startDeepInterview(h.runtime, SID, "  ")).toMatchObject({ ok: false })
@@ -1011,7 +1021,7 @@ describe("completion re-checks every panel and choice record (W1/W7)", () => {
     expect(deepInterviewView(finished, wt.worktree)).toMatchObject({ evidenceOk: true })
     const okStatus = statusJson(h.runtime, SID).workflow
     expect(okStatus?.review).toContain("spec verified")
-    expect(okStatus?.review).toContain("threshold 0.05 (otter-default)")
+    expect(okStatus?.review).toContain("threshold 0.2 (otter-agenda-default)")
     expect(okStatus?.review).toContain("records verified")
     const file = join(receiptsDirectory(wt.worktree, SID, wf.id), receiptFiles(wf.id).find(name => name.includes("panel-r2-simplifier"))!)
     writeFileSync(file, readFileSync(file, "utf8").replace("SENTINEL-simplifier", "TAMPERED"))
@@ -1056,4 +1066,170 @@ describe("attempt counts survive restarts", () => {
     expect(h.ids().filter(id => id === "di.interviewer.topology")).toHaveLength(2)
     expect(eventTypes(wf.id).filter(type => type === "attempt_failed")).toHaveLength(1)
   })
+})
+
+describe("agenda policy integration", () => {
+  test("answers each confirmed agenda once and retains scorer evidence through completion", async () => {
+    const h = harness(happy({
+      "di.interviewer.topology": [j({ type: "topology", project: "brownfield", components: [{ id: "core", description: "Core" }, { id: "ui", description: "UI" }] })],
+      "di.scorer": [score(1, 1, 1, 1, { evidence: ["Core agreed"] }), score(1, 1, 1, 1, { evidence: ["UI agreed"] })],
+    }))
+    const wf = begin(h)
+    const io = makeIo({ answers: twoAnswers() })
+    expect((await run(h, wf, io.io)).status).toBe("done")
+    expect(dataNow().rounds.map(r => r.agendaID)).toEqual(["core", "ui"])
+    expect(dataNow().rounds.map(r => r.evidence)).toEqual([["Core agreed"], ["UI agreed"]])
+    expect(agendaProgress(dataNow()).map(a => a.status)).toEqual(["ready", "ready"])
+    expect(h.ids().filter(id => id === "di.interviewer.question")).toHaveLength(2)
+    expect(h.ids()).toEqual(expect.arrayContaining(["di.closure", "di.restate", "di.crystallize"]))
+    expect(io.log.chooses.some(item => item.choices.includes("Yes, crystallize"))).toBe(true)
+    expect(readLedger(wt.worktree, SID).tasks).toHaveLength(0)
+  })
+
+  test("an unresolved agenda stops after two questions and explicit Exit produces no spec", async () => {
+    const h = harness(happy({ "di.scorer": [score(0.6, 0.6, 0.6, 0.6), score(0.6, 0.6, 0.6, 0.6)] }))
+    const wf = begin(h)
+    const io = makeIo({ answers: twoAnswers(), choices: [0, 1] })
+    expect((await run(h, wf, io.io)).status).toBe("exited")
+    expect(dataNow().round).toBe(2)
+    expect(h.ids().filter(id => id === "di.interviewer.question")).toHaveLength(2)
+    expect(io.log.chooses.some(item => item.choices.includes("Exit the interview"))).toBe(true)
+    expect(existsSync(join(wt.worktree, specRelative(SID, wf.id)))).toBe(false)
+    expect(readLedger(wt.worktree, SID).tasks).toHaveLength(0)
+  })
+
+  test("finish after one scored round preserves ambiguity and still runs closure and restatement", async () => {
+    const h = harness(happy({ "di.scorer": [score(0.6, 0.6, 0.6, 0.6)] }))
+    const wf = begin(h)
+    const io = makeIo({ answers: [answer(), { kind: "finish" }], choices: [0, 0, 0] })
+    expect((await run(h, wf, io.io)).status).toBe("done")
+    expect(dataNow().earlyExit).toMatchObject({ ambiguity: 0.4, reason: "finish" })
+    expect(finalAmbiguity(dataNow())).toBe(0.4)
+    expect(h.ids()).toEqual(expect.arrayContaining(["di.closure", "di.restate"]))
+    expect(io.log.chooses.some(item => item.choices.includes("Yes, crystallize"))).toBe(true)
+    expect(readLedger(wt.worktree, SID).tasks).toHaveLength(0)
+  })
+
+  test("repeated closure gaps cannot ask a third question or silently approve a spec", async () => {
+    const h = harness(happy({
+      "di.scorer": [score(1, 1, 1, 1), score(1, 1, 1, 1)],
+      "di.closure": [closure(false, ["Missing core acceptance"]), closure(false, ["Still missing core acceptance"])],
+    }))
+    const wf = begin(h)
+    const io = makeIo({ answers: twoAnswers(), choices: [0, 1] })
+    expect((await run(h, wf, io.io)).status).toBe("exited")
+    expect(dataNow().round).toBe(2)
+    expect(h.ids().filter(id => id === "di.interviewer.question")).toHaveLength(2)
+    expect(h.ids()).not.toContain("di.crystallize")
+    expect(existsSync(join(wt.worktree, specRelative(SID, wf.id)))).toBe(false)
+  })
+})
+
+test("the total question budget preserves unanswered agenda ambiguity in an explicitly crystallized spec", async () => {
+  const components = Array.from({ length: 13 }, (_, i) => ({ id: `item-${i}`, description: `Agenda ${i}` }))
+  const h = harness(happy({
+    "di.interviewer.topology": [j({ type: "topology", project: "brownfield", components })],
+    "di.interviewer.question": Array.from({ length: 12 }, (_, i) => q(`Question for agenda ${i}?`)),
+    "di.scorer": Array.from({ length: 12 }, () => score(1, 1, 1, 1)),
+  }))
+  const wf = begin(h)
+  const io = makeIo({ answers: Array.from({ length: 12 }, () => answer()), choices: [0, 0, 0] })
+  expect((await run(h, wf, io.io)).status).toBe("done")
+  expect(dataNow().round).toBe(12)
+  expect(h.ids().filter(id => id === "di.interviewer.question")).toHaveLength(12)
+  expect(dataNow().cap).toMatchObject({ round: 12, ambiguity: 1, decided: true })
+  expect(agendaProgress(dataNow()).at(-1)).toMatchObject({ id: "item-12", asked: 0, status: "pending" })
+  const spec = readFileSync(join(wt.worktree, specRelative(SID, wf.id)), "utf8")
+  expect(spec).toContain("Final Ambiguity Score: 100.0%")
+  expect(spec).toContain("Status: ROUND_CAP_EXIT")
+  expect(io.log.chooses.some(item => item.choices.includes("Crystallize with current clarity"))).toBe(true)
+  expect(io.log.chooses.some(item => item.choices.includes("Yes, crystallize"))).toBe(true)
+  expect(readLedger(wt.worktree, SID).tasks).toHaveLength(0)
+})
+
+test("a repeated normalized agenda question is rejected before it reaches the user", async () => {
+  const h = harness(happy({
+    "di.interviewer.question": [q("What must ship?"), q("  WHAT must ship!!!  "), q("What MUST ship.")],
+    "di.scorer": [score(0.6, 0.6, 0.6, 0.6)],
+  }))
+  const wf = begin(h)
+  const io = makeIo({ answers: [answer()] })
+  expect((await run(h, wf, io.io)).status).toBe("stuck")
+  expect(io.log.questions).toEqual(["What must ship?"])
+  expect(dataNow().round).toBe(1)
+  expect(dataNow().rounds[0]!.questionKey).toBe("what must ship")
+  expect(h.ids().filter(id => id === "di.interviewer.question")).toHaveLength(3)
+  expect(h.ids()).not.toContain("di.closure")
+})
+
+test("long retained evidence across four agendas stays within every turn's conversation budget", async () => {
+  const components = Array.from({ length: 4 }, (_, i) => ({ id: `agenda-${i}`, description: `Agenda ${i}` }))
+  const evidence = Array.from({ length: 8 }, (_, i) => `${i}:` + "e".repeat(498))
+  const h = harness(happy({
+    "di.interviewer.topology": [j({ type: "topology", project: "brownfield", components })],
+    "di.interviewer.question": components.map(c => q(`What must ${c.id} deliver?`)),
+    "di.scorer": components.map(() => score(1, 1, 1, 1, { evidence })),
+  }))
+  const wf = begin(h)
+  expect((await run(h, wf, makeIo({ answers: components.map(() => answer()) }).io)).status).toBe("done")
+  expect(dataNow().rounds.map(r => r.evidence)).toEqual(components.map(() => evidence))
+  expect(h.ids()).toEqual(expect.arrayContaining(["di.closure", "di.restate", "di.crystallize"]))
+  for (const request of h.seen) expect(request.text.length).toBeLessThanOrEqual(16_000)
+  const finalQuestion = h.seen.filter(item => item.promptId === "di.interviewer.question").at(-1)!
+  expect(finalQuestion.text).toContain("RECORDED EVIDENCE")
+  expect(finalQuestion.text).toContain("Round 1, agenda agenda-0:")
+  expect(finalQuestion.text).not.toContain(evidence[0]!)
+})
+
+test("older answer excerpts retain final decisions without promising protected artifact access", async () => {
+  const firstAnswer = "Existing behavior: keep compatibility. " + "background detail ".repeat(130) + "Final decision: export only filtered rows."
+  const h = harness(happy())
+  const wf = begin(h)
+  expect((await run(h, wf, makeIo({ answers: [answer(firstAnswer), answer("Use CSV.")] }).io)).status).toBe("done")
+  const secondScore = h.seen.filter(item => item.promptId === "di.scorer")[1]!
+  expect(secondScore.text).toContain("Existing behavior: keep compatibility.")
+  expect(secondScore.text).toContain("Final decision: export only filtered rows.")
+  expect(secondScore.text).toContain("[... middle omitted ...]")
+  expect(secondScore.text).toContain("Full records are protected and not available through file tools")
+  expect(secondScore.text).not.toContain("inspect before re-asking")
+  const stored = readFileSync(join(wt.worktree, roundFileRelative(SID, wf.id, 1, "answer")), "utf8")
+  expect(stored).toBe(firstAnswer)
+  expect(dataNow().rounds[0]!.answerSha).toBe(sha256Text(stored))
+})
+
+test("closure reopens only the identified ready agenda and persists that target before resume", async () => {
+  const h = harness(happy({
+    "di.interviewer.topology": [j({ type: "topology", project: "brownfield", components: [{ id: "a", description: "First task" }, { id: "b", description: "Second task" }] })],
+    "di.interviewer.question": [q("Define A"), q("Define B"), q("Complete B acceptance")],
+    "di.scorer": [score(1, 1, 1, 1), score(1, 1, 1, 1), score(1, 1, 1, 1)],
+    "di.closure": [closure(false, ["B acceptance incomplete"], ["b"]), closure()],
+  }))
+  const wf = begin(h)
+  // With no third answer the targeted question remains committed, then a fresh driver invocation resumes it.
+  expect((await run(h, wf, makeIo({ answers: twoAnswers() }).io)).status).toBe("awaiting")
+  expect(dataNow().reopenAgendaIDs).toEqual(["b"])
+  expect(dataNow().rounds.map(r => r.agendaID)).toEqual(["a", "b", "b"])
+  const resumed = makeIo({ answers: [answer()] })
+  expect((await run(h, committed(), resumed.io)).status).toBe("done")
+  expect(resumed.log.questions).toEqual(["Complete B acceptance"])
+  expect(agendaProgress(dataNow()).map(a => a.asked)).toEqual([1, 2])
+  expect(h.ids().filter(id => id === "di.interviewer.question")).toHaveLength(3)
+  expect(dataNow().closure?.pass).toBe(true)
+})
+
+describe("closure agenda targets are required for new interviews", () => {
+  for (const [name, target] of [["missing", undefined], ["empty", []], ["unknown", ["foreign"]]] as const) {
+    test(`${name} target refuses failed closure without asking another agenda or writing a spec`, async () => {
+      const invalid = j({ type: "closure", pass: false, gaps: ["Acceptance incomplete"], ...(target === undefined ? {} : { agenda_ids: target }) })
+      const h = harness(happy({ "di.scorer": [score(1, 1, 1, 1)], "di.closure": [invalid, invalid] }))
+      const wf = begin(h)
+      const io = makeIo({ answers: [answer()] })
+      expect((await run(h, wf, io.io)).status).toBe("stuck")
+      expect(committed().stage).toBe("closure")
+      expect(io.log.questions).toEqual(["Q1"])
+      expect(dataNow().round).toBe(1)
+      expect(h.ids()).not.toContain("di.crystallize")
+      expect(existsSync(join(wt.worktree, specRelative(SID, wf.id)))).toBe(false)
+    })
+  }
 })

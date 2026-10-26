@@ -1016,7 +1016,7 @@ mentions `/skill:ralplan` starts nothing. **Invoking a name is not consent to ex
 | Kind | Status in this build | What it is |
 |---|---|---|
 | `plan` | available | `/plan` → local human `APPROVE` → verified workers (unchanged). |
-| `deep-interview` | available (P6a) | Code-owned interview: topology confirmation, one question per round, code-computed ambiguity, independent researcher/contrarian/simplifier (+architect) panels whose records must all verify, closure, restatement, then a verified `spec.md` with the final ambiguity and threshold. |
+| `deep-interview` | available (P6a) | Code-owned interview: task-agenda confirmation, one focused question per round, code-computed ambiguity, independent researcher/contrarian/simplifier (+architect) panels whose records must all verify, closure, restatement, then a verified `spec.md` with the final ambiguity and threshold. |
 | `ralplan` | available (P6a) | Planner → independent architect/critic review → revision up to five openers; consensus needs Architect `CLEAR`/`APPROVE` and Critic `OKAY` on the **same plan hash**, re-derived from disk, then `pending-approval.md` + `consensus.json`. |
 | `ultragoal` | available (P6b) | A direct start decomposes the objective and reviews one unit at a time. No implementation command runs until the current pending unit is approved with its exact `APPROVE-UNIT <workflow id> <subject sha>` receipt. |
 | `autoresearch` | available (P6b) | A direct start runs the research mission. No experiment command runs until the current pending experiment is approved with its exact `RUN <workflow id> <subject sha>` receipt. A verified verdict can be productified into a fresh deep-interview; no execution consent is inherited. |
@@ -1027,8 +1027,9 @@ Usage in the terminal (`otter` / `otter chat`, TUI or readline):
 /skill:deep-interview <request>   start an interview (the TUI status line shows `deep-interview · <stage> · <phase>`)
 /skill:ralplan <request>          start consensus planning on its own
 /skill:ultragoal <objective>      start goal decomposition; units still need exact APPROVE-UNIT receipts
+/skill:ultragoal                  continue the current session's pending plan or active ultragoal
 /skill:autoresearch <mission>     start research; experiments still need exact RUN receipts
-/finish                           early-exit request; allowed from round 3 above the threshold, and closure + restatement still run
+/finish                           early-exit request after one scored answer (legacy: round 3); closure + restatement still run
 ```
 
 Workflow questions, the topology and restatement confirmations, stuck Retry/Keep, the round-cap choice and the
@@ -1037,6 +1038,19 @@ the answer to the open question (bounded to 10,000 characters). `/pause`, `/canc
 behave as for a plan: Escape interrupts the running step and leaves the committed state, `/pause` and `/cancel` are
 requests labelled `pausing — termination unconfirmed` / `cancelling — termination unconfirmed` until the owner proves
 quiescence, and `/continue` offers Keep/Resume.
+
+**Bounded task agendas.** New deep interviews group related work into user-facing task agendas, reuse previous
+answers and repository evidence, and ask only about material unresolved decisions in the active agenda. The default
+ambiguity threshold is **0.20**, with at most **two questions per confirmed agenda** and **12 questions overall**.
+Reaching a budget does not establish readiness: closure still checks material coverage across all agendas, unresolved
+gaps remain explicit, and restatement and execution approval retain their existing gates. Interviews saved before
+these defaults retain their **0.05** threshold and **100-round** cap when resumed.
+
+To evaluate stage-level question quality with an installed Ollama model, run from the repository root:
+`bun scripts/otter-interview-eval.ts <model> /tmp/interview-quality.json 3`.
+The opt-in probe uses production prompts and transport across ten synthetic scenarios, retaining raw responses and
+prompt hashes. Its automatic checks cover structure and selected invariants; a passing exit code still requires
+semantic review of scope, evidence and recommendations. It is not a complete workflow or file-tool test.
 
 **Preset (AC-W3).** A deep interview that reaches a *verified* `spec.md` connects to a ralplan in the same live
 session epoch with exactly one committed handoff: the ralplan carries `lineage` (interview id, revision, spec path and
@@ -1055,8 +1069,10 @@ two-attempt limit.
 
 **Consensus is not consent.** Reaching consensus shows `Architect CLEAR/APPROVE + Critic OKAY · execution pending`.
 *Stop here* ends with `planning complete; not executed`. *Execute via ultragoal* needs the exact typed text
-`EXECUTE <workflow id> <plan sha>` and then only connects the plan to ultragoal; each implementation unit still needs
-its own exact `APPROVE-UNIT` receipt before anything runs. Direct `/skill:ultragoal` and `/skill:autoresearch` starts
+`EXECUTE <workflow id> <plan sha>` and immediately continues into ultragoal's unit review; each implementation unit still needs
+its own exact `APPROVE-UNIT` receipt before code changes and verification run. After *Decide later*, bare `/skill:ultragoal`
+reopens the saved plan's execution choice; it also continues an existing ultragoal in the current session.
+Direct `/skill:ultragoal <objective>` and `/skill:autoresearch` starts
 follow the same rule: invoking a name creates or resumes the workflow, never execution or experiment consent. Planning
 workflows run read-only roles only and create no ledger tasks.
 
