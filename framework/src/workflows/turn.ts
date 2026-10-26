@@ -403,7 +403,38 @@ async function dispatch(runtime: ExecutionRuntime, input: Dispatch): Promise<Tur
  * Run one bound stage turn. Throws on host/lifecycle failure (fence retained when quiescence is unproven); returns a
  * diagnostic when the binding went stale and `stuck` when the input cannot be made to fit the budget.
  */
+type TurnTiming = { turnID: string; preflightMs: number; summaryMs: number; executionMs: number; summaryCount: number }
+
+async function timed<T>(timing: TurnTiming, key: "preflightMs" | "summaryMs" | "executionMs", run: () => Promise<T>): Promise<T> {
+  const started = performance.now()
+  try { return await run() }
+  finally { timing[key] += Math.max(0, Math.round(performance.now() - started)) }
+}
+
+/** Content-free observations only: total stage/dispatch time can include tools and main-role approval waits. */
 export async function runWorkflowTurn(runtime: ExecutionRuntime, binding: TurnBinding, request: TurnRequest, signal?: AbortSignal): Promise<TurnResult> {
+  const started = performance.now()
+  const timing: TurnTiming = { turnID: randomUUID(), preflightMs: 0, summaryMs: 0, executionMs: 0, summaryCount: 0 }
+  let status: TurnResult["status"] | "failed" | "cancelled" = "failed"
+  try {
+    const result = await executeWorkflowTurn(runtime, binding, request, timing, signal)
+    status = result.status
+    return result
+  } catch (error) {
+    if (signal?.aborted) status = "cancelled"
+    throw error
+  } finally {
+    try {
+      runtime.log("workflow turn timing", {
+        workflowID: binding.workflowID, kind: binding.kind, stage: binding.stage, role: binding.role,
+        operation: binding.prompt.id === summarizerFor(binding.kind).id ? "summary" : "stage", status,
+        durationMs: Math.max(0, Math.round(performance.now() - started)), inputChars: request.text.length, ...timing,
+      })
+    } catch { /* Timing observers cannot change execution, settlement, or errors. */ }
+  }
+}
+
+async function executeWorkflowTurn(runtime: ExecutionRuntime, binding: TurnBinding, request: TurnRequest, timing: TurnTiming, signal?: AbortSignal): Promise<TurnResult> {
   assertBinding(binding, request)
   let text = request.text
   let overflowed = false
@@ -417,7 +448,7 @@ export async function runWorkflowTurn(runtime: ExecutionRuntime, binding: TurnBi
     const stale = () => bindingStaleReason(runtime, binding)
     const cancelled = () => { if (signal?.aborted) throw new Error("conversation cancelled") }
     cancelled()
-    const preflight = await runtime.host.preflight(runtime.host.identity.profile)
+    const preflight = await timed(timing, "preflightMs", () => runtime.host.preflight(runtime.host.identity.profile))
     assertHostAdmission(preflight, runtime.host.identity.controlProfile)
     cancelled()
     let reason = stale()
@@ -433,6 +464,8 @@ export async function runWorkflowTurn(runtime: ExecutionRuntime, binding: TurnBi
       abort: (cause) => control.abort?.(cause),
     })
     if (!releaseActivity) throw new Error("another execution is active")
+    try { runtime.log("workflow turn timing started", { turnID: timing.turnID }) }
+    catch { /* An observer cannot prevent an admitted turn from running. */ }
 
     if (overflowed) {
       // One read-only summarize retry; any failure to shrink the input is a visible stuck, never a silent truncation.
@@ -446,7 +479,8 @@ export async function runWorkflowTurn(runtime: ExecutionRuntime, binding: TurnBi
       assertBinding(summaryBinding, { text: summaryText })
       if (!fits(summaryText, request.budget)) return { status: "stuck", cause: "input_budget", reason: `${request.label} context is too large to summarize` }
       let summary: TurnResult
-      try { summary = await dispatch(runtime, { binding: summaryBinding, request: summarizeRequest, text: summaryText, signal, summary: true, control }) }
+      timing.summaryCount++
+      try { summary = await timed(timing, "summaryMs", () => dispatch(runtime, { binding: summaryBinding, request: summarizeRequest, text: summaryText, signal, summary: true, control })) }
       catch (error) {
         // Quiescent settlement already happened inside dispatch; only a bounded-output overflow is a visible stuck.
         if (error instanceof SummaryUnusable) return { status: "stuck", cause: "input_budget", reason: `${request.label} summary exceeds the response budget or is empty` }
@@ -459,7 +493,7 @@ export async function runWorkflowTurn(runtime: ExecutionRuntime, binding: TurnBi
       assertBinding(binding, { text })
       if (!fits(text, request.budget)) return { status: "stuck", cause: "input_budget", reason: `${request.label} request exceeds the input budget after summarizing` }
     }
-    return await dispatch(runtime, { binding, request, text, signal, control })
+    return await timed(timing, "executionMs", () => dispatch(runtime, { binding, request, text, signal, control }))
   } finally {
     releaseActivity?.()
     // The stage activity is part of the stop proof: settle a recorded stop only after it is released.

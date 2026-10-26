@@ -11,8 +11,9 @@ import { pendingSkillPermissionActivityCount, pendingSkillPermissionActivityCoun
 import { consumeValidatedResumeProof } from "./admission.ts"
 import { validateComboRoutes } from "../hosts/default-model.ts"
 import type { ComboRoutes } from "../hosts/types.ts"
+import { validPlanningTiming } from "../telemetry/planning.ts"
 
-export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "context-window" | "model-rebind" | "shell" | "verify" | "action"
+export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "context-window" | "model-rebind" | "shell" | "verify" | "action" | "timing"
 export type TranscriptRecord = { seq: number; kind: TranscriptKind; eventID: string; data: Record<string, unknown> }
 export type SessionMetadata = {
   version: 1
@@ -87,7 +88,7 @@ const MAX_EVENT_ID_BYTES = 16 * 1024
 const MAX_TOOL_TEXT_BYTES = 4096
 const noFollow = fs.constants.O_NOFOLLOW ?? 0
 const directoryOnly = fs.constants.O_DIRECTORY ?? 0
-const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice", "carried-context", "context-window", "model-rebind", "shell", "verify", "action"])
+const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice", "carried-context", "context-window", "model-rebind", "shell", "verify", "action", "timing"])
 /** Bounds for a persisted operator shell run (see hosts/operator-shell.ts). */
 export const MAX_SHELL_LINES = 200
 export const MAX_SHELL_OUTPUT_BYTES = 64 * 1024
@@ -588,6 +589,10 @@ function validateWorkflowAnnotation(value: Record<string, unknown>): void {
 }
 
 function validateKindData(kind: TranscriptKind, data: Record<string, unknown>): void {
+  if (kind === "timing") {
+    if (!validPlanningTiming(data)) throw new TypeError("timing transcript data must contain only validated enums and counters")
+    return
+  }
   if (toolKinds.has(kind)) {
     validateToolData(data)
     return

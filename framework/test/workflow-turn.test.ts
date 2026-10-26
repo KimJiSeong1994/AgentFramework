@@ -36,6 +36,7 @@ type Hooks = {
 function harness(hooks: Hooks = {}) {
   const calls: string[] = []
   const requests: ExecutionRequest[] = []
+  const logs: Array<{ message: string; fields?: Record<string, unknown> }> = []
   const host: ExecutionHost = {
     identity: { engine: "fixture", profile: "legacy-unowned" },
     async preflight() {
@@ -66,9 +67,10 @@ function harness(hooks: Hooks = {}) {
     },
   }
   const runtime = createExecutionRuntime({
-    directory: wt.worktree, worktree: wt.worktree, config: structuredClone(DEFAULT_CONFIG), log() {},
+    directory: wt.worktree, worktree: wt.worktree, config: structuredClone(DEFAULT_CONFIG),
+    log(message, fields) { logs.push({ message, fields }) },
   }, () => host, { planningOnlyMain: true })
-  return { runtime, calls, requests }
+  return { runtime, calls, requests, logs }
 }
 
 function seedWorkflow(sid: string, patch: Partial<Workflow> = {}): Workflow {
@@ -95,6 +97,42 @@ function ownedStore(sid: string): SessionStore {
 }
 
 const indexBytes = () => readFileSync(workflowPath(wt.worktree))
+
+describe("content-free workflow timing", () => {
+  test("reports stage and compaction costs without logging request or response text", async () => {
+    const h = harness({ text: req => req.title.endsWith("(summarize)") ? "short context" : "PRIVATE RESPONSE" })
+    const result = await runWorkflowTurn(h.runtime, bindingFor(null, "s-timing"), request(`${PLAN_MAIN_PROMPT.text}${OVERFLOW_CONTEXT}`, {
+      compact: { source: OVERFLOW_CONTEXT, rebuild: summary => `${PLAN_MAIN_PROMPT.text}${summary}` },
+    }))
+    expect(result.status).toBe("completed")
+    const timing = h.logs.filter(log => log.message === "workflow turn timing")
+    expect(timing).toHaveLength(1)
+    expect(timing[0]!.fields).toMatchObject({ kind: "plan", stage: "draft", role: "main", status: "completed", operation: "stage", summaryCount: 1 })
+    for (const key of ["durationMs", "preflightMs", "summaryMs", "executionMs", "inputChars"]) {
+      expect(Number.isSafeInteger(timing[0]!.fields![key])).toBe(true)
+      expect(timing[0]!.fields![key] as number).toBeGreaterThanOrEqual(0)
+    }
+    expect(JSON.stringify(timing)).not.toContain("PRIVATE RESPONSE")
+    expect(JSON.stringify(timing)).not.toContain(OVERFLOW_CONTEXT)
+    expect(h.runtime.runs.status().claim).toBeUndefined()
+  })
+
+  test("reports preflight failure while preserving the original error", async () => {
+    const error = new Error("PRIVATE ERROR")
+    const h = harness({ preflightError: error })
+    await expect(runWorkflowTurn(h.runtime, bindingFor(null, "s-timing-failed"), request())).rejects.toBe(error)
+    expect(h.logs.find(log => log.message === "workflow turn timing")).toMatchObject({ message: "workflow turn timing", fields: { status: "failed", summaryCount: 0, executionMs: 0 } })
+    expect(JSON.stringify(h.logs)).not.toContain(error.message)
+    expect(h.requests).toHaveLength(0)
+  })
+
+  test("a timing observer failure cannot change completion or leave a claim", async () => {
+    const h = harness()
+    h.runtime.log = () => { throw new Error("observer unavailable") }
+    expect(await runWorkflowTurn(h.runtime, bindingFor(null, "s-timing-observer"), request())).toEqual({ status: "completed", text: "ok" })
+    expect(h.runtime.runs.status().claim).toBeUndefined()
+  })
+})
 
 describe("workflow turn lifecycle (R12)", () => {
   test("runs preflight -> claim -> registerIntent -> prepare -> markHostDispatched -> run -> terminal -> reconcile -> release in order", async () => {

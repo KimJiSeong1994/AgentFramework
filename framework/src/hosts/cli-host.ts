@@ -220,6 +220,7 @@ const BUDGET_EVIDENCE: BudgetEvidence = Object.freeze({
 
 const TOOL_SCHEMAS: Record<CliToolName, string> = {
   read: '{"path": relative nonempty string ≤2048 UTF-8 bytes, "startLine"?: positive safe integer, "maxLines"?: integer 1..2000}',
+  multiread: '{"reads": array of 1..8 read inputs}; batch independent known files in one reply to avoid extra model turns; every file uses read permissions, combined output ≤32 KiB; any failure returns no file contents',
   list: '{"path"?: relative nonempty string ≤2048 UTF-8 bytes; omitted path means worktree root}',
   glob: '{"pattern": nonempty relative glob ≤1024 UTF-8 bytes}',
   grep: '{"pattern": nonempty literal string ≤1024 UTF-8 bytes, "path"?: relative nonempty string ≤2048 UTF-8 bytes}',
@@ -564,7 +565,7 @@ function offeredSkillTool(request: ExecutionRequest): { provider: SkillToolProvi
 
 function buildBasePrompt(request: ExecutionRequest, available: readonly CliToolName[], catalog: SkillToolProvider["catalog"] = [], inputLimit = roleInputLimit(request.role)): string {
   const allow = new Set(available)
-  const toolLines = CLI_TOOL_NAMES.filter(name => (name !== "skill" || allow.has(name)) && (name !== "repo_search" || allow.has(name))).map(name =>
+  const toolLines = CLI_TOOL_NAMES.filter(name => (name !== "skill" || allow.has(name)) && (name !== "repo_search" || allow.has(name)) && (name !== "multiread" || allow.has(name))).map(name =>
     `- ${name}: ${allow.has(name) ? "allowed" : "denied"}; exact input schema ${TOOL_SCHEMAS[name]}`,
   ).join("\n")
   const skills = allow.has("skill") ? catalog : []
@@ -996,6 +997,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             allowed: request.policy.tools.allowed,
             denied: request.policy.tools.denied,
             skillTool: offered !== undefined,
+            multiRead: request.skillContext === undefined && !witnessRequested,
             repoSearchProvider,
             actionGate: request.role === "main" && request.actionGate !== undefined,
             beforeEffect() {
@@ -1017,6 +1019,11 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             offered = undefined
             available = Object.freeze(available.filter(name => name !== "skill"))
             basePrompt = buildBasePrompt(request, available, [], inputLimit)
+          }
+          // Batching is optional: keep a previously admissible task even when its extra schema would overflow.
+          if (available.includes("multiread") && estimatedTokens(renderPrompt(basePrompt, [])) + nativeInstructionTokens > inputLimit) {
+            available = Object.freeze(available.filter(name => name !== "multiread"))
+            basePrompt = buildBasePrompt(request, available, offered?.catalog, inputLimit)
           }
           if (listed) {
             try { listed.provider.offered?.(offered ? listed.catalog.map(skill => skill.name) : [], offered === undefined) } catch { /* Telemetry only. */ }
@@ -1206,6 +1213,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               if (Date.now() >= request.deadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed before inference" })
             }
             let native: Awaited<ReturnType<CliTransportHandle["run"]>> | undefined
+            const modelStartedAt = performance.now()
             observeActivity({ kind: "model-started", role: request.role, execution: activityExecution, engine: route.engine, model: route.model })
             try { native = await transport.run() }
             catch { native = undefined }
@@ -1218,6 +1226,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               !native.quiescent ? "unresolved" : native.status
             observeActivity({
               kind: "model-returned", role: request.role, execution: activityExecution, status: modelStatus,
+              durationMs: Math.max(0, Math.round(performance.now() - modelStartedAt)), inputChars: prompt.length, toolRound: turn,
             })
             if (!native) {
               let reconciliation = witnessReconciliation
@@ -1423,7 +1432,14 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               observeToolDisplay({ executionID: activity.executionID, callID, phase: "finished", durationMs: Math.max(0, Date.now() - toolStartedAt),
                 ...(resultDetail ? { detail: validatedToolDetail(resultDetail) } : {}) })
             }
-            if (toolCalls >= roundLimit) {
+            try { validateCliToolInput(name, envelope.input) }
+            catch (error) {
+              finishTool("failed", false)
+              if (error instanceof CliToolInputError) return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
+              return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
+            }
+            const toolCost = name === "multiread" ? (envelope.input.reads as unknown[]).length : 1
+            if (toolCalls + toolCost > roundLimit) {
               let granted = false
               if (turnGate?.extendRounds && extensions < MAX_ROUND_EXTENSIONS) {
                 const extendSignal = AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))])
@@ -1436,12 +1452,6 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               }
               extensions++
               roundLimit += MAX_TOOL_ROUNDS
-            }
-            try { validateCliToolInput(name, envelope.input) }
-            catch (error) {
-              finishTool("failed", false)
-              if (error instanceof CliToolInputError) return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
-              return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
             }
             if (cancelled) {
               finishTool("failed", false)
@@ -1528,6 +1538,86 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                 try { skillProvider.delivered?.(skillName) } catch { /* Display/audit only; never affects the turn. */ }
               }
               toolCalls++
+              continue
+            }
+            if (name === "multiread") {
+              if (request.skillContext !== undefined || witnessRequested || !available.includes(name) ||
+                  !request.policy.tools.allowed.includes("read") || request.policy.tools.denied.includes("read")) {
+                finishTool("denied", false)
+                return setFinal({ status: "failed", error: "Otter tool denied by role policy before effects" })
+              }
+              const reads = envelope.input.reads as Record<string, unknown>[]
+              // The common extension gate admitted the whole batch; every member still consumes one read.
+              const canonicalAssistant = JSON.stringify({ type: "tool", name, input: envelope.input })
+              const prospective = fitHistory(basePrompt, [...history, { assistant: canonicalAssistant, ok: true, result: "" }], inputLimit, nativeInstructionTokens)
+              if (!prospective) {
+                finishTool("failed", false)
+                return setFinal({ status: "failed", error: "tool call would exceed the estimated input budget; no effect was performed" })
+              }
+              const childEvents = reads.map((input, index) => ({
+                type: "tool-before" as const, sessionID: callSession, callID: `${callID}:read:${index + 1}`, toolID: "otter:read", name: "read", input,
+              }))
+              let admitted = 0
+              let settled = 0
+              try {
+                for (const event of childEvents) {
+                  admitted++
+                  let allow: boolean
+                  try { allow = request.handlers.beforeTool(event).allow }
+                  catch {
+                    finishTool("failed", false)
+                    return setFinal({ status: "failed", error: "Otter pre-execution tool policy failed closed" })
+                  }
+                  if (!allow) {
+                    finishTool("denied", false)
+                    return setFinal({ status: "failed", error: "Otter pre-execution tool policy denied the tool" })
+                  }
+                }
+                if (cancelled || checkLease(request, fixedLease).state === "cancelled") {
+                  finishTool("denied", false)
+                  return setFinal({ status: "cancelled", error: cancelReason })
+                }
+                assertFixedPolicy(request)
+                let output = tools.execute(name, envelope.input)
+                const members = output.ok ? (JSON.parse(output.text) as { results: Array<{ path: string; text: string }> }).results : []
+                const results: Array<{ path: string; text: string }> = []
+                let resultDenied = false
+                for (const [index, event] of childEvents.entries()) {
+                  const member: CliToolOutput = output.ok ? { ok: true, text: members[index]!.text } : output
+                  // Match every beforeTool, including failed reads, so repeat/recovery state is released.
+                  settled++
+                  const transformed = request.handlers.toolResult({
+                    type: "tool-result", sessionID: event.sessionID, callID: event.callID, toolID: event.toolID, name: "read",
+                    ...(member.ok ? { result: member.text } : { error: member.error }),
+                  })
+                  const filtered = toolResultText(member, transformed)
+                  resultDenied ||= !filtered.ok
+                  results.push({ path: reads[index]!.path as string, text: filtered.text })
+                }
+                if (output.ok) {
+                  const text = JSON.stringify({ results })
+                  output = resultDenied ? { ok: false, error: "Tool refused: a read result was denied; no batch contents returned." }
+                    : Buffer.byteLength(text, "utf8") > 32 * 1024 ? { ok: false, error: "Tool refused: combined read output exceeds 32 KiB; request fewer files or narrower line ranges." }
+                      : { ok: true, text }
+                }
+                finishTool(output.ok ? "succeeded" : "failed", output.ok, output)
+                if (cancelled || checkLease(request, fixedLease).state === "cancelled") return setFinal({ status: "cancelled", error: cancelReason })
+                prospective[prospective.length - 1] = { assistant: canonicalAssistant, ok: output.ok, result: (output.ok ? output.text : output.error) + ignoredNote }
+                const fitted = fitHistory(basePrompt, prospective, inputLimit, nativeInstructionTokens)
+                if (!fitted) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
+                replaceHistory(fitted)
+                toolCalls += reads.length
+              } catch {
+                finishTool("failed", false)
+                if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+                return setFinal({ status: "failed", error: "Otter multiread policy or execution failed closed" })
+              } finally {
+                for (const event of childEvents.slice(settled, admitted)) {
+                  try {
+                    request.handlers.toolResult({ type: "tool-result", sessionID: event.sessionID, callID: event.callID, toolID: event.toolID, name: "read", error: "Batch aborted before returning file contents." })
+                  } catch { /* Continue settling the remaining independently admitted reads. */ }
+                }
+              }
               continue
             }
             const event = { type: "tool-before" as const, sessionID: callSession, callID, toolID: `otter:${name}`, name, input: envelope.input }

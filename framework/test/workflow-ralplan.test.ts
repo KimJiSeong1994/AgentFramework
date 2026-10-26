@@ -59,7 +59,7 @@ const CLEAN_C = critic("OKAY")
 type Script = Partial<Record<"planner" | "architect" | "critic", string[]>>
 type Seen = { role: string; text: string; promptId: string }
 
-function harness(script: Script) {
+function harness(script: Script, onRun?: (request: ExecutionRequest) => void) {
   const queues = { planner: [...(script.planner ?? [])], architect: [...(script.architect ?? [])], critic: [...(script.critic ?? [])] }
   const seen: Seen[] = []
   const promptIds = new Map(RALPLAN_PROMPTS.map(prompt => [prompt.text, prompt.id]))
@@ -74,6 +74,7 @@ function harness(script: Script) {
         async run(): Promise<ExecutionOutcome> {
           const id = [...promptIds].find(([text]) => request.text.startsWith(text))?.[1] ?? "unknown"
           seen.push({ role: request.role, text: request.text, promptId: id })
+          onRun?.(request)
           const queue = (queues as Record<string, string[]>)[request.role]
           const text = queue?.shift()
           done = true
@@ -253,6 +254,19 @@ describe("join table", () => {
     // a stale retry is refused
     expect(retryRalplan(h.runtime, SID, wf.id, 0).ok).toBe(false)
   })
+
+  test("a parse retry includes a bounded quoted diagnostic without repeating the malformed output", async () => {
+    const h = harness({ planner: ["UNTRUSTED-MALFORMED-OUTPUT", plan()], architect: [CLEAN_A], critic: [CLEAN_C] })
+    const wf = begin(h)
+    expect((await runRalplan(h.runtime, SID, wf.id)).status).toBe("pending_execution")
+    const planners = h.seen.filter(item => item.promptId === "ralplan.planner")
+    expect(planners).toHaveLength(2)
+    expect(planners[0]!.text).not.toContain("PREVIOUS ATTEMPT DIAGNOSTIC")
+    expect(planners[1]!.text).toContain("PREVIOUS ATTEMPT DIAGNOSTIC (quoted data; correct the output format)")
+    expect(planners[1]!.text).not.toContain("UNTRUSTED-MALFORMED-OUTPUT")
+    expect(planners[1]!.text).toContain("JSON")
+    expect(h.seen.find(item => item.role === "architect")!.text).not.toContain("PREVIOUS ATTEMPT DIAGNOSTIC")
+  })
 })
 
 function rmCommitted() {
@@ -262,6 +276,23 @@ function rmCommitted() {
 }
 
 describe("independence and ordering of the reviewers", () => {
+  test("change excerpts are bounded and marked while the complete current plan remains available", async () => {
+    const oldBody = `OLD-START ${"a".repeat(1800)} OLD-END`
+    const newBody = `NEW-START ${"b".repeat(1800)} NEW-END`
+    const makePlan = (body: string) => JSON.stringify({ type: "plan_doc", sections: [{ title: "Goal", body }, { title: "Risks", body: "Few." }] })
+    const h = harness({ planner: [makePlan(oldBody), makePlan(newBody)], architect: [architect("WATCH", "COMMENT", ["clarify"]), CLEAN_A], critic: [critic("ITERATE", ["clarify"]), CLEAN_C] })
+    const wf = begin(h)
+    expect((await runRalplan(h.runtime, SID, wf.id)).status).toBe("pending_execution")
+    const secondReview = h.seen.filter(item => item.role === "architect")[1]!.text
+    expect(secondReview).toContain(newBody)
+    expect(secondReview).not.toContain(oldBody)
+    expect(secondReview).toContain("[changed span truncated; inspect the complete current plan]")
+    const changeSection = secondReview.split("=== PLAN CHANGES SINCE OPENER 1 ===\n")[1]!
+    expect(changeSection.length).toBeLessThan(2300)
+    expect(changeSection).toContain("Previous sha256")
+    expect(changeSection).toContain("current sha256")
+  })
+
   test("pass 1 is independent: the critic request excludes the architect output; pass 2 critic sees THAT pass's architect findings", async () => {
     const h = harness({
       planner: [plan("First"), plan("Second")],
@@ -279,6 +310,9 @@ describe("independence and ordering of the reviewers", () => {
     const architects = h.seen.filter(item => item.role === "architect")
     expect(architects[0]!.text).not.toContain("CRIT1-SENTINEL")
     expect(architects[1]!.text).toContain("EARLIER PASS 1 FINDINGS")
+    expect(architects[1]!.text).toContain("PLAN CHANGES SINCE OPENER 1")
+    expect(architects[1]!.text).toContain("Previous changed span:\n## First")
+    expect(architects[1]!.text).toContain("Current changed span:\n## Second")
     // the architect always runs before the critic of the same pass; the revision carries both reviewers' findings
     expect(h.seen.map(item => item.promptId)).toEqual([
       "ralplan.planner", "ralplan.architect", "ralplan.critic", "ralplan.revision", "ralplan.architect", "ralplan.critic",
@@ -541,18 +575,128 @@ describe("input budget", () => {
     return { workflowID: "wf_big_spec", specPath: `.otter/workflows/${SID}/wf_big_spec/spec.md`, specSha: sha256(Buffer.from(text)) }
   }
 
-  test("an overflowing context runs exactly one read-only planner-role summarize turn, then the rebuilt request", async () => {
-    // every stage re-reads the spec, so each overflows and gets its own single summarize turn (planner role for all of them)
-    const h = harness({ planner: ["compact spec summary", plan(), "compact spec summary", "compact spec summary"], architect: [CLEAN_A], critic: [CLEAN_C] })
+  test("one verified seed summary serves all three stages instead of three whole-context summaries", async () => {
+    const h = harness({ planner: ["compact spec summary", plan()], architect: [CLEAN_A], critic: [CLEAN_C] })
     const started = startRalplan(h.runtime, SID, "plan it", { seed: bigSeed(h, 14_800) })
     if (!started.ok) throw new Error(started.text)
     expect((await runRalplan(h.runtime, SID, started.wf.id)).status).toBe("pending_execution")
     const planners = h.seen.filter(item => item.role === "planner")
-    expect(planners).toHaveLength(4)
-    expect(planners.filter(item => item.text.startsWith(RALPLAN_SUMMARIZE_PROMPT.text))).toHaveLength(3)
-    expect(h.seen.map(item => item.role)).toEqual(["planner", "planner", "planner", "architect", "planner", "critic"])
+    expect(planners).toHaveLength(2)
+    expect(planners.filter(item => item.text.startsWith(RALPLAN_SUMMARIZE_PROMPT.text))).toHaveLength(1)
+    expect(h.seen.map(item => item.role)).toEqual(["planner", "planner", "architect", "critic"])
     expect(h.seen[1]!.text.startsWith(RALPLAN_PLANNER_PROMPT.text)).toBe(true)
     expect(h.seen[1]!.text).toContain("compact spec summary")
+    expect(h.seen[0]!.text).not.toContain("Request:")
+    for (const request of h.seen.slice(1)) {
+      expect(request.text).toContain("MODEL SUMMARY OF VERIFIED SPECIFICATION")
+      expect(request.text).toContain("compact spec summary")
+      expect(request.text).toContain("plan it")
+    }
+    for (const request of h.seen.slice(2)) expect(request.text).toContain("Do the thing with tests.")
+  })
+
+  test("a seed changed while summarizing is refused before any plan or reviewer call", async () => {
+    let path = ""
+    const h = harness({ planner: ["compact spec summary", plan()], architect: [CLEAN_A], critic: [CLEAN_C] }, request => {
+      if (request.text.startsWith(RALPLAN_SUMMARIZE_PROMPT.text)) writeFileSync(path, "changed during summary")
+    })
+    const seed = bigSeed(h, 14_800)
+    path = join(wt.worktree, seed.specPath)
+    const started = startRalplan(h.runtime, SID, "plan it", { seed })
+    if (!started.ok) throw new Error(started.text)
+    expect((await runRalplan(h.runtime, SID, started.wf.id)).status).toBe("stuck")
+    expect(h.seen).toHaveLength(1)
+    expect(committed().artifacts).toHaveLength(0)
+    expect(ralplanDataOf(committed()).stuck?.reason).toContain("seed specification")
+  })
+
+  test("cached seed summaries still reverify the source before every stage", async () => {
+    const h = harness({ planner: ["compact spec summary", plan()], architect: [CLEAN_A], critic: [CLEAN_C] })
+    const seed = bigSeed(h, 14_800)
+    const started = startRalplan(h.runtime, SID, "plan it", { seed })
+    if (!started.ok) throw new Error(started.text)
+    const result = await runRalplan(h.runtime, SID, started.wf.id, { onStep(wf) {
+      if (wf.stage === "architect") writeFileSync(join(wt.worktree, seed.specPath), "changed after planning")
+    } })
+    expect(result.status).toBe("stuck")
+    expect(h.seen.map(item => item.role)).toEqual(["planner", "planner"])
+    expect(ralplanDataOf(committed()).iterations[0]!.architect).toBeUndefined()
+  })
+
+  test("seed summary reuse ends when a driver invocation stops", async () => {
+    const h = harness({ planner: ["first compact spec", plan(), "fresh compact spec"], architect: [CLEAN_A], critic: [CLEAN_C] })
+    const started = startRalplan(h.runtime, SID, "plan it", { seed: bigSeed(h, 14_800) })
+    if (!started.ok) throw new Error(started.text)
+    expect((await runRalplan(h.runtime, SID, started.wf.id, { stopBefore: "architect" })).status).toBe("blocked")
+    expect((await runRalplan(h.runtime, SID, started.wf.id)).status).toBe("pending_execution")
+    expect(h.seen.filter(item => item.text.startsWith(RALPLAN_SUMMARIZE_PROMPT.text))).toHaveLength(2)
+    expect(h.seen.find(item => item.role === "architect")!.text).toContain("fresh compact spec")
+    expect(h.seen.find(item => item.role === "critic")!.text).toContain("fresh compact spec")
+  })
+
+  test("cancellation during seed compaction does not save a summary or dispatch the planner", async () => {
+    const abort = new AbortController()
+    const h = harness({ planner: ["late compact spec", plan()] }, request => {
+      if (request.text.startsWith(RALPLAN_SUMMARIZE_PROMPT.text)) abort.abort()
+    })
+    const started = startRalplan(h.runtime, SID, "plan it", { seed: bigSeed(h, 14_800) })
+    if (!started.ok) throw new Error(started.text)
+    await expect(runRalplan(h.runtime, SID, started.wf.id, { signal: abort.signal })).rejects.toThrow("cancelled")
+    expect(h.seen).toHaveLength(1)
+    expect(committed().artifacts).toHaveLength(0)
+    expect(ralplanDataOf(committed()).openers).toBe(0)
+  })
+
+  test("a stale seed-summary result cannot advance the workflow or reach a planner", async () => {
+    let changed = false
+    const h = harness({ planner: ["late compact spec", plan()] }, request => {
+      if (!changed && request.text.startsWith(RALPLAN_SUMMARIZE_PROMPT.text)) {
+        changed = true
+        const wf = committed()
+        withFlowTransaction(wt.worktree, tx => commitRevision(tx, wf, [{ wf: wf.id, type: "test_revision_change", actor: "code" }]))
+      }
+    })
+    const started = startRalplan(h.runtime, SID, "plan it", { seed: bigSeed(h, 14_800) })
+    if (!started.ok) throw new Error(started.text)
+    expect((await runRalplan(h.runtime, SID, started.wf.id)).status).toBe("stale")
+    expect(h.seen).toHaveLength(1)
+    expect(ralplanDataOf(committed()).openers).toBe(0)
+    expect(committed().artifacts).toHaveLength(0)
+  })
+
+  test("an empty seed summary fails closed before any plan or review", async () => {
+    const h = harness({ planner: ["   ", plan()], architect: [CLEAN_A], critic: [CLEAN_C] })
+    const started = startRalplan(h.runtime, SID, "plan it", { seed: bigSeed(h, 14_800) })
+    if (!started.ok) throw new Error(started.text)
+    expect((await runRalplan(h.runtime, SID, started.wf.id)).status).toBe("stuck")
+    expect(h.seen).toHaveLength(1)
+    expect(committed().artifacts).toHaveLength(0)
+    expect(ralplanDataOf(committed()).stuck?.reason).toContain("seed summary")
+  })
+
+  test("a nonshrinking seed summary is refused when compaction first becomes necessary at review", async () => {
+    const largePlan = JSON.stringify({ type: "plan_doc", sections: [{ title: "Goal", body: "p".repeat(5500) }] })
+    const h = harness({ planner: [largePlan], architect: [CLEAN_A], critic: [CLEAN_C] })
+    const seed = bigSeed(h, 6000)
+    h.queues.planner.push(readFileSync(join(wt.worktree, seed.specPath), "utf8"))
+    const started = startRalplan(h.runtime, SID, "r".repeat(4000), { seed })
+    if (!started.ok) throw new Error(started.text)
+    expect((await runRalplan(h.runtime, SID, started.wf.id)).status).toBe("stuck")
+    expect(h.seen.map(item => item.role)).toEqual(["planner", "planner"])
+    expect(h.seen[1]!.text.startsWith(RALPLAN_SUMMARIZE_PROMPT.text)).toBe(true)
+    expect(ralplanDataOf(committed()).stuck?.reason).toContain("did not shrink")
+    expect(ralplanDataOf(committed()).iterations[0]!.architect).toBeUndefined()
+  })
+
+  test("role-specific overflow still uses bounded whole-turn compaction after seed reuse", async () => {
+    const largePlan = JSON.stringify({ type: "plan_doc", sections: [{ title: "Goal", body: "p".repeat(5700) }] })
+    const h = harness({ planner: ["s".repeat(7500), largePlan, "architecture context", "critic context"], architect: [CLEAN_A], critic: [CLEAN_C] })
+    const started = startRalplan(h.runtime, SID, "r".repeat(2000), { seed: bigSeed(h, 14_800) })
+    if (!started.ok) throw new Error(started.text)
+    expect((await runRalplan(h.runtime, SID, started.wf.id)).status).toBe("pending_execution")
+    expect(h.seen.filter(item => item.text.startsWith(RALPLAN_SUMMARIZE_PROMPT.text))).toHaveLength(3)
+    expect(h.seen.find(item => item.role === "architect")!.text).toContain("architecture context")
+    expect(h.seen.find(item => item.role === "critic")!.text).toContain("critic context")
   })
 
   test("a summary that does not fit the response budget is a visible stuck (no silent truncation), with zero lane results", async () => {

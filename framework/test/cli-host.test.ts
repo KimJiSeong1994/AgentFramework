@@ -912,7 +912,15 @@ describe("common CLI execution host", () => {
     expect(Number.isSafeInteger(execution)).toBe(true)
     expect(execution).toBeGreaterThan(0)
     expect(execution).toBeLessThanOrEqual(1_000_000)
-    expect(activities).toEqual([
+    const modelReturns = activities.filter(activity => activity.kind === "model-returned")
+    expect(modelReturns.map(activity => activity.toolRound)).toEqual([0, 1, 2])
+    expect(modelReturns.map(activity => activity.inputChars)).toEqual(subject.prompts.map(prompt => prompt.length))
+    for (const activity of modelReturns) {
+      expect(Number.isSafeInteger(activity.durationMs)).toBe(true)
+      expect(activity.durationMs!).toBeGreaterThanOrEqual(0)
+    }
+    expect(activities.map(activity => activity.kind === "model-returned"
+      ? { kind: activity.kind, role: activity.role, execution: activity.execution, status: activity.status } : activity)).toEqual([
       { kind: "model-started", role: "reviewer", execution, engine: "local", model: "fixture-model" },
       { kind: "model-returned", role: "reviewer", execution, status: "completed" },
       { kind: "tool-started", role: "reviewer", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:1`, tool: "read" },
@@ -1260,6 +1268,65 @@ describe("common CLI execution host", () => {
 
     const foreign = harness({ engine: "claude", responses: [stage] })
     expect(await (await foreign.host.prepare(foreign.request)).run()).toMatchObject({ status: "failed" })
+  })
+
+  test("multiread collects three files in one model round with individual read policy results", async () => {
+    for (const path of ["a.txt", "b.txt", "c.txt"]) writeFileSync(join(root, path), `contents-${path}`)
+    const subject = harness({ role: "planner", responses: [
+      JSON.stringify({ type: "tool", name: "multiread", input: { reads: ["a.txt", "b.txt", "c.txt"].map(path => ({ path })) } }),
+      JSON.stringify({ type: "final", text: "reviewed all three" }),
+    ] })
+    const calls: string[] = []
+    const results: string[] = []
+    const original = subject.request.handlers
+    subject.request.handlers = { ...original,
+      beforeTool(event) { expect(event.name).toBe("read"); calls.push(event.callID); return original.beforeTool(event) },
+      toolResult(event) { expect(event.name).toBe("read"); results.push(event.callID); return original.toolResult(event) },
+    }
+    expect(await (await subject.host.prepare(subject.request)).run()).toEqual({ status: "completed", text: "reviewed all three" })
+    expect(subject.prompts).toHaveLength(2)
+    for (const path of ["a.txt", "b.txt", "c.txt"]) expect(subject.prompts[1]).toContain(`contents-${path}`)
+    expect(calls).toHaveLength(3)
+    expect(new Set(calls).size).toBe(3)
+    expect(results).toEqual(calls)
+  })
+
+  test("multiread settles prior read policies and returns no contents when a member is denied", async () => {
+    writeFileSync(join(root, "a.txt"), "private-first")
+    writeFileSync(join(root, "b.txt"), "private-second")
+    const subject = harness({ responses: [JSON.stringify({ type: "tool", name: "multiread", input: { reads: [{ path: "a.txt" }, { path: "b.txt" }] } })] })
+    const before: string[] = []
+    const after: string[] = []
+    subject.request.handlers = { ...subject.request.handlers,
+      beforeTool(event) { before.push(event.callID); return (event.input as { path: string }).path === "b.txt" ? { allow: false, reason: "denied" } : { allow: true } },
+      toolResult(event) { after.push(event.callID); expect(event.result).toBeUndefined(); return { error: event.error } },
+    }
+    expect(await (await subject.host.prepare(subject.request)).run()).toMatchObject({ status: "failed", error: "Otter pre-execution tool policy denied the tool" })
+    expect(before).toHaveLength(2)
+    expect(after).toEqual(before)
+    expect(subject.prompts).toHaveLength(1)
+  })
+
+  test("multiread bounds aggregate output after per-file result policy transforms", async () => {
+    writeFileSync(join(root, "a.txt"), "a")
+    const subject = harness({ responses: [
+      JSON.stringify({ type: "tool", name: "multiread", input: { reads: [{ path: "a.txt" }, { path: "a.txt" }] } }),
+      JSON.stringify({ type: "final", text: "retry narrower reads" }),
+    ] })
+    subject.request.handlers = { ...subject.request.handlers, toolResult: () => ({ result: "expanded-private-content".repeat(900) }) }
+    expect(await (await subject.host.prepare(subject.request)).run()).toMatchObject({ status: "completed" })
+    expect(subject.prompts[1]).toContain("combined read output exceeds 32 KiB")
+    expect(subject.prompts[1]).not.toContain("expanded-private-content")
+  })
+
+  test("multiread charges each member against the existing read work budget", async () => {
+    writeFileSync(join(root, "a.txt"), "a")
+    const batch = JSON.stringify({ type: "tool", name: "multiread", input: { reads: Array.from({ length: 8 }, () => ({ path: "a.txt" })) } })
+    const subject = harness({ responses: [batch, batch, batch, batch] })
+    expect(await (await subject.host.prepare(subject.request)).run()).toMatchObject({ status: "failed", error: "Otter tool round limit reached" })
+    expect(subject.observed.before).toBe(24)
+    expect(subject.observed.results).toBe(24)
+    expect(subject.prompts).toHaveLength(4)
   })
 
   test("known tools with malformed input still emit a correlated failed lifecycle", async () => {
@@ -2068,6 +2135,37 @@ describe("chat execution through the action gate", () => {
       expect(fact.finishedAt).toBeGreaterThanOrEqual(fact.startedAt)
       expect(Object.keys(fact).sort()).toEqual(["callID", "finishedAt", "ok", "sessionID", "startedAt", "tool", ...(fact.exitCode !== undefined ? ["exitCode"] : [])].sort())
     }
+  })
+
+  test.each([true, false])("multiread crossing the remaining budget asks before any child read (grant=%s)", async grant => {
+    writeFileSync(join(root, "seed.txt"), "seed")
+    const read = JSON.stringify({ type: "tool", name: "read", input: { path: "seed.txt" } })
+    const batch = JSON.stringify({ type: "tool", name: "multiread", input: { reads: [{ path: "seed.txt" }, { path: "seed.txt" }] } })
+    const asked: Array<[number, number, number]> = []
+    const run = harness({ role: "main", tools: CHAT_TOOLS, responses: [...Array.from({ length: 23 }, () => read), batch, final("done")] })
+    const approval = gate(() => true, undefined, { extendRounds: async (used, rounds) => {
+      asked.push([used, rounds, run.observed.before])
+      return grant
+    } })
+    const result = await (await run.host.prepare({ ...run.request, actionGate: approval.value })).run()
+    expect(asked).toEqual([[23, 24, 23]])
+    expect(result).toEqual(grant ? { status: "completed", text: "done" } : { status: "failed", error: "Otter tool round limit reached" })
+    expect(run.observed.before).toBe(grant ? 25 : 23)
+    expect(run.observed.results).toBe(grant ? 25 : 23)
+    expect(run.prompts).toHaveLength(grant ? 25 : 24)
+  })
+
+  test("headless planning multiread cannot extend its read budget", async () => {
+    writeFileSync(join(root, "seed.txt"), "seed")
+    const read = JSON.stringify({ type: "tool", name: "read", input: { path: "seed.txt" } })
+    const batch = JSON.stringify({ type: "tool", name: "multiread", input: { reads: [{ path: "seed.txt" }, { path: "seed.txt" }] } })
+    let asked = 0
+    const approval = gate(() => true, undefined, { extendRounds: async () => { asked++; return true } })
+    const run = harness({ role: "planner", responses: [...Array.from({ length: 23 }, () => read), batch] })
+    expect(await (await run.host.prepare({ ...run.request, actionGate: approval.value })).run()).toEqual({ status: "failed", error: "Otter tool round limit reached" })
+    expect(asked).toBe(0)
+    expect(run.observed.before).toBe(23)
+    expect(run.observed.results).toBe(23)
   })
 
   test("at the tool-call limit chat asks to continue; granted rounds keep the turn going, a refusal ends it", async () => {

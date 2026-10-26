@@ -11,7 +11,7 @@ import { readLedger } from "../src/state/ledger.ts"
 import { readCommitted } from "../src/workflows/commit.ts"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { createExecutionRuntime } from "../src/hosts/runtime.ts"
-import { readSessionMetadata, replaySession } from "../src/sessions/store.ts"
+import { getOwnedSession, readSessionMetadata, replaySession } from "../src/sessions/store.ts"
 import { activeAnyWorkflow } from "../src/flow/state.ts"
 import { resumeAdmission } from "../src/sessions/admission.ts"
 import type { ExecutionOutcome, ExecutionRequest, ExecutionRuntime } from "../src/hosts/types.ts"
@@ -77,7 +77,10 @@ async function session(options: Options) {
   let uuid = options.uuidBase ?? 0
   const deps: Partial<InteractiveDependencies> = {
     cwd: wt.worktree, terminal, gitTopLevel: () => wt.worktree,
-    createRuntime: () => fixture.runtime,
+    createRuntime: options => {
+      fixture.runtime.log = (message, fields) => options.progress?.queue(message, fields)
+      return fixture.runtime
+    },
     admitRuntime: async () => {},
     createConversation: () => ({ turn: async text => { conversationTurns.push(text); return { text: "Acknowledged." } } }),
     discoverModels: async () => { throw new Error("no model discovery") },
@@ -94,6 +97,24 @@ const committed = () => {
 }
 
 describe("deep-interview then ralplan through the interactive session", () => {
+  test("a timing transcript write failure aborts and holds the session before another request", async () => {
+    let failed = false
+    let nextRequest = false
+    await expect(session({ lines: [() => {
+      const store = getOwnedSession(wt.worktree, "otter-fixture0")!
+      const append = store.append.bind(store)
+      store.append = (kind, data, eventID) => {
+        if (kind === "timing") { failed = true; throw new Error("PRIVATE_TIMING_STORAGE_FAILURE") }
+        return append(kind, data, eventID)
+      }
+      return "/skill:ralplan plan a change"
+    }, () => { nextRequest = true; return "/quit" }] })).rejects.toThrow("Session transcript persistence failed; the session remains held.")
+    expect(failed).toBe(true)
+    expect(nextRequest).toBe(false)
+    expect(readSessionMetadata(wt.worktree, "otter-fixture0")?.held).toBe(true)
+    expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
+  })
+
   test("one owner kind per start; inline choosers; committed status; auto-connect; consensus does not execute", async () => {
     const s = await session({
       lines: ["/skill:deep-interview build the widget", ...answers, "/quit"],
@@ -125,6 +146,10 @@ describe("deep-interview then ralplan through the interactive session", () => {
     const created = readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)
     expect(created).toEqual(["deep-interview", "ralplan"])
     expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
+    const timings = replaySession(wt.worktree, "otter-fixture0", { kind: "timing" }).records
+    expect(timings.filter(record => record.data.kind === "ralplan").map(record => record.data.stage)).toEqual(["planner", "architect", "critic"])
+    expect(timings.every(record => record.data.category === "workflow" && Number.isSafeInteger(record.data.durationMs))).toBe(true)
+    expect(timings.every(record => !("text" in record.data) && !("prompt" in record.data))).toBe(true)
     const roles = new Set(s.seen.map(item => item.role))
     expect([...roles].every(role => ["interviewer", "researcher", "contrarian", "simplifier", "planner", "architect", "critic"].includes(role))).toBe(true)
   })

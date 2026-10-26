@@ -35,6 +35,7 @@ import { recordSkillToolLoad, recordSkillToolTurn } from "../telemetry/routing.t
 import { attachAdmission, detachAdmission, effectiveHold, holdAdmission, rebindAdmissionModel, resumeAdmission } from "../sessions/admission.ts"
 import { canonicalRoutes, inspectSessions, MAX_CARRIED_MESSAGES, routesKey, MAX_SHELL_COMMAND_BYTES, MAX_SHELL_LINES, MAX_SHELL_OUTPUT_BYTES, readSessionMetadata, replaySession, type SessionStore, type ReplayOptions, type ReplayResult, type TranscriptKind } from "../sessions/store.ts"
 import { persistToolActivity } from "../tui/session-transcript.ts"
+import { createPlanningTimingCollector } from "../telemetry/planning.ts"
 import { createForegroundController, PlanIsolationUnavailableError, readForegroundStatus, type ForegroundController } from "./controller.ts"
 import { discoverModels as discoverModelCatalog, type ModelCatalog } from "./model-catalog.ts"
 import { incompleteArtifactSummary } from "../workflows/artifacts.ts"
@@ -1079,15 +1080,26 @@ export async function runInteractiveSession(
     terminal.queueActivity?.(message, fields)
   }
   const scopedProgress = () => {
+    const timings = createPlanningTimingCollector()
     let epoch: string | undefined
     let sessionID: string | undefined
     const current = () => epoch !== undefined && sessionStore?.epoch === epoch && sessionStore.sessionID === sessionID
     return {
       bind(store: SessionStore) { epoch = store.epoch; sessionID = store.sessionID },
       sink: {
-        host(activity: CliHostActivity) { if (current()) progress.host(activity) },
+        host(activity: CliHostActivity) { if (current()) { timings.model(activity); progress.host(activity) } },
         toolDisplay(display: CliToolDisplay) { if (current()) terminal.toolDisplay?.(display) },
-        queue(message: string, fields?: Record<string, unknown>) { if (current()) progress.queue(message, fields) },
+        queue(message: string, fields?: Record<string, unknown>) {
+          if (!current()) return
+          if (message === "workflow turn timing started") timings.start(fields)
+          if (message === "workflow turn timing") {
+            const timing = timings.finish(fields)
+            // Persist once per turn, not once per model/tool round. The normal
+            // persistence path retains abort/held semantics on primary-store failures.
+            try { if (timing) persist("timing", timing) } catch { /* persist already aborted the session. */ }
+          }
+          progress.queue(message, fields)
+        },
         verifyRun(run: VerifyRunObservation) { if (current()) showVerifyRun(run) },
       },
     }

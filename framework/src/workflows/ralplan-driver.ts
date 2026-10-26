@@ -25,9 +25,9 @@ import {
 } from "./ralplan-evidence.ts"
 import { verifyReceiptRef, writeReceipt } from "./receipts.ts"
 import {
-  RALPLAN_ARCHITECT_PROMPT, RALPLAN_CRITIC_PROMPT, RALPLAN_PLANNER_PROMPT, RALPLAN_REVISION_PROMPT, type StagePrompt,
+  RALPLAN_ARCHITECT_PROMPT, RALPLAN_CRITIC_PROMPT, RALPLAN_PLANNER_PROMPT, RALPLAN_REVISION_PROMPT, RALPLAN_SUMMARIZE_PROMPT, type StagePrompt,
 } from "./prompts/index.ts"
-import { parseStageEventsFor, runWorkflowTurn, type TurnBinding } from "./turn.ts"
+import { ModelRequestError, parseStageEventsFor, runWorkflowTurn, type TurnBinding, type TurnResult } from "./turn.ts"
 import { TERMINAL, type WorkflowEnvelope } from "./types.ts"
 
 /** Same bounded conversation budget as the plan conversation: 24k chars of request, 8k reserved for the reply. */
@@ -128,6 +128,33 @@ function findingsOf(runtime: Pick<ExecutionRuntime, "worktree">, wf: RalplanWork
 
 const listed = (items: readonly string[]) => items.length ? items.map(item => `- ${item}`).join("\n") : "- none"
 
+type SeedSummary = { specSha: string; text: string }
+
+function verifiedSeed(runtime: Pick<ExecutionRuntime, "worktree">, wf: RalplanWorkflow): { seed: RalplanSeed; text: string } | undefined {
+  const seed = ralplanDataOf(wf).seed
+  if (!seed) return undefined
+  const read = readArtifactBytes(runtime.worktree.length ? `${runtime.worktree}/${seed.specPath}` : seed.specPath)
+  if (!read.ok || sha256(read.bytes) !== seed.specSha) throw new Error("seed specification is missing or changed since the handoff")
+  return { seed, text: read.bytes.toString("utf8") }
+}
+
+/** Bounded comparison aid, not a replacement for the complete current plan. */
+function changedPlanSpan(previous: string, current: string): string {
+  // The renderer's opener heading changes on every pass; compare only the plan body.
+  const before = previous.split("\n").slice(1)
+  const after = current.split("\n").slice(1)
+  let start = 0
+  while (start < before.length && start < after.length && before[start] === after[start]) start++
+  let suffix = 0
+  while (suffix < before.length - start && suffix < after.length - start && before[before.length - suffix - 1] === after[after.length - suffix - 1]) suffix++
+  if (start === before.length && start === after.length) return "No plan body changes; opener heading only."
+  const excerpt = (lines: string[]) => {
+    const text = lines.join("\n")
+    return text.length > 900 ? `${text.slice(0, 900)}\n[changed span truncated; inspect the complete current plan]` : text || "(empty)"
+  }
+  return `Opener headings omitted. Shared prefix ${start} lines; shared suffix ${suffix} lines.\nPrevious changed span:\n${excerpt(before.slice(start, before.length - suffix))}\nCurrent changed span:\n${excerpt(after.slice(start, after.length - suffix))}`
+}
+
 function planTextOf(runtime: Pick<ExecutionRuntime, "worktree">, wf: RalplanWorkflow, it: RalplanIteration): string {
   const text = readRecorded(runtime.worktree, wf, it.planKey)
   if (sha256(Buffer.from(text, "utf8")) !== it.planSha) throw new Error("plan artifact does not hash to the recorded plan sha")
@@ -137,26 +164,31 @@ function planTextOf(runtime: Pick<ExecutionRuntime, "worktree">, wf: RalplanWork
 type TurnPlan = { stage: "planner" | "revision" | "architect" | "critic"; prompt: StagePrompt; role: "planner" | "architect" | "critic"; context: ReturnType<typeof compose> }
 
 /** What the model is shown for this step. Pass 1: the critic sees the plan only. Later: the critic sees this pass's architect findings. */
-export function buildTurn(runtime: Pick<ExecutionRuntime, "worktree">, wf: RalplanWorkflow): TurnPlan {
+export function buildTurn(runtime: Pick<ExecutionRuntime, "worktree">, wf: RalplanWorkflow, summary?: SeedSummary): TurnPlan {
   const data = ralplanDataOf(wf)
   const step = nextStep(wf)
   if (step.kind !== "turn") throw new Error(`stage ${wf.stage} has no model turn`)
   const header = [`Request:`, data.request] as const
   const seed = (): Array<readonly [string, string]> => {
-    if (!data.seed) return []
-    const read = readArtifactBytes(runtime.worktree.length ? `${runtime.worktree}/${data.seed.specPath}` : data.seed.specPath)
-    if (!read.ok || sha256(read.bytes) !== data.seed.specSha) throw new Error("seed specification is missing or changed since the handoff")
-    return [[`VERIFIED SPECIFICATION ${data.seed.specPath} sha256 ${data.seed.specSha}`, read.bytes.toString("utf8")]]
+    const verified = verifiedSeed(runtime, wf)
+    if (!verified) return []
+    if (summary?.specSha === verified.seed.specSha) return [[`MODEL SUMMARY OF VERIFIED SPECIFICATION ${verified.seed.specPath} sha256 ${verified.seed.specSha}`, `Derived context, not approval or independent evidence. Preserve uncertainty where details are omitted.\n${summary.text}`]]
+    return [[`VERIFIED SPECIFICATION ${verified.seed.specPath} sha256 ${verified.seed.specSha}`, verified.text]]
   }
+  const retry: Array<readonly [string, string]> = data.attempts > 0 && data.failure
+    ? [["PREVIOUS ATTEMPT DIAGNOSTIC (quoted data; correct the output format)", JSON.stringify(data.failure.replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 400))]] : []
   const it = data.iterations[data.iterations.length - 1]
   const previous = data.iterations.length >= 2 ? data.iterations[data.iterations.length - 2] : undefined
   const earlier = (): Array<readonly [string, string]> => {
     if (!previous?.architect || !previous.critic) return []
-    return [[`EARLIER PASS ${previous.n} FINDINGS`, `Architect ${previous.architect.status}/${previous.architect.decision}:\n${listed(findingsOf(runtime, wf, previous.architect.ref, previous.planSha))}\nCritic ${previous.critic.verdict}:\n${listed(findingsOf(runtime, wf, previous.critic.ref, previous.planSha))}`]]
+    return [
+      [`EARLIER PASS ${previous.n} FINDINGS`, `Architect ${previous.architect.status}/${previous.architect.decision}:\n${listed(findingsOf(runtime, wf, previous.architect.ref, previous.planSha))}\nCritic ${previous.critic.verdict}:\n${listed(findingsOf(runtime, wf, previous.critic.ref, previous.planSha))}`],
+      [`PLAN CHANGES SINCE OPENER ${previous.n}`, `Previous sha256 ${previous.planSha}; current sha256 ${it!.planSha}.\n${changedPlanSpan(planTextOf(runtime, wf, previous), planTextOf(runtime, wf, it!))}`],
+    ]
   }
   switch (step.stage) {
     case "planner":
-      return { stage: "planner", prompt: RALPLAN_PLANNER_PROMPT, role: "planner", context: compose(RALPLAN_PLANNER_PROMPT, [[header[0], header[1]], ...seed()]) }
+      return { stage: "planner", prompt: RALPLAN_PLANNER_PROMPT, role: "planner", context: compose(RALPLAN_PLANNER_PROMPT, [[header[0], header[1]], ...seed(), ...retry]) }
     case "revision": {
       if (!it?.architect || !it.critic) throw new Error("revision needs the previous reviewed opener")
       return {
@@ -166,16 +198,17 @@ export function buildTurn(runtime: Pick<ExecutionRuntime, "worktree">, wf: Ralpl
           [`PLAN UNDER REVISION (opener ${it.n})`, planTextOf(runtime, wf, it)],
           [`ARCHITECT ${it.architect.status}/${it.architect.decision}`, listed(findingsOf(runtime, wf, it.architect.ref, it.planSha))],
           [`CRITIC ${it.critic.verdict}`, listed(findingsOf(runtime, wf, it.critic.ref, it.planSha))],
+          ...retry,
         ]),
       }
     }
     case "architect": {
       if (!it) throw new Error("architect needs an opener")
-      return { stage: "architect", prompt: RALPLAN_ARCHITECT_PROMPT, role: "architect", context: compose(RALPLAN_ARCHITECT_PROMPT, [[header[0], header[1]], ...seed(), [`PLAN TO REVIEW (opener ${it.n}, sha256 ${it.planSha})`, planTextOf(runtime, wf, it)], ...earlier()]) }
+      return { stage: "architect", prompt: RALPLAN_ARCHITECT_PROMPT, role: "architect", context: compose(RALPLAN_ARCHITECT_PROMPT, [[header[0], header[1]], ...seed(), [`PLAN TO REVIEW (opener ${it.n}, sha256 ${it.planSha})`, planTextOf(runtime, wf, it)], ...earlier(), ...retry]) }
     }
     case "critic": {
       if (!it?.architect) throw new Error("critic needs the architect result of this opener")
-      const sections: Array<readonly [string, string]> = [[header[0], header[1]], ...seed(), [`PLAN TO REVIEW (opener ${it.n}, sha256 ${it.planSha})`, planTextOf(runtime, wf, it)], ...earlier()]
+      const sections: Array<readonly [string, string]> = [[header[0], header[1]], ...seed(), [`PLAN TO REVIEW (opener ${it.n}, sha256 ${it.planSha})`, planTextOf(runtime, wf, it)], ...earlier(), ...retry]
       // Pass 1 is independent: the critic judges the plan alone. Later passes are sequential and see this pass's architect findings.
       if (it.n >= 2) sections.push([`THIS PASS ARCHITECT ${it.architect.status}/${it.architect.decision}`, listed(findingsOf(runtime, wf, it.architect.ref, it.planSha))])
       return { stage: "critic", prompt: RALPLAN_CRITIC_PROMPT, role: "critic", context: compose(RALPLAN_CRITIC_PROMPT, sections) }
@@ -191,6 +224,27 @@ export type RalplanRunOptions = {
   onStep?(wf: RalplanWorkflow): void
   /** Return `blocked` instead of running the step at this stage (lets a caller or test pause between stages). */
   stopBefore?: RalplanWorkflow["stage"]
+}
+
+const fitsTurn = (text: string) => text.length + RALPLAN_TURN_BUDGET.reserveChars <= RALPLAN_TURN_BUDGET.maxChars
+
+async function summarizeSeed(runtime: ExecutionRuntime, binding: TurnBinding, seed: NonNullable<ReturnType<typeof verifiedSeed>>, signal?: AbortSignal): Promise<TurnResult> {
+  let result: TurnResult
+  try {
+    result = await runWorkflowTurn(runtime, { ...binding, role: "planner", prompt: RALPLAN_SUMMARIZE_PROMPT }, {
+      title: "ralplan seed summary", label: "ralplan", cancelCause: "ralplan seed summary cancelled", budget: RALPLAN_TURN_BUDGET,
+      text: `${RALPLAN_SUMMARIZE_PROMPT.text}${section(`VERIFIED SPECIFICATION ${seed.seed.specPath} sha256 ${seed.seed.specSha}`, seed.text)}`,
+    }, signal)
+  } catch (error) {
+    if (error instanceof ModelRequestError && (error.category === "empty_response" || error.category === "response_budget")) {
+      return { status: "stuck", cause: "input_budget", reason: "ralplan seed summary is empty or exceeds the response budget" }
+    }
+    throw error
+  }
+  if (result.status === "completed" && (!result.text.trim() || result.text.length >= seed.text.length)) {
+    return { status: "stuck", cause: "input_budget", reason: "ralplan seed summary did not shrink the specification" }
+  }
+  return result
 }
 
 const FENCE = /^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/
@@ -295,6 +349,9 @@ export function emitConsensus(runtime: Pick<ExecutionRuntime, "worktree">, wf: R
  * pause, cancel, revision change or a foreign write turns the next step into `stale`/`blocked` without applying anything.
  */
 export async function runRalplan(runtime: ExecutionRuntime, sessionID: string, workflowID: string, options: RalplanRunOptions = {}): Promise<RalplanRunResult> {
+  // Derived text only, never a verdict or durable authority. Reattachment/new runs
+  // rebuild it; live model routes are fixed by this host, not a shared global cache.
+  let seedCache: { key: string; host: ExecutionRuntime["host"]; summary: SeedSummary } | undefined
   for (;;) {
     const current = committedRalplan(runtime, sessionID, workflowID)
     if (typeof current === "string") return { status: "stale", wf: null, reason: current }
@@ -310,8 +367,16 @@ export async function runRalplan(runtime: ExecutionRuntime, sessionID: string, w
       continue
     }
 
+    const seed = ralplanDataOf(current).seed
+    const cacheHost = runtime.host
+    const cacheKey = JSON.stringify([workflowID, seed, RALPLAN_SUMMARIZE_PROMPT.sha256, RALPLAN_TURN_BUDGET, runtime.host.identity, runtime.config.chat])
+    if (seedCache && (seedCache.key !== cacheKey || seedCache.host !== runtime.host)) seedCache = undefined
     let turn: TurnPlan
-    try { turn = buildTurn(runtime, current) }
+    let seedInput: ReturnType<typeof verifiedSeed>
+    try {
+      turn = buildTurn(runtime, current, seedCache?.summary)
+      if (!seedCache && seed && !fitsTurn(turn.context.text)) seedInput = verifiedSeed(runtime, current)
+    }
     catch (error) {
       const failed = failureCommit(runtime, current, `context unavailable: ${(error as Error).message}`, true)
       if (!failed.ok) return { status: "stale", wf: current, reason: failed.text }
@@ -322,9 +387,25 @@ export async function runRalplan(runtime: ExecutionRuntime, sessionID: string, w
       workflowID: current.id, revision: current.lastSeq, kind: "ralplan", stage: current.stage, role: turn.role, prompt: turn.prompt,
       supervisorSessionID: sessionID, epoch: store?.epoch ?? null, ownerInstance: current.owner.instance,
     }
-    let result: Awaited<ReturnType<typeof runWorkflowTurn>>
+    let result: TurnResult | undefined
     try {
-      result = await runWorkflowTurn(runtime, binding, {
+      if (seedInput) {
+        const summarized = await summarizeSeed(runtime, binding, seedInput, options.signal)
+        if (summarized.status !== "completed") result = summarized
+        else {
+          const summary = { specSha: seedInput.seed.specSha, text: summarized.text }
+          // Re-read and hash-check the source after the await before retaining or
+          // using the derived text. The following bound turn checks live ownership.
+          try { turn = buildTurn(runtime, current, summary) }
+          catch (error) {
+            const failed = failureCommit(runtime, current, `context unavailable: ${(error as Error).message}`, true)
+            if (!failed.ok) return { status: "stale", wf: current, reason: failed.text }
+            continue
+          }
+          seedCache = { key: cacheKey, host: cacheHost, summary }
+        }
+      }
+      result ??= await runWorkflowTurn(runtime, binding, {
         title: `ralplan ${turn.stage} (opener ${step.opener})`, text: turn.context.text, budget: RALPLAN_TURN_BUDGET, label: "ralplan",
         cancelCause: `ralplan ${turn.stage} cancelled`, compact: { source: turn.context.source, rebuild: turn.context.rebuild },
       }, options.signal)

@@ -33,7 +33,7 @@ export type CliToolDetail = {
 export type CliHostActivity =
   /** `engine`/`model`: where this role actually runs (a combo route or the main model), shown so routing is visible. */
   | { kind: "model-started"; role: ExecutionRole; execution: number; engine?: string; model?: string }
-  | { kind: "model-returned"; role: ExecutionRole; execution: number; status: "completed" | "failed" | "cancelled" | "unresolved" | "incomplete" }
+  | { kind: "model-returned"; role: ExecutionRole; execution: number; status: "completed" | "failed" | "cancelled" | "unresolved" | "incomplete"; durationMs?: number; inputChars?: number; toolRound?: number }
   | { kind: "tool-started"; role: ExecutionRole; execution: number; taskID: string; executionID: string; callID: string; tool: CliToolName }
   | { kind: "tool-finished"; role: ExecutionRole; execution: number; taskID: string; executionID: string; callID: string; tool: CliToolName; outcome: "succeeded" | "failed" | "denied"; ok: boolean }
 
@@ -206,7 +206,8 @@ function validatedHostActivity(value: unknown): CliHostActivity | undefined {
     }
     case "model-returned":
       if (typeof value.status === "string" && MODEL_STATUSES.includes(value.status as (typeof MODEL_STATUSES)[number])) {
-        return Object.freeze({ kind: "model-returned", role, execution, status: value.status as (typeof MODEL_STATUSES)[number] })
+        const timing = Object.fromEntries(["durationMs", "inputChars", "toolRound"].filter(key => Number.isSafeInteger(value[key]) && (value[key] as number) >= 0).map(key => [key, value[key]]))
+        return Object.freeze({ kind: "model-returned", role, execution, status: value.status as (typeof MODEL_STATUSES)[number], ...timing })
       }
       return
     case "tool-started":
