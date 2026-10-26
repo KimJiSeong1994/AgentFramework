@@ -647,7 +647,7 @@ describe("architect S3 items: shared legacy pause policy and runner failures", (
     const wf = committed()
     const approved = approveUnit(h.runtime, h.sid, wf.id, wf.lastSeq, approveUnitConfirmation(wf.id, ultragoalDataOf(wf).pending!.subject.sha256))
     if (!approved.ok) throw new Error(approved.text)
-    const broken = { async runApprovedUnit(): Promise<unknown> { throw new Error("execution unresolved; fence retained") } }
+    const broken = { async runApprovedUnit(): Promise<unknown> { throw new Error("execution unresolved; fence retained; cancel and retry") } }
     const result = await runUltragoal(h.runtime, broken, h.sid, wf.id)
     expect(result.status).toBe("stuck")
     expect(result.reason).toContain("fence retained")
@@ -656,6 +656,42 @@ describe("architect S3 items: shared legacy pause policy and runner failures", (
     expect(ultragoalDataOf(stuck).stuck).toMatchObject({ kind: "runner" })
     expect(ultragoalView(stuck)).toContain("fence retained")
     expect(stuck.artifacts.map(ref => ref.key)).not.toContain("completion.json")
+  }, 30_000)
+})
+
+describe("isolated stage recovery", () => {
+  test.each(["missing", "changed git identity", "deleted during preflight", "deleted before first checkpoint"])("later stages refuse %s implementation worktree", async damage => {
+    scripts(1)
+    const h = harness({ script: { planner: [goals(1), unitPlan(1)], architect: [OKAY], critic: [OKAY] }, isolate: true,
+      worker: request => { writeFileSync(join(request.cwd, "mod1.py"), "VALUE = 1\n"); return { status: "completed", text: "Open issues: none" } },
+    })
+    await toUltragoal(h)
+    await drive(h, { approve: false })
+    const pending = committed()
+    expect(approveUnit(h.runtime, h.sid, pending.id, pending.lastSeq, approveUnitConfirmation(pending.id, ultragoalDataOf(pending).pending!.subject.sha256)).ok).toBe(true)
+    expect((await runUltragoal(h.runtime, h.controller, h.sid, pending.id, { stopBefore: damage === "deleted before first checkpoint" ? "verify" : "final_review" })).status).toBe("blocked")
+    const count = h.requests.length
+    if (damage === "deleted during preflight") {
+      const preflight = h.runtime.host.preflight.bind(h.runtime.host)
+      h.runtime.host.preflight = async profile => {
+        await h.controller.discardPlanWorktree(h.sid, pending.id)
+        return preflight(profile)
+      }
+      await expect(runUltragoal(h.runtime, h.controller, h.sid, pending.id)).rejects.toThrow()
+    } else if (damage === "deleted before first checkpoint") {
+      await h.controller.discardPlanWorktree(h.sid, pending.id)
+      await expect(runUltragoal(h.runtime, h.controller, h.sid, pending.id)).rejects.toThrow("worktree is missing")
+    } else if (damage === "missing") {
+      await h.controller.discardPlanWorktree(h.sid, pending.id)
+      const result = await runUltragoal(h.runtime, h.controller, h.sid, pending.id)
+      expect(result.status).toBe("stuck")
+      expect(result.reason).toContain("worktree is missing")
+    } else {
+      writeFileSync(join(h.workers()[0]!.cwd, ".git"), "gitdir: /nonexistent/otter-test-forged\n")
+      await expect(runUltragoal(h.runtime, h.controller, h.sid, pending.id)).rejects.toThrow()
+    }
+    expect(h.requests).toHaveLength(count)
+    expect(committed().phase).not.toBe("done")
   }, 30_000)
 })
 
@@ -669,8 +705,13 @@ describe("shared workflow worktree (S4)", () => {
   test("units share one workflow worktree, see each other's unapplied changes, and the checkpoint digest points at it; the checkout changes only on Apply at final review", async () => {
     scripts(2)
     const seen: Array<{ cwd: string; hadMod1: boolean }> = []
+    const stageReads: Array<{ cwd: string; hadMod1: boolean }> = []
     const h = harness({
       script: { planner: [goals(2), unitPlan(1), unitPlan(2)], architect: [OKAY, OKAY], critic: [OKAY] }, isolate: true,
+      intercept: request => {
+        if (request.text.includes("CURRENT GOAL g2") || request.text.includes("GOALS AND VERIFIED CHECKPOINTS")) stageReads.push({ cwd: request.cwd, hadMod1: existsSync(join(request.cwd, "mod1.py")) })
+        return undefined
+      },
       worker: request => {
         if (request.title.includes("make mod2")) seen.push({ cwd: request.cwd, hadMod1: existsSync(join(request.cwd, "mod1.py")) })
         return cwdWriter(request)
@@ -682,6 +723,7 @@ describe("shared workflow worktree (S4)", () => {
     const done = committed()
     const planPath = join(worktreeRoot(wt.worktree), h.sid, `wf-${done.id}`)
     expect(new Set(h.workers().map(request => request.cwd))).toEqual(new Set([planPath]))
+    expect(stageReads).toEqual([{ cwd: planPath, hadMod1: true }, { cwd: planPath, hadMod1: true }])
     expect(seen).toEqual([{ cwd: planPath, hadMod1: true }]) // unit 2 saw unit 1's unapplied change
     expect(existsSync(join(wt.worktree, "mod1.py"))).toBe(false)
     expect(existsSync(join(wt.worktree, "mod2.py"))).toBe(false)

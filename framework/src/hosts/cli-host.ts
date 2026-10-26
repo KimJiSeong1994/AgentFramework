@@ -16,7 +16,7 @@ import { parseTree, type Node, type ParseError } from "jsonc-parser"
 import { estimateTokens } from "../tokens.ts"
 import { prefilterSkills } from "../routing/retrieve.ts"
 import { createRepoSearchProvider, repoSearchAvailable } from "../repo-search/access.ts"
-import { DEFAULT_CONFIG, loadConfig, localContextInputTokens, type OtterConfig } from "../config.ts"
+import { DEFAULT_CONFIG, localContextInputTokens, type OtterConfig } from "../config.ts"
 import type {
   BudgetEvidence,
   ChatAction,
@@ -278,6 +278,9 @@ export type CliHostOptions = {
    * undefined means the config is unreadable (recall reports invalid_config). Defaults to DEFAULT_CONFIG.memory.
    */
   loadMemory?: () => OtterConfig["memory"] | undefined
+  /** Trusted originating-project settings; execution cwd may be an isolated worktree without project config.
+   * Input budget reloads per execution, retention per inference. Omission uses local model defaults. */
+  loadLocalModel?: () => OtterConfig["local_model"]
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -698,6 +701,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
   const injectedTransportFactory = options.createTransport
   const transportFactory = injectedTransportFactory ?? createCliTransport
   const loadMemory = options.loadMemory ?? (() => DEFAULT_CONFIG.memory)
+  const loadLocalModel = options.loadLocalModel ?? (() => DEFAULT_CONFIG.local_model)
   const currentHandles = new Map<string, { reconcile: () => Promise<ExecutionReconciliation> }>()
   const preflightTransports = new Set<CliTransportHandle>()
   const identity = Object.freeze({ engine: options.engine, profile: "legacy-unowned", controlProfile: CONTROL_PROFILE })
@@ -1008,7 +1012,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               assertSkillExecution(request)
             },
           })
-          const inputLimit = roleInputLimit(request.role, route.engine, route.engine === "local" ? localContextInputTokens(loadConfig(request.cwd)) : undefined)
+          const inputLimit = roleInputLimit(request.role, route.engine, route.engine === "local" ? localContextInputTokens({ local_model: loadLocalModel() }) : undefined)
           const nativeInstructionTokens = request.policy.nativeContext ? estimateTokens(request.policy.nativeContext.instructions) : 0
           let available = witnessRequested ? Object.freeze([] as CliToolName[]) : tools.available
           let basePrompt = buildBasePrompt(request, available, offered?.catalog, inputLimit)
@@ -1103,7 +1107,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             try {
               const transportOptions: CliTransportOptions = {
                 engine: route.engine,
-                ...(route.engine === "local" ? { localKeepAlive: loadConfig(request.cwd).local_model?.keep_alive ?? undefined } : {}),
+                ...(route.engine === "local" ? { localKeepAlive: loadLocalModel()?.keep_alive ?? undefined } : {}),
                 model: route.model,
                 prompt,
                 deadlineAt: nativeDeadlineAt,

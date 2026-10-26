@@ -34,7 +34,7 @@ export type SessionReleaseProof = {
 }
 export type SessionClearHoldProof = { authorized: true; reason: string }
 export type SessionOpenMetadata = { engine: string; model?: string; routes?: ComboRoutes }
-export type ReplayOptions = { offset?: number; limit?: number; query?: string; order?: "asc" | "desc"; kind?: TranscriptKind }
+export type ReplayOptions = { offset?: number; limit?: number; query?: string; order?: "asc" | "desc"; kind?: TranscriptKind; excludeKinds?: readonly TranscriptKind[] }
 export type ReplayResult = { records: TranscriptRecord[]; relatedRecords?: TranscriptRecord[]; complete: boolean; recoveryNotice?: string; nextOffset?: number; totalRecords?: number }
 export type InspectedSession = { sessionID: string; engine: string; model?: string; routes?: ComboRoutes; held: boolean; lastActivityAt?: number; summary?: string; corrupt?: string }
 export type SessionAttachmentInspection =
@@ -1298,6 +1298,8 @@ export function replaySession(worktree: string, sid: string, options: ReplayOpti
   const order = options.order ?? "asc"
   if (order !== "asc" && order !== "desc") throw new TypeError("invalid transcript order")
   if (options.kind !== undefined && !transcriptKinds.has(options.kind)) throw new TypeError("invalid transcript kind filter")
+  if (options.excludeKinds !== undefined && (!Array.isArray(options.excludeKinds) || options.excludeKinds.some(kind => !transcriptKinds.has(kind)))) throw new TypeError("invalid transcript kind filter")
+  const excludedKinds = new Set(options.excludeKinds)
   const queryTokens = options.query?.toLowerCase().trim().split(/\s+/).filter(Boolean) ?? []
   const taskStatuses = new Map<string, string>()
   const executionEvidence = new Map<string, string>()
@@ -1313,6 +1315,8 @@ export function replaySession(worktree: string, sid: string, options: ReplayOpti
     }
   }
   const matches = (record: TranscriptRecord): boolean => {
+    // Filter before counting pages; hidden telemetry still participates in integrity validation.
+    if (excludedKinds.has(record.kind)) return false
     if (options.kind !== undefined && record.kind !== options.kind) return false
     if (queryTokens.length === 0) return true
     const searchableValues = Object.values(record.data)

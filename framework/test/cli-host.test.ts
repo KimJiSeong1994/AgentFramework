@@ -12,6 +12,7 @@ import type { CliHostActivity } from "../src/hosts/cli-progress.ts"
 import { estimateTokens } from "../src/tokens.ts"
 import { CODEX_INSTRUCTIONS, createCodexProfile } from "../src/hosts/codex-profile.ts"
 import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
+import { loadConfig } from "../src/config.ts"
 import { attachAdmission } from "../src/sessions/admission.ts"
 import {
   consumeSkillLoaderWitness, finishSkillInvocation, registerSkillLoaderWitness,
@@ -479,6 +480,7 @@ function harness(options: HarnessOptions = {}) {
   }
   const host = createCliHost({
     engine, model, policy, runs,
+    loadLocalModel: () => loadConfig(root).local_model,
     ...(!options.useRealTransport ? { createTransport: options.transportOverride ?? createTransport } : {}),
     observeActivity: options.observeActivity,
     recordOutcome: options.recordOutcome,
@@ -1716,7 +1718,8 @@ describe("route-aware common CLI host", () => {
     })
     let active: ExecutionRole = "worker"
     const runs = { status: () => state(active) } as unknown as ExecutionRunStore
-    const host = createCliHost({ engine: anchor.engine, model: anchor.model, routes: options.routes ?? routes, policy, runs, createTransport })
+    const host = createCliHost({ engine: anchor.engine, model: anchor.model, routes: options.routes ?? routes, policy, runs, createTransport,
+      loadLocalModel: () => loadConfig(root).local_model })
     return {
       host, requests, transports, makeRequest, retentionCalls,
       async dispatch(role: ExecutionRole) {

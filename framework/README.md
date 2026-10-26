@@ -491,6 +491,8 @@ These are Ollama's model allocations, not the computer's total free RAM or a cac
 Settings are saved in the user `otter.jsonc`; project settings take precedence. The effective value is shown after
 saving. They apply on subsequent local CLI calls, including combo roles, local wiki recall and local skill selection;
 already loaded models keep their current expiry until a new request. The default behavior is unchanged until configured.
+Isolated CLI workers and workflow stages read local model settings from the originating project, including ignored
+project configuration. Retention reloads for each inference; the input budget reloads at the start of each execution.
 The equivalent project or user setting is:
 
 ```json
@@ -878,6 +880,8 @@ is kept, the patch is copied to `.otter/handoffs/<sid>/plan-<workflowID>.patch`,
 With no commit yet or outside a git repository there is no silent fallback: Otter asks **Run in place in my checkout |
 Cancel** before anything runs and records the answer. Ultragoal units share their workflow's worktree; their checkpoint
 digest describes it (`worktree.isolatedAs`), and Apply is offered once, when the ultragoal completes.
+After isolated execution begins, later ultragoal planning and final review read the same authenticated worktree.
+Session state, ownership and approval receipts remain attached to the original project.
 
 Set `chat.worktree` in `otter.jsonc` to `"off"` to run in the checkout as before (default `"plan"`; any other value is
 refused with `invalid-chat-worktree`). It lives under `chat`, outside policy identity, and does not touch
@@ -1085,7 +1089,8 @@ Workflow records separate preflight, nested compaction and main dispatch time. A
 `operation: "summary"`; `summaryCount` counts only additional compactions inside a turn. Dispatch time includes tool
 work and, for ordinary chat, can include approval waits; it is not pure inference time. Timing persistence happens
 after measurement, once per turn. These records contain no prompts, file bodies or tool arguments, are omitted from
-the restored conversation display, and never grant execution authority. Current readers accept earlier transcripts;
+the restored conversation display and its pagination/search counts, and never grant execution authority.
+Hidden timing records still undergo transcript integrity validation. Current readers accept earlier transcripts;
 older binaries without the `timing` record kind cannot replay newly instrumented sessions.
 
 Common seed reuse does not guarantee complete verbatim context: if the remaining stage-specific input still

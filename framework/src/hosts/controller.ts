@@ -629,8 +629,8 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
   }
 
   /** Run an already-inserted approved unit (ultragoal/autoresearch) through the queue; the driver verifies afterwards. */
-  function runApprovedUnit(sessionID: string, signal?: AbortSignal, resumed = false) {
-    return runInternal(sessionID, signal, resumed)
+  function runApprovedUnit(sessionID: string, signal?: AbortSignal, resumed = false, runOptions?: RunOptions) {
+    return runInternal(sessionID, signal, resumed, runOptions)
   }
 
   // ------------------------------------------------------------------ plan worktree: review / apply / discard
