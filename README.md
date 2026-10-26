@@ -1,5 +1,7 @@
 # AgentFramework (`otter`)
 
+[한국어](README.md) · [English](README.en.md)
+
 ![otter: 실행할수록 쌓이는 코딩 에이전트](artifacts/otter-hero/hero.png)
 
 **실행할수록 쌓이는 코딩 에이전트.**
