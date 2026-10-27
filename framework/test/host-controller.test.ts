@@ -3,7 +3,7 @@ import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 import { DEFAULT_CONFIG } from "../src/config.ts"
-import { createForegroundController, readForegroundStatus } from "../src/hosts/controller.ts"
+import { createForegroundController, PlanIsolationSetupError, readForegroundStatus } from "../src/hosts/controller.ts"
 import { humanDecision, type DecisionBinding, type OperatorDecision } from "../src/hosts/operator.ts"
 import { createExecutionRunStore } from "../src/hosts/run-state.ts"
 import { createExecutionPolicy } from "../src/hosts/tool-policy.ts"
@@ -220,6 +220,67 @@ console.log(JSON.stringify({ ok: result.ok, text: result.ok ? undefined : result
 }
 
 describe("external foreground imported-plan controller", () => {
+  test("plan isolation setup failure preserves approved tasks and dispatches nothing", async () => {
+    const f = fixture({ worker: request => {
+      const module = request.title.match(/module (\d)/)?.[1]
+      if (!module) throw new Error("unexpected worker request")
+      writeFileSync(join(request.cwd, `mod${module}.py`), `VALUE = ${module}\n`)
+      return { status: "completed", text: "Open issues: none" }
+    } })
+    const controller = createForegroundController(f.runtime, { planWorktree: true })
+    const submitted = await controller.importPlan(SESSION, save())
+    if (!submitted.result.ok) throw new Error(submitted.result.text)
+    expect((await approve(controller, submitted.result.wf.id, submitted.planSha)).ok).toBe(true)
+    symlinkSync("missing-target", join(wt.worktree, "unsafe-link"))
+    const requestsBefore = f.requests.length
+    const executionsBefore = f.runtime.runs.status().executions
+    const tasksBefore = readLedger(wt.worktree, SESSION).tasks
+    const failure = await controller.run(SESSION).catch(error => error)
+    expect(failure).toBeInstanceOf(PlanIsolationSetupError)
+    expect(failure.cause).toBeInstanceOf(Error)
+    expect(failure.message).toContain("nonregular import unsafe-link")
+    expect(readWorkflow(wt.worktree)?.phase).toBe("executing")
+    expect(readLedger(wt.worktree, SESSION).tasks).toEqual(tasksBefore)
+    expect(f.requests).toHaveLength(requestsBefore)
+    expect(f.runtime.runs.status().executions).toEqual(executionsBefore)
+    unlinkSync(join(wt.worktree, "unsafe-link"))
+    try {
+      const retried = await controller.resume(SESSION)
+      expect(retried.workflow.id).toBe(submitted.result.wf.id)
+      expect(retried.workflow.phase).toBe("done")
+      expect(retried.run.done).toBe(3)
+      const workers = f.requests.slice(requestsBefore).filter(request => request.role === "worker")
+      expect(workers).toHaveLength(3)
+      expect(new Set(workers.map(request => request.cwd)).size).toBe(1)
+      expect(workers.every(request => request.cwd !== wt.worktree)).toBe(true)
+      expect(existsSync(join(wt.worktree, "mod1.py"))).toBe(false)
+    } finally {
+      if (controller.pendingPlanWorktree(SESSION)) await controller.discardPlanWorktree(SESSION, submitted.result.wf.id)
+    }
+  }, 20_000)
+
+  test("plan isolation reopen failure preserves the workflow and never replaces unauthenticated state", async () => {
+    const f = fixture()
+    const controller = createForegroundController(f.runtime, { planWorktree: true })
+    const submitted = await controller.importPlan(SESSION, save())
+    if (!submitted.result.ok) throw new Error(submitted.result.text)
+    expect((await approve(controller, submitted.result.wf.id, submitted.planSha)).ok).toBe(true)
+    const child = join(stateRoot(wt.worktree), "worktrees", SESSION, `wf-${submitted.result.wf.id}`)
+    mkdirSync(child, { recursive: true })
+    writeFileSync(join(child, "unowned.txt"), "preserve")
+    const requestsBefore = f.requests.length
+    const workflowBefore = readFileSync(workflowPath(wt.worktree))
+    const tasksBefore = readLedger(wt.worktree, SESSION).tasks
+    const failure = await controller.resume(SESSION).catch(error => error)
+    expect(failure).toBeInstanceOf(PlanIsolationSetupError)
+    expect(failure.cause).toBeInstanceOf(Error)
+    expect(failure.message).toContain("state directory is missing or unsafe")
+    expect(readFileSync(workflowPath(wt.worktree))).toEqual(workflowBefore)
+    expect(readLedger(wt.worktree, SESSION).tasks).toEqual(tasksBefore)
+    expect(f.requests).toHaveLength(requestsBefore)
+    expect(readFileSync(join(child, "unowned.txt"), "utf8")).toBe("preserve")
+  })
+
   test("controller refuses a workflow without a live attachment epoch instead of using runtime.instance", async () => {
     const f = fixture({ attach: false })
     await expect(f.controller.importPlan(SESSION, save())).rejects.toThrow("session remains held")

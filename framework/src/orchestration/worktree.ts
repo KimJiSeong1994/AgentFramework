@@ -108,16 +108,19 @@ export function hasTaskWorktreeState(mainWorktree: string, sessionID: string, ta
   return childExists || ownerExists
 }
 
-type WorktreeOwnership = {
-  version: 1
+type WorktreeIdentity = {
   mainWorktree: string
   childWorktree: string
-  sessionID: string
-  taskId: string
   commonGitDir: string
   mainGitDir: string
   childGitDir: string
   originalHead: string
+}
+
+type WorktreeOwnership = WorktreeIdentity & {
+  version: 1
+  sessionID: string
+  taskId: string
   diffExclude: string[]
   baselineTree: string
 }
@@ -178,49 +181,99 @@ export async function createTaskWorktree(mainWorktree: string, sessionID: string
   }
   if ((await git(mainWorktree, ["worktree", "prune"])) === null) throw new Error("git-config: could not prune worktrees")
   if ((await git(mainPath, ["worktree", "add", "--detach", "--quiet", paths.child, head])) === null) throw new Error("git-config: could not create the task worktree")
-  // 1. tracked modifications of the main worktree (incl. staged), as a patch applied to the new worktree
-  const patch = await gitBuffer(mainPath, ["diff", "--binary", "HEAD", "--", ".", ...exclude])
-  if (patch === null) throw new Error("git-config: could not capture main worktree changes")
-  if (patch && patch.length) {
-    const file = join(dirname(paths.child), `${taskId}.base.patch`)
-    writeFileSync(file, patch, { flag: "wx", mode: 0o600 })
-    if ((await git(paths.child, ["apply", "--whitespace=nowarn", file])) === null) {
-      await git(mainPath, ["worktree", "remove", "--force", paths.child])
-      throw new Error("git-config: could not import main worktree changes")
-    }
-    unlinkOwnedFile(file)
-  }
-  // 2. untracked, non-ignored files (new modules from earlier tasks, the user's new files)
-  for (const rel of untracked) {
-    const src = join(mainPath, rel)
-    const dst = join(paths.child, rel)
-    mkdirSync(dirname(dst), { recursive: true })
-    const destParent = realpathSync.native(dirname(dst))
-    const destRoot = realpathSync.native(paths.child)
-    if (destParent !== destRoot && !destParent.startsWith(destRoot + "/")) throw new Error(`git-config: unsafe import ${rel}`)
-    copyRegularFile(src, dst, rel)
-  }
-  const store = await createSnapshotStore(paths.child, paths.baselineDir)
-  if (!store) throw new Error("could not create the task worktree snapshot store")
-  const baseline = await store.baseline(diffExclude)
-  if (!baseline) throw new Error("could not snapshot the task worktree baseline")
+  // This proof belongs only to this successful creation call, never to discovered leftovers.
+  // If identity capture itself fails, retain the tree rather than guessing what can be removed.
+  const childInfo = lstatSync(paths.child)
   const childIdentity = gitIdentitySync(paths.child)
-  const ownership: WorktreeOwnership = {
-    version: 1,
-    mainWorktree: mainPath,
-    childWorktree: paths.child,
-    sessionID,
-    taskId,
-    commonGitDir: mainIdentity.commonGitDir,
-    mainGitDir: mainIdentity.gitDir,
-    childGitDir: childIdentity.gitDir,
-    originalHead: head,
-    diffExclude: [...diffExclude],
-    baselineTree: baseline.tree,
+  const identity: WorktreeIdentity = {
+    mainWorktree: mainPath, childWorktree: paths.child, commonGitDir: mainIdentity.commonGitDir,
+    mainGitDir: mainIdentity.gitDir, childGitDir: childIdentity.gitDir, originalHead: head,
   }
-  writeOwnership(paths.ownershipFile, ownership)
-  assertOwnershipSync(mainPath, paths, ownership)
-  return bindTaskWorktree(mainPath, paths, ownership, store)
+  assertGitOwnershipSync(mainPath, paths, identity)
+  const directories = new Map<string, Stats>()
+  const files = new Map<string, Stats>()
+  let store: SnapshotStore | null = null
+  try {
+    // 1. tracked modifications of the main worktree (incl. staged).
+    const patch = await gitBuffer(mainPath, ["diff", "--binary", "HEAD", "--", ".", ...exclude])
+    if (patch === null) throw new Error("git-config: could not capture main worktree changes")
+    if (patch.length) {
+      const file = patchFiles[0]!
+      const fd = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+      try { files.set(file, fstatSync(fd)); writeFileSync(fd, patch) }
+      finally { closeSync(fd) }
+      if ((await git(paths.child, ["apply", "--whitespace=nowarn", file])) === null) throw new Error("git-config: could not import main worktree changes")
+      assertCreatedPath(file, files.get(file)!, false)
+      unlinkOwnedFile(file)
+      files.delete(file)
+    }
+    // 2. untracked, non-ignored files (new modules and the user's new files).
+    for (const rel of untracked) {
+      const src = join(mainPath, rel)
+      const dst = join(paths.child, rel)
+      mkdirSync(dirname(dst), { recursive: true })
+      const destParent = realpathSync.native(dirname(dst))
+      const destRoot = realpathSync.native(paths.child)
+      if (destParent !== destRoot && !destParent.startsWith(destRoot + "/")) throw new Error(`git-config: unsafe import ${rel}`)
+      copyRegularFile(src, dst, rel)
+    }
+    // Reserve each recovery root ourselves before the snapshot constructor can await.
+    for (const path of [paths.ownerDir, paths.baselineDir, join(paths.baselineDir, "objects")]) {
+      mkdirSync(path, { mode: 0o700 })
+      directories.set(path, lstatSync(path))
+    }
+    store = await createSnapshotStore(paths.child, paths.baselineDir)
+    if (!store) throw new Error("could not create the task worktree snapshot store")
+    const baseline = await store.baseline(diffExclude)
+    if (!baseline) throw new Error("could not snapshot the task worktree baseline")
+    const ownership: WorktreeOwnership = { ...identity, version: 1, sessionID, taskId, diffExclude: [...diffExclude], baselineTree: baseline.tree }
+    writeOwnership(paths.ownershipFile, ownership, files)
+    assertOwnershipSync(mainPath, paths, ownership)
+    return bindTaskWorktree(mainPath, paths, ownership, store)
+  } catch (error) {
+    try { await rollbackCreation(mainPath, paths, sessionID, identity, childInfo, directories, files) }
+    catch (cleanup) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; creation cleanup refused: ${cleanup instanceof Error ? cleanup.message : String(cleanup)}; partial creation state retained`, { cause: error })
+    }
+    throw error
+  }
+}
+
+function assertCreatedPath(path: string, expected: Stats, directory: boolean): void {
+  const info = lstatOrNull(path)
+  if (!info || info.isSymbolicLink() || info.dev !== expected.dev || info.ino !== expected.ino ||
+    (directory ? !info.isDirectory() || realpathSync.native(path) !== path : !info.isFile() || info.nlink !== 1)) {
+    throw new Error("newly created worktree resource was replaced or removed")
+  }
+}
+
+/** Roll back this invocation only; interrupted or previously existing creations require separate recovery. */
+async function rollbackCreation(mainPath: string, paths: WorktreePaths & { baseDir: string }, sessionID: string,
+  identity: WorktreeIdentity, childInfo: Stats, directories: Map<string, Stats>, files: Map<string, Stats>): Promise<void> {
+  const validateRecovery = () => {
+    ensureWorktreeParents(paths, sessionID, false)
+    for (const [path, info] of directories) assertCreatedPath(path, info, true)
+    for (const [path, info] of files) assertCreatedPath(path, info, false)
+    for (const path of [paths.ownerDir, paths.baselineDir, join(paths.baselineDir, "objects")]) {
+      if (lstatOrNull(path) && !directories.has(path)) throw new Error("unexpected recovery directory")
+    }
+    // Snapshot commands create files asynchronously. A known filename is not proof that this
+    // invocation created it: retain nonempty snapshot output instead of recursively disposing it.
+    for (const path of directories.keys()) {
+      if (readdirSync(path).some(name => !directories.has(join(path, name)) && !files.has(join(path, name)))) {
+        throw new Error("unproven recovery files or nonempty snapshot output retained")
+      }
+    }
+  }
+  assertCreatedPath(paths.child, childInfo, true)
+  assertGitOwnershipSync(mainPath, paths, identity)
+  validateRecovery()
+  if (await git(mainPath, ["worktree", "remove", "--force", paths.child]) === null) throw new Error("could not remove the newly created registered worktree")
+  if (lstatOrNull(paths.child)) throw new Error("newly created worktree remains after Git removal")
+  // Revalidate roots after the asynchronous Git command before touching recovery data.
+  validateRecovery()
+  for (const path of files.keys()) unlinkOwnedFile(path)
+  for (const path of [...directories.keys()].reverse()) if (lstatOrNull(path)) rmdirSync(path)
 }
 
 /** Reopen an existing task worktree without recreating, importing, or recapturing its baseline. */
@@ -412,6 +465,10 @@ function assertOwnershipSync(mainWorktree: string, paths: WorktreePaths & { base
   if (ownership.mainWorktree !== mainWorktree || ownership.childWorktree !== paths.child) {
     throw new Error("task worktree recovery refused: ownership paths do not match")
   }
+  assertGitOwnershipSync(mainWorktree, paths, ownership)
+}
+
+function assertGitOwnershipSync(mainWorktree: string, paths: WorktreePaths, ownership: WorktreeIdentity): void {
   const main = gitIdentitySync(mainWorktree)
   const child = gitIdentitySync(paths.child)
   if (main.top !== mainWorktree || main.head !== ownership.originalHead ||
@@ -466,7 +523,7 @@ function registeredWorktree(output: string, childPath: string, head: string): bo
   return entries.filter((item) => item.worktree === childPath && item.HEAD === head).length === 1
 }
 
-function writeOwnership(path: string, ownership: WorktreeOwnership): void {
+function writeOwnership(path: string, ownership: WorktreeOwnership, created?: Map<string, Stats>): void {
   const dir = dirname(path)
   const info = lstatOrNull(dir)
   if (!info || !info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || realpathSync.native(dir) !== dir) {
@@ -474,6 +531,7 @@ function writeOwnership(path: string, ownership: WorktreeOwnership): void {
   }
   const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
   try {
+    created?.set(path, fstatSync(fd))
     writeFileSync(fd, JSON.stringify(ownership) + "\n")
     fsyncSync(fd)
   } finally {

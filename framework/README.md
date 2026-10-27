@@ -877,6 +877,16 @@ worktree. If the patch no longer applies (you edited the same lines meanwhile) t
 is kept, the patch is copied to `.otter/handoffs/<sid>/plan-<workflowID>.patch`, and `/continue` offers the choice again.
 `diff_exclude` paths are not carried into the worktree.
 
+If initial setup fails after Git creates the worktree, Otter can roll back that attempt when the captured identities
+still match and recovery data consists only of individually recorded files and empty directories. A successful rollback
+allows setup to retry with the same task ID after correcting the reported cause. Partial snapshot output, pre-existing,
+replaced, or interrupted creation state is preserved for inspection. Cleanup refusal retains the original error;
+Otter does not delete uncertain state or silently run in the checkout.
+
+If plan-worktree setup or authenticated reopening is refused, chat shows the bounded failure reason and keeps the
+session open with execution held. That attempt dispatches no tasks; the approved plan remains available for `/continue`
+after the cause is corrected. The refusal does not grant permission to run in the checkout.
+
 With no commit yet or outside a git repository there is no silent fallback: Otter asks **Run in place in my checkout |
 Cancel** before anything runs and records the answer. Ultragoal units share their workflow's worktree; their checkpoint
 digest describes it (`worktree.isolatedAs`), and Apply is offered once, when the ultragoal completes.
