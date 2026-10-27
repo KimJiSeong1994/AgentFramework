@@ -1,7 +1,7 @@
 // Stage 4: per-task git worktree isolation (delegate.worktree). The worktree module alone (creation state, merge,
 // conflicts) and the queue path (worker + verify bound to the worktree, main worktree untouched until accepted,
 // failed/cancelled tasks preserved, patch kept when the merge no longer applies).
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { execFileSync, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
@@ -9,6 +9,8 @@ import { createQueue } from "../src/orchestration/queue.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
 import { createTaskWorktree, hasPlanWorktreeState, hasTaskWorktreeState, planIsolationAvailability, planWorktreePath, planWorktreeScope, reopenPlanWorktree, reopenTaskWorktree, taskWorktreeOwner, worktreeRoot } from "../src/orchestration/worktree.ts"
 import { createSnapshotStore } from "../src/orchestration/snapshot.ts"
+import * as snapshots from "../src/orchestration/snapshot.ts"
+import * as gitBoundary from "../src/orchestration/git-boundary.ts"
 import { readLedger } from "../src/state/ledger.ts"
 import { fakeClient, GIT_TEST_ENV, makeDeps, tempGitWorktree, verifyScript, waitFor, type FakeClient } from "./guards-helpers.ts"
 
@@ -27,6 +29,87 @@ const prompts = (agent: string) => client.calls.filter((c) => c.method === "prom
 const recoveryDir = (taskId: string) => join(worktreeRoot(wt.worktree), ".recovery", S, taskId)
 
 describe("task worktree", () => {
+  test.each(["symlink", "non-directory state"])("failed initial baseline is rolled back so the same task can retry after source repair: %s", async obstruction => {
+    mkdirSync(join(wt.worktree, "safe-data"))
+    if (obstruction === "symlink") symlinkSync("safe-data", join(wt.worktree, ".otter"))
+    else { mkdirSync(join(wt.worktree, ".otter")); writeFileSync(join(wt.worktree, ".otter", "state"), "not a directory\n") }
+    g(wt.worktree, "add", ".otter")
+    g(wt.worktree, "commit", "-qm", "unsafe control directory fixture")
+    const head = g(wt.worktree, "rev-parse", "HEAD")
+    await expect(createTaskWorktree(wt.worktree, S, "retry-baseline", [])).rejects.toThrow("snapshot control directory is unsafe")
+    expect(hasTaskWorktreeState(wt.worktree, S, "retry-baseline")).toBe(false)
+    expect(g(wt.worktree, "worktree", "list", "--porcelain")).not.toContain("retry-baseline")
+    expect(g(wt.worktree, "rev-parse", "HEAD")).toBe(head)
+    expect(read(wt.worktree, "lib.py")).toBe("X = 1\n")
+    if (obstruction === "symlink") { unlinkSync(join(wt.worktree, ".otter")); mkdirSync(join(wt.worktree, ".otter")) }
+    else {
+      // .otter/state is always excluded from dirty imports; repair its committed source too.
+      g(wt.worktree, "rm", ".otter/state")
+      g(wt.worktree, "commit", "-qm", "repair excluded control directory fixture")
+    }
+    const retried = await createTaskWorktree(wt.worktree, S, "retry-baseline", [])
+    expect(retried).not.toBeNull()
+    await retried!.remove()
+    expect(hasTaskWorktreeState(wt.worktree, S, "retry-baseline")).toBe(false)
+  })
+
+  test.each(["child", "owner", "baseline", "objects", "owner symlink", "unknown entry", "baseline metadata", "object file"])("creation rollback preserves %s changed during initialization", async replacement => {
+    const task = "rollback-refusal"
+    const child = join(worktreeRoot(wt.worktree), S, task)
+    const owner = recoveryDir(task)
+    const objects = join(owner, "baseline", "objects")
+    let sentinel = ""
+    const original = snapshots.createSnapshotStore
+    const intercepted = spyOn(snapshots, "createSnapshotStore").mockImplementation(async (...args) => {
+      const store = await original(...args)
+      if (!store) return store
+      return { ...store, async baseline() {
+        if (["unknown entry", "baseline metadata", "object file"].includes(replacement)) {
+          sentinel = replacement === "baseline metadata" ? join(owner, "baseline", "baseline.json")
+            : replacement === "object file" ? join(objects, "unrelated.txt") : join(owner, "unrelated.txt")
+          writeFileSync(sentinel, "KEEP\n")
+        } else {
+          const target = replacement === "child" ? child : replacement === "objects" ? objects : replacement === "baseline" ? join(owner, "baseline") : owner
+          renameSync(target, `${target}.retained`)
+          if (replacement === "owner symlink") {
+            const victim = join(wt.stateHome, "unrelated-victim")
+            mkdirSync(victim)
+            symlinkSync(victim, target)
+            sentinel = join(victim, "unrelated.txt")
+          } else {
+            mkdirSync(target)
+            sentinel = join(target, "unrelated.txt")
+          }
+          writeFileSync(sentinel, "KEEP\n")
+        }
+        throw new Error("injected initial baseline failure")
+      } }
+    })
+    try {
+      await expect(createTaskWorktree(wt.worktree, S, task, [])).rejects.toThrow(/injected initial baseline failure; creation cleanup refused:/)
+      expect(readFileSync(sentinel, "utf8")).toBe("KEEP\n")
+      expect(existsSync(child)).toBe(true)
+      expect(read(wt.worktree, "lib.py")).toBe("X = 1\n")
+    } finally { intercepted.mockRestore() }
+  })
+
+  test("failed initial patch import removes its owned patch and permits retry", async () => {
+    writeFileSync(join(wt.worktree, "lib.py"), "X = 2\n")
+    const task = "retry-import"
+    const original = gitBoundary.safeGit
+    const intercepted = spyOn(gitBoundary, "safeGit").mockImplementation(async (cwd, args, extra) =>
+      args[0] === "apply" ? null : original(cwd, args, extra))
+    try {
+      await expect(createTaskWorktree(wt.worktree, S, task, [])).rejects.toThrow("could not import main worktree changes")
+      expect(hasTaskWorktreeState(wt.worktree, S, task)).toBe(false)
+      expect(existsSync(join(worktreeRoot(wt.worktree), S, `${task}.base.patch`))).toBe(false)
+      expect(read(wt.worktree, "lib.py")).toBe("X = 2\n")
+    } finally { intercepted.mockRestore() }
+    const retried = (await createTaskWorktree(wt.worktree, S, task, []))!
+    expect(read(retried.path, "lib.py")).toBe("X = 2\n")
+    await retried.remove()
+  })
+
   test.each([
     ["filter.evil.clean", "sh -c 'touch sentinel'"],
     ["diff.evil.textconv", "sh -c 'touch sentinel'"],

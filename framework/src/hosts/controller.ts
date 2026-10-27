@@ -49,6 +49,14 @@ export class PlanIsolationUnavailableError extends Error {
   }
 }
 
+/** Isolation preparation failed before queue dispatch; the approved work remains available for explicit retry. */
+export class PlanIsolationSetupError extends Error {
+  constructor(cause: unknown) {
+    super(`plan worktree setup failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause })
+    this.name = "PlanIsolationSetupError"
+  }
+}
+
 export type PlanWorktreeReview =
   | { ok: true; workflowID: string; path: string; files: string[]; stat: string; patch: string }
   | { ok: false; workflowID: string; reason: string }
@@ -595,9 +603,14 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
       let origin: QueueOrigin | undefined = resumed ? { resumed: true } : undefined
       let isolated: { workflowID: string } | undefined
       if (options.planWorktree && !runOptions.inPlace) {
-        const availability = await planIsolationAvailability(root)
-        if (availability !== "ready") throw new PlanIsolationUnavailableError(availability)
-        origin = { ...origin, planWorktree: await planWorktreeFor(sessionID, wf, resumed) }
+        try {
+          const availability = await planIsolationAvailability(root)
+          if (availability !== "ready") throw new PlanIsolationUnavailableError(availability)
+          origin = { ...origin, planWorktree: await planWorktreeFor(sessionID, wf, resumed) }
+        } catch (error) {
+          if (error instanceof PlanIsolationUnavailableError) throw error
+          throw new PlanIsolationSetupError(error)
+        }
         isolated = { workflowID: wf.id }
       }
       const result = await withAdmissionBoundDispatch(sessionID, epoch, () => queue.run(sessionID, origin))

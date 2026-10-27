@@ -36,7 +36,7 @@ import { attachAdmission, detachAdmission, effectiveHold, holdAdmission, rebindA
 import { canonicalRoutes, inspectSessions, MAX_CARRIED_MESSAGES, routesKey, MAX_SHELL_COMMAND_BYTES, MAX_SHELL_LINES, MAX_SHELL_OUTPUT_BYTES, readSessionMetadata, replaySession, type SessionStore, type ReplayOptions, type ReplayResult, type TranscriptKind } from "../sessions/store.ts"
 import { persistToolActivity } from "../tui/session-transcript.ts"
 import { createPlanningTimingCollector } from "../telemetry/planning.ts"
-import { createForegroundController, PlanIsolationUnavailableError, readForegroundStatus, type ForegroundController } from "./controller.ts"
+import { createForegroundController, PlanIsolationSetupError, PlanIsolationUnavailableError, readForegroundStatus, type ForegroundController } from "./controller.ts"
 import { discoverModels as discoverModelCatalog, type ModelCatalog } from "./model-catalog.ts"
 import { incompleteArtifactSummary } from "../workflows/artifacts.ts"
 import { readSessionCommitted } from "../workflows/commit.ts"
@@ -2443,6 +2443,15 @@ export async function runInteractiveSession(
       return inPlace
     }
 
+    function reportPlanIsolationSetupFailure(error: unknown): boolean {
+      if (!(error instanceof PlanIsolationSetupError)) return false
+      if (abort.signal.aborted) throw error
+      if (!effectiveHold(worktree, selection.sessionID)) holdAdmission(worktree, selection.sessionID, "plan_isolation_setup_failed")
+      progress.error()
+      terminal.write(terminalSafeText(`[error] ${boundedTerminalDiagnostic(error.message)}\nNo tasks were dispatched by this attempt. The approved plan remains available; fix the reported cause, then /continue to retry.\n`))
+      return true
+    }
+
     async function runOwned(resumed: boolean) {
       if (persistenceFailed) throw new InteractiveLaunchError("Session transcript persistence failed; the session remains held.")
       if (effectiveHold(worktree, selection.sessionID)) throw new InteractiveLaunchError("Session held; explicit Resume required.")
@@ -2452,6 +2461,7 @@ export async function runInteractiveSession(
       let result: Awaited<ReturnType<typeof start>>
       try { result = await start(false) }
       catch (error) {
+        if (reportPlanIsolationSetupFailure(error)) return null
         if (!(error instanceof PlanIsolationUnavailableError)) throw error
         // No commit / not a git repository: never a silent fallback.
         if (!await chooseInPlace(error, abort.signal)) return undefined
@@ -2633,6 +2643,7 @@ export async function runInteractiveSession(
       progress.tasks(titledTasks, approvedTasks.total)
       terminal.taskSnapshot?.(titledTasks)
       const result = await runOwned(false)
+      if (result === null) return undefined
       if (!result) {
         terminal.write("Run cancelled before dispatch; the approved plan stays executing. /continue retries.\n")
         return undefined
@@ -3678,7 +3689,9 @@ export async function runInteractiveSession(
               if ("planWorktree" in outcome && outcome.planWorktree && !("run" in outcome && outcome.run.aborted)) await offerPlanWorktree(outcome.planWorktree.workflowID)
             }
           }
-          catch (error) { terminal.write(`Resume refused or incomplete: ${boundedTerminalDiagnostic(String(error))}\n`) }
+          catch (error) {
+            if (!reportPlanIsolationSetupFailure(error)) terminal.write(`Resume refused or incomplete: ${boundedTerminalDiagnostic(String(error))}\n`)
+          }
           continue
         }
         terminal.write(selection.controller.status(selection.sessionID) + "\n")

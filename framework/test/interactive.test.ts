@@ -18,8 +18,8 @@ import { currentOwner } from "../src/flow/owner.ts"
 import { readSessionCommitted } from "../src/workflows/commit.ts"
 import { AdmissionRefusal } from "../src/hosts/required-controls.ts"
 import { ModelRequestError } from "../src/workflows/turn.ts"
-import { holdAdmission } from "../src/sessions/admission.ts"
-import { PlanIsolationUnavailableError, type ForegroundController } from "../src/hosts/controller.ts"
+import { effectiveHold, holdAdmission } from "../src/sessions/admission.ts"
+import { PlanIsolationSetupError, PlanIsolationUnavailableError, type ForegroundController } from "../src/hosts/controller.ts"
 import type { ActionGate, ComboRoutes, ExecutionRuntime } from "../src/hosts/types.ts"
 import { COMBO_PRESETS } from "../src/hosts/combo-presets.ts"
 import type { CliProgressSink } from "../src/hosts/cli-progress.ts"
@@ -77,6 +77,7 @@ type HarnessOptions = {
     apply?: { ok: true; workflowID: string; files: string[] } | { ok: false; workflowID: string; reason: string; patch: string }
     /** run() throws PlanIsolationUnavailableError once (no commit), then succeeds only when called with inPlace. */
     unavailable?: "no-commit" | "no-git"
+    setupError?: Error
   }
   validatePlan?: (plan: unknown) => void
   runResult?: { phase: string; done: number; failed: number; cancelled: number }
@@ -242,6 +243,7 @@ function harness(options: HarnessOptions = {}) {
       calls.runCount++
       options.beforeRun?.(signal)
       await runGate
+      if (options.isolated?.setupError) throw options.isolated.setupError
       if (options.isolated?.unavailable && !runOptions?.inPlace) throw new PlanIsolationUnavailableError(options.isolated.unavailable)
       return {
         workflow: { id: workflowID, phase: options.runResult?.phase ?? "done", artifacts: [] },
@@ -4565,6 +4567,105 @@ describe("plan worktree chooser (interactive)", () => {
   const launch = (h: ReturnType<typeof harness>) => launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
   const choices = (h: ReturnType<typeof harness>) => h.calls.choices.map(choice => choice.title)
   const approveThenPick = (pick: number) => async (title: string) => title === "Execution decision" ? 0 : title === "Apply the plan worktree?" ? pick : undefined
+
+  test.each([false, true])("setup failure reports the cause and keeps input available without an in-place fallback (fullscreen=%s)", async fullscreen => {
+    const busy: boolean[] = []
+    const h = harness({ fullscreen, lines: ["make the change", "/help", "/quit"],
+      beforeRead: () => { if (h.calls.runCount) expect(busy.at(-1)).toBe(false) },
+      turns: [{ text: "plan", plan: proposedPlan }], choose: approveThenPick(0),
+      isolated: { setupError: new PlanIsolationSetupError(new Error("nonregular import unsafe-link\u001b[2J")) } })
+    h.deps.terminal!.executionSnapshot = (_state, active) => { busy.push(active) }
+    await launch(h)
+    const output = h.calls.output.join("")
+    expect(output).toContain("nonregular import unsafe-link")
+    expect(output).not.toContain("\u001b[2J")
+    expect(output).toContain("/continue")
+    expect(output).not.toContain("Run cancelled before dispatch")
+    expect(h.calls.prompts.filter(prompt => prompt === "You> ")).toHaveLength(3)
+    expect(h.calls.runCount).toBe(1)
+    expect(h.calls.events).not.toContain("run-in-place")
+    expect(h.calls.events).not.toContain("review")
+    expect(h.calls.controllerCancelCalls).toBe(0)
+  })
+
+  test("setup failure binds a durable hold so same-chat /continue can readmit and retry the approved workflow", async () => {
+    const sid = "otter-fixture-session"
+    const isolated: NonNullable<HarnessOptions["isolated"]> = { setupError: new PlanIsolationSetupError(new Error("temporary setup refusal")) }
+    let resumed = false
+    const h = harness({ fullscreen: true, lines: ["make the change", "/continue", "/quit"], isolated,
+      turns: [{ text: "plan", plan: proposedPlan }],
+      choose: async title => title === "Execution decision" ? 0 : title.startsWith("Resume residual") ? 1 : undefined,
+      beforeRun() {
+        const store = getOwnedSession(wt.worktree, sid)!
+        publishWorkflow(wt.worktree, { ...newWorkflow(sid, currentOwner(Date.now(), store.epoch), "command", "retry fixture", "codex"),
+          id: "wf_fixture", phase: "executing" })
+      },
+      beforeRead(_prompt, _signal, lines) {
+        if (lines?.[0] === "/continue") {
+          expect(effectiveHold(wt.worktree, sid)).toBe(true)
+          expect(readSessionMetadata(wt.worktree, sid)?.held).toBe(true)
+          isolated.setupError = undefined
+        }
+      },
+    })
+    const create = h.deps.createController!
+    h.deps.createController = (...args) => {
+      const controller = create(...args)
+      controller.resume = async () => {
+        expect(effectiveHold(wt.worktree, sid)).toBe(false)
+        expect(readSessionMetadata(wt.worktree, sid)?.held).toBe(false)
+        resumed = true
+        return { workflow: { id: "wf_fixture", phase: "done", artifacts: [] },
+          run: { done: 1, failed: 0, cancelled: 0, skipped: 0 } } as unknown as Awaited<ReturnType<ForegroundController["resume"]>>
+      }
+      return controller
+    }
+    await launch(h)
+    expect(resumed).toBe(true)
+    expect(h.calls.events.filter(event => event === "humanDecision")).toHaveLength(1)
+    expect(h.calls.output.join("")).not.toContain("Resume refused")
+  })
+
+  test("paused-plan setup failure is held again and the next /continue reaches the approved residual", async () => {
+    const sid = "otter-fixture-session"
+    let attempted = false
+    let resumed = false
+    const h = harness({ fullscreen: true, lines: ["/continue", "/continue", "/quit"], choose: async () => 1,
+      beforeRead(_prompt, _signal, lines) {
+        if (lines?.[0] !== "/continue") return
+        if (attempted) {
+          expect(effectiveHold(wt.worktree, sid)).toBe(true)
+          return
+        }
+        const epoch = getOwnedSession(wt.worktree, sid)!.epoch
+        publishWorkflow(wt.worktree, { ...newWorkflow(sid, currentOwner(Date.now(), epoch), "command", "paused retry", "codex"),
+          id: "wf_fixture", phase: "paused", pausedFrom: { phase: "executing", stage: "unit" } })
+      },
+    })
+    const create = h.deps.createController!
+    h.deps.createController = (...args) => {
+      const controller = create(...args)
+      controller.resumePaused = async () => {
+        attempted = true
+        const epoch = getOwnedSession(wt.worktree, sid)!.epoch
+        publishWorkflow(wt.worktree, { ...newWorkflow(sid, currentOwner(Date.now(), epoch), "command", "paused retry", "codex"),
+          id: "wf_fixture", phase: "executing" })
+        throw new PlanIsolationSetupError(new Error("reopen failed after unpause"))
+      }
+      controller.resume = async () => {
+        expect(effectiveHold(wt.worktree, sid)).toBe(false)
+        resumed = true
+        return { workflow: { id: "wf_fixture", phase: "done", artifacts: [] },
+          run: { done: 1, failed: 0, cancelled: 0, skipped: 0 } } as unknown as Awaited<ReturnType<ForegroundController["resume"]>>
+      }
+      return controller
+    }
+    await launch(h)
+    expect(attempted).toBe(true)
+    expect(resumed).toBe(true)
+    expect(h.calls.output.join("")).toContain("reopen failed after unpause")
+    expect(h.calls.events).not.toContain("humanDecision")
+  })
 
   test("after an isolated run it shows files, stat and patch path, then Apply applies and records the choice", async () => {
     const h = harness({ lines: ["make the change", "/quit"], turns: [{ text: "plan", plan: proposedPlan }], choose: approveThenPick(0),
