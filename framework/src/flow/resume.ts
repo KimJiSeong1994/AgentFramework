@@ -58,7 +58,7 @@ export function checkResumeIn(tx: FlowTx, runtime: ExecutionRuntime, sessionID: 
   // 4. stop proof
   const intent = wf.stopIntent
   if (wf.phase !== "paused" || intent?.kind !== "pause" || !wf.pausedFrom) return fail("stop-proof", "workflow is not a settled pause")
-  const settledEvents = readEvents(runtime.worktree, wf.id).filter(event => event.type === "pause_settled" && event.data?.token === intent.token)
+  const settledEvents = readEvents(runtime.worktree, wf.id, wf.sessionID).filter(event => event.type === "pause_settled" && event.data?.token === intent.token)
   if (settledEvents.length !== 1) return fail("stop-proof", "no committed pause_settled for this stop")
   const checkpoint = readCheckpoint(runtime.worktree, sessionID, wf.id, intent.token, intent.checkpoint)
   if (!checkpoint.ok) return fail("stop-proof", checkpoint.reason)
@@ -167,7 +167,7 @@ function viewOf(runtime: ExecutionRuntime, check: Extract<ResumeCheck, { ok: tru
   const { wf, checkpoint } = check
   const subjectSha = wf.kind === "plan" ? wf.planRef?.jsonSha ?? null : checkpoint.subject?.sha256 ?? null
   const current = taskPartition(readLedger(runtime.worktree, wf.sessionID), wf.id, subjectSha)
-  const resumedBefore = readEvents(runtime.worktree, wf.id).filter(event => event.type === "resumed").length
+  const resumedBefore = readEvents(runtime.worktree, wf.id, wf.sessionID).filter(event => event.type === "resumed").length
   return {
     workflowID: wf.id, pausedFrom: wf.pausedFrom!, residual: current.residual, done: current.done,
     interrupted: checkpoint.interrupted, worktreeChanged: JSON.stringify(worktreeDigest(runtime.worktree)) !== JSON.stringify(checkpoint.worktree),
@@ -176,7 +176,7 @@ function viewOf(runtime: ExecutionRuntime, check: Extract<ResumeCheck, { ok: tru
 }
 
 function checkNow(runtime: ExecutionRuntime, sessionID: string, revision: number): ResumeCheck {
-  return withFlowTransaction(runtime.worktree, tx => checkResumeIn(tx, runtime, sessionID, revision))
+  return withFlowTransaction(runtime.worktree, tx => checkResumeIn(tx, runtime, sessionID, revision), sessionID)
 }
 
 /**
@@ -207,7 +207,7 @@ export async function resumePaused(runtime: ExecutionRuntime, sessionID: string,
     )
     if (!result.ok) return { kind: "refused", precondition: "stop-proof", reason: result.text }
     return { kind: "resumed", wf: result.wf, view }
-  })
+  }, sessionID)
   if (committed.kind !== "resumed") return committed
   // The hold marker still names the paused revision; rebind it to the resumed one, then mint the token for this epoch.
   holdAdmission(runtime.worktree, sessionID, "workflow_resume")

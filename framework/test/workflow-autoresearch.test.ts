@@ -39,6 +39,7 @@ const CONTROLS = Object.fromEntries([
 
 let wt: ReturnType<typeof tempGitWorktree>
 let counter = 0
+let SID: string
 beforeEach(() => { wt = tempGitWorktree(); wt.worktree = realpathSync(wt.worktree) })
 afterEach(() => { __setCommitFaultHook(null); stopHeartbeat(); wt.cleanup() })
 
@@ -94,6 +95,7 @@ function harness(options: Options) {
       },
     },
   }
+  SID = sid
   const store = attachAdmission(runtime, sid, { engine: ENGINE, model: "m" })
   const controller = createForegroundController(runtime)
   return { runtime, store, sid, controller, requests, queues, verifierPrepares, workers: () => requests.filter(r => r.role === "worker" || r.role === "reviewer") }
@@ -101,7 +103,7 @@ function harness(options: Options) {
 type H = ReturnType<typeof harness>
 
 const committed = () => {
-  const read = readCommitted(wt.worktree)
+  const read = readCommitted(wt.worktree, {}, SID)
   if (read.state !== "ok" || read.wf.kind !== "autoresearch") throw new Error("no committed autoresearch")
   return read.wf
 }
@@ -162,7 +164,7 @@ describe("stage and phase order (1)", () => {
     const done = committed()
     expect(done).toMatchObject({ stage: "terminal", phase: "done" })
     parseEnvelope(done)
-    const types = readEvents(wt.worktree, done.id).map(event => event.type)
+    const types = readEvents(wt.worktree, done.id, SID).map(event => event.type)
     for (const type of ["intake_confirmed", "evidence_recorded", "experiment_proposed", "experiment_approved", "run_recorded", "evaluation_recorded", "verdict_written", "productify_selected"]) expect(types).toContain(type)
     for (const key of ["mission.json", "evidence.json", "runs/1.json", "runs/2.json", "verdict.json"]) expect(done.artifacts.map(ref => ref.key)).toContain(key)
     expect(requiredArtifactKeys(done)).toEqual(["mission.json", "verdict.json", "runs/1.json", "runs/2.json"])
@@ -255,7 +257,7 @@ describe("commands run only through the verifier (2, 3)", () => {
     const third = await runAutoresearch(h.runtime, h.sid, wid)
     expect(third.status).toBe("choice")
     expect(h.verifierPrepares).toHaveLength(3)
-    const approvals = readEvents(wt.worktree, wid).filter(event => event.type === "experiment_approved")
+    const approvals = readEvents(wt.worktree, wid, SID).filter(event => event.type === "experiment_approved")
     expect(approvals.map(event => event.data?.reused)).toEqual([undefined, undefined, true])
     expect(dataNow().iteration).toBe(3)
   }, 60_000)
@@ -426,12 +428,12 @@ describe("pause, resume and cancel (7, 8)", () => {
     expect(pausing.phase).toBe("executing")
     expect(pausing.stopIntent).toMatchObject({ kind: "pause" })
     expect(pausing.stopIntent!.token).toBeTruthy()
-    const settledBefore = readEvents(wt.worktree, wid).filter(event => event.type === "pause_settled")
+    const settledBefore = readEvents(wt.worktree, wid, SID).filter(event => event.type === "pause_settled")
     expect(settledBefore).toHaveLength(0)
     const result = await running
     expect(result).toMatchObject({ status: "blocked" })
     await waitFor(() => committed().phase === "paused")
-    expect(readEvents(wt.worktree, wid).filter(event => event.type === "pause_settled")).toHaveLength(1)
+    expect(readEvents(wt.worktree, wid, SID).filter(event => event.type === "pause_settled")).toHaveLength(1)
     const data = dataNow()
     expect(data.runs.map(run => [run.status, run.valid, run.invalid])).toEqual([["baseline", true, undefined], ["checks_failed", false, "interrupted"]])
     expect(data.runs[1]!.status).not.toBe("crash")
@@ -464,8 +466,8 @@ describe("pause, resume and cancel (7, 8)", () => {
     await running
     await waitFor(() => committed().phase === "cancelled")
     const wf = committed()
-    expect(readEvents(wt.worktree, wid).filter(event => event.type === "cancel_settled")).toHaveLength(1)
-    expect(readEvents(wt.worktree, wid).filter(event => event.type === "pause_settled")).toHaveLength(0)
+    expect(readEvents(wt.worktree, wid, SID).filter(event => event.type === "cancel_settled")).toHaveLength(1)
+    expect(readEvents(wt.worktree, wid, SID).filter(event => event.type === "pause_settled")).toHaveLength(0)
     expect(dataNow().runs).toHaveLength(2)
     expect(dataNow().verdict).toBeUndefined()
     expect(wf.artifacts.map(ref => ref.key)).not.toContain("verdict.json")

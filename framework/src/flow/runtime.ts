@@ -39,7 +39,7 @@ export function flowLimits(deps: FlowRuntime): Limits {
 }
 
 export function liveness(deps: FlowRuntime, now = Date.now(), wf?: WorkflowEnvelope): LivenessCtx {
-  const beat = wf ? readHeartbeat(deps.worktree, wf) : undefined
+  const beat = wf ? readHeartbeat(deps.worktree, wf, wf.sessionID) : undefined
   return defaultLiveness(epochReleased(deps.worktree), now, () => beat)
 }
 
@@ -53,37 +53,29 @@ export function tally(tasks: LedgerTask[]): TaskTally {
   }
 }
 
-// ---------------------------------------------------------------- heartbeat (one per process)
-let beat: Heartbeat | null = null
-let beatWorktree: string | null = null
-let beatEngine: unknown
-let beatWorkflowID: string | null = null
-let beatOwnerInstance: string | null = null
+// ---------------------------------------------------------------- heartbeat (one per session)
+type SessionHeartbeat = { timer: Heartbeat; engine: unknown; workflowID: string; ownerInstance: string }
+const beats = new Map<string, SessionHeartbeat>()
+const heartbeatKey = (worktree: string, sessionID?: string) => JSON.stringify([worktree, sessionID ?? null])
 
 /** Keep the captured owner binding fresh; stop when its workflow or attachment epoch changes. */
-export function ensureHeartbeat(deps: FlowRuntime, engine: unknown, snapshot?: Workflow, interval?: number): void {
-  const expected = snapshot ?? readAnyWorkflowChecked(deps.worktree).wf
+export function ensureHeartbeat(deps: FlowRuntime, engine: unknown, snapshot?: Workflow, interval?: number, sessionID?: string): void {
+  const expected = snapshot ?? readAnyWorkflowChecked(deps.worktree, sessionID).wf
+  const key = heartbeatKey(deps.worktree, expected?.sessionID ?? sessionID)
+  const existing = beats.get(key)
   if (!expected || TERMINAL.has(expected.phase) || expected.owner.pid !== process.pid || workflowEngineRefusal(expected, engine)) {
-    beat?.stop()
-    beat = null
-    beatWorktree = null
-    beatEngine = undefined
-    beatWorkflowID = null
-    beatOwnerInstance = null
+    existing?.timer.stop()
+    beats.delete(key)
     return
   }
-  if (beat && beatWorktree === deps.worktree && beatEngine === engine &&
-      beatWorkflowID === expected.id && beatOwnerInstance === expected.owner.instance) return
-  beat?.stop()
-  beatWorktree = deps.worktree
-  beatEngine = engine
-  beatWorkflowID = expected.id
-  beatOwnerInstance = expected.owner.instance
+  if (existing && existing.engine === engine && existing.workflowID === expected.id &&
+      existing.ownerInstance === expected.owner.instance) return
+  existing?.timer.stop()
   const expectedEngine = engine
   const expectedWorkflowID = expected.id
   const expectedOwner = expected.owner
   let expectedRevision = expected.lastSeq
-  beat = startHeartbeat(() => {
+  const timer = startHeartbeat(() => {
     try {
       const keep = withFlowTransaction(deps.worktree, (tx) => {
         assertFlowTxWorktree(tx, deps.worktree)
@@ -99,30 +91,27 @@ export function ensureHeartbeat(deps: FlowRuntime, engine: unknown, snapshot?: W
         writeHeartbeat(tx, wf)
         expectedRevision = wf.lastSeq
         return true
-      })
-      if (!keep) {
-        beat = null
-        beatWorktree = null
-        beatEngine = undefined
-        beatWorkflowID = null
-        beatOwnerInstance = null
-      }
+      }, expected.sessionID)
+      if (!keep) beats.delete(key)
       return keep
     } catch (error) {
       if (error instanceof FlowTransactionBusyError) return true
       throw error
     }
   }, interval, (e) => deps.log("flow heartbeat write failed; retrying", { error: (e as Error)?.message ?? String(e) }))
+  beats.set(key, { timer, engine, workflowID: expected.id, ownerInstance: expected.owner.instance })
 }
 
-/** Test hook: stop the timer. */
-export function stopHeartbeat(): void {
-  beat?.stop()
-  beat = null
-  beatWorktree = null
-  beatEngine = undefined
-  beatWorkflowID = null
-  beatOwnerInstance = null
+/** Stop one session timer; no arguments clears all timers for process shutdown and tests. */
+export function stopHeartbeat(worktree?: string, sessionID?: string): void {
+  if (worktree !== undefined) {
+    const key = heartbeatKey(worktree, sessionID)
+    beats.get(key)?.timer.stop()
+    beats.delete(key)
+    return
+  }
+  for (const beat of beats.values()) beat.timer.stop()
+  beats.clear()
 }
 
 type WorkflowOwnerBinding = { active: boolean; store?: SessionStore }
@@ -208,7 +197,7 @@ export function applyEvent(
   data?: Record<string, unknown>,
   now = Date.now(),
 ): FlowResult {
-  return withFlowTransaction(deps.worktree, (tx) => applyEventIn(tx, deps, wf, event, actor, ctx, patch, data, now))
+  return withFlowTransaction(deps.worktree, (tx) => applyEventIn(tx, deps, wf, event, actor, ctx, patch, data, now), wf.sessionID)
 }
 
 /**
@@ -375,7 +364,7 @@ export function resolveAuthority(
   engine: string,
   now = Date.now(),
 ): AuthorityResult {
-  return withFlowTransaction(deps.worktree, (tx) => resolveAuthorityIn(tx, deps, cmd, sessionID, engine, now))
+  return withFlowTransaction(deps.worktree, (tx) => resolveAuthorityIn(tx, deps, cmd, sessionID, engine, now), sessionID)
 }
 
 export type ReattachHeldOwnerResult = { wf: WorkflowEnvelope } | { refuse: string; wf?: WorkflowEnvelope | null }
@@ -383,16 +372,16 @@ export type ReattachHeldOwnerResult = { wf: WorkflowEnvelope } | { refuse: strin
 /** The one audit event name for a same-SID epoch reattachment; emit and idempotency lookup both use it. */
 export const OWNER_REATTACHED = "owner_reattached"
 
-function reattachEventsFor(worktree: string, workflowID: string, toEpoch: string, expectedRevision: number) {
-  return readEvents(worktree, workflowID).filter(event => {
+function reattachEventsFor(worktree: string, workflowID: string, toEpoch: string, expectedRevision: number, sessionID: string) {
+  return readEvents(worktree, workflowID, sessionID).filter(event => {
     if (event.type !== OWNER_REATTACHED || !event.data || typeof event.data !== "object") return false
     const data = event.data as Record<string, unknown>
     return data.toEpoch === toEpoch && data.expectedRevision === expectedRevision
   })
 }
 
-function reattachEventFor(worktree: string, workflowID: string, fromEpoch: string, toEpoch: string, expectedRevision: number) {
-  const matches = reattachEventsFor(worktree, workflowID, toEpoch, expectedRevision).filter(event => {
+function reattachEventFor(worktree: string, workflowID: string, fromEpoch: string, toEpoch: string, expectedRevision: number, sessionID: string) {
+  const matches = reattachEventsFor(worktree, workflowID, toEpoch, expectedRevision, sessionID).filter(event => {
     const data = event.data as Record<string, unknown>
     return data.fromEpoch === fromEpoch
   })
@@ -442,14 +431,14 @@ export function reattachOwner(
       if (TERMINAL.has(wf.phase)) return refuse("terminal workflow cannot be reattached", wf)
 
       if (wf.owner.instance === store.epoch) {
-        const committed = reattachEventsFor(runtime.worktree, wf.id, store.epoch, expectedRevision)
+        const committed = reattachEventsFor(runtime.worktree, wf.id, store.epoch, expectedRevision, wf.sessionID)
         if (wf.owner.pid === process.pid && committed.length === 1 && committed[0]!.seq === wf.lastSeq) return { wf }
         return refuse("workflow is already bound to this attachment without a matching reattach receipt", wf)
       }
       if (wf.lastSeq !== expectedRevision) return refuse("workflow revision changed; reattach refused", wf)
       if (!isAttachmentEpoch(wf.owner.instance)) return refuse("workflow owner has no verifiable attachment epoch", wf)
-      const targetEvents = reattachEventsFor(runtime.worktree, wf.id, store.epoch, expectedRevision)
-      const existing = reattachEventFor(runtime.worktree, wf.id, wf.owner.instance, store.epoch, expectedRevision)
+      const targetEvents = reattachEventsFor(runtime.worktree, wf.id, store.epoch, expectedRevision, wf.sessionID)
+      const existing = reattachEventFor(runtime.worktree, wf.id, wf.owner.instance, store.epoch, expectedRevision, wf.sessionID)
       if (existing === undefined) return refuse("duplicate owner-reattached receipt; reattach refused", wf)
       if (targetEvents.length > 0 && (targetEvents.length !== 1 || !existing)) {
         return refuse("conflicting owner-reattached receipt; reattach refused", wf)
@@ -491,7 +480,7 @@ export function reattachOwner(
         path: `sessions/${wf.sessionID}/attachments/${previousOwner.instance}.json`,
         sha256: sha256Hex(proofBytes),
       }
-      const newRevision = lastEventSeq(runtime.worktree) + 1
+      const newRevision = lastEventSeq(runtime.worktree, wf.sessionID) + 1
       // One commit: the owner_reattached event, the snapshot with the new owner, then the index. A crash before the
       // index leaves the old committed owner and an orphan event that readers ignore.
       const rebound = commitRevision(tx, { ...current, owner: { instance: store.epoch, pid: process.pid } } as WorkflowEnvelope, [{
@@ -511,7 +500,7 @@ export function reattachOwner(
       }], now)
       if (rebound.lastSeq !== newRevision) throw new Error("reattach revision did not match its audit row")
       return { wf: rebound }
-    })
+    }, store.sessionID)
   } catch (error) {
     return refuse(`held workflow reattach refused: ${(error as Error)?.message ?? String(error)}`)
   }
@@ -537,7 +526,7 @@ function cancelTaggedIdleIn(tx: FlowTx, deps: FlowRuntime, wf: WorkflowEnvelope,
 }
 
 export function cancelTaggedIdle(deps: FlowRuntime, wf: WorkflowEnvelope, reason = `${wf.kind} workflow ${wf.id} cancelled`): string[] {
-  return withFlowTransaction(deps.worktree, (tx) => cancelTaggedIdleIn(tx, deps, wf, reason))
+  return withFlowTransaction(deps.worktree, (tx) => cancelTaggedIdleIn(tx, deps, wf, reason), wf.sessionID)
 }
 
 /** T1 in one transaction: same-session stuck cancel, ledger cleanup, terminal rotation and creation. */
@@ -596,7 +585,7 @@ function startWorkflowIn(tx: FlowTx, deps: FlowRuntime, sessionID: string, entry
 }
 
 export function startWorkflow(deps: FlowRuntime, sessionID: string, entry: Workflow["entry"], request: string, actor: EventActor, engine: string, now = Date.now()): FlowResult {
-  const result = withFlowTransaction(deps.worktree, (tx) => startWorkflowIn(tx, deps, sessionID, entry, request, actor, engine, now))
+  const result = withFlowTransaction(deps.worktree, (tx) => startWorkflowIn(tx, deps, sessionID, entry, request, actor, engine, now), sessionID)
   if (result.ok) ensureHeartbeat(deps, engine, result.wf)
   return result
 }
@@ -704,7 +693,7 @@ export function insertApprovedUnitTasks(deps: FlowRuntime & Pick<ExecutionRuntim
     if (!inserted.ok) return { ok: false, text: inserted.reason }
     if (inserted.added.length > 0) writeLedger(deps.worktree, inserted.ledger)
     return { ok: true, taskIds: tasksForWorkflow(inserted.ledger, fresh.id).filter((t) => t.wf?.planSha === tag.planSha).map((t) => t.id) }
-  })
+  }, wf.sessionID)
 }
 
 export function approveWorkflow(
@@ -714,7 +703,7 @@ export function approveWorkflow(
   opts: { queueRunning: boolean; planShaOk: boolean; mdShaOk: boolean; subject?: Subject; receiptRevision?: number },
   now = Date.now(),
 ): FlowResult {
-  return withFlowTransaction(deps.worktree, (tx) => approveWorkflowIn(tx, deps, wf, inputs, opts, now))
+  return withFlowTransaction(deps.worktree, (tx) => approveWorkflowIn(tx, deps, wf, inputs, opts, now), wf.sessionID)
 }
 
 // ---------------------------------------------------------------- stop protocol (pause / cancel)
@@ -868,7 +857,7 @@ export function requestStop(runtime: ExecutionRuntime, sessionID: string, kind: 
   const done = Promise.resolve()
   const refuse = (text: string, wf?: WorkflowEnvelope | null): StopRequest => ({ result: { ok: false, text, wf }, quiesce: done })
   let before: WorkflowEnvelope | null
-  try { before = readAnyWorkflowChecked(runtime.worktree).wf } catch (error) { return refuse((error as Error).message) }
+  try { before = readAnyWorkflowChecked(runtime.worktree, sessionID).wf } catch (error) { return refuse((error as Error).message) }
   if (!before || before.sessionID !== sessionID) return refuse(before ? `${before.kind} workflow ${before.id} is owned by session ${before.sessionID}; use /resume ${before.sessionID} to continue` : "no active workflow", before)
   const engineRefusal = workflowEngineRefusal(before, runtime.host.identity.engine)
   if (engineRefusal) return refuse(engineRefusal, before)
@@ -883,7 +872,7 @@ export function requestStop(runtime: ExecutionRuntime, sessionID: string, kind: 
     const store = getOwnedSession(runtime.worktree, sessionID)
     if (kind === "pause" && store && !store.metadata.held) holdOwnedAdmission(runtime.worktree, sessionID, "workflow_pause")
   } catch (error) { return refuse(`admission hold failed; ${kind} refused: ${(error as Error).message}`, before) }
-  const result = withFlowTransaction(runtime.worktree, (tx) => requestStopIn(tx, runtime, sessionID, kind, reason, options))
+  const result = withFlowTransaction(runtime.worktree, (tx) => requestStopIn(tx, runtime, sessionID, kind, reason, options), sessionID)
   if (!result.ok || result.idempotent) return { result, token: result.ok ? result.wf.stopIntent?.token : undefined, quiesce: done }
   const intent = result.wf.stopIntent
   if (!intent || getOwnedSession(runtime.worktree, sessionID)?.epoch !== result.wf.owner.instance) return { result, token: intent?.token, quiesce: done }
@@ -990,7 +979,7 @@ export function onCancelSettled(listener: (sessionID: string) => void): () => vo
  */
 export function adoptForeignStop(runtime: ExecutionRuntime, ref: SettleRef): void {
   try {
-    const wf = readAnyWorkflowChecked(runtime.worktree).wf
+    const wf = readAnyWorkflowChecked(runtime.worktree, ref.sessionID).wf
     const store = getOwnedSession(runtime.worktree, ref.sessionID)
     if (!wf || wf.sessionID !== ref.sessionID || !wf.stopIntent || !store || store.metadata.held) return
     if (wf.owner.instance !== store.epoch || wf.owner.pid !== process.pid) return
@@ -1006,7 +995,7 @@ export function adoptForeignStop(runtime: ExecutionRuntime, ref: SettleRef): voi
 export function settleOwned(runtime: ExecutionRuntime, ref: SettleRef, observer: string, options: SettleOptions = {}): SettleOutcome {
   adoptForeignStop(runtime, ref)
   const outcome = withFlowTransaction(runtime.worktree, (tx) =>
-    settleOwnedIn(tx, runtime, runtime.host.identity.engine, ref, observer, { queueRunning: getQueue(runtime).isRunning(ref.sessionID), ...options }))
+    settleOwnedIn(tx, runtime, runtime.host.identity.engine, ref, observer, { queueRunning: getQueue(runtime).isRunning(ref.sessionID), ...options }), ref.sessionID)
   if (outcome.kind === "settled" && outcome.result.ok && outcome.result.wf.phase === "cancelled") {
     for (const listener of [...cancelSettledListeners]) {
       try { listener(ref.sessionID) } catch (error) { runtime.log("cancel settled listener failed", { error: String(error) }) }
@@ -1069,8 +1058,8 @@ function repairOnLoadIn(tx: FlowTx, deps: StopDeps, expectedEngine: string, isQu
   return settled.kind === "settled" ? settled.result : null
 }
 
-export function repairOnLoad(deps: StopDeps, engine: string, isQueueRunning: (sessionID: string) => boolean = () => false): AnyFlowResult | null {
-  return withFlowTransaction(deps.worktree, (tx) => repairOnLoadIn(tx, deps, engine, isQueueRunning))
+export function repairOnLoad(deps: StopDeps, engine: string, isQueueRunning: (sessionID: string) => boolean = () => false, sessionID?: string): AnyFlowResult | null {
+  return withFlowTransaction(deps.worktree, (tx) => repairOnLoadIn(tx, deps, engine, isQueueRunning), sessionID)
 }
 
 export { cancelOpen, DEFAULT_LIMITS }

@@ -73,7 +73,7 @@ export function startRalplan(runtime: Pick<ExecutionRuntime, "worktree" | "host"
       { wf: created.id, type: "transition", to: "planning", actor: "code", data: { event: "start" } },
     ], now)
     return { ok: true, wf: wf as RalplanWorkflow }
-  })
+  }, sessionID)
 }
 
 /**
@@ -104,7 +104,7 @@ export function handoffToRalplan(
       }, now)
       return { ok: true, wf: result.successor as RalplanWorkflow }
     } catch (error) { return { ok: false, text: (error as Error).message } }
-  })
+  }, sessionID)
 }
 
 // ---------------------------------------------------------------------------------------------- context
@@ -257,7 +257,7 @@ function unfenced(output: string): string {
 
 function committedRalplan(runtime: Pick<ExecutionRuntime, "worktree">, sessionID: string, workflowID: string): RalplanWorkflow | string {
   let read: ReturnType<typeof readCommitted>
-  try { read = readCommitted(runtime.worktree) } catch { return "workflow state is unreadable" }
+  try { read = readCommitted(runtime.worktree, {}, sessionID) } catch { return "workflow state is unreadable" }
   if (read.state !== "ok") return "workflow state is unavailable"
   const { wf } = read
   if (wf.id !== workflowID || wf.sessionID !== sessionID) return "workflow identity changed"

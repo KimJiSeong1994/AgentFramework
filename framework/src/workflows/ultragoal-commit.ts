@@ -36,5 +36,5 @@ export function commitUltragoal(worktree: string, expected: UltragoalWorkflow, b
     } catch (error) {
       return { ok: false, text: (error as Error).message }
     }
-  })
+  }, expected.sessionID)
 }

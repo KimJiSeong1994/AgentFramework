@@ -85,7 +85,7 @@ export function startDeepInterview(runtime: Pick<ExecutionRuntime, "worktree" | 
       { wf: created.id, type: "transition", to: "planning", actor: "code", data: { event: "start" } },
     ], now)
     return { ok: true, wf: wf as DeepInterviewWorkflow }
-  })
+  }, sessionID)
 }
 
 // ---------------------------------------------------------------------------------------------- commit
@@ -116,12 +116,12 @@ export function commitDeepInterview(worktree: string, expected: DeepInterviewWor
     } catch (error) {
       return { ok: false, text: (error as Error).message }
     }
-  })
+  }, expected.sessionID)
 }
 
 function committed(runtime: Pick<ExecutionRuntime, "worktree">, sessionID: string, workflowID: string): DeepInterviewWorkflow | string {
   let read: ReturnType<typeof readCommitted>
-  try { read = readCommitted(runtime.worktree) } catch { return "workflow state is unreadable" }
+  try { read = readCommitted(runtime.worktree, {}, sessionID) } catch { return "workflow state is unreadable" }
   if (read.state !== "ok") return "workflow state is unavailable"
   const { wf } = read
   if (wf.id !== workflowID || wf.sessionID !== sessionID) return "workflow identity changed"
@@ -567,7 +567,7 @@ export async function runDeepInterview(runtime: ExecutionRuntime, sessionID: str
           const handed = options.handoff({ ...built.wf, lastSeq: wf.lastSeq }, built.events)
           if (handed.ok) return { kind: "handed_off", successor: handed.successor }
           // A fault after the index publish can report failure for a handoff that did commit: the committed state decides.
-          const after = readCommitted(worktree)
+          const after = readCommitted(worktree, {}, wf.sessionID)
           if (after.state === "ok" && after.wf.kind === "ralplan" && after.wf.lineage?.predecessor.id === wf.id) return { kind: "handed_off", successor: after.wf }
           io.notice?.(`Connecting to ralplan was refused: ${handed.text}. The verified specification is kept.`)
         }

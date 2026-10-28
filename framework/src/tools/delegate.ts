@@ -42,10 +42,10 @@ export const delegateArgs = {
   resume: z.boolean().optional().describe("true: run the unfinished tasks of an interrupted run instead of adding tasks"),
 }
 
-function taggedWorkflowRefusal(deps: HookDeps, engine: unknown, tasks: Array<{ wf?: { id: string } }>): string | undefined {
+function taggedWorkflowRefusal(deps: HookDeps, engine: unknown, sessionID: string, tasks: Array<{ wf?: { id: string } }>): string | undefined {
   const workflowIDs = new Set(tasks.flatMap((task) => task.wf ? [task.wf.id] : []))
   if (workflowIDs.size === 0) return undefined
-  const workflow = readWorkflow(deps.worktree)
+  const workflow = readWorkflow(deps.worktree, sessionID)
   if (!workflow || [...workflowIDs].some((id) => id !== workflow.id)) return "workflow identity unavailable; recovery refused"
   return workflowEngineRefusal(workflow, engine)
 }
@@ -71,7 +71,7 @@ export function createDelegateTool(deps: HookDeps): ToolDefinition {
       if (readAbort(deps.worktree, sessionID)?.reason === "user_stop") {
         throw new Error("otter: the user stopped the task queue (/stop). Do not call delegate again until the user asks for more work.")
       }
-      const active = activeWorkflow(deps.worktree)
+      const active = activeWorkflow(deps.worktree, sessionID)
       if (active?.sessionID === sessionID) {
         const refusal = workflowEngineRefusal(active, runtime.host.identity.engine)
         if (refusal) throw new Error(`otter: ${refusal}`)
@@ -86,7 +86,7 @@ export function createDelegateTool(deps: HookDeps): ToolDefinition {
       // A model that re-sends the same list after an interruption means "resume", not "start over" (live review E2a).
       const ledgerNow = readLedger(deps.worktree, sessionID)
       const open = openTasks(ledgerNow)
-      const workflowRefusal = taggedWorkflowRefusal(deps, runtime.host.identity.engine, open)
+      const workflowRefusal = taggedWorkflowRefusal(deps, runtime.host.identity.engine, sessionID, open)
       if (workflowRefusal) throw new Error(`otter: ${workflowRefusal}`)
       if (clearAbort(deps.worktree, sessionID, { keepUserStop: true })) deps.log("delegate: cleared stale abort marker", { sessionID })
       let resume = !!args.resume

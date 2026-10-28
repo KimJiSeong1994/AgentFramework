@@ -214,8 +214,8 @@ function readValue(path: string, source: StatusSource, maxBytes: number): { valu
   }
 }
 
-function workflowAt(worktree: string): { workflow: Workflow | null; bytesRead: number } {
-  const committed = readCommitted(worktree, { index: STATUS_LIMITS.workflow, snapshot: STATUS_LIMITS.workflow })
+function workflowAt(worktree: string, sessionID?: string): { workflow: Workflow | null; bytesRead: number } {
+  const committed = readCommitted(worktree, { index: STATUS_LIMITS.workflow, snapshot: STATUS_LIMITS.workflow }, sessionID)
   switch (committed.state) {
     case "none": return { workflow: null, bytesRead: 0 }
     // A terminal pre-v2 record is retained history, not a current workflow. A non-terminal one is unreadable here
@@ -317,7 +317,7 @@ function detailView(worktree: string, sessionID: string, ownerSessionID: string 
     }
   }
   const history: Array<Record<string, unknown>> = []
-  const archiveDir = join(flowDir(worktree), "archive")
+  const archiveDir = join(flowDir(worktree, sessionID), "archive")
   let archiveNames: string[] = []
   let archivesScanTruncated = false
   try {
@@ -383,7 +383,7 @@ export function statusJson(deps: FlowRuntime, sessionID?: string, options: Statu
       throw error
     }
   }
-  const wfRead = accumulate(() => workflowAt(deps.worktree))
+  const wfRead = accumulate(() => workflowAt(deps.worktree, sessionID))
   const wf = wfRead.workflow
   const resolvedSession = sessionID ?? wf?.sessionID
   const sessionSource = options.sessionSource ?? (sessionID ? "arg" : resolvedSession ? "workflow" : "none")
@@ -410,7 +410,7 @@ export function statusJson(deps: FlowRuntime, sessionID?: string, options: Statu
       const ownerRead = accumulate(() => statusLedger(deps.worktree, wf.sessionID))
       workflowLedger = ownerRead.ledger
     }
-    heartbeatAt = readHeartbeat(deps.worktree, wf)
+    heartbeatAt = readHeartbeat(deps.worktree, wf, wf.sessionID)
     const live = workflowOwnerLive(wf, {
       now, instance: options.liveness?.instance ?? INSTANCE_ID, pidAlive: options.liveness?.ownerPidAlive ?? pidAlive,
       epochReleased: options.liveness?.epochReleased ?? epochReleased(deps.worktree),
@@ -455,7 +455,7 @@ export function statusJson(deps: FlowRuntime, sessionID?: string, options: Statu
   }
   const queue = classifyQueue(queueInput)
   const eventsRead = wf ? accumulate(() => {
-    try { return readEventsTail(deps.worktree, { wfId: wf.id, limit: 20, maxBytes: STATUS_LIMITS.events, bound: committedEventBound(deps.worktree) }) }
+    try { return readEventsTail(deps.worktree, { wfId: wf.id, limit: 20, maxBytes: STATUS_LIMITS.events, bound: committedEventBound(deps.worktree, wf.sessionID) }, wf.sessionID) }
     catch (error) {
       if (nativeFsError(error) || unreadableSentinel(error)) throw new StatusReadError("events", "unreadable", errorBytesRead(error))
       throw error

@@ -93,7 +93,7 @@ async function session(options: Options) {
 
 const answers = ["first answer", "second answer"]
 const committed = () => {
-  const read = readCommitted(wt.worktree)
+  const read = readCommitted(wt.worktree, {}, "otter-fixture0")
   return read.state === "ok" ? read.wf : undefined
 }
 
@@ -144,7 +144,7 @@ describe("deep-interview then ralplan through the interactive session", () => {
     expect(s.output).toContain("Connected to ralplan")
     expect(s.output).toContain("Architect CLEAR/APPROVE + Critic OKAY · execution pending")
     // exactly one DI and one ralplan were created; nothing executed
-    const created = readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)
+    const created = readEvents(wt.worktree, undefined, "otter-fixture0").filter(event => event.type === "created").map(event => event.data?.kind)
     expect(created).toEqual(["deep-interview", "ralplan"])
     expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
     const timings = replaySession(wt.worktree, "otter-fixture0", { kind: "timing" }).records
@@ -158,25 +158,25 @@ describe("deep-interview then ralplan through the interactive session", () => {
   test("an idle Escape keeps the interview; only an explicit /cancel stops it", async () => {
     const kept = await session({ lines: ["/skill:deep-interview build the widget", "<esc>", "/quit"], choices: [0], controls: { "<esc>": "interrupt" } })
     expect(kept.exit.code).toBe(0)
-    expect(activeAnyWorkflow(wt.worktree)).toMatchObject({ kind: "deep-interview", phase: "planning" })
-    expect(readEvents(wt.worktree).some(event => event.type === "cancelled")).toBe(false)
+    expect(activeAnyWorkflow(wt.worktree, "otter-fixture0")).toMatchObject({ kind: "deep-interview", phase: "planning" })
+    expect(readEvents(wt.worktree, undefined, "otter-fixture0").some(event => event.type === "cancelled")).toBe(false)
 
     const stopped = await session({ lines: ["/cancel", "/quit"], choices: [] })
     expect(stopped.exit.code).toBe(0)
-    expect(readEvents(wt.worktree).some(event => event.type === "cancelled")).toBe(true)
+    expect(readEvents(wt.worktree, undefined, "otter-fixture0").some(event => event.type === "cancelled")).toBe(true)
   })
 
-  test("another session's workflow holds chat but not /model; the workflow is untouched", async () => {
+  test("another session can chat and switch models without touching the original workflow", async () => {
     await session({ lines: ["/skill:deep-interview build the widget", "/quit"], choices: [0] })
-    const owner = activeAnyWorkflow(wt.worktree)!
+    const owner = activeAnyWorkflow(wt.worktree, "otter-fixture0")!
     const observer = await session({ lines: ["hello", "/model local model-b", "/quit"], uuidBase: 100 })
     expect(observer.exit.code).toBe(0)
-    expect(observer.output).toContain("Read-only observer")
+    expect(observer.output).not.toContain("Read-only observer")
     expect(observer.output).not.toContain("Model selection is unavailable")
     expect(observer.output).not.toContain("Model switch refused")
     expect(observer.output).toContain("── local · model-b")
-    expect(observer.conversationTurns).toEqual([])
-    expect(activeAnyWorkflow(wt.worktree)).toMatchObject({ id: owner.id, sessionID: owner.sessionID, phase: "planning" })
+    expect(observer.conversationTurns).toEqual(["hello"])
+    expect(activeAnyWorkflow(wt.worktree, "otter-fixture0")).toMatchObject({ id: owner.id, sessionID: owner.sessionID, phase: "planning" })
   })
 
   test("/finish is wired: after one scored round above the threshold it warns, records the early exit and still runs closure and the restatement", async () => {
@@ -390,7 +390,8 @@ describe("deep-interview then ralplan through the interactive session", () => {
     await session({ lines: ["/skill:ralplan original objective", "/quit"], choices: [2] })
     const owner = committed()!
     const s = await session({ lines: ["/skill:ultragoal", "/quit"], uuidBase: 100 })
-    expect(s.output).toContain("workflow belongs to")
+    expect(s.output).not.toContain("workflow belongs to")
+    expect(readCommitted(wt.worktree, {}, "otter-fixture100").state).toBe("none")
     expect(committed()).toMatchObject({ id: owner.id, sessionID: owner.sessionID, kind: "ralplan" })
     expect(s.seen).toHaveLength(0)
   })
@@ -399,14 +400,14 @@ describe("deep-interview then ralplan through the interactive session", () => {
     const s = await session({ lines: ["/skill:ultragoal ship it", "", "/skill:ultragoal", "wrong approval", "/quit"] })
     expect(s.output).toContain("Unit approval refused")
     expect(committed()).toMatchObject({ kind: "ultragoal", stage: "unit_approval", phase: "pending_approval" })
-    expect(readEvents(wt.worktree).filter(event => event.type === "created")).toHaveLength(1)
+    expect(readEvents(wt.worktree, undefined, "otter-fixture0").filter(event => event.type === "created")).toHaveLength(1)
     expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
   })
 
   test("bare ultragoal cannot bypass an unfinished interview", async () => {
     const s = await session({ lines: ["/skill:deep-interview build it", "/skill:ultragoal", "/quit"], choices: [0] })
     expect(committed()).toMatchObject({ kind: "deep-interview", stage: "answer" })
-    expect(readEvents(wt.worktree).filter(event => event.type === "created")).toHaveLength(1)
+    expect(readEvents(wt.worktree, undefined, "otter-fixture0").filter(event => event.type === "created")).toHaveLength(1)
     expect(s.seen.some(item => item.promptId.startsWith("ug."))).toBe(false)
   })
 
@@ -441,7 +442,7 @@ describe("deep-interview then ralplan through the interactive session", () => {
       choices: [1],
     })
     expect(s.exit.code).toBe(0)
-    const created = readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)
+    const created = readEvents(wt.worktree, undefined, "otter-fixture0").filter(event => event.type === "created").map(event => event.data?.kind)
     expect(created).toEqual(["ralplan"])
     expect(s.output).toContain("Execution not started")
     expect(committed()).toMatchObject({ kind: "ralplan", stage: "pending_execution", phase: "pending_approval" })
@@ -458,7 +459,7 @@ describe("names, collisions and consent", () => {
     expect(s.exit.code).toBe(0)
     expect(s.seen.length).toBeGreaterThan(0)
     expect(s.seen.every(item => !item.text.includes("SENTINEL-PROJECT-SKILL-BYTES"))).toBe(true)
-    const created = readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)
+    const created = readEvents(wt.worktree, undefined, "otter-fixture0").filter(event => event.type === "created").map(event => event.data?.kind)
     expect(created).toEqual(["deep-interview", "ralplan"])
   })
 
@@ -466,7 +467,7 @@ describe("names, collisions and consent", () => {
     const s = await session({ lines: ["/skill:ultragoal ship it", "", "/quit"] })
     expect(s.output).toContain("Unit not approved")
     expect(committed()).toMatchObject({ kind: "ultragoal", stage: "unit_approval", phase: "pending_approval" })
-    const created = readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)
+    const created = readEvents(wt.worktree, undefined, "otter-fixture0").filter(event => event.type === "created").map(event => event.data?.kind)
     expect(created).toEqual(["ultragoal"])
     expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
     expect(s.seen.map(item => item.promptId)).toEqual(["ug.decompose", "ug.unit_plan", "ug.unit_review"])
@@ -476,7 +477,7 @@ describe("names, collisions and consent", () => {
     const s = await session({ lines: ["/skill:autoresearch find out", "", "/quit"] })
     expect(s.output).toContain("Experiment not approved")
     expect(committed()).toMatchObject({ kind: "autoresearch", stage: "experiment_approval", phase: "pending_approval" })
-    const created = readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)
+    const created = readEvents(wt.worktree, undefined, "otter-fixture0").filter(event => event.type === "created").map(event => event.data?.kind)
     expect(created).toEqual(["autoresearch"])
     expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
     expect(s.seen.map(item => item.promptId)).toEqual(["ar.intake", "ar.hypothesis", "ar.evidence", "ar.experiment"])
@@ -517,7 +518,7 @@ describe("intent offers start the same protected workflows", () => {
     expect(s.exit.code).toBe(0)
     expect(s.chooses[0]!.values).toEqual(["Continue in chat", "Start deep-interview", "Cancel"])
     expect(s.conversationTurns).toEqual([])
-    const created = readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)
+    const created = readEvents(wt.worktree, undefined, "otter-fixture0").filter(event => event.type === "created").map(event => event.data?.kind)
     expect(created).toEqual(["deep-interview", "ralplan"])
     expect(s.chooses.some(item => item.title.includes("not consent to execute"))).toBe(true)
     expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
@@ -528,7 +529,7 @@ describe("intent offers start the same protected workflows", () => {
     const s = await session({ lines: ["Refactor the auth module", "/quit"], choices: [1, 1] })
     expect(s.chooses[0]!.values).toEqual(["Continue in chat", "Start ralplan", "Start deep-interview first", "Cancel"])
     expect(s.conversationTurns).toEqual([])
-    const created = readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)
+    const created = readEvents(wt.worktree, undefined, "otter-fixture0").filter(event => event.type === "created").map(event => event.data?.kind)
     expect(created).toEqual(["ralplan"])
     expect(readLedger(wt.worktree, "otter-fixture0").tasks).toHaveLength(0)
   })
@@ -599,7 +600,7 @@ describe("model change during a workflow (same session, same workflow)", () => {
     // same session ID throughout; metadata carries the new model; only the first session was ever created
     expect(readSessionMetadata(wt.worktree, "otter-fixture0")).toMatchObject({ engine: "local", model: "model-b" })
     expect(readSessionMetadata(wt.worktree, "otter-fixture1")).toBeNull()
-    const wf = readEvents(wt.worktree).filter(event => event.type === "created")
+    const wf = readEvents(wt.worktree, undefined, "otter-fixture0").filter(event => event.type === "created")
     expect(wf.map(event => event.data?.kind)).toEqual(["deep-interview", "ralplan"])
     // steps before the switch ran on model-a, the steps after it on model-b (distinct policy IDs)
     expect(s.fixtures[0]!.seen.length).toBeGreaterThan(0)
@@ -625,7 +626,7 @@ describe("model change during a workflow (same session, same workflow)", () => {
 
   test("an engine change during a workflow is refused with the workflow named", async () => {
     const s = await rebinding(["/skill:deep-interview build the widget", "/model codex gpt-5-codex", "/quit"], [0])
-    const wf = activeAnyWorkflow(wt.worktree)!
+    const wf = activeAnyWorkflow(wt.worktree, "otter-fixture0")!
     expect(s.output).toContain(`Model switch refused: the active workflow ${wf.id} runs on local; pick another local model, or finish/cancel the workflow to switch engines.`)
     expect(s.fixtures).toHaveLength(1)
     expect(readSessionMetadata(wt.worktree, "otter-fixture0")).toMatchObject({ engine: "local", model: "model-a" })

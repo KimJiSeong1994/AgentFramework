@@ -421,7 +421,7 @@ async function resumeCliSession(runtime: ExecutionRuntime, sessionID: string, st
     throw new Error("session attachment is held; explicit owner Resume is required")
   }
   if (revision !== undefined) {
-    const current = readWorkflow(runtime.worktree)
+    const current = readWorkflow(runtime.worktree, sessionID)
     if (!current || current.sessionID !== sessionID || current.lastSeq !== revision) {
       throw new Error("workflow revision changed; explicit resume refused")
     }
@@ -436,7 +436,7 @@ function confirmationWorkflow(
   expectedID?: string,
   expectedSha?: string,
 ): Workflow | null {
-  const persisted = readWorkflow(runtime.worktree)
+  const persisted = readWorkflow(runtime.worktree, sessionID)
   if (!persisted || persisted.sessionID !== sessionID) {
     if (expectedID !== undefined) throw new Error("no workflow owned by this session")
     return null
@@ -470,7 +470,7 @@ function planBinding(sessionID: string, wf: Pick<Workflow, "id" | "lastSeq">, pl
 }
 
 function validateCliOwnerIdentity(runtime: ExecutionRuntime, sessionID: string, model: string): void {
-  const workflow = readWorkflow(runtime.worktree)
+  const workflow = readWorkflow(runtime.worktree, sessionID)
   if (!workflow || workflow.sessionID !== sessionID) throw new Error("no workflow owned by this session")
   const refusal = workflowEngineRefusal(workflow, runtime.host.identity.engine)
   if (refusal) throw new Error(refusal)
@@ -533,7 +533,7 @@ async function runCommonCommand(args: CliArgs, runtime: ExecutionRuntime): Promi
     validateCliOwnerIdentity(runtime, sessionID, args.model!)
     assertPinnedPolicyEvidence(runtime, sessionID)
   }
-  else if (readWorkflow(runtime.worktree)?.sessionID === sessionID) {
+  else if (readWorkflow(runtime.worktree, sessionID)?.sessionID === sessionID) {
     throw new Error("an existing workflow must be explicitly resumed or approved before a new plan is submitted")
   }
 
@@ -674,7 +674,7 @@ export async function runCli(
     const preflight = await runtime.host.preflight(runtime.host.identity.profile)
     assertHostAdmission(preflight)
     return withCliSession(runtime, args, args.session!, async store => {
-      const existing = readWorkflow(root)
+      const existing = readWorkflow(root, args.session)
       if (store.metadata.held && existing?.sessionID === args.session!) {
         const confirmed = confirmationWorkflow(controller, runtime, args.session!, existing.id)
         await resumeCliSession(runtime, args.session!, store, confirmed?.lastSeq, client)
@@ -709,7 +709,7 @@ export async function runCli(
     controller.validateImportedPlan(parsed, args.session)
     const preflight = await runtime.host.preflight(runtime.host.identity.profile)
     assertHostAdmission(preflight)
-    const existing = readWorkflow(root)
+    const existing = readWorkflow(root, args.session)
     let sessionID = args.session ?? (existing?.phase === "planning" ? existing.sessionID : undefined)
     if (!sessionID) {
       const created = await client.session.create({ body: { title: "otter foreground imported plan" }, query: { directory: root } })

@@ -95,7 +95,7 @@ function statusInputSnapshot() {
 }
 
 describe("/status", () => {
-  test("JSON status exposes original recovery identifiers without taking over the workflow", () => {
+  test("JSON status keeps recovery identifiers within the owning session", () => {
     const planSha = "a".repeat(64)
     const wf = putWorkflow({
       engine: "codex",
@@ -107,7 +107,8 @@ describe("/status", () => {
     const runs = createExecutionRunStore(wt.worktree)
     const runsBefore = runs.status()
     const status = statusJson(makeDeps(client, wt.worktree), OTHER, { queueRunning: false })
-    expect(status.workflow).toMatchObject({ id: wf.id, sessionID: S, engine: "codex", planSha })
+    expect(status.workflow).toBeNull()
+    expect(statusJson(makeDeps(client, wt.worktree), S).workflow).toMatchObject({ id: wf.id, sessionID: S, engine: "codex", planSha })
     expect(status.session.id).toBe(OTHER)
     expect(readFileSync(workflowPath(wt.worktree))).toEqual(before)
     expect(runs.status()).toEqual(runsBefore)
@@ -185,7 +186,7 @@ describe("/status", () => {
     expect(text).toContain(`workflow: ${wf.id} planning — this session`)
   })
 
-  test("foreign session, dead owner: renders 'owner dead' and mutates nothing (workflow.json + events byte-identical)", async () => {
+  test("foreign session, dead owner: reports no workflow and preserves the owner workflow and events", async () => {
     putWorkflow({ owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 } })
     const wfBefore = readFileSync(workflowPath(wt.worktree))
     const evBefore = (() => {
@@ -196,8 +197,8 @@ describe("/status", () => {
       }
     })()
     const text = await runStatus(makeDeps(client, wt.worktree), OTHER)
-    expect(text).toContain("owner dead")
-    expect(text).toContain(`session ${S}`)
+    expect(text).toContain("workflow: none")
+    expect(text).not.toContain(`session ${S}`)
     expect(readFileSync(workflowPath(wt.worktree))).toEqual(wfBefore)
     const evAfter = (() => {
       try {

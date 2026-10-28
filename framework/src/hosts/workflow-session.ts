@@ -108,7 +108,7 @@ export function workflowStatusLine(worktree: string, wf: WorkflowEnvelope): stri
  */
 export function requestWorkflowStop(runtime: ExecutionRuntime, worktree: string, sessionID: string, kind: StopKind): { ok: boolean; text: string } {
   const noun = kind === "pause" ? "Pause" : "Cancellation"
-  const wf = activeAnyWorkflow(worktree)
+  const wf = activeAnyWorkflow(worktree, sessionID)
   if (!wf || wf.sessionID !== sessionID) return { ok: false, text: `${noun} refused: no live workflow in this session.` }
   const requested = requestStop(runtime, sessionID, kind, `${kind} requested`, { workflowID: wf.id })
   if (!requested.result.ok) return { ok: false, text: `${noun} refused: ${boundedTerminalDiagnostic(requested.result.text)}` }
@@ -118,7 +118,7 @@ export function requestWorkflowStop(runtime: ExecutionRuntime, worktree: string,
   }
   settle()
   void requested.quiesce.then(settle)
-  const latest = readAnyWorkflowChecked(worktree).wf
+  const latest = readAnyWorkflowChecked(worktree, sessionID).wf
   if (latest && latest.id === wf.id && TERMINAL.has(latest.phase)) return { ok: true, text: latest.phase === "cancelled" ? "cancelled" : latest.phase }
   const display = latest ? stopDisplay(latest) : "none"
   return { ok: true, text: display === "paused" ? "paused" : kind === "pause" ? STOP_LABEL.pausing : STOP_LABEL.cancelling }
@@ -164,7 +164,7 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
 
   function syncStatus(): void {
     let wf: WorkflowEnvelope | null = null
-    try { wf = activeAnyWorkflow(worktree) } catch { wf = null }
+    try { wf = activeAnyWorkflow(worktree, ctx.sessionID()) } catch { wf = null }
     show(wf)
   }
 
@@ -292,7 +292,7 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
 
   function committedKind<K extends WorkflowEnvelope["kind"]>(id: string, kind: K): Extract<WorkflowEnvelope, { kind: K }> | undefined {
     let read: ReturnType<typeof readAnyWorkflowChecked>
-    try { read = readAnyWorkflowChecked(worktree) } catch { return undefined }
+    try { read = readAnyWorkflowChecked(worktree, ctx.sessionID()) } catch { return undefined }
     return read.wf && read.wf.id === id && read.wf.kind === kind ? read.wf as Extract<WorkflowEnvelope, { kind: K }> : undefined
   }
 
@@ -384,7 +384,7 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
       const confirmed = confirmExecute(ctx.runtime(), ctx.sessionID(), wf.id, wf.lastSeq, typed)
       write(confirmed.ok ? "Connected to ultragoal: nothing runs until each unit is reviewed and you approve it with its own typed receipt." : `Execution not started: ${confirmed.text}`)
       if (confirmed.ok) {
-        const successor = activeAnyWorkflow(worktree)
+        const successor = activeAnyWorkflow(worktree, ctx.sessionID())
         if (successor?.kind === "ultragoal" && successor.sessionID === wf.sessionID
           && successor.lineage?.predecessor.kind === "ralplan" && successor.lineage.predecessor.id === wf.id) return successor.id
       }
@@ -564,7 +564,7 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
     ctx.persist("user", { text: `/skill:${descriptor.name}${request ? ` ${request}` : ""}` })
     const runtime = ctx.runtime()
     if (kind === "ultragoal") {
-      const active = activeAnyWorkflow(worktree)
+      const active = activeAnyWorkflow(worktree, ctx.sessionID())
       if (active) {
         if (active.sessionID !== ctx.sessionID()) {
           write(`ultragoal was not started: workflow belongs to ${active.sessionID}; use /resume ${active.sessionID}.`)
@@ -601,7 +601,7 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
   }
 
   async function finish(): Promise<WorkflowOutcome> {
-    const wf = activeAnyWorkflow(worktree)
+    const wf = activeAnyWorkflow(worktree, ctx.sessionID())
     if (!wf || wf.kind !== "deep-interview" || wf.sessionID !== ctx.sessionID() || wf.stage !== "answer" || wf.phase !== "planning" || wf.stopIntent || effectiveHold(worktree, ctx.sessionID())) {
       write("/finish applies only while an interview awaits an answer.")
       return { quit }
@@ -610,7 +610,7 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
   }
 
   async function answer(text: string): Promise<WorkflowOutcome | undefined> {
-    const wf = activeAnyWorkflow(worktree)
+    const wf = activeAnyWorkflow(worktree, ctx.sessionID())
     if (!wf || wf.kind !== "deep-interview" || wf.sessionID !== ctx.sessionID() || wf.stage !== "answer" || wf.phase !== "planning" || wf.stopIntent || effectiveHold(worktree, ctx.sessionID())) return undefined
     ctx.persist("user", { text })
     return drive(wf, { kind: "answer", text })
@@ -630,7 +630,7 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
         })
         if (outcome.kind === "refused") { write(`Resume refused (${outcome.precondition}): ${outcome.reason}`); return { quit } }
         if (outcome.kind === "kept") { write("Kept held; no work was started."); return { quit } }
-        const resumed = activeAnyWorkflow(worktree)
+        const resumed = activeAnyWorkflow(worktree, ctx.sessionID())
         write(`Resumed ${outcome.wf.kind} ${outcome.wf.id}: ${outcome.wf.phase}.`)
         return resumed ? drive(resumed) : { quit }
       } catch (error) { write(`Resume refused or incomplete: ${boundedTerminalDiagnostic(String(error))}`); return { quit } }
@@ -640,7 +640,7 @@ export function createWorkflowHost(ctx: WorkflowHostContext): WorkflowHost {
       if (!await keepOrResume("Resume this held planning workflow after recovery checks?")) return { quit }
       try { await ctx.resumeHeld(wf.lastSeq) }
       catch (error) { write(`Resume refused or incomplete: ${boundedTerminalDiagnostic(String(error))}`); return { quit } }
-      const fresh = activeAnyWorkflow(worktree)
+      const fresh = activeAnyWorkflow(worktree, ctx.sessionID())
       return fresh ? drive(fresh) : { quit }
     }
     return drive(wf)

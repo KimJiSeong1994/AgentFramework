@@ -114,7 +114,7 @@ function appendWorkflowEvent(
         current.engine !== expected.engine || current.phase !== expected.phase || current.lastSeq !== expected.lastSeq) return false
     appendEvents(tx, [{ wf: current.id, type, actor: "model_tool", data }])
     return true
-  })
+  }, expected.sessionID)
 }
 
 export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.execute.before"]> {
@@ -176,7 +176,7 @@ export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.ex
     // The read-only planning allowlist remains available so a failed chat-start hook cannot fail open. This is a
     // tool policy boundary, not OS containment; authenticated worker/reviewer sessions were handled above.
     if (deps.interactive) {
-      const wf = activeWorkflow(deps.worktree)
+      const wf = activeWorkflow(deps.worktree, input.sessionID)
       const runtime = wf ? getOpenCodeRuntime(deps) : undefined
       const ownRunnable = !!wf && !workflowEngineRefusal(wf, runtime!.host.identity.engine) && wf.sessionID === input.sessionID && wf.phase !== "stuck"
         && (BOUNDARY_PHASES.has(wf.phase) || wf.phase === "executing")
@@ -197,7 +197,7 @@ export function createToolBeforeHook(deps: HookDeps): NonNullable<Hooks["tool.ex
     }
 
     if (deps.interactive || (boundaryOn && flowOn(deps.config))) {
-      const wf = activeWorkflow(deps.worktree)
+      const wf = activeWorkflow(deps.worktree, input.sessionID)
       if (wf && wf.sessionID === input.sessionID) {
         const engineRefusal = workflowEngineRefusal(wf, getOpenCodeRuntime(deps).host.identity.engine)
         if (engineRefusal && input.tool === "delegate") {

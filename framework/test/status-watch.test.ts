@@ -27,7 +27,7 @@ function newStatusWorkflow(sessionID: string, owner: Workflow["owner"], entry: W
 }
 
 function writeStatusWorkflow(worktree: string, workflow: Workflow, now?: number) {
-  return withFlowTransaction(worktree, tx => writeWorkflow(tx, workflow, now))
+  return withFlowTransaction(worktree, tx => writeWorkflow(tx, workflow, now), workflow.sessionID)
 }
 
 describe("status watch tick", () => {
@@ -81,7 +81,7 @@ describe("status watch tick", () => {
     const liveness = { instance: "watcher", ownerPidAlive: () => true, epochReleased: () => false }
 
     expect(watchTick(state, runtime, 1000, liveness).frame).toMatchObject({ type: "snapshot", reason: "initial", status: { workflow: { ownerLive: true } } })
-    writeFileSync(workflowPath(wt.worktree), "{ invalid json")
+    writeFileSync(workflowPath(wt.worktree, SESSION), "{ invalid json")
     expect(watchTick(state, runtime, 2000, liveness).frame).toMatchObject({ type: "error", error: { source: "workflow", code: "invalid_state" } })
 
     const crossedThreshold = watchTick(state, runtime, 91_001, liveness)
@@ -89,9 +89,9 @@ describe("status watch tick", () => {
     expect(crossedThreshold.bytesRead).toBe(0)
     expect(state.status?.workflow?.ownerLive).toBe(true)
 
-    publishWorkflow(wt.worktree, workflow, 91_002)
+    publishWorkflow(wt.worktree, workflow, 91_002, SESSION)
     // The sidecar still holds the original beat: staleness is evaluated from it, not from the republished snapshot.
-    withFlowTransaction(wt.worktree, tx => writeHeartbeat(tx, workflow, 1000))
+    withFlowTransaction(wt.worktree, tx => writeHeartbeat(tx, workflow, 1000), SESSION)
     expect(watchTick(state, runtime, 91_003, liveness).frame).toMatchObject({
       type: "snapshot", reason: "changed", status: { workflow: { sessionID: SESSION, ownerLive: false } },
     })
@@ -105,11 +105,11 @@ describe("status watch tick", () => {
     writeStatusWorkflow(wt.worktree, workflow, 1000)
     expect(watchTick(state, runtime, 1000).frame?.reason).toBe("initial")
 
-    writeFileSync(workflowPath(wt.worktree), "{ invalid json")
+    writeFileSync(workflowPath(wt.worktree, SESSION), "{ invalid json")
     expect(watchTick(state, runtime, 1001).frame).toMatchObject({ type: "error", error: { source: "workflow", code: "invalid_state" } })
     for (let tick = 3; tick < 10; tick++) expect(watchTick(state, runtime, 1000 + tick).frame).toBeUndefined()
 
-    publishWorkflow(wt.worktree, workflow, 1010)
+    publishWorkflow(wt.worktree, workflow, 1010, SESSION)
     expect(watchTick(state, runtime, 1010).frame).toMatchObject({ type: "snapshot", reason: "changed" })
   })
 
@@ -150,9 +150,9 @@ describe("status watch tick", () => {
     const wf = writeStatusWorkflow(wt.worktree, newStatusWorkflow(SESSION, { ...currentOwner() }, "command", "request", 1000), 1000)
     const state = createStatusWatchState({ sessionID: SESSION })
     expect(watchTick(state, runtime, 1000).frame?.reason).toBe("initial")
-    const indexBefore = readFileSync(workflowPath(wt.worktree))
-    withFlowTransaction(wt.worktree, tx => writeHeartbeat(tx, wf, 1001))
-    expect(readFileSync(workflowPath(wt.worktree)).equals(indexBefore)).toBe(true)
+    const indexBefore = readFileSync(workflowPath(wt.worktree, SESSION))
+    withFlowTransaction(wt.worktree, tx => writeHeartbeat(tx, wf, 1001), SESSION)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION)).equals(indexBefore)).toBe(true)
     const tick = watchTick(state, runtime, 1001)
     expect(tick.frame).toBeUndefined()
     expect(tick.bytesRead).toBeGreaterThan(0)
@@ -172,8 +172,8 @@ describe("status watch tick", () => {
   test("emits an error once per source/code and recovery as changed", () => {
     const runtime = setup()
     const state = createStatusWatchState({ sessionID: SESSION })
-    mkdirSync(join(stateRoot(wt.worktree), "workflow"), { recursive: true })
-    writeFileSync(workflowPath(wt.worktree), "{ invalid json")
+    mkdirSync(flowDir(wt.worktree, SESSION), { recursive: true })
+    writeFileSync(workflowPath(wt.worktree, SESSION), "{ invalid json")
     const first = watchTick(state, runtime, 1000)
     expect(first.frame).toMatchObject({ type: "error", reason: "initial", error: { source: "workflow", code: "invalid_state" } })
     expect(first.bytesRead).toBeGreaterThan(0)
@@ -185,7 +185,7 @@ describe("status watch tick", () => {
     const forced = watchTick(state, runtime, 1010)
     expect(forced.frame).toBeUndefined()
     expect(forced.bytesRead).toBeGreaterThan(0)
-    publishWorkflow(wt.worktree, newStatusWorkflow(SESSION, currentOwner(), "command", "request", 1002), 1002)
+    publishWorkflow(wt.worktree, newStatusWorkflow(SESSION, currentOwner(), "command", "request", 1002), 1002, SESSION)
     const recovered = watchTick(state, runtime, 1003)
     expect(recovered.frame).toMatchObject({ type: "snapshot", reason: "changed", status: { workflow: { sessionID: SESSION } } })
     expect(state.errors.size).toBe(0)
@@ -194,8 +194,8 @@ describe("status watch tick", () => {
   test("turns directory-enumeration failures into bounded workflow errors and recovers", () => {
     const runtime = setup()
     const state = createStatusWatchState({ sessionID: SESSION, detail: true })
-    const archiveDir = join(flowDir(wt.worktree), "archive")
-    mkdirSync(flowDir(wt.worktree), { recursive: true })
+    const archiveDir = join(flowDir(wt.worktree, SESSION), "archive")
+    mkdirSync(flowDir(wt.worktree, SESSION), { recursive: true })
     writeFileSync(archiveDir, "not a directory")
 
     const failed = watchTick(state, runtime, 1000)
@@ -224,7 +224,7 @@ describe("status watch tick", () => {
   test("rethrows unexpected stat errors", () => {
     const runtime = setup()
     const state = createStatusWatchState({ sessionID: SESSION })
-    const path = workflowPath(wt.worktree)
+    const path = workflowPath(wt.worktree, SESSION)
     const failure = new Error("stat wrapper bug")
     const original = fs.statSync
     const stat = spyOn(fs, "statSync").mockImplementation(((target: fs.PathLike) => {
@@ -242,8 +242,8 @@ describe("status watch tick", () => {
   test("turns watched-path stat failures into source-tagged errors and recovers", () => {
     const runtime = setup()
     const state = createStatusWatchState({ sessionID: SESSION })
-    const workflowDir = flowDir(wt.worktree)
-    mkdirSync(stateRoot(wt.worktree), { recursive: true })
+    const workflowDir = flowDir(wt.worktree, SESSION)
+    mkdirSync(join(stateRoot(wt.worktree), "sessions", SESSION), { recursive: true })
     writeFileSync(workflowDir, "not a directory")
 
     const failed = watchTick(state, runtime, 1000)
@@ -379,10 +379,10 @@ describe("status watch tick", () => {
     }
     try {
       expect(await nextFrame()).toMatchObject({ type: "snapshot", reason: "initial" })
-      mkdirSync(join(stateRoot(wt.worktree), "workflow"), { recursive: true })
-      writeFileSync(workflowPath(wt.worktree), "{ invalid json")
+      mkdirSync(flowDir(wt.worktree, SESSION), { recursive: true })
+      writeFileSync(workflowPath(wt.worktree, SESSION), "{ invalid json")
       expect(await nextFrame()).toMatchObject({ type: "error", error: { source: "workflow", code: "invalid_state" }, meta: { bytesRead: expect.any(Number) } })
-      publishWorkflow(wt.worktree, newStatusWorkflow(SESSION, currentOwner(), "command", "repaired"))
+      publishWorkflow(wt.worktree, newStatusWorkflow(SESSION, currentOwner(), "command", "repaired"), Date.now(), SESSION)
       expect(await nextFrame()).toMatchObject({ type: "snapshot", reason: "changed", status: { workflow: { sessionID: SESSION } } })
 
       child.kill("SIGTERM")

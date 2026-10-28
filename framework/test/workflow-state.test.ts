@@ -195,7 +195,7 @@ describe("phases", () => {
     }
   })
 
-  test("a paused workflow occupies the slot: activeWorkflow returns it and a start for the same or another session refuses", () => {
+  test("a paused workflow occupies only its own session slot", () => {
     const deps = makeDeps(fakeClient(), wt.worktree)
     const owner = admitFixtureSession(deps, "ses_state")
     stores.push(owner)
@@ -203,15 +203,13 @@ describe("phases", () => {
     stores.push(other)
     const started = startWorkflow(deps, "ses_state", "command", "first", "user_command", "opencode")
     if (!started.ok) throw new Error(started.text)
-    const paused = rewriteCommitted(wt.worktree, { phase: "paused", stage: REGISTRY.plan.stageOf("paused", started.wf.stage) })
-    expect(activeWorkflow(wt.worktree)).toMatchObject({ id: paused.id, phase: "paused" })
-    const before = readFileSync(workflowPath(wt.worktree))
-    for (const sid of ["ses_state", "ses_other"]) {
-      const refused = startWorkflow(deps, sid, "command", "second", "user_command", "opencode")
-      expect(refused.ok).toBe(false)
-    }
-    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
-    expect(activeWorkflow(wt.worktree)?.id).toBe(started.wf.id)
+    const paused = rewriteCommitted(wt.worktree, { phase: "paused", stage: REGISTRY.plan.stageOf("paused", started.wf.stage) }, "ses_state")
+    expect(activeWorkflow(wt.worktree, "ses_state")).toMatchObject({ id: paused.id, phase: "paused" })
+    const before = readFileSync(workflowPath(wt.worktree, "ses_state"))
+    expect(startWorkflow(deps, "ses_state", "command", "second", "user_command", "opencode").ok).toBe(false)
+    expect(startWorkflow(deps, "ses_other", "command", "second", "user_command", "opencode").ok).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, "ses_state")).equals(before)).toBe(true)
+    expect(activeWorkflow(wt.worktree, "ses_state")?.id).toBe(started.wf.id)
   })
 })
 

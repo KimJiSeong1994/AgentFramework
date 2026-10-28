@@ -312,7 +312,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
     if (!releaseActivity) return Promise.resolve({ taskIds: [], done: 0, failed: 0, cancelled: 0, aborted: false, skipped: "execution_busy" })
     let workflowID: string | undefined
     try {
-      const workflow = readAnyWorkflowChecked(deps.worktree).wf
+      const workflow = readAnyWorkflowChecked(deps.worktree, sessionID).wf
       if (workflow?.sessionID === sessionID) workflowID = workflow.id
     } catch (error) {
       deps.log("workflow cancellation watch unavailable", { sessionID, error: String(error) })
@@ -415,7 +415,7 @@ export function createQueue(deps: ExecutionRuntime): Queue {
   function observeWorkflowCancellation(sessionID: string, entry: Active): void {
     if (!entry.workflowID || entry.workflowCancellationObserved || entry.aborted) return
     let current: ReturnType<typeof readAnyWorkflowChecked>["wf"]
-    try { current = readAnyWorkflowChecked(deps.worktree).wf }
+    try { current = readAnyWorkflowChecked(deps.worktree, sessionID).wf }
     catch (error) {
       deps.log("workflow cancellation poll failed", { sessionID, workflowID: entry.workflowID, error: String(error) })
       return

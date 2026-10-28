@@ -38,7 +38,7 @@ export function commitRalplan(worktree: string, expected: RalplanWorkflow, build
     } catch (error) {
       return { ok: false, text: (error as Error).message }
     }
-  })
+  }, expected.sessionID)
 }
 
 /** Verify the DI spec a ralplan is seeded from: recorded with a hash and still hashing to it on disk. */

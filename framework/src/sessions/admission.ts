@@ -61,8 +61,8 @@ function admitValidatedStore(runtime: ExecutionRuntime, sid: string, store: Sess
     }
     throw new Error("resumed session could not be admitted")
   }
-  const checked = readWorkflowChecked(runtime.worktree)
-  if (!checked.corrupt && checked.wf?.sessionID === sid) ensureHeartbeat(runtime, runtime.host.identity.engine, checked.wf.kind === "plan" ? checked.wf : undefined)
+  const checked = readWorkflowChecked(runtime.worktree, sid)
+  if (!checked.corrupt && checked.wf?.sessionID === sid) ensureHeartbeat(runtime, runtime.host.identity.engine, checked.wf.kind === "plan" ? checked.wf : undefined, undefined, sid)
   return store
 }
 
@@ -105,7 +105,7 @@ function readJsonFile(path: string): { exists: false } | { exists: true; value: 
 }
 
 function holdMarker(worktree: string, sid: string, epoch: string): HoldMarker | undefined {
-  const checked = readWorkflowChecked(worktree)
+  const checked = readWorkflowChecked(worktree, sid)
   if (checked.corrupt) throw new Error("workflow state is corrupt; admission remains held")
   const workflow = checked.wf?.sessionID === sid ? checked.wf : null
   return {
@@ -128,7 +128,7 @@ function writeHold(worktree: string, sid: string, store: SessionStore, reason: s
 
 /** Snapshot authority, not transcript facts, across asynchronous host identity/quiescence checks. */
 export function admissionFence(worktree: string, sid: string): string {
-  const workflow = readWorkflowChecked(worktree)
+  const workflow = readWorkflowChecked(worktree, sid)
   if (workflow.corrupt) throw new Error("workflow state is corrupt; admission remains held")
   return JSON.stringify([
     readSessionMetadata(worktree, sid), workflow.wf,
@@ -259,7 +259,7 @@ function heldRebindReason(worktree: string, sid: string, epoch: string): "user_s
 }
 
 function validWorkflowBinding(worktree: string, sid: string, engine: string, epoch: string): boolean {
-  const checked = readWorkflowChecked(worktree)
+  const checked = readWorkflowChecked(worktree, sid)
   if (checked.corrupt) return false
   const workflow = checked.wf
   if (!workflow || workflow.sessionID !== sid) return true
@@ -343,7 +343,7 @@ export function isAdmissionCurrent(worktree: string, sid: string, expectedEpoch:
 function rebindHeldWorkflow(runtime: ExecutionRuntime, store: SessionStore, sid: string): void {
   const holdReason = heldRebindReason(runtime.worktree, sid, store.epoch)
   if (!holdReason) return
-  const checked = readWorkflowChecked(runtime.worktree)
+  const checked = readWorkflowChecked(runtime.worktree, sid)
   if (checked.corrupt) {
     runtime.log("held workflow reattach refused", { sessionID: sid, reason: "workflow state is corrupt" })
     return
@@ -376,7 +376,7 @@ function rebindHeldWorkflow(runtime: ExecutionRuntime, store: SessionStore, sid:
       store.assertOwner()
       holdAdmission(runtime.worktree, sid, holdReason)
       return true
-    })
+    }, sid)
     if (!refreshed) runtime.log("held workflow reattach marker refresh refused", { sessionID: sid, workflowID: workflow.id })
   } catch (error) {
     runtime.log("held workflow reattach marker refresh failed", { sessionID: sid, workflowID: workflow.id, error: (error as Error)?.message ?? String(error) })
@@ -412,7 +412,7 @@ export function attachAdmission(
   }
 
   const priorState = existsSync(sessionDir(runtime.worktree, sid))
-  const workflowState = readWorkflowChecked(runtime.worktree)
+  const workflowState = readWorkflowChecked(runtime.worktree, sid)
   if (workflowState.corrupt) throw new Error("workflow state is corrupt; new-session admission refused")
   const priorWorkflow = workflowState.wf?.sessionID === sid
   const priorMetadata = readSessionMetadata(runtime.worktree, sid)
@@ -478,7 +478,7 @@ export function holdOwnedAdmission(worktree: string, sid: string, reason: string
       const held = marker.exists && "value" in marker && marker.value && typeof marker.value === "object" &&
         (marker.value as HoldMarker).sid === sid && (marker.value as HoldMarker).epoch === store.epoch &&
         (marker.value as HoldMarker).held === true && store.metadata.held && readSessionMetadata(worktree, sid)?.held === true
-      const checked = readWorkflowChecked(worktree)
+      const checked = readWorkflowChecked(worktree, sid)
       const workflow = checked.wf?.sessionID === sid ? checked.wf : null
       if (!held || checked.corrupt || workflow &&
           (workflow.owner.instance !== store.epoch || workflow.owner.pid !== process.pid || workflow.engine !== store.metadata.engine)) {
@@ -505,7 +505,7 @@ export function holdAdmission(worktree: string, sid: string, reason: string): vo
   const store = getOwnedSession(worktree, sid)
   if (!store) {
     if (readJsonFile(endRequestedPath(worktree, sid)).exists || readJsonFile(endedPath(worktree, sid)).exists) return
-    const checked = readWorkflowChecked(worktree)
+    const checked = readWorkflowChecked(worktree, sid)
     if (checked.corrupt) throw new Error("workflow state is corrupt; admission remains held")
     const workflow = checked.wf?.sessionID === sid ? checked.wf : null
     const epoch = "unowned-request"
@@ -620,7 +620,7 @@ export async function detachAdmission(
       assertAdmissionQuiescent(runtime, sid)
       if (getOwnedSession(runtime.worktree, sid)?.epoch !== expectedEpoch) return false
       owned.assertOwner()
-      if (workflow?.sessionID === sid) stopHeartbeat()
+      if (workflow?.sessionID === sid) stopHeartbeat(runtime.worktree, sid)
       owned.release({
         workflowQuiescent: true,
         evidence: `held session detached after quiescence: ${reason}`,
@@ -629,7 +629,7 @@ export async function detachAdmission(
       })
       tokens.delete(key(runtime.worktree, sid))
       return true
-    })
+    }, sid)
     return detached
   } catch (error) {
     runtime.log("session detach remains held", { sessionID: sid, epoch: expectedEpoch, error: (error as Error)?.message ?? String(error) })
@@ -667,7 +667,7 @@ export function rebindAdmissionModel(
     owned.assertOwner()
     const changed = owned.rebindModel({ engine: next.engine, model: next.model, ...(next.routes ? { routes: next.routes } : {}) })
     return { ...changed, ...(workflow ? { workflowID: workflow.id } : {}) }
-  })
+  }, sid)
 }
 
 /** Explicit Resume clears admission only after a held attachment is already bound to this workflow epoch. */
@@ -703,7 +703,7 @@ export function resumeAdmission(
     throw new Error("exact user_stop marker is missing")
   }
 
-  const before = readWorkflowChecked(runtime.worktree)
+  const before = readWorkflowChecked(runtime.worktree, sid)
   if (before.corrupt) throw new Error("workflow state is corrupt")
   const workflow = before.wf
   const ownedWorkflow = workflow?.sessionID === sid ? workflow : null
@@ -794,7 +794,7 @@ export function resumeAdmission(
       if (!cleared) throw new Error("could not persist resume binding")
       durableWriteJson(markerPath(runtime.worktree, sid), { ...cleared, held: false, reason: "explicit-resume" })
       return current?.lastSeq
-    })
+    }, sid)
   } catch (error) {
     tokens.delete(key(runtime.worktree, sid))
     if (admissionMutationStarted) {
@@ -844,7 +844,7 @@ export async function endAdmission(runtime: ExecutionRuntime, sid: string, expec
         ...(workflow?.sessionID === sid ? { workflowID: workflow.id, workflowRevision: workflow.lastSeq } : {}),
         endedAt: Date.now(),
       })
-      if (workflow?.sessionID === sid) stopHeartbeat()
+      if (workflow?.sessionID === sid) stopHeartbeat(runtime.worktree, sid)
       owned.release({
         workflowQuiescent: true,
         evidence: "owned queue and execution state are quiescent; workflow cancellation is settled",
@@ -853,7 +853,7 @@ export async function endAdmission(runtime: ExecutionRuntime, sid: string, expec
       })
       tokens.delete(key(runtime.worktree, sid))
       return true
-    })
+    }, sid)
   } catch (error) {
     runtime.log("session end remains held", { sessionID: sid, epoch: expectedEpoch, error: (error as Error)?.message ?? String(error) })
     return false

@@ -42,6 +42,7 @@ const CONTROLS = Object.fromEntries([
 
 let wt: ReturnType<typeof tempGitWorktree>
 let counter = 0
+let SID: string
 /** Runs inside the final critic's turn, i.e. after the pre-check and before the commit transaction. */
 let onFinalCritic: (() => void) | undefined
 beforeEach(() => { wt = tempGitWorktree(); wt.worktree = realpathSync(wt.worktree) })
@@ -118,6 +119,7 @@ function harness(options: Options) {
       },
     },
   }
+  SID = sid
   const store = attachAdmission(runtime, sid, { engine: ENGINE, model: "m" })
   const controller = createForegroundController(runtime, { planWorktree: options.isolate === true })
   return {
@@ -129,11 +131,11 @@ function harness(options: Options) {
 type H = ReturnType<typeof harness>
 
 const committed = (): UltragoalWorkflow => {
-  const read = readCommitted(wt.worktree)
+  const read = readCommitted(wt.worktree, {}, SID)
   if (read.state !== "ok" || read.wf.kind !== "ultragoal") throw new Error("no committed ultragoal")
   return read.wf
 }
-const anyCommitted = () => { const read = readCommitted(wt.worktree); if (read.state !== "ok") throw new Error("no workflow"); return read.wf }
+const anyCommitted = () => { const read = readCommitted(wt.worktree, {}, SID); if (read.state !== "ok") throw new Error("no workflow"); return read.wf }
 
 /** Write the verification scripts: `pass` goals check for their module, `fail` goals always exit 1. */
 function scripts(n: number, failing: number[] = []): void {
@@ -195,7 +197,7 @@ describe("ultragoal stage and phase order (1)", () => {
       "unit_execute:executing", "verify:executing", "checkpoint:planning", "goal_select:planning",
       "final_review:reviewing", "terminal:done",
     ])
-    const types = readEvents(wt.worktree, committed().id).map(event => event.type)
+    const types = readEvents(wt.worktree, committed().id, SID).map(event => event.type)
     for (const type of ["goals_saved", "unit_prepared", "unit_reviewed", "execution_approved", "unit_terminal", "verification_recorded", "goal_checkpointed", "aggregate_verified"]) expect(types).toContain(type)
     const done = committed()
     expect(done).toMatchObject({ stage: "terminal", phase: "done" })
@@ -225,7 +227,7 @@ describe("approval gate (2) and handoff (3)", () => {
     expect(readLedger(wt.worktree, h.sid).tasks).toHaveLength(0)
     expect(h.runtime.runs.status().executions.every(e => e.kind === "host")).toBe(true)
     const sha = data.pending!.subject.sha256
-    const before = readFileSync(join(stateRoot(wt.worktree), "workflow", "workflow.json"))
+    const before = readFileSync(join(stateRoot(wt.worktree), "sessions", SID, "workflow", "workflow.json"))
     const planSha = data.seed!.planSha
     for (const typed of [
       `APPROVE-UNIT ${wf.id} ${"0".repeat(64)}`, `APPROVE-UNIT ${wf.id}`, "APPROVE", "ultragoal", `EXECUTE ${data.seed!.workflowID} ${planSha}`,
@@ -234,7 +236,7 @@ describe("approval gate (2) and handoff (3)", () => {
       expect(approveUnit(h.runtime, h.sid, wf.id, wf.lastSeq, typed)).toMatchObject({ ok: false })
     }
     expect(approveUnit(h.runtime, h.sid, wf.id, wf.lastSeq + 1, approveUnitConfirmation(wf.id, sha))).toMatchObject({ ok: false })
-    expect(readFileSync(join(stateRoot(wt.worktree), "workflow", "workflow.json")).equals(before)).toBe(true)
+    expect(readFileSync(join(stateRoot(wt.worktree), "sessions", SID, "workflow", "workflow.json")).equals(before)).toBe(true)
     expect(h.workers()).toHaveLength(0)
     expect(readLedger(wt.worktree, h.sid).tasks).toHaveLength(0)
     // the run itself never advances past approval without the receipt
@@ -250,7 +252,7 @@ describe("approval gate (2) and handoff (3)", () => {
     const pending = (await runRalplan(h.runtime, h.sid, started.wf.id)).wf!
     const sha = ralplanDataOf(pending).consensus!.planSha
     const planRef = pending.artifacts.find(ref => ref.key === "pending-approval.md")!
-    const handoffsBefore = readEvents(wt.worktree).filter(event => event.type === "execute_confirmed").length
+    const handoffsBefore = readEvents(wt.worktree, undefined, SID).filter(event => event.type === "execute_confirmed").length
     expect(confirmExecute(h.runtime, h.sid, pending.id, pending.lastSeq, "yes")).toMatchObject({ ok: false })
     expect(anyCommitted().kind).toBe("ralplan")
     const handed = confirmExecute(h.runtime, h.sid, pending.id, pending.lastSeq, executeConfirmation(pending.id, sha))
@@ -260,7 +262,7 @@ describe("approval gate (2) and handoff (3)", () => {
     expect(ug).toMatchObject({ stage: "decompose", phase: "planning" })
     expect(ug.lineage?.predecessor).toMatchObject({ id: pending.id, kind: "ralplan", artifact: { path: planRef.path, sha256: planRef.sha256 } })
     expect(ug.lineage!.predecessor.revision).toBeGreaterThan(pending.lastSeq - 1)
-    expect(readEvents(wt.worktree).filter(event => event.type === "execute_confirmed")).toHaveLength(handoffsBefore + 1)
+    expect(readEvents(wt.worktree, undefined, SID).filter(event => event.type === "execute_confirmed")).toHaveLength(handoffsBefore + 1)
     expect(ultragoalDataOf(ug).seed).toMatchObject({ workflowID: pending.id, planSha: planRef.sha256 })
     expect(h.workers()).toHaveLength(0)
     expect(readLedger(wt.worktree, h.sid).tasks).toHaveLength(0)
@@ -291,7 +293,7 @@ describe("review iteration (4)", () => {
     // the first unit's documents were superseded: its sha is not approvable now
     const oldSubjectSha = sha256("stale")
     expect(approveUnit(h.runtime, h.sid, wf.id, wf.lastSeq, approveUnitConfirmation(wf.id, oldSubjectSha))).toMatchObject({ ok: false })
-    const events = readEvents(wt.worktree, wf.id).filter(event => event.type === "unit_prepared").map(event => event.data?.subject)
+    const events = readEvents(wt.worktree, wf.id, SID).filter(event => event.type === "unit_prepared").map(event => event.data?.subject)
     expect(events).toHaveLength(2)
     expect(events[0]).not.toBe(events[1])
     expect(events[1]).toBe(data.pending!.subject.sha256)
@@ -345,7 +347,7 @@ describe("no-progress cap and worker prose (5, 7)", () => {
     expect(data.progress.g1!.lastCheckpoint).toBeUndefined()
     expect(data.progress.g1!.noProgress).toBeGreaterThanOrEqual(1)
     expect(wf.phase).not.toBe("done")
-    const events = readEvents(wt.worktree, wf.id)
+    const events = readEvents(wt.worktree, wf.id, SID)
     expect(events.find(event => event.type === "verification_recorded")?.data).toMatchObject({ ok: false })
     expect(events.find(event => event.type === "goal_checkpointed")?.data).toMatchObject({ complete: false })
     const worker = h.workers()
@@ -557,7 +559,7 @@ describe("pause, cancel and reattach (9, 10, 11)", () => {
     if ("refuse" in result) throw new Error(result.refuse)
     expect(result.wf).toMatchObject({ id: wf.id, kind: "ultragoal", stage: "unit_approval", owner: { instance: store.epoch } })
     expect(committed().id).toBe(wf.id)
-    expect(readEvents(wt.worktree, wf.id).filter(event => event.type === "owner_reattached")).toHaveLength(1)
+    expect(readEvents(wt.worktree, wf.id, SID).filter(event => event.type === "owner_reattached")).toHaveLength(1)
     // held: the engine refuses to advance, approve or dispatch
     const after = committed()
     const blocked = await runUltragoal(h.runtime, h.controller, h.sid, wf.id)
@@ -632,7 +634,7 @@ describe("architect S3 items: shared legacy pause policy and runner failures", (
     expect(committed()).toMatchObject({ phase: "executing", stopIntent: { kind: "pause" } })
     await running
     await waitFor(() => committed().phase === "paused", 10_000)
-    expect(readEvents(wt.worktree, wf.id).filter(event => event.type === "pause_settled")).toHaveLength(1)
+    expect(readEvents(wt.worktree, wf.id, SID).filter(event => event.type === "pause_settled")).toHaveLength(1)
     const verifier = h.runtime.runs.status().executions.find(e => e.kind === "verifier")!
     expect(verifier.fence).toBeUndefined()
     expect(verifier.cancel).toBeUndefined()

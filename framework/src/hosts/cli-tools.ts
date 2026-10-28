@@ -17,7 +17,7 @@ import { FdTree, fdStatKind, type FdDirectory, type FdEntry } from "../skills/fd
 import type { OtterConfig } from "../config.ts"
 import { memoryToolText } from "../wiki/recall.ts"
 
-export const CLI_TOOL_NAMES = ["read", "multiread", "list", "glob", "grep", "memory", "skill", "write", "edit", "multiedit", "bash", "repo_search"] as const
+export const CLI_TOOL_NAMES = ["read", "multiread", "list", "glob", "grep", "memory", "skill", "write", "edit", "multiedit", "bash", "model_api", "repo_search"] as const
 export const MAX_MULTIREAD_FILES = 8
 /** Upper bound on the edits one `multiedit` call may carry. */
 export const MAX_MULTIEDIT_EDITS = 20
@@ -51,6 +51,7 @@ export type CliToolsOptions = {
    * approved by the host first. Without it, main and other read-only roles never get these tools.
    */
   actionGate?: boolean
+  modelApi?: boolean
   /** Host-minted read-only query capability; repo_search is not available without this provider. */
   repoSearchProvider?: (input: { query: string; limit?: number }, signal?: AbortSignal) => Promise<string>
 }
@@ -165,6 +166,14 @@ export function validateCliToolInput(name: string, input: unknown): asserts inpu
             boundedString(edit.oldText, MAX_WRITE_BYTES) && (edit.oldText as string).length > 0 && boundedString(edit.newText, MAX_WRITE_BYTES))) {
         throw new CliToolInputError()
       }
+      return
+    case "model_api":
+      if (!hasExactKeys(input, ["target", "model", "prompt"], ["maxOutputTokens", "timeoutSeconds"]) ||
+          typeof input.target !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/u.test(input.target) ||
+          typeof input.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/u.test(input.model) ||
+          !boundedString(input.prompt, 16 * 1024) || !input.prompt.trim() ||
+          (input.maxOutputTokens !== undefined && (!Number.isSafeInteger(input.maxOutputTokens) || (input.maxOutputTokens as number) < 1 || (input.maxOutputTokens as number) > 4096)) ||
+          (input.timeoutSeconds !== undefined && (!Number.isSafeInteger(input.timeoutSeconds) || (input.timeoutSeconds as number) < 1 || (input.timeoutSeconds as number) > 600))) throw new CliToolInputError()
       return
     case "bash":
       if (!hasExactKeys(input, ["command"], ["interactive", "timeoutSeconds"]) || typeof input.command !== "string" ||
@@ -892,6 +901,7 @@ function executeFileTool(
     }
     case "memory": return { ok: false, error: "Tool refused: memory recall is asynchronous." }
     case "skill": return { ok: false, error: "Tool refused: skill loading is host-provided." }
+    case "model_api": return { ok: false, error: "Tool refused: model API calls run through the host approval gate." }
     case "bash": return { ok: false, error: "Tool refused: commands run through the host approval gate." }
     case "multiedit": return multiEditTargets(root, input.edits as Array<{ path: string; oldText: string; newText: string }>, identity, beforeEffect)
     case "write": return writeTarget(root, normalizeToolPath(input.path as string), identity, input.content as string, undefined, beforeEffect)
@@ -930,6 +940,7 @@ export function createCliTools(options: CliToolsOptions): CliTools {
   const available = CLI_TOOL_NAMES.filter(name => name === "skill" ? options.skillTool === true
     : name === "multiread" ? options.multiRead !== false && options.allowed.includes("read") && !options.denied.includes("read") && !options.denied.includes("multiread")
     : name === "repo_search" ? options.role === "main" && options.repoSearchProvider !== undefined && options.allowed.includes(name) && !options.denied.includes(name)
+    : name === "model_api" ? gatedMain && options.modelApi === true && options.allowed.includes(name) && !options.denied.includes(name)
     : name === "bash" ? gatedMain && options.allowed.includes(name) && !options.denied.includes(name)
     // multiedit is the approved-chat batch of `edit`: same permission as edit, offered only to gated main.
     : name === "multiedit" ? gatedMain && options.allowed.includes("edit") && !options.denied.includes("edit")
@@ -946,7 +957,7 @@ export function createCliTools(options: CliToolsOptions): CliTools {
           for (const read of input.reads as Record<string, unknown>[]) validateReadTarget(root, read, rootIdentity)
           return true
         }
-        if (name === "memory" || name === "skill" || name === "bash" || name === "repo_search") return true
+        if (name === "memory" || name === "skill" || name === "bash" || name === "model_api" || name === "repo_search") return true
         if (name === "glob") normalizeToolPath(input.pattern as string)
         const relativePath = normalizeToolPath(name === "glob" ? "." : (input.path as string | undefined) ?? ".")
         let fd: number

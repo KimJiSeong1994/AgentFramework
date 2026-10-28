@@ -1,8 +1,9 @@
+import { prepareModelApiAction, runModelApi } from "./model-api.ts"
 import { randomUUID } from "node:crypto"
 import { STOP_LABEL } from "../flow/status.ts"
 import { taskPartition } from "../workflows/checkpoint.ts"
 import { handoffDir, readLedger } from "../state/ledger.ts"
-import { isPauseSettled, stopDisplay } from "../workflows/types.ts"
+import { isPauseSettled, stopDisplay, TERMINAL } from "../workflows/types.ts"
 import { spawnSync } from "node:child_process"
 import { accessSync, constants, copyFileSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { homedir } from "node:os"
@@ -40,7 +41,7 @@ import { createForegroundController, PlanIsolationSetupError, PlanIsolationUnava
 import { discoverModels as discoverModelCatalog, type ModelCatalog } from "./model-catalog.ts"
 import { incompleteArtifactSummary } from "../workflows/artifacts.ts"
 import { readSessionCommitted } from "../workflows/commit.ts"
-import { humanDecision } from "./operator.ts"
+import { humanDecision, OperatorDecisionInputError } from "./operator.ts"
 import type { OperatorDecision } from "./operator.ts"
 import {
   createNativeSkillOptForeground, foregroundReasonCode, readSkillOptForegroundArtifact,
@@ -979,11 +980,11 @@ function defaultSessionID(uuid: string): string {
   return `otter-${uuid}`
 }
 
-function planForImport(value: unknown, worktree: string): unknown {
+function planForImport(value: unknown, worktree: string, sessionID: string): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new InteractiveLaunchError("conversation did not return a valid plan")
   }
-  const existing = activeWorkflow(worktree)
+  const existing = activeWorkflow(worktree, sessionID)
   const revision = existing
     ? 1 + existing.counters.code_invalid + existing.counters.review_iterations + existing.counters.user_rejections
     : 1
@@ -1125,7 +1126,7 @@ export async function runInteractiveSession(
     terminal.write("Terminal resumed; no work was automatically restarted.\n")
     // B7: redraw the Keep/Resume decision for a settled pause. It is shown, never taken: /continue asks and rechecks.
     try {
-      const paused = signalWorktree ? activeWorkflow(signalWorktree) : null
+      const paused = signalWorktree && sessionStore ? activeWorkflow(signalWorktree, sessionStore.sessionID) : null
       if (signalWorktree && paused && isPauseSettled(paused)) {
         const partition = taskPartition(readLedger(signalWorktree, paused.sessionID), paused.id, paused.planRef?.jsonSha ?? null)
         terminal.write(terminalSafeText(`Paused from ${paused.pausedFrom?.phase ?? "?"}/${paused.pausedFrom?.stage ?? "?"}: residual ${partition.residual.join(", ") || "none"}; done ${partition.done.join(", ") || "none"}. Kept held; /continue offers Keep or Resume.\n`))
@@ -1227,7 +1228,7 @@ export async function runInteractiveSession(
           note(`Allowed by your rule: ${title}`)
           return { how: "rule", decision: { allow: true } }
         }
-      } else if (mode === "auto-edit") {
+      } else if (action.tool !== "model_api" && mode === "auto-edit") {
         note(`${title} (auto-edit)`)
         return { how: "auto-edit", decision: { allow: true } }
       } else if (coveredByGrant(action, turnGrants)) {
@@ -1259,6 +1260,7 @@ export async function runInteractiveSession(
       return { how: "asked", decision: { allow: true } }
     }
     return {
+      modelApi: { prepare: prepareModelApiAction, run: runModelApi },
       async approve(action, signal) {
         const { decision, how } = await decide(action, signal)
         // Structured record for the session digest: tool, decision, written paths, a command's rule prefix. No contents.
@@ -1268,7 +1270,7 @@ export async function runInteractiveSession(
             ...(rule ? { rule } : {}) })
         } catch { /* persist marks the session failed itself */ }
         // The turn's checkpoint is taken before its first effect, whichever way that effect was allowed.
-        if (decision.allow) {
+        if (decision.allow && action.tool !== "model_api") {
           try {
             const checkpoints = chatCheckpoints(runtime.worktree)
             if (action.tool === "bash") await checkpoints.beforeEffect({ tool: "bash" })
@@ -2191,7 +2193,7 @@ export async function runInteractiveSession(
       let workflow: InteractiveViewFacts["workflow"] = { state: "unknown" }
       let owner: InteractiveViewFacts["owner"] = "unknown"
       try {
-        const current = activeAnyWorkflow(worktree)
+        const current = activeAnyWorkflow(worktree, selection.sessionID)
         workflow = { state: "known", value: current ? {
           id: current.id,
           kind: current.kind,
@@ -2248,7 +2250,7 @@ export async function runInteractiveSession(
     let localModelOperation = false
     /** The committed non-plan (planning-kind) workflow this session owns, if any. */
     function ownedPlanningWorkflow() {
-      const wf = activeAnyWorkflow(worktree)
+      const wf = activeAnyWorkflow(worktree, selection.sessionID)
       return wf && wf.kind !== "plan" && wf.sessionID === selection.sessionID ? wf : undefined
     }
     const workflowHost: WorkflowHost = createWorkflowHost({
@@ -2330,7 +2332,7 @@ export async function runInteractiveSession(
         terminal.write(`Retained SDK session ${retainedSDKSessionID} is read-only; cancellation is unavailable.\n`)
         return
       }
-      const current = activeWorkflow(worktree)
+      const current = activeWorkflow(worktree, selection.sessionID)
       const planning = ownedPlanningWorkflow()
       if (!operationAbort && current?.sessionID !== selection.sessionID && !planning) return
       progress.cancelRequested()
@@ -2350,7 +2352,7 @@ export async function runInteractiveSession(
           if (!result.ok) terminal.write(`Cancellation refused: ${boundedTerminalDiagnostic(result.text)}\n`)
           else {
             // B6: a cancel request is never a stopped display; the label says what is proven.
-            const latest = activeWorkflow(worktree)
+            const latest = activeWorkflow(worktree, selection.sessionID)
             terminal.write(latest?.sessionID === selection.sessionID && stopDisplay(latest) === "cancelling" ? `${STOP_LABEL.cancelling}\n` : "cancelled\n")
           }
         }
@@ -2372,7 +2374,7 @@ export async function runInteractiveSession(
       } catch { live = true }
       if (live) { requestCancel(); return }
       try {
-        const current = activeAnyWorkflow(worktree)
+        const current = activeAnyWorkflow(worktree, selection.sessionID)
         if (current?.sessionID === selection.sessionID) terminal.write(`Nothing is running; Escape does not stop the ${current.kind} workflow. Use /cancel to stop it or /pause to keep it.\n`)
       } catch { /* display only */ }
     }
@@ -2382,7 +2384,7 @@ export async function runInteractiveSession(
         terminal.write(`Retained SDK session ${retainedSDKSessionID} is read-only; pause is unavailable.\n`)
         return
       }
-      const current = activeWorkflow(worktree)
+      const current = activeWorkflow(worktree, selection.sessionID)
       if (current?.sessionID !== selection.sessionID) {
         if (ownedPlanningWorkflow()) {
           operationAbort?.abort()
@@ -2395,7 +2397,7 @@ export async function runInteractiveSession(
         const result = selection.controller.pause(selection.sessionID)
         if (!result.ok) terminal.write(`Pause refused: ${boundedTerminalDiagnostic(result.text)}\n`)
         else {
-          const latest = activeWorkflow(worktree)
+          const latest = activeWorkflow(worktree, selection.sessionID)
           terminal.write(latest && stopDisplay(latest) === "paused" ? "paused\n" : `${STOP_LABEL.pausing}\n`)
         }
         terminal.executionSnapshot?.(selection.runtime.runs.status(), true)
@@ -2409,12 +2411,12 @@ export async function runInteractiveSession(
         terminal.write(`Retained SDK session ${retainedSDKSessionID} is read-only; suspension is unavailable.\n`)
         return
       }
-      const current = activeAnyWorkflow(worktree)
+      const current = activeAnyWorkflow(worktree, selection.sessionID)
       if (current?.sessionID === selection.sessionID && !isPauseSettled(current)) {
         if (current.stopIntent?.kind !== "cancel") requestPause()
         else terminal.write(`${STOP_LABEL.cancelling}\n`)
       } else if (!current || current.sessionID !== selection.sessionID) requestCancel()
-      const latest = activeAnyWorkflow(worktree)
+      const latest = activeAnyWorkflow(worktree, selection.sessionID)
       const state = selection.runtime.runs.status()
       const stopped = latest?.sessionID === selection.sessionID && isPauseSettled(latest)
       // Refuse suspension rather than stopping a worker's process group with the UI.
@@ -2443,6 +2445,25 @@ export async function runInteractiveSession(
       return inPlace
     }
 
+    /** Keep recoverable plan failures visible without releasing execution ownership or retrying work. */
+    function reportPlanOperationFailure(error: unknown, reason: "approval_input_invalid" | "plan_execution_failed" | "plan_submission_failed" | "plan_decision_failed"): void {
+      if (persistenceFailed || abort.signal.aborted || error instanceof AdmissionRefusal || error instanceof LinuxAdmissionRefused) throw error
+      if (!sessionStore || sessionStore.sessionID !== selection.sessionID || attachedRuntime !== selection.runtime) throw error
+      sessionStore.assertOwner()
+      const checked = readAnyWorkflowChecked(worktree, selection.sessionID)
+      if (checked.corrupt || (checked.wf && checked.wf.sessionID !== selection.sessionID)) throw error
+      const state = selection.runtime.runs.status()
+      const terminalSettled = checked.wf && TERMINAL.has(checked.wf.phase) && !state.claim && state.executions.every(settled)
+      // Existing holds (notably user_stop) carry recovery semantics; never replace them here.
+      if (!terminalSettled && !effectiveHold(worktree, selection.sessionID)) holdAdmission(worktree, selection.sessionID, reason)
+      progress.error()
+      const diagnostic = boundedTerminalDiagnostic(error instanceof Error ? error.message : String(error))
+      terminal.write(terminalSafeText(`[error] ${diagnostic}\n`))
+      terminal.write(terminalSettled
+        ? "The workflow has ended; no automatic retry. /status shows retained work; /new starts a new session.\n"
+        : "Session held; no automatic retry. /status shows retained work; /continue rechecks it before resuming or requesting approval.\n")
+    }
+
     function reportPlanIsolationSetupFailure(error: unknown): boolean {
       if (!(error instanceof PlanIsolationSetupError)) return false
       if (abort.signal.aborted) throw error
@@ -2458,30 +2479,38 @@ export async function runInteractiveSession(
       const start = (inPlace: boolean) => resumed
         ? selection.controller.resume(selection.sessionID, abort.signal, { inPlace })
         : selection.controller.run(selection.sessionID, abort.signal, { inPlace })
-      let result: Awaited<ReturnType<typeof start>>
-      try { result = await start(false) }
-      catch (error) {
+      try {
+        let result: Awaited<ReturnType<typeof start>>
+        try { result = await start(false) }
+        catch (error) {
+          if (!(error instanceof PlanIsolationUnavailableError)) throw error
+          // No commit / not a git repository: never a silent fallback.
+          if (!await chooseInPlace(error, abort.signal)) return undefined
+          result = await start(true)
+        }
+        if (observedTasks) {
+          const tasks = readProgressTasks(worktree, selection.sessionID, observedTasks.ids)
+          if (tasks) { progress.taskSnapshot(tasks); terminal.taskSnapshot?.(tasks) }
+        }
+        terminal.executionSnapshot?.(selection.runtime.runs.status(), false)
+        persist("workflow-stage", { workflowID: result.workflow.id, phase: result.workflow.phase, text: `Workflow ${result.workflow.id}: ${result.workflow.phase}` })
+        const incompleteArtifacts = incompleteArtifactSummary(worktree, result.workflow)
+        if (incompleteArtifacts) terminal.write(terminalSafeText(`[artifacts] ${incompleteArtifacts}\n`))
+        progress.final({
+          workflowID: result.workflow.id, phase: result.workflow.phase,
+          done: result.run.done, failed: result.run.failed, cancelled: result.run.cancelled,
+          ...(result.run.skipped ? { skipped: result.run.skipped } : {}),
+        })
+        if (result.planWorktree && !result.run.aborted && !receivedSignal) await offerPlanWorktree(result.planWorktree.workflowID)
+        if (!receivedSignal && !TERMINAL.has(result.workflow.phase)) {
+          reportPlanOperationFailure(new Error(`Plan execution is incomplete (${result.workflow.phase}); inspect the task results.`), "plan_execution_failed")
+        }
+        return result
+      } catch (error) {
         if (reportPlanIsolationSetupFailure(error)) return null
-        if (!(error instanceof PlanIsolationUnavailableError)) throw error
-        // No commit / not a git repository: never a silent fallback.
-        if (!await chooseInPlace(error, abort.signal)) return undefined
-        result = await start(true)
+        reportPlanOperationFailure(error, "plan_execution_failed")
+        return null
       }
-      if (observedTasks) {
-        const tasks = readProgressTasks(worktree, selection.sessionID, observedTasks.ids)
-        if (tasks) { progress.taskSnapshot(tasks); terminal.taskSnapshot?.(tasks) }
-      }
-      terminal.executionSnapshot?.(selection.runtime.runs.status(), false)
-      persist("workflow-stage", { workflowID: result.workflow.id, phase: result.workflow.phase, text: `Workflow ${result.workflow.id}: ${result.workflow.phase}` })
-      const incompleteArtifacts = incompleteArtifactSummary(worktree, result.workflow)
-      if (incompleteArtifacts) terminal.write(terminalSafeText(`[artifacts] ${incompleteArtifacts}\n`))
-      progress.final({
-        workflowID: result.workflow.id, phase: result.workflow.phase,
-        done: result.run.done, failed: result.run.failed, cancelled: result.run.cancelled,
-        ...(result.run.skipped ? { skipped: result.run.skipped } : {}),
-      })
-      if (result.planWorktree && !result.run.aborted && !receivedSignal) await offerPlanWorktree(result.planWorktree.workflowID)
-      return result
     }
 
     /**
@@ -2606,6 +2635,10 @@ export async function runInteractiveSession(
           sessionID: selection.sessionID, workflowID: workflow.id, expectedRevision: workflow.lastSeq,
           subject: { kind: "plan", id: workflow.id, sha256: planSha },
         }, abort.signal)
+      } catch (error) {
+        if (!(error instanceof OperatorDecisionInputError)) throw error
+        reportPlanOperationFailure(error, "approval_input_invalid")
+        return undefined
       } finally {
         terminal.resume?.()
         progress.resume()
@@ -2616,8 +2649,14 @@ export async function runInteractiveSession(
       }
       if (abort.signal.aborted) return signalExit(receivedSignal)
       persist("workflow-choice", { text: `Operator chose ${decision.action} for workflow ${workflow.id}.`, workflowID: workflow.id, planSha })
-      const decided = selection.controller.decide(decision)
-      if (!decided.ok) throw new InteractiveLaunchError("local plan decision could not be applied; inspect read-only status")
+      let decided: ReturnType<ForegroundController["decide"]>
+      try {
+        decided = selection.controller.decide(decision)
+        if (!decided.ok) throw new InteractiveLaunchError("local plan decision could not be applied; inspect read-only status")
+      } catch (error) {
+        reportPlanOperationFailure(error, "plan_decision_failed")
+        return undefined
+      }
       persist("workflow-stage", { workflowID: decided.wf.id, phase: decided.wf.phase, text: `Workflow ${decided.wf.id}: ${decided.wf.phase}` })
       if (decision.action === "reject") {
         const rejected = terminalSafeText(`Workflow ${workflow.id} rejected; execution was not started.\n`)
@@ -2649,20 +2688,19 @@ export async function runInteractiveSession(
         return undefined
       }
       if (receivedSignal) return signalExit(receivedSignal)
-      if (terminal.fullscreen) return undefined
-      return { code: result.workflow.phase === "done" && result.run.failed === 0 && result.run.cancelled === 0 ? 0 : 1 }
+      return undefined
     }
 
     function acquireSwitchGuard(allowHeldWorkflow = false): { release?: () => void; refusal?: string } {
       const release = beginExecutionActivity(selection.runtime, selection.sessionID, "review")
       if (!release) return { refusal: "Model switch refused: another local execution is still active.\n" }
       try {
-        const workflowState = readAnyWorkflowChecked(worktree)
+        const workflowState = readAnyWorkflowChecked(worktree, selection.sessionID)
         if (workflowState.corrupt) {
           release()
           return { refusal: "Model switch refused: workflow state is corrupt and must be inspected first.\n" }
         }
-        const occupant = activeAnyWorkflow(worktree)
+        const occupant = activeAnyWorkflow(worktree, selection.sessionID)
         // Another session's workflow is untouched by this session's model choice; only this session's own workflow blocks it.
         if (occupant && occupant.sessionID === selection.sessionID && !allowHeldWorkflow) {
           release()
@@ -2804,8 +2842,8 @@ export async function runInteractiveSession(
     /** Chat is held only because another session owns the active workflow; this session itself is clean. */
     function foreignWorkflowOnly(): boolean {
       try {
-        if (retainedSDKSessionID || effectiveHold(worktree, selection.sessionID) || readAnyWorkflowChecked(worktree).corrupt) return false
-        const occupant = activeAnyWorkflow(worktree)
+        if (retainedSDKSessionID || effectiveHold(worktree, selection.sessionID) || readAnyWorkflowChecked(worktree, selection.sessionID).corrupt) return false
+        const occupant = activeAnyWorkflow(worktree, selection.sessionID)
         const state = selection.runtime.runs.status()
         return !!occupant && occupant.sessionID !== selection.sessionID && !state.claim && state.executions.every(settled)
       } catch { return false }
@@ -2815,7 +2853,7 @@ export async function runInteractiveSession(
     function rebindableWorkflow(): WorkflowEnvelope | undefined {
       try {
         if (retainedSDKSessionID || !sessionStore || !attachedRuntime) return undefined
-        const wf = activeAnyWorkflow(worktree)
+        const wf = activeAnyWorkflow(worktree, selection.sessionID)
         return wf && wf.sessionID === selection.sessionID && !effectiveHold(worktree, selection.sessionID) ? wf : undefined
       } catch { return undefined }
     }
@@ -3248,8 +3286,8 @@ export async function runInteractiveSession(
       if (executionState.claim || executionState.executions.some(execution => !settled(execution))) {
         return "Execution ownership unresolved · /status · /cancel · /quit exit"
       }
-      if (readAnyWorkflowChecked(worktree).corrupt) return "Workflow state is corrupt · /status inspects it · /quit exit"
-      const occupant = activeAnyWorkflow(worktree)
+      if (readAnyWorkflowChecked(worktree, selection.sessionID).corrupt) return "Workflow state is corrupt · /status inspects it · /quit exit"
+      const occupant = activeAnyWorkflow(worktree, selection.sessionID)
       if (occupant && occupant.sessionID !== selection.sessionID) {
         return `Observer · /model switch · /status · /resume ${occupant.sessionID} opens the owner · /quit exit`
       }
@@ -3271,8 +3309,8 @@ export async function runInteractiveSession(
         automaticExecutionIdle = !queueState.claim &&
           queueState.executions.every(execution => settled(execution) && !execution.fence)
         terminal.executionSnapshot?.(queueState, false)
-        queueAllowed = !effectiveHold(worktree, selection.sessionID) && !readAnyWorkflowChecked(worktree).corrupt &&
-          !activeAnyWorkflow(worktree) && !queueState.claim && queueState.executions.every(settled)
+        queueAllowed = !effectiveHold(worktree, selection.sessionID) && !readAnyWorkflowChecked(worktree, selection.sessionID).corrupt &&
+          !activeAnyWorkflow(worktree, selection.sessionID) && !queueState.claim && queueState.executions.every(settled)
         terminal.queueAdmission?.(queueAllowed && requestObservation.state !== "failed")
         actionContext = queueAllowed ? "chat" : foreignWorkflowOnly() ? "observer" : "held"
       }
@@ -3374,7 +3412,7 @@ export async function runInteractiveSession(
       if (message === "/cancel") {
         requestCancel()
         // B6: a cancel request is not a stopped display or an exit; leave only once no workflow awaits proof.
-        const pending = activeAnyWorkflow(worktree)
+        const pending = activeAnyWorkflow(worktree, selection.sessionID)
         if (pending?.sessionID === selection.sessionID) terminal.write(`${pending.stopIntent?.kind === "cancel" ? STOP_LABEL.cancelling : "cancel refused"}; the process stays until termination is proven.\n`)
         else if (!terminal.fullscreen) return { code: 0 }
         continue
@@ -3462,6 +3500,7 @@ export async function runInteractiveSession(
         terminal.write(terminalSafeText([
           `Chat execution: ${mode}${mode === "ask" ? " (otter asks before each write, edit and command)" : mode === "auto-edit" ? " (file edits apply without asking; commands ask)" : " (read-only; use /plan or !<command>)"}.`,
           `Change it with "chat": { "execute": "ask" | "auto-edit" | "plan" } in ~/.config/otter/otter.jsonc; it applies to the next model selection or /new.`,
+          "Model API calls require Allow once for every request, including auto-edit mode; saved command rules do not apply.",
           rules.length ? `Always-allowed commands: ${rules.map(rule => `\`${rule}\``).join(", ")} (/permissions clear removes them).` : "No always-allowed commands.",
         ].join("\n") + "\n"))
         continue
@@ -3568,8 +3607,8 @@ export async function runInteractiveSession(
           state: () => conversation.contextState!(), report: () => conversation.contextReport!(),
           apply(state) {
             const live = selection.runtime.runs.status()
-            if (!sessionStore || effectiveHold(worktree, selection.sessionID) || readAnyWorkflowChecked(worktree).corrupt ||
-                activeAnyWorkflow(worktree) || live.claim || live.executions.some(execution => !settled(execution))) {
+            if (!sessionStore || effectiveHold(worktree, selection.sessionID) || readAnyWorkflowChecked(worktree, selection.sessionID).corrupt ||
+                activeAnyWorkflow(worktree, selection.sessionID) || live.claim || live.executions.some(execution => !settled(execution))) {
               throw new Error("Context changes require an idle conversation; finish active work first")
             }
             const previous = conversation.contextState!()
@@ -3604,8 +3643,8 @@ export async function runInteractiveSession(
         if (commandArgs[0] === "unload") {
           try {
             const state = selection.runtime.runs.status()
-            allowUnload = !effectiveHold(worktree, selection.sessionID) && !readAnyWorkflowChecked(worktree).corrupt &&
-              !activeAnyWorkflow(worktree) && !state.claim && state.executions.every(settled)
+            allowUnload = !effectiveHold(worktree, selection.sessionID) && !readAnyWorkflowChecked(worktree, selection.sessionID).corrupt &&
+              !activeAnyWorkflow(worktree, selection.sessionID) && !state.claim && state.executions.every(settled)
           } catch { /* Unknown live state cannot authorize model release. */ }
         }
         const controller = new AbortController()
@@ -3633,7 +3672,7 @@ export async function runInteractiveSession(
         continue
       }
       if (command === "/continue" && commandArgs.length === 0) {
-        const planning = activeAnyWorkflow(worktree)
+        const planning = activeAnyWorkflow(worktree, selection.sessionID)
         if (!planning) {
           const kept = selection.controller.pendingPlanWorktree?.(selection.sessionID)
           if (kept) {
@@ -3647,7 +3686,7 @@ export async function runInteractiveSession(
           if (outcome.quit) return { code: 0 }
           continue
         }
-        const current = activeWorkflow(worktree)
+        const current = activeWorkflow(worktree, selection.sessionID)
         if (current && current.sessionID !== selection.sessionID) {
           terminal.write(`Resume refused: workflow belongs to ${current.sessionID}; use /resume ${current.sessionID}.\n`)
           continue
@@ -3674,7 +3713,7 @@ export async function runInteractiveSession(
               terminal.write(`Resumed workflow ${outcome.workflow.id}: ${outcome.workflow.phase}.\n`)
               if (outcome.workflow.phase === "pending_approval") {
                 // The resume changed the revision, so any earlier receipt is dead: a fresh human decision is required.
-                const fresh = activeWorkflow(worktree)
+                const fresh = activeWorkflow(worktree, selection.sessionID)
                 const plan = fresh && savedPlan(selection.runtime, fresh)
                 if (!fresh || fresh.sessionID !== selection.sessionID || !fresh.planRef || !plan) throw new InteractiveLaunchError("Canonical restored plan is unavailable; approval refused.")
                 const rendered = readFileSync(resolve(worktree, fresh.planRef.mdPath), "utf8")
@@ -3712,7 +3751,7 @@ export async function runInteractiveSession(
           await refreshSkillCatalog()
           if (current?.phase === "executing") await runOwned(true)
           else if (current?.phase === "pending_approval") {
-            const fresh = activeWorkflow(worktree)
+            const fresh = activeWorkflow(worktree, selection.sessionID)
             const plan = fresh && savedPlan(selection.runtime, fresh)
             if (!fresh || fresh.sessionID !== selection.sessionID || !fresh.planRef || !plan) throw new InteractiveLaunchError("Canonical restored plan is unavailable; approval refused.")
             const rendered = readFileSync(resolve(worktree, fresh.planRef.mdPath), "utf8")
@@ -3842,7 +3881,7 @@ export async function runInteractiveSession(
           terminal.write("Workflow not started: execution ownership is unresolved; explicit recovery is required.\n")
           continue
         }
-        if (readAnyWorkflowChecked(worktree).corrupt) {
+        if (readAnyWorkflowChecked(worktree, selection.sessionID).corrupt) {
           terminal.write("Workflow not started: workflow state is corrupt; inspect read-only status before new work.\n")
           continue
         }
@@ -3865,12 +3904,12 @@ export async function runInteractiveSession(
         terminal.write("Conversation held: execution ownership is unresolved; explicit recovery is required.\n")
         continue
       }
-      const workflowRecord = readAnyWorkflowChecked(worktree)
+      const workflowRecord = readAnyWorkflowChecked(worktree, selection.sessionID)
       if (workflowRecord.corrupt) {
         terminal.write("Conversation held: workflow state is corrupt; inspect read-only status before new work.\n")
         continue
       }
-      const occupant = activeAnyWorkflow(worktree)
+      const occupant = activeAnyWorkflow(worktree, selection.sessionID)
       if (occupant && occupant.kind !== "plan") {
         if (occupant.sessionID !== selection.sessionID) {
           terminal.write(`Read-only observer: ${occupant.kind} workflow belongs to ${occupant.sessionID}; open with /resume ${occupant.sessionID}. No new workflow can start here.\n`)
@@ -3886,7 +3925,7 @@ export async function runInteractiveSession(
         terminal.write(`Conversation held: ${occupant.kind} workflow ${occupant.id} is ${occupant.phase} at ${occupant.stage}. Use /status, /continue, /pause or /cancel.\n`)
         continue
       }
-      const existingWorkflow = activeWorkflow(worktree)
+      const existingWorkflow = activeWorkflow(worktree, selection.sessionID)
       if (existingWorkflow && existingWorkflow.sessionID === selection.sessionID && existingWorkflow.phase !== "planning") {
         terminal.write(`Conversation held: workflow ${existingWorkflow.id} is ${existingWorkflow.phase}; owner session ${existingWorkflow.sessionID}. Use /status or the owner-session recovery command.\n`)
         continue
@@ -3959,7 +3998,7 @@ export async function runInteractiveSession(
       const turnSelection = selection
       const turnStore: SessionStore | undefined = sessionStore
       const turnEpoch = turnStore?.epoch
-      const turnWorkflowSnapshot = JSON.stringify(readAnyWorkflowChecked(worktree))
+      const turnWorkflowSnapshot = JSON.stringify(readAnyWorkflowChecked(worktree, selection.sessionID))
       const turnSkills = skillSession
       const userFact = persist("user", { text: outbound })
       checkpointTurnLabel = outbound.replace(/\s+/gu, " ").trim().slice(0, 80)
@@ -3990,9 +4029,9 @@ export async function runInteractiveSession(
           if (turnStore.metadata.held || effectiveHold(worktree, turnStore.sessionID)) return false
           const state = turnSelection.runtime.runs.status()
           if (state.claim || state.executions.some(execution => !settled(execution) || !!execution.fence)) return false
-          const workflowState = readAnyWorkflowChecked(worktree)
+          const workflowState = readAnyWorkflowChecked(worktree, selection.sessionID)
           if (workflowState.corrupt || workflowState.legacy || JSON.stringify(workflowState) !== turnWorkflowSnapshot) return false
-          const occupant = activeAnyWorkflow(worktree)
+          const occupant = activeAnyWorkflow(worktree, selection.sessionID)
           if (occupant && (occupant.sessionID !== turnStore.sessionID || occupant.kind !== "plan" || occupant.phase !== "planning")) return false
           return true
         } catch {
@@ -4032,7 +4071,7 @@ export async function runInteractiveSession(
           }
         } else if (turnSkills && turnStore && turnSkills.store === turnStore && autoSkillEnabled && !retainedSDKSessionID &&
             !message.startsWith("/") && !hasIntentForcePrefix(message) && skillPolicy?.auto.mode === "auto" &&
-            activeAnyWorkflow(worktree) === null && (await autoCandidateWork, autoSkillCandidates.length > 0)) {
+            activeAnyWorkflow(worktree, selection.sessionID) === null && (await autoCandidateWork, autoSkillCandidates.length > 0)) {
           // Model-chosen skills: the main model sees the consent-free catalog and may load entries with the `skill` tool
           // as the conversation calls for them. A load never prompts (consent "never") and is re-checked against the
           // current content and the role's tools; protected workflows are never in the catalog.
@@ -4257,13 +4296,13 @@ export async function runInteractiveSession(
         terminal.write("The reply contains a plan proposal; send /plan to submit it.\n")
         continue
       }
-      const ownerWorkflow = activeWorkflow(worktree)
+      const ownerWorkflow = activeWorkflow(worktree, selection.sessionID)
       if (ownerWorkflow && ownerWorkflow.sessionID !== selection.sessionID) {
         terminal.write(`Plan proposal not admitted: workflow owned by ${ownerWorkflow.sessionID}. Use /resume ${ownerWorkflow.sessionID}.\n`)
         continue
       }
 
-      const parsedPlan = planForImport(turn.plan, worktree)
+      const parsedPlan = planForImport(turn.plan, worktree, selection.sessionID)
       try {
         selection.controller.validateImportedPlan(parsedPlan, selection.sessionID)
       } catch (error) {
@@ -4278,7 +4317,13 @@ export async function runInteractiveSession(
         const instructions = skillTexts.get(skill.name)
         return instructions === undefined ? [] : [{ name: skill.name, contentHash: skill.contentHash, instructions }]
       })
-      const submitted = await selection.controller.importPlan(selection.sessionID, "", abort.signal, parsedPlan, planSkills.length ? { skills: planSkills } : undefined)
+      let submitted: Awaited<ReturnType<ForegroundController["importPlan"]>>
+      try {
+        submitted = await selection.controller.importPlan(selection.sessionID, "", abort.signal, parsedPlan, planSkills.length ? { skills: planSkills } : undefined)
+      } catch (error) {
+        reportPlanOperationFailure(error, "plan_submission_failed")
+        continue
+      }
       if (abort.signal.aborted) return signalExit(receivedSignal)
       if (submitted.skills?.skills.length) {
         terminal.write(`Plan carries skills to its workers: ${submitted.skills.skills.map(skill => terminalSafeText(skill.name)).join(", ")}\n`)
@@ -4288,16 +4333,16 @@ export async function runInteractiveSession(
       }
       if (!submitted.result.ok) {
         const diagnostic = boundedTerminalDiagnostic(submitted.result.text)
-        terminal.write(`[error] Plan submission failed${diagnostic ? `: ${diagnostic}` : ""}; no execution was started.\n`)
-        return { code: 1 }
+        reportPlanOperationFailure(new Error(`Plan submission failed${diagnostic ? `: ${diagnostic}` : ""}; no execution was started.`), "plan_submission_failed")
+        continue
       }
       if (submitted.result.wf.phase !== "pending_approval") {
-        terminal.write("[error] Plan did not reach pending approval; no execution was started.\n")
-        return { code: 1 }
+        reportPlanOperationFailure(new Error("Plan did not reach pending approval; no execution was started."), "plan_submission_failed")
+        continue
       }
       if (!submitted.renderedPlan) {
-        terminal.write("[error] Canonical plan rendering is unavailable; no execution was started.\n")
-        return { code: 1 }
+        reportPlanOperationFailure(new Error("Canonical plan rendering is unavailable; no execution was started."), "plan_submission_failed")
+        continue
       }
 
       const workflow = submitted.result.wf

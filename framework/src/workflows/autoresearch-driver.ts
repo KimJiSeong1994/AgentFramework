@@ -71,7 +71,7 @@ export function startAutoresearch(runtime: Pick<ExecutionRuntime, "worktree" | "
       { wf: created.id, type: "transition", to: "planning", actor: "code", data: { event: "start" } },
     ], now)
     return { ok: true, wf: wf as AutoresearchWorkflow }
-  })
+  }, sessionID)
 }
 
 // ---------------------------------------------------------------------------------------------- context
@@ -480,7 +480,7 @@ export function productifyAutoresearch(
     } catch (error) {
       return { ok: false, text: (error as Error).message }
     }
-  })
+  }, sessionID)
 }
 
 /** Retry after an attempt-failure or runner stuck: resumes the same stage. A finished (terminal) workflow cannot retry. */

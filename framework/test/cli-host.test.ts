@@ -7,6 +7,7 @@ import { consumeCliSkillLoaderCompletion, SKILL_CATALOG_LIMIT, SKILL_DROPPED_RES
 import { assertHostAdmission } from "../src/hosts/required-controls.ts"
 import { createCliTransport, type CliNativeIdentity, type CliTransportHandle, type CliTransportOptions } from "../src/hosts/cli-transport.ts"
 import type { ActionGate, ChatAction, ComboRoutes, ExecutionPolicy, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole, SkillToolProvider } from "../src/hosts/types.ts"
+import type { ModelApiAction, ModelApiInput } from "../src/hosts/model-api.ts"
 import type { ExecutionRunStore, ExecutionRunStatus } from "../src/hosts/run-state.ts"
 import type { CliHostActivity } from "../src/hosts/cli-progress.ts"
 import { estimateTokens } from "../src/tokens.ts"
@@ -2053,6 +2054,28 @@ describe("chat execution through the action gate", () => {
     return { value, approvals, runs }
   }
 
+  async function bindModelApiSkill(subject: ReturnType<typeof harness>) {
+    root = realpathSync.native(root)
+    const directory = join(root, ".agents", "skills", "api-review")
+    mkdirSync(directory, { recursive: true })
+    const path = join(directory, "SKILL.md")
+    writeFileSync(path, "---\nname: api-review\ndescription: Review through an approved model request\nallowed-tools: [model_api]\n---\nUse model_api within its approval gate.\n")
+    const runtime = createCliRuntime({ worktree: root, engine: "local", model: "fixture-model" })
+    const store = attachAdmission(runtime, OWNER, { engine: "local", model: "fixture-model" })
+    const roots = await resolveSkillRoots({ projectRoot: root })
+    const session = await SkillSession.create({ roots, store, terminal: {
+      stdinIsTTY: true, stderrIsTTY: true, choose: async () => 0,
+    } }, new AbortController().signal)
+    witnessSessions.push(session)
+    const prepared = await session.prepare("api-review", new AbortController().signal)
+    const { handlers: _handlers, skillContext: _context, ...scope } = subject.request
+    const bound = bindSkillInvocation(prepared, scope, subject.policy)
+    witnessContexts.push(bound.context)
+    subject.request.skillContext = bound.context
+    subject.request.handlers = bound.handlers
+    return path
+  }
+
   test("an approved write happens and its result returns to the model; a denied write changes nothing and the turn goes on", async () => {
     const allowed = gate(() => true)
     const subject = harness({ role: "main", tools: CHAT_TOOLS, responses: [toolWrite("notes.md", "hello\n"), final("written")] })
@@ -2090,6 +2113,145 @@ describe("chat execution through the action gate", () => {
     const refused = harness({ role: "main", tools: CHAT_TOOLS, responses: [bash("rm -rf build"), final("ok")] })
     expect(await (await refused.host.prepare({ ...refused.request, actionGate: denied.value })).run()).toEqual({ status: "completed", text: "ok" })
     expect(denied.runs).toEqual([])
+  })
+
+  test("model_api approves the exact prepared destination and prompt before running, then returns the result", async () => {
+    const input = { target: "review", model: "fixture-model", prompt: "Review this exact text.\nDo not change it.", maxOutputTokens: 256, timeoutSeconds: 30 }
+    let endpoint = "https://review.example.test/v1/chat/completions"
+    const events: string[] = []
+    const prepared: ModelApiAction[] = []
+    const executed: ModelApiAction[] = []
+    const subject = gate(action => {
+      events.push("approve")
+      expect(action).toBe(prepared.at(-1)!)
+      expect(Object.isFrozen(action)).toBe(true)
+      // Changing configuration during approval must not retarget the prepared request.
+      endpoint = "https://changed.example.test/v1/chat/completions"
+      return true
+    }, undefined, { modelApi: {
+      prepare(value) {
+        events.push("prepare")
+        const action: ModelApiAction = Object.freeze({ tool: "model_api", ...value, url: endpoint, protocol: "openai-compatible", apiKeyEnv: "FIXTURE_MODEL_KEY" })
+        prepared.push(action)
+        return action
+      },
+      async run(action, signal) {
+        events.push("run")
+        expect(signal.aborted).toBe(false)
+        expect(action).toBe(prepared.at(-1)!)
+        executed.push(action)
+        return { ok: true, text: "API_REVIEW_RESULT" }
+      },
+    } })
+    const run = harness({ role: "main", tools: [...CHAT_TOOLS, "model_api"], responses: [
+      JSON.stringify({ type: "tool", name: "model_api", input }), final("review complete"),
+    ] })
+    expect(await (await run.host.prepare({ ...run.request, actionGate: subject.value })).run()).toEqual({ status: "completed", text: "review complete" })
+    expect(events).toEqual(["prepare", "approve", "run"])
+    expect(executed).toEqual([{ tool: "model_api", ...input, url: "https://review.example.test/v1/chat/completions", protocol: "openai-compatible", apiKeyEnv: "FIXTURE_MODEL_KEY" }])
+    expect(subject.runs).toEqual([])
+    expect(run.prompts[0]).toContain("- model_api: allowed")
+    expect(run.prompts[1]).toContain("API_REVIEW_RESULT")
+  })
+
+  test("model_api denial performs no API request and returns the denial to the model", async () => {
+    const inputs: ModelApiInput[] = []
+    let requests = 0
+    const subject = gate(() => false, undefined, { modelApi: {
+      prepare(input) { inputs.push(input); return Object.freeze({ tool: "model_api", ...input, url: "http://127.0.0.1:11434/api/chat", protocol: "ollama" }) },
+      async run() { requests++; return { ok: true, text: "must not run" } },
+    } })
+    const run = harness({ role: "main", tools: [...CHAT_TOOLS, "model_api"], responses: [
+      JSON.stringify({ type: "tool", name: "model_api", input: { target: "local", model: "fixture-model", prompt: "hello" } }), final("denial respected"),
+    ] })
+    expect(await (await run.host.prepare({ ...run.request, actionGate: subject.value })).run()).toEqual({ status: "completed", text: "denial respected" })
+    expect(inputs).toEqual([{ target: "local", model: "fixture-model", prompt: "hello", maxOutputTokens: 1024, timeoutSeconds: 120 }])
+    expect(subject.approvals).toHaveLength(1)
+    expect(requests).toBe(0)
+    expect(run.prompts[1]).toContain("The user denied this action: denied")
+  })
+
+  test("model_api cancellation during approval prevents the request even if approval returns allow", async () => {
+    let requests = 0
+    let approvalSignal: AbortSignal | undefined
+    const run = harness({ role: "main", tools: [...CHAT_TOOLS, "model_api"], responses: [
+      JSON.stringify({ type: "tool", name: "model_api", input: { target: "local", model: "fixture-model", prompt: "hello" } }),
+    ] })
+    const subject = gate(() => true, undefined, {
+      async approve(_action, signal) {
+        approvalSignal = signal
+        await handle.requestCancel("session closed during approval", Date.now() + 1000)
+        return { allow: true }
+      },
+      modelApi: {
+        prepare(input) { return Object.freeze({ tool: "model_api", ...input, url: "http://127.0.0.1:11434/api/chat", protocol: "ollama" }) },
+        async run() { requests++; return { ok: true, text: "must not run" } },
+      },
+    })
+    const handle = await run.host.prepare({ ...run.request, actionGate: subject.value })
+    expect(await handle.run()).toMatchObject({ status: "cancelled" })
+    expect(approvalSignal?.aborted).toBe(true)
+    expect(requests).toBe(0)
+    expect(run.prompts).toHaveLength(1)
+  })
+
+  test.each(["denial", "preparation failure"] as const)("skill-bound model_api settles %s without a request and continues the turn", async failure => {
+    let requests = 0
+    const subject = gate(() => false, undefined, { modelApi: {
+      prepare(input) {
+        if (failure === "preparation failure") throw new Error("invalid fixture target")
+        return Object.freeze({ tool: "model_api", ...input, url: "http://127.0.0.1:11434/api/chat", protocol: "ollama" })
+      },
+      async run() { requests++; return { ok: true, text: "must not run" } },
+    } })
+    const run = harness({ role: "main", tools: [...CHAT_TOOLS, "model_api"], responses: [
+      JSON.stringify({ type: "tool", name: "model_api", input: { target: "local", model: "fixture-model", prompt: "hello" } }), final("handled without an API request"),
+    ] })
+    await bindModelApiSkill(run)
+    expect(await (await run.host.prepare({ ...run.request, actionGate: subject.value })).run()).toEqual({ status: "completed", text: "handled without an API request" })
+    expect(requests).toBe(0)
+    expect(subject.approvals).toHaveLength(failure === "denial" ? 1 : 0)
+    expect(run.prompts).toHaveLength(2)
+    expect(run.prompts[1]).toContain(failure === "denial" ? "The user denied this action: denied" : "Model API target is unavailable or invalid")
+    expect(run.observed.results).toBe(1)
+  })
+
+  test("skill-bound model_api revalidates skill content after approval before any request", async () => {
+    let requests = 0
+    let skillPath = ""
+    const subject = gate(() => {
+      writeFileSync(skillPath, "---\nname: api-review\ndescription: Changed during approval\nallowed-tools: [model_api]\n---\nChanged instructions.\n")
+      return true
+    }, undefined, { modelApi: {
+      prepare(input) { return Object.freeze({ tool: "model_api", ...input, url: "http://127.0.0.1:11434/api/chat", protocol: "ollama" }) },
+      async run() { requests++; return { ok: true, text: "must not run" } },
+    } })
+    const run = harness({ role: "main", tools: [...CHAT_TOOLS, "model_api"], responses: [
+      JSON.stringify({ type: "tool", name: "model_api", input: { target: "local", model: "fixture-model", prompt: "hello" } }),
+    ] })
+    skillPath = await bindModelApiSkill(run)
+    expect(await (await run.host.prepare({ ...run.request, actionGate: subject.value })).run()).toMatchObject({ status: "failed" })
+    expect(subject.approvals).toHaveLength(1)
+    expect(requests).toBe(0)
+    expect(run.prompts).toHaveLength(1)
+  })
+
+  test.each(["no gate", "no capability", "worker", "planner", "not allowed"] as const)("model_api is unavailable with %s", async boundary => {
+    let prepares = 0
+    let requests = 0
+    const subject = gate(() => true, undefined, { modelApi: {
+      prepare(input) { prepares++; return Object.freeze({ tool: "model_api", ...input, url: "http://127.0.0.1:11434/api/chat", protocol: "ollama" }) },
+      async run() { requests++; return { ok: true, text: "must not run" } },
+    } })
+    const actionGate = boundary === "no gate" ? undefined : boundary === "no capability" ? gate(() => true).value : subject.value
+    const run = harness({ role: boundary === "worker" || boundary === "planner" ? boundary : "main", tools: boundary === "not allowed" ? CHAT_TOOLS : [...CHAT_TOOLS, "model_api"], responses: [
+      JSON.stringify({ type: "tool", name: "model_api", input: { target: "local", model: "fixture-model", prompt: "hello" } }),
+    ] })
+    expect(await (await run.host.prepare({ ...run.request, ...(actionGate ? { actionGate } : {}) })).run()).toEqual({ status: "failed", error: "Otter tool denied by role policy before effects" })
+    expect(run.prompts[0]).not.toContain("- model_api:")
+    expect(subject.approvals).toEqual([])
+    expect(prepares).toBe(0)
+    expect(requests).toBe(0)
   })
 
   test("multiedit is approved once as a whole and applies all edits or none; knowledge/raw is never written", async () => {

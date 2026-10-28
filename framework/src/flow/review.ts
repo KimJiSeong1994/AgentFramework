@@ -165,7 +165,7 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
     const observeWorkflowCancellation = () => {
       if (reviewSignal.aborted) return
       let current: ReturnType<typeof readWorkflow>
-      try { current = readWorkflow(runtime.worktree) }
+      try { current = readWorkflow(runtime.worktree, wf.sessionID) }
       catch { return }
       if (current?.id !== wf.id || current.sessionID !== wf.sessionID || !(isCancelPending(current) || isPausePending(current) || current.phase === "cancelled")) return
       if (current.stopIntent) adoptForeignStop(runtime, { sessionID: wf.sessionID })
@@ -173,7 +173,7 @@ export async function runPlanReview(runtime: ExecutionRuntime, wf: Workflow, pla
       if (workflowCancelTimer) clearInterval(workflowCancelTimer)
     }
     let currentWorkflow: ReturnType<typeof readWorkflow>
-    try { currentWorkflow = readWorkflow(runtime.worktree) }
+    try { currentWorkflow = readWorkflow(runtime.worktree, wf.sessionID) }
     catch { currentWorkflow = null }
     if (currentWorkflow?.id === wf.id && currentWorkflow.sessionID === wf.sessionID) {
       observeWorkflowCancellation()

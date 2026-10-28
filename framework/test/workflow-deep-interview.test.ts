@@ -129,14 +129,14 @@ function legacyData(request: string): DeepInterviewData {
 }
 function beginLegacy(h: Harness): DeepInterviewWorkflow {
   const wf = begin(h)
-  return withFlowTransaction(wt.worktree, tx => commitRevision(tx, { ...wf, data: legacyData("build the widget") }, [{ wf: wf.id, type: "legacy_fixture", actor: "code" }])) as DeepInterviewWorkflow
+  return withFlowTransaction(wt.worktree, tx => commitRevision(tx, { ...wf, data: legacyData("build the widget") }, [{ wf: wf.id, type: "legacy_fixture", actor: "code" }]), SID) as DeepInterviewWorkflow
 }
 const committed = (): DeepInterviewWorkflow => {
-  const read = readCommitted(wt.worktree)
+  const read = readCommitted(wt.worktree, {}, SID)
   if (read.state !== "ok" || read.wf.kind !== "deep-interview") throw new Error("no committed deep-interview")
   return read.wf
 }
-const eventTypes = (wid: string) => readEvents(wt.worktree, wid).map(event => event.type)
+const eventTypes = (wid: string) => readEvents(wt.worktree, wid, SID).map(event => event.type)
 const dataNow = () => dataOf(committed())
 const run = (h: Harness, wf: DeepInterviewWorkflow, io: DiIo, options = {}) => runDeepInterview(h.runtime, SID, wf.id, io, options)
 
@@ -180,7 +180,7 @@ function seed(patch: (d: DeepInterviewData) => DeepInterviewData, stage: DeepInt
     topology: { confirmed: true, components, receiptRef: topologyRef }, rounds: records as never,
   }
   const wf = { ...fresh, stage, phase, data: patch(base) } as DeepInterviewWorkflow
-  return withFlowTransaction(wt.worktree, tx => commitRevision(tx, wf, [{ wf: wf.id, type: "created", actor: "code" }])) as DeepInterviewWorkflow
+  return withFlowTransaction(wt.worktree, tx => commitRevision(tx, wf, [{ wf: wf.id, type: "created", actor: "code" }]), SID) as DeepInterviewWorkflow
 }
 
 // ---------------------------------------------------------------------------------------------- pure engine
@@ -216,7 +216,7 @@ describe("ambiguity is computed by code from component scores", () => {
     const wf = begin(h)
     await run(h, wf, makeIo({ answers: [answer()] }).io, { stopBefore: "panel" })
     expect(dataNow().rounds[0]).toMatchObject({ ambiguity: 0.22, band: "refined" })
-    const scored = readEvents(wt.worktree, wf.id).find(event => event.type === "scores_recorded")!
+    const scored = readEvents(wt.worktree, wf.id, SID).find(event => event.type === "scores_recorded")!
     expect(scored.data).toMatchObject({ ambiguity: 0.22, threshold: 0.2 })
   })
 })
@@ -539,7 +539,7 @@ describe("panel independence and binding", () => {
       const receipt = JSON.parse(readFileSync(join(receiptsDirectory(wt.worktree, SID, wf.id), name), "utf8"))
       expect(receipt).toMatchObject({ kind: "panel", wid: wf.id, inputSha: hashes[0], body: { round: 2 } })
     }
-    const triggered = readEvents(wt.worktree, wf.id).find(event => event.type === "panel_required")!
+    const triggered = readEvents(wt.worktree, wf.id, SID).find(event => event.type === "panel_required")!
     expect(triggered.data).toMatchObject({ round: 2, inputSha: hashes[0], personas: ["researcher", "contrarian", "simplifier"] })
   })
 
@@ -564,7 +564,7 @@ describe("panel independence and binding", () => {
     }))
     const wf = beginLegacy(h)
     await run(h, wf, makeIo({ answers: [answer(), answer(), answer(), answer()] }).io)
-    const panels = readEvents(wt.worktree, wf.id).filter(event => event.type === "panel_required").map(event => (event.data as { triggers: string[] }).triggers[0])
+    const panels = readEvents(wt.worktree, wf.id, SID).filter(event => event.type === "panel_required").map(event => (event.data as { triggers: string[] }).triggers[0])
     expect(panels).toEqual(["band:initial->progress", "band:progress->refined", "band:refined->ready"])
     const upward = reduce({ ...committed(), stage: "scoring", phase: "planning", data: { ...legacyData("x"), type: "brownfield", round: 2, topology: { confirmed: true, components: [{ id: "c", description: "d" }] }, rounds: [{ n: 1, questionSha: "a", scores: { goal: 1, constraints: 1, criteria: 1, context: 1 }, ambiguity: 0.22, band: "refined" }, { n: 2, questionSha: "b", answerSha: "c" }] } } as unknown as DeepInterviewWorkflow,
       { type: "scores_recorded", round: 2, scores: { goal: 0.3, constraints: 0.3, criteria: 0.3, context: 0.3 }, weakest: "goal", shapeChange: false, evidence: [] }, { worktree: wt.worktree })
@@ -648,7 +648,7 @@ describe("closure and restatement precede the spec", () => {
     expect(d.closureOverrides).toEqual([{ round: 2, gaps: ["no acceptance coverage for core"] }])
     const third = h.seen.filter(item => item.promptId === "di.interviewer.question")[2]!
     expect(third.text).toContain("no acceptance coverage for core")
-    expect(readEvents(wt.worktree, wf.id).filter(event => event.type === "closure_result").map(event => (event.data as { pass: boolean }).pass)).toEqual([false, true])
+    expect(readEvents(wt.worktree, wf.id, SID).filter(event => event.type === "closure_result").map(event => (event.data as { pass: boolean }).pass)).toEqual([false, true])
   })
 
   test("Adjust wording re-runs the restatement with the note; Yes then crystallizes and writes spec.md", async () => {
@@ -1005,11 +1005,11 @@ describe("completion re-checks every panel and choice record (W1/W7)", () => {
     const finished = committed()
     const file = join(receiptsDirectory(wt.worktree, SID, wf.id), receiptFiles(wf.id).find(name => name.includes("panel-r2-researcher"))!)
     writeFileSync(file, readFileSync(file, "utf8").replace("SENTINEL-researcher", "TAMPERED"))
-    const before = readFileSync(join(stateRoot(wt.worktree), "workflow", "workflow.json"))
+    const before = readFileSync(join(stateRoot(wt.worktree), "sessions", SID, "workflow", "workflow.json"))
     const { handoffToRalplan } = await import("../src/workflows/ralplan-driver.ts")
     const refused = handoffToRalplan(h.runtime, SID, finished, "plan it", [{ wf: wf.id, type: "spec_written", actor: "code" as const }])
     expect(refused.ok).toBe(false)
-    expect(readFileSync(join(stateRoot(wt.worktree), "workflow", "workflow.json")).equals(before)).toBe(true)
+    expect(readFileSync(join(stateRoot(wt.worktree), "sessions", SID, "workflow", "workflow.json")).equals(before)).toBe(true)
   })
 
   test("(b) after done, a tampered panel receipt makes verifiedSpec, the interview view, statusJson and the status line report incomplete", async () => {

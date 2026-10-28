@@ -71,6 +71,7 @@ function sourceForPath(path: string): WatchErrorSource {
   const name = parts.at(-1)
   if (name === "events.jsonl") return "events"
   if (name === "mode.json") return "mode"
+  if (parts.includes("workflow")) return "workflow"
   if (name === "ledger.json" || parts.includes("sessions")) return "ledger"
   if (parts.includes("execution-runs")) return "execution"
   return "workflow"
@@ -87,15 +88,16 @@ function watchEntries(path: string, maxEntries: number, source: WatchErrorSource
 
 function basePathsFor(runtime: FlowRuntime, state: StatusWatchState, status?: StatusJson): string[] {
   const root = runtime.worktree
-  const paths = [workflowPath(root), heartbeatPath(root), eventsPath(root), join(executionRunDirectory(root), "state.json")]
   const sessionID = state.sessionID ?? status?.session.id
+  const scope = sessionID === "no-session" ? undefined : sessionID
+  const paths = [workflowPath(root, scope), heartbeatPath(root, scope), eventsPath(root, scope), join(executionRunDirectory(root), "state.json")]
   if (sessionID && sessionID !== "no-session") {
     paths.push(sessionDir(root, sessionID), ledgerPath(root, sessionID), modeStatePath(root, sessionID))
   }
   const ownerSession = status?.workflow?.sessionID
   if (ownerSession && ownerSession !== sessionID) paths.push(sessionDir(root, ownerSession), ledgerPath(root, ownerSession))
   if (state.detail) {
-    paths.push(join(stateRoot(root), "sessions"), join(flowDir(root), "archive"))
+    paths.push(join(stateRoot(root), "sessions"), join(flowDir(root, sessionID === "no-session" ? undefined : sessionID), "archive"))
   }
   return [...new Set(paths)]
 }
@@ -108,7 +110,7 @@ function pathsFor(runtime: FlowRuntime, state: StatusWatchState, status?: Status
   const sessionID = state.sessionID ?? status?.session.id
   const ownerSession = status?.workflow?.sessionID
   const sessionRoot = join(stateRoot(root), "sessions")
-  const archiveDir = join(flowDir(root), "archive")
+  const archiveDir = join(flowDir(root, sessionID === "no-session" ? undefined : sessionID), "archive")
   const sessions = watchEntries(sessionRoot, STATUS_LIMITS.sessionsEntries, "ledger")
   const sessionIDs = sessions.entries.filter(entry => entry.isDirectory()).map(entry => entry.name)
   paths.push(...sessionIDs.filter(id => id !== sessionID && id !== ownerSession).map(id => ledgerPath(root, id)))

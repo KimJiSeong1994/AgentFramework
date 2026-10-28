@@ -107,15 +107,15 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
   const permissionSource = createOpenCodeSkillPermissionSource(deps)
   const router = createSkillRouter(deps, permissionSource)
 
-  function persistedWorkflowRefusal(): string | undefined {
-    const workflow = readWorkflow(worktree)
+  function persistedWorkflowRefusal(sessionID: string): string | undefined {
+    const workflow = readWorkflow(worktree, sessionID)
     return workflow ? workflowEngineRefusal(workflow, runtime.host.identity.engine) : undefined
   }
 
-  function taggedTasksRefusal(tasks: Array<{ wf?: { id: string } }>): string | undefined {
+  function taggedTasksRefusal(sessionID: string, tasks: Array<{ wf?: { id: string } }>): string | undefined {
     const workflowIDs = new Set(tasks.flatMap((task) => task.wf ? [task.wf.id] : []))
     if (workflowIDs.size === 0) return undefined
-    const workflow = readWorkflow(worktree)
+    const workflow = readWorkflow(worktree, sessionID)
     if (!workflow || [...workflowIDs].some((id) => id !== workflow.id)) return "workflow identity unavailable; recovery refused"
     return workflowEngineRefusal(workflow, runtime.host.identity.engine)
   }
@@ -148,14 +148,14 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     if (!canCaptureSDKUserMessage(worktree, sessionID, messageID)) return undefined
 
     const initialSessionDirectoryExists = existsSync(sessionDir(worktree, sessionID))
-    const initialWorkflowOwned = readWorkflow(worktree)?.sessionID === sessionID
+    const initialWorkflowOwned = readWorkflow(worktree, sessionID)?.sessionID === sessionID
     const initialAttachment = inspectCurrentSessionAttachment(worktree, sessionID)
     if (initialSessionDirectoryExists || initialWorkflowOwned || initialAttachment?.state === "attached") return undefined
 
     const freshBindingIsUnchanged = () => getOwnedSession(worktree, sessionID) === storeBefore &&
       admissionEpoch(worktree, sessionID) === epochBefore &&
       existsSync(sessionDir(worktree, sessionID)) === initialSessionDirectoryExists &&
-      (readWorkflow(worktree)?.sessionID === sessionID) === initialWorkflowOwned &&
+      (readWorkflow(worktree, sessionID)?.sessionID === sessionID) === initialWorkflowOwned &&
       inspectCurrentSessionAttachment(worktree, sessionID)?.state !== "attached" &&
       authenticatedSDKSessionIdentity(worktree, sessionID) !== undefined &&
       JSON.stringify(authenticatedSDKSessionIdentity(worktree, sessionID)) === JSON.stringify(initialIdentity) &&
@@ -447,7 +447,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     // §5.6: while this session owns a non-terminal plan workflow, legacy mode keywords/router/resume are all
     // superseded by the workflow suffix. Handled entirely here, before any legacy detection runs, D4/AC0.8.
     if (flowOn(config)) {
-      const wf = activeWorkflow(worktree)
+      const wf = activeWorkflow(worktree, sessionID)
       if (wf && wf.sessionID === sessionID) {
         const refusal = workflowEngineRefusal(wf, runtime.host.identity.engine)
         if (refusal) {
@@ -479,7 +479,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
         part.text += "\n\nlca interactive mode is read-only because the plan workflow is disabled."
         return
       }
-      const refusal = persistedWorkflowRefusal()
+      const refusal = persistedWorkflowRefusal(sessionID)
       if (refusal) {
         part.text += `\n\notter: ${refusal}`
         log("chat.message: interactive plan refused", { sessionID, reason: refusal })
@@ -522,7 +522,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
     // applied above, request = stripModeKeywords(text), actor user_keyword. No legacy plan mode state is written.
     // A foreign nonterminal workflow blocks new work even after its process dies.
     if (detection && detection.mode === "plan" && flowOn(config)) {
-      const refusal = persistedWorkflowRefusal()
+      const refusal = persistedWorkflowRefusal(sessionID)
       if (refusal) {
         part.text = `otter: ${refusal}`
         log("chat.message: plan keyword refused", { sessionID, refusal })
@@ -612,7 +612,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       const ledger = readLedger(worktree, sessionID)
       const open = openTasks(ledger)
       if (open.length === 0) return ""
-      const refusal = taggedTasksRefusal(open)
+      const refusal = taggedTasksRefusal(sessionID, open)
       if (refusal) {
         log("resume offer skipped: workflow engine identity refused", { sessionID, reason: refusal })
         return ""
@@ -689,7 +689,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
    */
   function handleFlowCommand(sessionID: string, command: string, args: string, part: TextPart): void {
     const now = Date.now()
-    const persistedRefusal = persistedWorkflowRefusal()
+    const persistedRefusal = persistedWorkflowRefusal(sessionID)
     if (persistedRefusal) {
       part.text = `otter: ${persistedRefusal}`
       log(`chat.message: /${command} refused`, { sessionID, reason: persistedRefusal })
@@ -734,7 +734,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
       let inputs: TaskInput[] = []
       if (wf.planRef) {
         try {
-          const raw = readJson<unknown>(planJsonPath(worktree, wf.id), null)
+          const raw = readJson<unknown>(planJsonPath(worktree, wf.id, sessionID), null)
           if (raw !== null) {
             const plan = coercePlan(raw, wf.planRef.revision)
             planShaOk = canonicalPlanSha(plan) === wf.planRef.jsonSha
@@ -745,7 +745,7 @@ export function createChatMessageHook(deps: HookDeps): NonNullable<Hooks["chat.m
         }
       }
       const mdShaOk = !!wf.planRef && verifyArtifact(worktree, { key: "plan.md", path: planMdPath(wf.id), sha256: wf.planRef.mdSha }).state === "verified"
-      const current = readWorkflow(worktree)
+      const current = readWorkflow(worktree, sessionID)
       const currentRefusal = current && workflowEngineRefusal(current, runtime.host.identity.engine)
       if (currentRefusal) {
         part.text = `otter: ${currentRefusal}`

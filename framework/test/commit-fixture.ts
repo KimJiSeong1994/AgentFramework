@@ -1,13 +1,13 @@
 // Test-only commit fixture: publishes an already-formed workflow as an index-bound immutable snapshot without
 // appending events, so tests can stage arbitrary states (stale owners, phases, v1-era shapes) through the real v2
 // on-disk layout. Production code has exactly one writer: commitRevision.
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { durableWriteBytes } from "../src/state/durable.ts"
 import { stateRoot } from "../src/state/store.ts"
-import { withFlowTransaction, flowTxWorktree, readWorkflowForWrite, workflowPath, workflowReadError, type FlowTx, type Workflow } from "../src/flow/state.ts"
+import { withFlowTransaction, flowTxWorktree, flowTxSessionID, readWorkflowForWrite, workflowPath, workflowReadError, type FlowTx, type Workflow } from "../src/flow/state.ts"
 import { parseEnvelope } from "../src/workflows/registry.ts"
-import { sha256Hex, snapshotRelativePath } from "../src/workflows/commit.ts"
+import { readCommitted, sha256Hex, snapshotRelativePath } from "../src/workflows/commit.ts"
 import type { WorkflowIndex } from "../src/workflows/types.ts"
 import { REGISTRY } from "../src/workflows/registry.ts"
 
@@ -42,31 +42,32 @@ export function writeWorkflow(tx: FlowTx, input: Fixture, now = Date.now()): Wor
   // Same refusals as the real writer: corrupt or non-terminal legacy state is never overwritten.
   const existing = readWorkflowForWrite(tx)
   if (existing.corrupt) throw workflowReadError(existing)
-  return publishWorkflow(worktree, input, now)
+  return publishWorkflow(worktree, input, now, flowTxSessionID(tx))
 }
 
 /** Publish without the corrupt-state refusal: simulates an operator repairing state out of band. */
-export function publishWorkflow(worktree: string, input: Fixture, now = Date.now()): Workflow {
+export function publishWorkflow(worktree: string, input: Fixture, now = Date.now(), sessionID?: string): Workflow {
   const wf = fixtureEnvelope(input, now)
   const bytes = Buffer.from(`${JSON.stringify(wf)}\n`, "utf8")
   const relative = snapshotRelativePath(wf.sessionID, wf.id, wf.lastSeq)
   durableWriteBytes(join(stateRoot(worktree), relative), bytes)
   const index: WorkflowIndex = { version: 2, id: wf.id, sessionID: wf.sessionID, kind: wf.kind, revision: wf.lastSeq, path: relative, sha256: sha256Hex(bytes) }
-  durableWriteBytes(workflowPath(worktree), Buffer.from(`${JSON.stringify(index)}\n`, "utf8"))
+  durableWriteBytes(workflowPath(worktree, sessionID), Buffer.from(`${JSON.stringify(index)}\n`, "utf8"))
   return wf
 }
 
 /** The committed snapshot bytes currently bound by the index. */
-export function committedSnapshot(worktree: string): Workflow {
-  const index = JSON.parse(readFileSync(workflowPath(worktree), "utf8")) as WorkflowIndex
+export function committedSnapshot(worktree: string, sessionID?: string): Workflow {
+  const index = JSON.parse(readFileSync(workflowPath(worktree, fixtureSession(worktree, sessionID)), "utf8")) as WorkflowIndex
   return JSON.parse(readFileSync(join(stateRoot(worktree), index.path), "utf8")) as Workflow
 }
 
 /** Publish `patch` over the current committed workflow as a new snapshot (a raw-edit fixture, e.g. an engine swap). */
-export function rewriteCommitted(worktree: string, patch: Partial<Workflow> | ((wf: Workflow) => Workflow)): Workflow {
-  const current = committedSnapshot(worktree)
+export function rewriteCommitted(worktree: string, patch: Partial<Workflow> | ((wf: Workflow) => Workflow), sessionID?: string): Workflow {
+  sessionID = fixtureSession(worktree, sessionID)
+  const current = committedSnapshot(worktree, sessionID)
   const next = typeof patch === "function" ? patch(current) : { ...current, ...patch }
-  return withFlowTransaction(worktree, (tx) => writeWorkflow(tx, next as never, next.updatedAt))
+  return withFlowTransaction(worktree, (tx) => writeWorkflow(tx, next as never, next.updatedAt), sessionID)
 }
 
 /**
@@ -85,7 +86,17 @@ export function writeRawSnapshot(worktree: string, value: unknown, identity: { i
 }
 
 /** Byte length of the index-bound snapshot (status reads index + snapshot). */
-export function committedSnapshotBytes(worktree: string): number {
-  const index = JSON.parse(readFileSync(workflowPath(worktree), "utf8")) as WorkflowIndex
+export function committedSnapshotBytes(worktree: string, sessionID?: string): number {
+  const index = JSON.parse(readFileSync(workflowPath(worktree, fixtureSession(worktree, sessionID)), "utf8")) as WorkflowIndex
   return readFileSync(join(stateRoot(worktree), index.path)).byteLength
+}
+
+/** Test-only convenience: infer only one verified committed session, never orphan snapshots. */
+function fixtureSession(worktree: string, sessionID?: string): string | undefined {
+  if (sessionID !== undefined || existsSync(workflowPath(worktree))) return sessionID
+  let names: string[]
+  try { names = readdirSync(join(stateRoot(worktree), "sessions")) } catch { return undefined }
+  const candidates = names.filter(sid => /^[A-Za-z0-9_-]{1,128}$/u.test(sid) && readCommitted(worktree, {}, sid).state === "ok")
+  if (candidates.length > 1) throw new Error("fixture requires explicit session ID for multiple committed sessions")
+  return candidates[0]
 }

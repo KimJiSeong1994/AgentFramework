@@ -422,3 +422,23 @@ describe("scoped CLI file tools", () => {
     }
   })
 })
+
+
+test("model_api requires a gated main capability, validates input and never executes through file tools", () => {
+  const input = { target: "local", model: "test:latest", prompt: "review this" }
+  const api = createCliTools({ root, role: "main", allowed: ["model_api"], denied: [], actionGate: true, modelApi: true })
+  expect(api.available).toContain("model_api")
+  expect(api.validate("model_api", input)).toBe(true)
+  expect(api.execute("model_api", input)).toEqual({ ok: false, error: "Tool refused: model API calls run through the host approval gate." })
+  for (const bad of [ { ...input, url: "https://unapproved.example" }, { ...input, apiKeyEnv: "SECRET" },
+    { ...input, prompt: "a".repeat(16385) }, { ...input, maxOutputTokens: 4097 }, { ...input, timeoutSeconds: 601 },
+    { ...input, model: "bad\nmodel" }, { ...input, target: "../local" } ]) expect(api.validate("model_api", bad)).toBe(false)
+  for (const options of [ { role: "main" as const, actionGate: false, modelApi: true, denied: [] },
+    { role: "main" as const, actionGate: true, modelApi: false, denied: [] },
+    { role: "worker" as const, actionGate: true, modelApi: true, denied: [] },
+    { role: "main" as const, actionGate: true, modelApi: true, denied: ["model_api"] } ]) {
+    const denied = createCliTools({ root, allowed: ["model_api"], ...options })
+    expect(denied.available).not.toContain("model_api")
+    expect(denied.validate("model_api", input)).toBe(false)
+  }
+})

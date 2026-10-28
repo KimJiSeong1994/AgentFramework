@@ -12,15 +12,17 @@ import type { EngineInfo } from "../src/hosts/engine-update.ts"
 import { createChatCheckpoints } from "../src/hosts/chat-checkpoint.ts"
 import type { ModelCatalog } from "../src/hosts/model-catalog.ts"
 import type { ChoicePresentation, InteractiveViewFacts, TranscriptText } from "../src/hosts/interactive-view.ts"
-import { newWorkflow, withFlowTransaction, workflowPath } from "../src/flow/state.ts"
+import { newWorkflow, withFlowTransaction, workflowPath, writePlanJson } from "../src/flow/state.ts"
 import { publishWorkflow, writeWorkflow } from "./commit-fixture.ts"
+import { canonicalPlanSha, renderPlanMd, type Plan } from "../src/flow/plan.ts"
 import { currentOwner } from "../src/flow/owner.ts"
 import { readSessionCommitted } from "../src/workflows/commit.ts"
 import { AdmissionRefusal } from "../src/hosts/required-controls.ts"
 import { ModelRequestError } from "../src/workflows/turn.ts"
 import { effectiveHold, holdAdmission } from "../src/sessions/admission.ts"
 import { PlanIsolationSetupError, PlanIsolationUnavailableError, type ForegroundController } from "../src/hosts/controller.ts"
-import type { ActionGate, ComboRoutes, ExecutionRuntime } from "../src/hosts/types.ts"
+import { LinuxAdmissionRefused, type ActionGate, type ComboRoutes, type ExecutionRuntime } from "../src/hosts/types.ts"
+import type { ModelApiAction } from "../src/hosts/model-api.ts"
 import { COMBO_PRESETS } from "../src/hosts/combo-presets.ts"
 import type { CliProgressSink } from "../src/hosts/cli-progress.ts"
 import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
@@ -29,7 +31,7 @@ import { SkillSession, type SkillCatalog } from "../src/skills/session.ts"
 import { DEFAULT_SKILL_AUTO, NO_SKILL_TRUST, parseSkillTrust, type SkillTrust, type SkillTrustLookup } from "../src/skills/trust.ts"
 import type { AutoSkillSelection } from "../src/routing/router.ts"
 import type { AutoSkillSelectInput } from "../src/hosts/interactive-session.ts"
-import { humanDecision, type OperatorDecision } from "../src/hosts/operator.ts"
+import { consumeOperatorDecision, humanDecision, type OperatorDecision } from "../src/hosts/operator.ts"
 import { planBinding, withTerminalLine } from "./operator-helpers.ts"
 import { tempGitWorktree } from "./guards-helpers.ts"
 import { DEFAULT_CONFIG } from "../src/config.ts"
@@ -303,7 +305,7 @@ function harness(options: HarnessOptions = {}) {
         host: { identity: { engine, profile: "interactive-fixture" } },
         config: { ...structuredClone(DEFAULT_CONFIG), chat: { intent: options.intent ?? "off", ...(options.chatExecute ? { execute: options.chatExecute } : {}) } },
         // Chat execution needs a main role built to act; the read-only default keeps no policy (no gate).
-        ...(options.chatExecute && options.chatExecute !== "plan" ? { policy: { resolve: () => ({ tools: { allowed: ["read", "write", "edit", "bash"], denied: [] } }) } } : {}),
+        ...(options.chatExecute && options.chatExecute !== "plan" ? { policy: { resolve: () => ({ tools: { allowed: ["read", "write", "edit", "bash", "model_api"], denied: [] } }) } } : {}),
         log() {},
         selectedEngine: engine,
         selectedModel: model,
@@ -954,7 +956,7 @@ describe("interactive terminal", () => {
     }
   })
 
-  test("SkillOpt cleanup refuses held and observer sessions before service or artifact access", async () => {
+  test("SkillOpt cleanup refuses the held owning session before service or artifact access", async () => {
     const factory = spyOn(skillOptForegroundModule, "createNativeSkillOptForeground")
     const inputReader = spyOn(skillOptForegroundModule, "readSkillOptForegroundInput")
     const artifactReader = spyOn(skillOptForegroundModule, "readSkillOptForegroundArtifact")
@@ -969,23 +971,11 @@ describe("interactive terminal", () => {
       expect(held.calls.output.join(" ")).toContain("SkillOpt cleanup refused: this session is held or observing")
       expect(held.calls.events).not.toContain("terminal.suspend")
 
-      observerWorktree = tempGitWorktree()
-      withFlowTransaction(observerWorktree.worktree, tx => writeWorkflow(tx, newWorkflow("another-session",
-        { instance: "other-instance", pid: process.pid }, "command", "observer cleanup", "codex")))
-      const observer = harness({ lines: [`/skillopt cleanup ${runId}`, "/quit"] })
-      observer.deps.cwd = observerWorktree.worktree
-      observer.deps.gitTopLevel = () => observerWorktree!.worktree
-      await launchInteractive({ worktree: observerWorktree.worktree, engine: "codex", model: "gpt-5-codex" }, observer.deps)
-      expect(observer.calls.actionContexts).toContain("observer")
-      expect(observer.calls.output.join(" ")).toContain("SkillOpt cleanup refused: this session is held or observing")
-      expect(observer.calls.events).not.toContain("terminal.suspend")
-
       expect(factory).not.toHaveBeenCalled()
       expect(inputReader).not.toHaveBeenCalled()
       expect(artifactReader).not.toHaveBeenCalled()
-      expect(held.calls.runCount + observer.calls.runCount).toBe(0)
+      expect(held.calls.runCount).toBe(0)
       expect(held.calls.turns).toEqual([])
-      expect(observer.calls.turns).toEqual([])
     } finally {
       factory.mockRestore()
       inputReader.mockRestore()
@@ -2093,6 +2083,60 @@ describe("interactive terminal", () => {
     const plan = harness({ chatExecute: "plan", lines: ["go", "/quit"] })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, plan.deps)
     expect(plan.calls.gates).toEqual([undefined])
+  })
+
+  test.each(["ask", "auto-edit"] as const)("model_api in %s mode always asks for each call and shows its exact destination and prompt", async chatExecute => {
+    const decisions: Array<{ allow: boolean; reason?: string }> = []
+    const action: ModelApiAction = Object.freeze({ tool: "model_api", target: "review", model: "fixture-model", prompt: "Only this text is sent.\nSecond line.",
+      maxOutputTokens: 256, timeoutSeconds: 30, url: "https://review.example.test/v1/chat/completions", protocol: "openai-compatible", apiKeyEnv: "FIXTURE_MODEL_KEY" })
+    let choices = 0
+    const h = harness({
+      chatExecute, allowRules: ["model_api", "curl", "review"], lines: ["review", "/quit"],
+      choose: async (_title, values) => ++choices === 1 ? values.indexOf("Allow once") : values.indexOf("Deny"),
+      onGate: async gate => {
+        expect(gate.modelApi).toBeDefined()
+        const signal = new AbortController().signal
+        decisions.push(await gate.approve(action, signal))
+        decisions.push(await gate.approve(action, signal))
+      },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(decisions).toEqual([{ allow: true }, { allow: false, reason: "denied" }])
+    expect(h.calls.choices.map(choice => choice.values)).toEqual([["Allow once", "Deny"], ["Allow once", "Deny"]])
+    expect(h.calls.allowRules).toEqual(["model_api", "curl", "review"])
+    expect(h.calls.chatRuns).toEqual([])
+    const output = h.calls.output.join("")
+    expect(output).toContain("POST https://review.example.test/v1/chat/completions (openai-compatible)")
+    expect(output).toContain("Output limit 256 tokens; time limit 30s")
+    expect(output).toContain("Exact prompt sent:\n  Only this text is sent.\n  Second line.")
+    expect(output).toContain("environment variable FIXTURE_MODEL_KEY (value hidden)")
+    const actions = replaySession(wt.worktree, h.calls.sessionIDs[0]!, { order: "asc" }).records.filter(record => record.kind === "action")
+    expect(actions.map(record => record.data)).toEqual([
+      { tool: "model_api", decision: "asked", paths: [] }, { tool: "model_api", decision: "denied", paths: [] },
+    ])
+    expect(JSON.stringify(actions)).not.toContain(action.prompt)
+  })
+
+  test("model_api is not covered by a whole-worktree edit grant", async () => {
+    const decisions: Array<{ allow: boolean; reason?: string }> = []
+    const h = harness({
+      chatExecute: "ask", lines: ["go", "/quit"],
+      choose: async (_title, values) => {
+        const grant = values.indexOf("Allow edits in the whole worktree for this turn")
+        return grant >= 0 ? grant : values.indexOf("Deny")
+      },
+      onGate: async gate => {
+        const signal = new AbortController().signal
+        decisions.push(await gate.approve({ tool: "write", path: "notes.md", content: "notes" }, signal))
+        decisions.push(await gate.approve(Object.freeze({ tool: "model_api", target: "local", model: "fixture-model", prompt: "hello",
+          maxOutputTokens: 32, timeoutSeconds: 10, url: "http://127.0.0.1:11434/api/chat", protocol: "ollama" }), signal))
+      },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(decisions).toEqual([{ allow: true }, { allow: false, reason: "denied" }])
+    expect(h.calls.choices).toHaveLength(2)
+    expect(h.calls.choices[1]!.values).toEqual(["Allow once", "Deny"])
+    expect(h.calls.output.join("")).toContain("Edits in the whole worktree are allowed until this turn ends.")
   })
 
   test("chat execution: read-only commands run without asking; a folder grant lasts for its turn only", async () => {
@@ -3731,7 +3775,7 @@ describe("interactive terminal", () => {
     expect(h.calls.viewFacts.some(fact => fact.request.state === "failed" && fact.request.category.state === "unknown")).toBe(true)
   })
 
-  test.each(["claim", "unsettled", "fenced", "held", "foreign-workflow"] as const)(
+  test.each(["claim", "unsettled", "fenced", "held"] as const)(
     "a settled model failure does not restore chat when %s ownership/safety state appears",
     async scenario => {
       const executionStatus: NonNullable<HarnessOptions["executionStatus"]> = { generation: 0, executions: [] }
@@ -3906,35 +3950,28 @@ describe("interactive terminal", () => {
     expect([...h.calls.signalListeners.values()].every(listeners => listeners.size === 0)).toBe(true)
   })
 
-  test("another session's workflow allows a model switch but no new chat; corrupt workflow state refuses switching", async () => {
+  test("another session's workflow leaves new chat independent; own corrupt state still refuses", async () => {
     const path = workflowPath(wt.worktree)
     withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, newWorkflow("another-session",
       { instance: "fixture", pid: process.pid }, "command", "active plan", "codex")))
-    const active = harness({ lines: ["/help", "/skillopt consent not-a-run-id /not-read-in-observer.json", "/skillopt prepare /not-read-in-observer.json", "/skillopt run not-a-run-id /not-read-in-observer.json", "/skillopt apply 00000000-0000-4000-8000-000000000001", "/skillopt rollback 00000000-0000-4000-8000-000000000001", "/skillopt cleanup 00000000-0000-4000-8000-000000000001", "/model local qwen3:8b", "hello", "/quit"] })
-    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, active.deps)
-    expect(active.calls.actionContexts).toContain("observer")
-    expect(active.calls.output.find(text => text.includes("Commands (observer):")) ?? "").toContain("/model")
-    expect(active.calls.output.find(text => text.includes("Commands (observer):")) ?? "").toContain("/skillopt")
-    expect(active.calls.output.join(" ")).toContain("SkillOpt prepare refused: this session is held or observing")
-    expect(active.calls.output.join(" ")).toContain("SkillOpt consent refused: this session is held or observing")
-    expect(active.calls.output.join(" ")).toContain("SkillOpt run refused: this session is held or observing")
-    expect(active.calls.output.join(" ")).toContain("SkillOpt apply refused: this session is held or observing")
-    expect(active.calls.output.join(" ")).toContain("SkillOpt rollback refused: this session is held or observing")
-    expect(active.calls.output.join(" ")).toContain("SkillOpt cleanup refused: this session is held or observing")
-    expect(active.calls.output.join(" ")).toContain("no inputs were read or state changed")
+    const retained = readFileSync(path, "utf8")
+    const active = harness({ lines: ["/help", "/model local qwen3:8b", "hello", "/quit"] })
+    expect((await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, active.deps)).code).toBe(0)
+    expect(active.calls.actionContexts).toContain("chat")
+    expect(active.calls.actionContexts).not.toContain("observer")
     expect(active.calls.runtimes).toHaveLength(2)
     expect(active.calls.runtimes[1]).toMatchObject({ engine: "local", model: "qwen3:8b" })
-    expect(active.calls.turnBindings).toEqual([])
-    expect(active.calls.output.join("")).not.toContain("resolve the active workflow first")
-    expect(active.calls.output.join("")).toContain("workflow belongs to another-session")
-    expect(active.calls.output.join("")).toContain("No new workflow can start here")
+    expect(active.calls.turns).toEqual(["hello"])
+    expect(active.calls.output.join("")).not.toContain("workflow belongs to another-session")
+    expect(readFileSync(path, "utf8")).toBe(retained)
 
-    writeFileSync(path, "{")
+    const ownPath = workflowPath(wt.worktree, "otter-fixture-run-2")
+    mkdirSync(dirname(ownPath), { recursive: true })
+    writeFileSync(ownPath, "{")
     const corrupt = harness({ lines: ["/model local qwen3:8b", "hello", "/quit"] })
     await expect(launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, corrupt.deps)).rejects.toThrow("workflow state is corrupt")
-    expect(corrupt.calls.runtimes).toHaveLength(1)
-    expect(corrupt.calls.runtimes[0]?.engine).toBe("codex")
     expect(corrupt.calls.turnBindings).toEqual([])
+    expect(readFileSync(path, "utf8")).toBe(retained)
   })
 
   test("held workflow and claim contexts hide /model and refuse typed switches before discovery", async () => {
@@ -4288,12 +4325,12 @@ describe("interactive terminal", () => {
   test("sanitizes untrusted runtime refusal output without deciding or running", async () => {
     const injection = "CSI-START\u001b[2JOSC-START\u001b]52;c;Y2xpcA==\u0007C1-CSI\u009b31mCR\rBIDI\u202eEND"
     const h = harness({
-      lines: ["make the change"],
+      lines: ["make the change", "/help", "/quit"],
       turns: [{ text: "Discussion remains.", plan: proposedPlan }],
       importResult: { ok: false, text: `Host refusal remains 日本語. ${injection}` },
     })
 
-    expect((await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)).code).toBe(1)
+    expect((await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)).code).toBe(0)
     const output = h.calls.output.join("")
     const refusal = h.calls.output.find(line => line.startsWith("[error] Plan submission failed"))
     expect(refusal).toContain("Host refusal remains 日本語.")
@@ -4308,6 +4345,7 @@ describe("interactive terminal", () => {
     expect(h.calls.events).not.toContain("humanDecision")
     expect(h.calls.events).not.toContain("decide")
     expect(h.calls.events).not.toContain("run")
+    expect(h.calls.prompts.filter(prompt => prompt === "You> ")).toHaveLength(3)
   })
 
   test("EOF after an invalid plan closes safely without import, approval, or execution", async () => {
@@ -4352,11 +4390,13 @@ describe("interactive terminal", () => {
     { phase: "stuck", done: 0, failed: 1, cancelled: 0 },
     { phase: "stuck", done: 0, failed: 0, cancelled: 1 },
     { phase: "stuck", done: 0, failed: 0, cancelled: 0 },
-  ])("unfinished execution returns failure rather than success: %j", async (runResult) => {
-    const h = harness({ lines: ["make the change"], turns: [{ text: "", plan: proposedPlan }], runResult })
+  ])("unfinished execution reports failure and keeps the composer available: %j", async (runResult) => {
+    const h = harness({ lines: ["make the change", "/help", "/quit"], turns: [{ text: "", plan: proposedPlan }], runResult })
     const result = await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
-    expect(result.code).toBe(1)
+    expect(result.code).toBe(0)
     expect(h.calls.runCount).toBe(1)
+    expect(h.calls.prompts.filter(prompt => prompt === "You> ")).toHaveLength(3)
+    expect(h.calls.output.join("")).toContain("stuck")
   })
 
   test("rejection never starts the queue", async () => {
@@ -4908,5 +4948,308 @@ describe("intent offer ranking by the automatic selector", () => {
       expect(h.calls.choices.find(choice => choice.title.includes("design-level"))?.values)
         .toEqual(["Continue in chat", "Start ralplan", "Start deep-interview first", "Cancel"])
     }
+  })
+})
+
+
+describe("plan execution stays in the interactive session", () => {
+  const launch = (h: ReturnType<typeof harness>) => launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+  const inputCount = (h: ReturnType<typeof harness>) => h.calls.prompts.filter(prompt => prompt === "You> ").length
+
+  test.each([false, true])("completed plan returns to the composer (fullscreen=%s)", async fullscreen => {
+    const h = harness({ fullscreen, lines: ["make the change", "follow-up question", "/quit"],
+      turns: [{ text: "plan", plan: proposedPlan }, { text: "follow-up answered" }], choose: async () => 0 })
+    expect((await launch(h)).code).toBe(0)
+    expect(h.calls.turns).toEqual(["make the change", "follow-up question"])
+    expect(inputCount(h)).toBe(3)
+    expect(h.calls.runCount).toBe(1)
+    expect(h.calls.output.join("")).toContain("follow-up answered")
+  })
+
+  test.each([false, true])("natural language at the real approval reader holds without execution and preserves input (fullscreen=%s)", async fullscreen => {
+    const sid = "otter-fixture-session"
+    let inspectedHold = false
+    const h = harness({ fullscreen, lines: ["make the change", "/help", "/quit"],
+      turns: [{ text: "plan", plan: proposedPlan }], choose: async () => 0,
+      beforeRead(_prompt, _signal, lines) {
+        if (lines?.[0] !== "/help") return
+        inspectedHold = true
+        expect(effectiveHold(wt.worktree, sid)).toBe(true)
+        expect(readSessionMetadata(wt.worktree, sid)?.holdReason).toBe("approval_input_invalid")
+        expect(h.calls.runCount).toBe(0)
+        expect(h.calls.events).not.toContain("terminal.close")
+      },
+    })
+    h.deps.humanDecision = (...args) => withTerminalLine("실제로 수행해줘", () => humanDecision(...args))
+    expect((await launch(h)).code).toBe(0)
+    expect(inspectedHold).toBe(true)
+    expect(inputCount(h)).toBe(3)
+    expect(h.calls.runCount).toBe(0)
+    expect(h.calls.events).not.toContain("decide")
+    expect(h.calls.output.join("")).toContain("/continue")
+  })
+
+  test("invalid approval can resume the same pending plan and execute only after a fresh valid receipt", async () => {
+    const sid = "otter-fixture-session"
+    let approvals = 0
+    const h = harness({ lines: ["make the change", "/continue", "/help", "/quit"], turns: [{ text: "plan", plan: proposedPlan }],
+      choose: async title => title === "Execution decision" ? 0 : title.startsWith("Resume residual") ? 1 : undefined,
+      beforeRead(_prompt, _signal, lines) {
+        if (lines?.[0] !== "/continue") return
+        expect(effectiveHold(wt.worktree, sid)).toBe(true)
+        expect(readSessionCommitted(wt.worktree, sid)?.wf.phase).toBe("pending_approval")
+        expect(h.calls.runCount).toBe(0)
+      },
+    })
+    const create = h.deps.createController!
+    h.deps.createController = (...args) => {
+      const controller = create(...args)
+      const originalImport = controller.importPlan
+      controller.importPlan = async (...input) => {
+        const result = await originalImport(...input)
+        const plan = input[3] as Plan
+        const mdPath = ".otter/plans/wf_fixture.md"
+        const rendered = renderPlanMd("wf_fixture", plan)
+        mkdirSync(dirname(join(wt.worktree, mdPath)), { recursive: true })
+        writeFileSync(join(wt.worktree, mdPath), rendered)
+        withFlowTransaction(wt.worktree, tx => writePlanJson(tx, "wf_fixture", plan))
+        const epoch = getOwnedSession(wt.worktree, sid)!.epoch
+        const wf = publishWorkflow(wt.worktree, { ...newWorkflow(sid, currentOwner(Date.now(), epoch), "command", "approval retry", "codex"),
+          id: "wf_fixture", phase: "pending_approval", planRef: { jsonSha: canonicalPlanSha(plan), mdPath,
+            mdSha: createHash("sha256").update(rendered).digest("hex"), revision: plan.revision } })
+        return { ...result, result: { ok: true, text: "", wf }, planSha: canonicalPlanSha(plan), renderedPlan: rendered }
+      }
+      const originalDecide = controller.decide
+      controller.decide = receipt => {
+        expect(consumeOperatorDecision(receipt).action).toBe("approve")
+        expect(effectiveHold(wt.worktree, sid)).toBe(false)
+        return originalDecide(receipt)
+      }
+      return controller
+    }
+    h.deps.humanDecision = (action, binding, signal) => withTerminalLine(++approvals === 1 ? "실제로 수행해줘"
+      : `APPROVE ${binding.workflowID} ${binding.subject.sha256}`, () => humanDecision(action, binding, signal))
+    expect((await launch(h)).code).toBe(0)
+    expect(approvals).toBe(2)
+    expect(h.calls.runCount).toBe(1)
+    expect(h.calls.events.filter(event => event === "import")).toHaveLength(1)
+    expect(h.calls.events.filter(event => event === "decide")).toHaveLength(1)
+    expect(inputCount(h)).toBe(4)
+    expect(h.calls.output.join("")).not.toContain("Resume refused")
+  })
+
+  test.each([false, true])("execution exceptions retain a held composer without redispatch (fullscreen=%s)", async fullscreen => {
+    const sid = "otter-fixture-session"
+    let inspectedHold = false
+    const h = harness({ fullscreen, lines: ["make the change", "/help", "do not dispatch again", "/quit"],
+      turns: [{ text: "plan", plan: proposedPlan }], choose: async () => 0,
+      beforeRun() { throw new Error(`queue failure \u001b[2J ${"detail ".repeat(100)}`) },
+      beforeRead(_prompt, _signal, lines) {
+        if (lines?.[0] !== "/help") return
+        inspectedHold = true
+        expect(effectiveHold(wt.worktree, sid)).toBe(true)
+        expect(readSessionMetadata(wt.worktree, sid)?.holdReason).toBe("plan_execution_failed")
+        expect(h.calls.events).not.toContain("terminal.close")
+      },
+    })
+    expect((await launch(h)).code).toBe(0)
+    expect(inspectedHold).toBe(true)
+    expect(inputCount(h)).toBe(4)
+    expect(h.calls.turns).toEqual(["make the change"])
+    expect(h.calls.runCount).toBe(1)
+    const output = h.calls.output.join("")
+    expect(output).toContain("queue failure")
+    expect(output).not.toContain("\u001b[2J")
+    expect(output).toContain("/status")
+    expect(output).toContain("/continue")
+    expect(output).not.toContain("No tasks were dispatched")
+  })
+
+  test("in-place fallback exceptions also keep the composer held", async () => {
+    let attempts = 0
+    const h = harness({ lines: ["make the change", "/help", "/quit"], turns: [{ text: "plan", plan: proposedPlan }],
+      choose: async () => 0, isolated: { unavailable: "no-commit" },
+      beforeRun() { if (++attempts === 2) throw new Error("in-place queue failure") },
+    })
+    expect((await launch(h)).code).toBe(0)
+    expect(inputCount(h)).toBe(3)
+    expect(h.calls.runCount).toBe(2)
+    expect(h.calls.events).toContain("run-in-place")
+    expect(h.calls.output.join("")).toContain("in-place queue failure")
+    expect(h.calls.output.join("")).not.toContain("No tasks were dispatched")
+  })
+
+  test("unresolved execution remains fenced while help is available", async () => {
+    const status: NonNullable<HarnessOptions["executionStatus"]> = { generation: 0, executions: [] }
+    const h = harness({ lines: ["make the change", "/help", "run again", "/quit"], executionStatus: status,
+      turns: [{ text: "plan", plan: proposedPlan }], choose: async () => 0,
+      beforeRun() {
+        status.executions.push({ executionId: "unsettled", taskId: "t1", ownerSession: "otter-fixture-session", generation: 1,
+          reconciliation: { outcome: "running", quiescent: false } })
+        throw new Error("execution unresolved; fence retained")
+      },
+      beforeRead(_prompt, _signal, lines) {
+        if (lines?.[0] === "/help") expect(effectiveHold(wt.worktree, "otter-fixture-session")).toBe(true)
+      },
+    })
+    expect((await launch(h)).code).toBe(0)
+    expect(inputCount(h)).toBe(4)
+    expect(status.executions).toHaveLength(1)
+    expect(h.calls.runCount).toBe(1)
+    expect(h.calls.turns).toEqual(["make the change"])
+    expect(h.calls.output.join("")).toContain("execution unresolved")
+  })
+
+  test("host admission refusal during execution still fails closed", async () => {
+    const h = harness({ lines: ["make the change", "/help", "/quit"], turns: [{ text: "plan", plan: proposedPlan }],
+      beforeRun() { throw AdmissionRefusal.hostIncompatible() },
+    })
+    await expect(launch(h)).rejects.toBeInstanceOf(AdmissionRefusal)
+    expect(inputCount(h)).toBe(1)
+    expect(h.calls.runCount).toBe(1)
+  })
+
+  test("a cancelled workflow result keeps input available without creating a new hold", async () => {
+    const sid = "otter-fixture-session"
+    let checked = false
+    const h = harness({ lines: ["make the change", "/help", "/quit"], turns: [{ text: "plan", plan: proposedPlan }],
+      runResult: { phase: "cancelled", done: 0, failed: 0, cancelled: 1 },
+      beforeRun() {
+        const epoch = getOwnedSession(wt.worktree, sid)!.epoch
+        publishWorkflow(wt.worktree, { ...newWorkflow(sid, currentOwner(Date.now(), epoch), "command", "cancelled fixture", "codex"),
+          id: "wf_fixture", phase: "cancelled" })
+      },
+      beforeRead(_prompt, _signal, lines) {
+        if (lines?.[0] !== "/help") return
+        checked = true
+        expect(effectiveHold(wt.worktree, sid)).toBe(false)
+        expect(readSessionMetadata(wt.worktree, sid)?.held).toBe(false)
+      },
+    })
+    expect((await launch(h)).code).toBe(0)
+    expect(checked).toBe(true)
+    expect(inputCount(h)).toBe(3)
+    expect(h.calls.runCount).toBe(1)
+    expect(h.calls.output.join("")).toContain("cancelled")
+    expect(h.calls.output.join("")).not.toContain("Plan execution is incomplete")
+  })
+
+  test("execution recovery preserves an existing user_stop hold reason", async () => {
+    const sid = "otter-fixture-session"
+    let checked = false
+    const h = harness({ lines: ["make the change", "/help", "/quit"], turns: [{ text: "plan", plan: proposedPlan }],
+      beforeRun() { holdAdmission(wt.worktree, sid, "user_stop"); throw new Error("execution stopped") },
+      beforeRead(_prompt, _signal, lines) {
+        if (lines?.[0] !== "/help") return
+        checked = true
+        expect(effectiveHold(wt.worktree, sid)).toBe(true)
+        expect(readSessionMetadata(wt.worktree, sid)?.holdReason).toBe("user_stop")
+      },
+    })
+    expect((await launch(h)).code).toBe(0)
+    expect(checked).toBe(true)
+    expect(inputCount(h)).toBe(3)
+    expect(h.calls.runCount).toBe(1)
+  })
+
+  test("an error after a settled terminal workflow points to new session without an unusable hold", async () => {
+    const sid = "otter-fixture-session"
+    let checked = false
+    const h = harness({ lines: ["make the change", "/new", "/quit"], turns: [{ text: "plan", plan: proposedPlan }],
+      beforeRun() {
+        const epoch = getOwnedSession(wt.worktree, sid)!.epoch
+        publishWorkflow(wt.worktree, { ...newWorkflow(sid, currentOwner(Date.now(), epoch), "command", "settled fixture", "codex"),
+          id: "wf_fixture", phase: "done" })
+        throw new Error("post-run reporting failed")
+      },
+      beforeRead(_prompt, _signal, lines) {
+        if (lines?.[0] !== "/new") return
+        checked = true
+        expect(effectiveHold(wt.worktree, sid)).toBe(false)
+        expect(readSessionMetadata(wt.worktree, sid)?.held).toBe(false)
+      },
+    })
+    expect((await launch(h)).code).toBe(0)
+    expect(checked).toBe(true)
+    expect(inputCount(h)).toBe(3)
+    expect(h.calls.sessionIDs).toHaveLength(2)
+    expect(h.calls.runCount).toBe(1)
+    expect(h.calls.output.join("")).toContain("/new starts a new session")
+    expect(h.calls.output.join("")).not.toContain("Session held; no automatic retry")
+  })
+
+  test.each(["throw", "refuse"] as const)("an unapplied approval decision (%s) holds without running and preserves input", async outcome => {
+    let checked = false
+    const h = harness({ lines: ["make the change", "/help", "/quit"], turns: [{ text: "plan", plan: proposedPlan }],
+      beforeRead(_prompt, _signal, lines) {
+        if (lines?.[0] !== "/help") return
+        checked = true
+        expect(effectiveHold(wt.worktree, "otter-fixture-session")).toBe(true)
+        expect(readSessionMetadata(wt.worktree, "otter-fixture-session")?.holdReason).toBe("plan_decision_failed")
+      },
+    })
+    const create = h.deps.createController!
+    h.deps.createController = (...args) => {
+      const controller = create(...args)
+      controller.decide = () => {
+        if (outcome === "throw") throw new Error("approval revision changed")
+        return { ok: false, text: "approval refused" } as ReturnType<ForegroundController["decide"]>
+      }
+      return controller
+    }
+    expect((await launch(h)).code).toBe(0)
+    expect(checked).toBe(true)
+    expect(inputCount(h)).toBe(3)
+    expect(h.calls.events).toContain("humanDecision")
+    expect(h.calls.runCount).toBe(0)
+  })
+
+  test("Linux admission refusal during execution still fails closed", async () => {
+    const h = harness({ lines: ["make the change", "/help", "/quit"], turns: [{ text: "plan", plan: proposedPlan }],
+      beforeRun() { throw new LinuxAdmissionRefused("epoch", ["boot-epoch"]) },
+    })
+    await expect(launch(h)).rejects.toBeInstanceOf(LinuxAdmissionRefused)
+    expect(inputCount(h)).toBe(1)
+    expect(h.calls.runCount).toBe(1)
+  })
+
+  test.each(["owner released", "corrupt workflow"] as const)("execution recovery fails closed when %s", async boundary => {
+    const h = harness({ lines: ["make the change", "/help", "/quit"], turns: [{ text: "plan", plan: proposedPlan }],
+      beforeRun() {
+        if (boundary === "owner released") releaseTestSession(getOwnedSession(wt.worktree, "otter-fixture-session")!)
+        else { mkdirSync(dirname(workflowPath(wt.worktree, "otter-fixture-session")), { recursive: true }); writeFileSync(workflowPath(wt.worktree, "otter-fixture-session"), "corrupt workflow index") }
+        throw new Error("fixture execution cannot recover")
+      },
+    })
+    await expect(launch(h)).rejects.toThrow()
+    expect(inputCount(h)).toBe(1)
+    expect(h.calls.runCount).toBe(1)
+    expect(h.calls.output.join("")).not.toContain("Session held; no automatic retry")
+    if (boundary === "corrupt workflow") expect(readFileSync(workflowPath(wt.worktree, "otter-fixture-session"), "utf8")).toBe("corrupt workflow index")
+  })
+
+  test.each(["declined", "wrong phase", "missing rendering", "exception"] as const)("plan submission %s stays held and never asks for approval", async failure => {
+    const sid = "otter-fixture-session"
+    let inspectedHold = false
+    const h = harness({ lines: ["make the change", "/help", "/quit"], turns: [{ text: "plan", plan: proposedPlan }],
+      ...(failure === "declined" ? { importResult: { ok: false, text: "review refused" } } : {}),
+      ...(failure === "wrong phase" ? { importResult: { ok: true, phase: "stuck" } } : {}),
+      ...(failure === "missing rendering" ? { renderedPlan: "" } : {}),
+      beforeRead(_prompt, _signal, lines) {
+        if (lines?.[0] !== "/help") return
+        inspectedHold = true
+        expect(effectiveHold(wt.worktree, sid)).toBe(true)
+        expect(readSessionMetadata(wt.worktree, sid)?.holdReason).toBe("plan_submission_failed")
+      },
+    })
+    if (failure === "exception") {
+      const create = h.deps.createController!
+      h.deps.createController = (...args) => { const controller = create(...args); controller.importPlan = async () => { throw new Error("import preflight failure") }; return controller }
+    }
+    expect((await launch(h)).code).toBe(0)
+    expect(inspectedHold).toBe(true)
+    expect(inputCount(h)).toBe(3)
+    expect(h.calls.events).not.toContain("humanDecision")
+    expect(h.calls.runCount).toBe(0)
   })
 })
