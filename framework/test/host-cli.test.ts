@@ -715,3 +715,10 @@ exit 0
     expect(result.stderr).not.toContain("fake-cli-interpreter")
   })
 })
+
+
+test.each(["approve", "reject"])("%s requires an explicit workflow session", command => {
+  const args = [command, "--worktree", wt.worktree, "--server", "http://127.0.0.1:4096", "--workflow", "wf_test", "--sha", "abc"]
+  expect(() => parseCliArgs(args)).toThrow("--session")
+  expect(parseCliArgs([...args, "--session", "ses_test"]).session).toBe("ses_test")
+})

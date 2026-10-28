@@ -577,6 +577,24 @@ export function assertAdmissionQuiescent(runtime: ExecutionRuntime, sid: string)
   if (hasUnsettledExecution(runtime)) throw new Error("execution claim or intent is unsettled")
 }
 
+/** Detaching releases only this session; other identified owners retain their execution fences. */
+function assertDetachQuiescent(runtime: ExecutionRuntime, sid: string): void {
+  const blocksDetach = (owner: unknown): boolean =>
+    typeof owner !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(owner) || owner === sid
+  if (pendingSkillPermissionActivityCountForSession(runtime.worktree, sid) > 0) {
+    throw new Error("skill permission activity is still settling")
+  }
+  const activity = executionActivity(runtime.worktree)
+  if (activity && blocksDetach(activity.sessionID)) throw new Error("execution activity is still active or has an unknown owner")
+  if (getQueue(runtime).isRunning(sid)) throw new Error("session queue is still active")
+  if (sessionActivityBlocker(runtime.worktree, sid)) throw new Error("stage reservation or activity is still active")
+  const status = runtime.runs.status()
+  if ((status.claim && blocksDetach(status.claim.ownerSession)) ||
+      status.executions.some(execution => !settled(execution) && blocksDetach(execution.ownerSession))) {
+    throw new Error("execution claim or intent is unsettled or has an unknown owner")
+  }
+}
+
 function retainedEndAllowsDetach(worktree: string, sid: string, epoch: string): boolean {
   const request = readJsonFile(endRequestedPath(worktree, sid))
   const end = readJsonFile(endedPath(worktree, sid))
@@ -617,7 +635,7 @@ export async function detachAdmission(
         isCancelPending(workflow)
       )) return false
       if (!retainedEndAllowsDetach(runtime.worktree, sid, expectedEpoch)) return false
-      assertAdmissionQuiescent(runtime, sid)
+      assertDetachQuiescent(runtime, sid)
       if (getOwnedSession(runtime.worktree, sid)?.epoch !== expectedEpoch) return false
       owned.assertOwner()
       if (workflow?.sessionID === sid) stopHeartbeat(runtime.worktree, sid)

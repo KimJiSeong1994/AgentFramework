@@ -5253,3 +5253,71 @@ describe("plan execution stays in the interactive session", () => {
     expect(h.calls.runCount).toBe(0)
   })
 })
+
+
+test("failed attachment release is visible and never records a closed session", async () => {
+  const state: NonNullable<HarnessOptions["executionStatus"]> = { generation: 0, executions: [] }
+  const h = harness({ lines: ["/quit"], executionStatus: state, beforeRead() {
+    state.claim = { ownerSession: "otter-fixture-session", instance: "fixture", pid: process.pid, generation: 1 }
+  } })
+  expect((await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)).code).toBe(0)
+  expect(h.calls.closedSessions).toEqual([])
+  expect(h.calls.output.join("")).toContain("attachment release was not confirmed")
+})
+
+test("held reviewing plan resumes review before fresh approval and execution", async () => {
+  const sid = "otter-fixture-session"
+  let reviews = 0
+  let approvals = 0
+  const h = harness({ lines: ["make the change", "/continue", "/quit"], turns: [{ text: "plan", plan: proposedPlan }],
+    choose: async title => title === "Execution decision" ? 0 : title.startsWith("Resume residual") ? 1 : undefined,
+    beforeRead(_prompt, _signal, lines) {
+      if (lines?.[0] !== "/continue") return
+      expect(effectiveHold(wt.worktree, sid)).toBe(true)
+      expect(readSessionCommitted(wt.worktree, sid)?.wf.phase).toBe("reviewing")
+      expect(reviews).toBe(0)
+      expect(approvals).toBe(0)
+      expect(h.calls.runCount).toBe(0)
+    },
+  })
+  const create = h.deps.createController!
+  h.deps.createController = (...args) => {
+    const controller = create(...args)
+    const originalImport = controller.importPlan
+    controller.importPlan = async (...input) => {
+      const result = await originalImport(...input)
+      const plan = input[3] as Plan
+      const mdPath = ".otter/plans/wf_fixture.md"
+      const rendered = renderPlanMd("wf_fixture", plan)
+      mkdirSync(dirname(join(wt.worktree, mdPath)), { recursive: true })
+      writeFileSync(join(wt.worktree, mdPath), rendered)
+      withFlowTransaction(wt.worktree, tx => writePlanJson(tx, "wf_fixture", plan))
+      const epoch = getOwnedSession(wt.worktree, sid)!.epoch
+      const wf = publishWorkflow(wt.worktree, { ...newWorkflow(sid, currentOwner(Date.now(), epoch), "command", "review retry", "codex"),
+        id: "wf_fixture", phase: "reviewing", planRef: { jsonSha: canonicalPlanSha(plan), mdPath,
+          mdSha: createHash("sha256").update(rendered).digest("hex"), revision: plan.revision } })
+      controller.resumeReview = async sessionID => {
+        expect(sessionID).toBe(sid)
+        expect(effectiveHold(wt.worktree, sid)).toBe(false)
+        reviews++
+        const current = readSessionCommitted(wt.worktree, sid)!.wf
+        if (current.kind !== "plan") throw new Error("expected saved plan workflow")
+        const reviewed = publishWorkflow(wt.worktree, { ...current, phase: "pending_approval" })
+        return { ...result, result: { ok: true, text: "", wf: reviewed } } as Awaited<ReturnType<ForegroundController["resumeReview"]>>
+      }
+      return { ...result, result: { ok: false, text: "review interrupted", wf } }
+    }
+    return controller
+  }
+  h.deps.humanDecision = (action, binding, signal) => {
+    approvals++
+    expect(reviews).toBe(1)
+    return withTerminalLine(`APPROVE ${binding.workflowID} ${binding.subject.sha256}`, () => humanDecision(action, binding, signal))
+  }
+  expect((await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)).code).toBe(0)
+  expect(reviews).toBe(1)
+  expect(approvals).toBe(1)
+  expect(h.calls.runCount).toBe(1)
+  expect(h.calls.events.filter(event => event === "import")).toHaveLength(1)
+  expect(h.calls.output.join("")).not.toContain("Resume refused")
+})

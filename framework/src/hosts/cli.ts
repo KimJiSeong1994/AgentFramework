@@ -131,8 +131,8 @@ Engine CLIs:
 Commands:
   status   --worktree PATH [--session ID] [--json] [--detail] [--watch [--interval 1..60]]
   import   --worktree PATH --server URL --session ID --plan PATH
-  approve  --worktree PATH --server URL --workflow ID --sha SHA
-  reject   --worktree PATH --server URL --workflow ID --sha SHA
+  approve  --worktree PATH --server URL --session ID --workflow ID --sha SHA
+  reject   --worktree PATH --server URL --session ID --workflow ID --sha SHA
   run      --worktree PATH --server URL (--plan PATH | --session ID)
   resume   --worktree PATH --server URL --session ID   (a paused workflow asks Keep/Resume on a terminal)
   pause    --worktree PATH --server URL --session ID   (request; "pausing — termination unconfirmed" until proof)
@@ -240,8 +240,8 @@ export function parseCliArgs(argv: string[]): CliArgs {
   if (command === "import" && (!fields["--session"] || !fields["--plan"])) {
     throw new CliUsageError("import requires --session and --plan")
   }
-  if ((command === "approve" || command === "reject") && (!fields["--workflow"] || !fields["--sha"])) {
-    throw new CliUsageError("approve and reject require --workflow and --sha")
+  if ((command === "approve" || command === "reject") && (!fields["--session"] || !fields["--workflow"] || !fields["--sha"])) {
+    throw new CliUsageError("approve and reject require --session, --workflow and --sha")
   }
   if (!commonRecovery && (command === "cancel" || command === "pause") && !fields["--session"]) throw new CliUsageError(`${command} requires --session`)
   if (!commonRecovery && command === "resume" && !fields["--session"]) throw new CliUsageError("resume requires --session")
@@ -629,7 +629,7 @@ export async function runCli(
     if (args.server !== undefined) throw new CliUsageError("common-engine workflow commands do not accept --server")
     if (!args.model || !args.session) throw new CliUsageError("common-engine workflow command requires explicit --model and --session")
     if ((args.command === "approve" || args.command === "reject") &&
-      (!args.workflow || !args.sha)) throw new CliUsageError("approve and reject require --workflow and --sha")
+      (!args.workflow || !args.sha)) throw new CliUsageError("approve and reject require --session, --workflow and --sha")
     if (((args.command === "approve" || args.command === "reject") || (args.command === "run" && args.plan)) &&
       (!process.stdin.isTTY || !process.stderr.isTTY)) {
       throw new Error("local human approval or rejection requires an interactive terminal")
@@ -687,7 +687,7 @@ export async function runCli(
     })
   }
   if (args.command === "approve" || args.command === "reject") {
-    const sessionID = args.session ?? readWorkflow(root)?.sessionID
+    const sessionID = args.session
     if (!sessionID) throw new Error("no workflow session for operator decision")
     return withCliSession(runtime, args, sessionID, async store => {
       const workflowID = args.workflow!

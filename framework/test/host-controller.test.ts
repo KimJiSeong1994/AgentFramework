@@ -823,6 +823,57 @@ describe("external foreground imported-plan controller", () => {
     clearReviewSession("child_1")
   })
 
+  async function interruptedReview() {
+    let lockPath: string | undefined
+    let failOnce = true
+    const f = fixture({ onReviewComplete() {
+      if (!failOnce) return
+      failOnce = false
+      lockPath = join(flowDir(wt.worktree, SESSION), "workflow.lock")
+      symlinkSync("transient-review-contention", lockPath)
+    } })
+    try {
+      await expect(f.controller.importPlan(SESSION, save())).rejects.toBeInstanceOf(FlowTransactionBusyError)
+    } finally {
+      if (lockPath) unlinkSync(lockPath)
+    }
+    expect(readWorkflow(wt.worktree, SESSION)?.phase).toBe("reviewing")
+    expect(f.runtime.runs.status().claim).toBeUndefined()
+    return f
+  }
+
+  test("explicit review recovery retries a settled review and still requires fresh human approval", async () => {
+    const f = await interruptedReview()
+    const before = readWorkflow(wt.worktree, SESSION)!
+    const stale = await operatorReceipt("approve", before.id, before.planRef!.jsonSha, `APPROVE ${before.id} ${before.planRef!.jsonSha}`)
+    const submitted = await f.controller.resumeReview(SESSION)
+    expect(submitted.result.ok).toBe(true)
+    expect(readWorkflow(wt.worktree, SESSION)?.phase).toBe("pending_approval")
+    expect(f.requests.map(request => request.role)).toEqual(["reviewer", "reviewer"])
+    expect(readLedger(wt.worktree, SESSION).tasks).toHaveLength(0)
+    expect(() => f.controller.decide(stale)).toThrow()
+    await expect(f.controller.run(SESSION)).rejects.toThrow()
+    expect((await approve(f.controller, before.id, submitted.planSha)).ok).toBe(true)
+    expect(readWorkflow(wt.worktree, SESSION)?.phase).toBe("executing")
+    expect(f.requests.map(request => request.role)).toEqual(["reviewer", "reviewer"])
+  })
+
+  test.each(["plan", "owner", "unresolved", "session", "engine"] as const)("review recovery refuses changed %s without reviewer dispatch", async kind => {
+    const f = await interruptedReview()
+    const wf = readWorkflow(wt.worktree, SESSION)!
+    if (kind === "plan") writeFileSync(planJsonPath(wt.worktree, wf.id, SESSION), "{}")
+    if (kind === "owner") rewriteCommitted(wt.worktree, current => ({ ...current, owner: { ...current.owner, instance: "foreign-epoch" } }), SESSION)
+    if (kind === "engine") f.runtime.host.identity.engine = "foreign-engine"
+    if (kind === "unresolved") {
+      const claim = f.runtime.runs.claim(SESSION, f.runtime.instance, process.pid)
+      f.runtime.runs.registerIntent(claim, { executionId: "lost-review", ownerSession: SESSION, taskId: wf.id, attemptId: "attempt", generation: claim.generation, role: "reviewer", cwd: wt.worktree, policyID: f.runtime.policy.resolve("reviewer").id, kind: "host", engine: ENGINE, profile: "legacy-unowned" })
+    }
+    const before = readFileSync(workflowPath(wt.worktree, SESSION), "utf8")
+    await expect(f.controller.resumeReview(kind === "session" ? "another-session" : SESSION)).rejects.toThrow()
+    expect(f.requests.map(request => request.role)).toEqual(["reviewer"])
+    expect(readFileSync(workflowPath(wt.worktree, SESSION), "utf8")).toBe(before)
+  })
+
   test("status observes a missing workflow engine without rewriting the stored bytes", () => {
     const f = fixture()
     const wf = newWorkflow(SESSION, currentOwner(Date.now(), f.session!.epoch), "command", "legacy record", ENGINE)
