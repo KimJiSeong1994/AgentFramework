@@ -20,7 +20,7 @@ const toEvents = (wf: AutoresearchWorkflow, events: readonly ArEvent[], actor: C
 /** The committed autoresearch of this session and id, or the reason there is none. */
 export function committedAutoresearch(runtime: Pick<ExecutionRuntime, "worktree">, sessionID: string, workflowID: string): AutoresearchWorkflow | string {
   let read: ReturnType<typeof readCommitted>
-  try { read = readCommitted(runtime.worktree) } catch { return "workflow state is unreadable" }
+  try { read = readCommitted(runtime.worktree, {}, sessionID) } catch { return "workflow state is unreadable" }
   if (read.state !== "ok") return "workflow state is unavailable"
   const { wf } = read
   if (wf.id !== workflowID || wf.sessionID !== sessionID) return "workflow identity changed"
@@ -59,5 +59,5 @@ export function commitAutoresearch(
     } catch (error) {
       return { ok: false, text: (error as Error).message }
     }
-  })
+  }, expected.sessionID)
 }

@@ -114,7 +114,7 @@ export function clearAllowRules(): number {
 
 /** Worktree-relative paths an action writes (empty for commands). */
 export function actionPaths(action: ChatAction): string[] {
-  if (action.tool === "bash") return []
+  if (action.tool === "bash" || action.tool === "model_api") return []
   if (action.tool === "multiedit") return [...new Set(action.edits.map(edit => edit.path))]
   return [action.path]
 }
@@ -146,6 +146,15 @@ export function coveredByGrant(action: ChatAction, directories: ReadonlySet<stri
 /** One-line title and a bounded preview the human reads before deciding. */
 export function describeAction(action: ChatAction, maxLines = 40): { title: string; preview: string[] } {
   const clip = (lines: string[]) => lines.length > maxLines ? [...lines.slice(0, maxLines), `… ${lines.length - maxLines} more line(s)`] : lines
+  if (action.tool === "model_api") {
+    return {
+      title: `Call model API: ${action.target} / ${action.model}`,
+      preview: [`POST ${action.url} (${action.protocol})`,
+        `Output limit ${action.maxOutputTokens} tokens; time limit ${action.timeoutSeconds}s. Remote calls may incur charges.`,
+        ...(action.apiKeyEnv ? [`Credential: environment variable ${action.apiKeyEnv} (value hidden).`] : []),
+        "Exact prompt sent:", ...action.prompt.split("\n")],
+    }
+  }
   if (action.tool === "bash") {
     return {
       title: `Run${action.interactive ? " (interactive)" : ""}: ${action.command.length > 200 ? `${action.command.slice(0, 199)}…` : action.command}`,

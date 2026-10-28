@@ -74,7 +74,7 @@ export function startUltragoal(runtime: Pick<ExecutionRuntime, "worktree" | "hos
       { wf: created.id, type: "transition", to: "planning", actor: "code", data: { event: "start" } },
     ], now)
     return { ok: true, wf: wf as UltragoalWorkflow }
-  })
+  }, sessionID)
 }
 
 /** The seed's three pieces re-verified from disk: the approved plan file, the consensus receipt and the typed execute receipt. */
@@ -117,7 +117,7 @@ export function handoffToUltragoal(
       }, now)
       return { ok: true, wf: result.successor as UltragoalWorkflow }
     } catch (error) { return { ok: false, text: (error as Error).message } }
-  })
+  }, sessionID)
 }
 
 // ---------------------------------------------------------------------------------------------- artifacts
@@ -241,7 +241,7 @@ export type UltragoalRunOptions = {
 
 function committedUltragoal(runtime: Pick<ExecutionRuntime, "worktree">, sessionID: string, workflowID: string): UltragoalWorkflow | string {
   let read: ReturnType<typeof readCommitted>
-  try { read = readCommitted(runtime.worktree) } catch { return "workflow state is unreadable" }
+  try { read = readCommitted(runtime.worktree, {}, sessionID) } catch { return "workflow state is unreadable" }
   if (read.state !== "ok") return "workflow state is unavailable"
   const { wf } = read
   if (wf.id !== workflowID || wf.sessionID !== sessionID) return "workflow identity changed"

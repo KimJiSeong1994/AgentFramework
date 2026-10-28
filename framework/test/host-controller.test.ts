@@ -136,7 +136,7 @@ function save(planValue = plan()) {
 }
 /** A real terminal-reader receipt bound to the committed revision the operator inspected. */
 function binding(workflowID: string, hash: string, overrides: Partial<DecisionBinding> = {}): DecisionBinding {
-  return { ...planBinding(SESSION, { id: workflowID, lastSeq: readWorkflow(wt.worktree)?.lastSeq ?? 0 }, hash), ...overrides }
+  return { ...planBinding(SESSION, { id: workflowID, lastSeq: readWorkflow(wt.worktree, SESSION)?.lastSeq ?? 0 }, hash), ...overrides }
 }
 async function operatorReceipt(mode: "approve" | "reject" | "choose", workflowID: string, hash: string, line: string, overrides: Partial<DecisionBinding> = {}): Promise<OperatorDecision> {
   return withTerminalLine(line, () => humanDecision(mode, binding(workflowID, hash, overrides)))
@@ -239,7 +239,7 @@ describe("external foreground imported-plan controller", () => {
     expect(failure).toBeInstanceOf(PlanIsolationSetupError)
     expect(failure.cause).toBeInstanceOf(Error)
     expect(failure.message).toContain("nonregular import unsafe-link")
-    expect(readWorkflow(wt.worktree)?.phase).toBe("executing")
+    expect(readWorkflow(wt.worktree, SESSION)?.phase).toBe("executing")
     expect(readLedger(wt.worktree, SESSION).tasks).toEqual(tasksBefore)
     expect(f.requests).toHaveLength(requestsBefore)
     expect(f.runtime.runs.status().executions).toEqual(executionsBefore)
@@ -269,13 +269,13 @@ describe("external foreground imported-plan controller", () => {
     mkdirSync(child, { recursive: true })
     writeFileSync(join(child, "unowned.txt"), "preserve")
     const requestsBefore = f.requests.length
-    const workflowBefore = readFileSync(workflowPath(wt.worktree))
+    const workflowBefore = readFileSync(workflowPath(wt.worktree, SESSION))
     const tasksBefore = readLedger(wt.worktree, SESSION).tasks
     const failure = await controller.resume(SESSION).catch(error => error)
     expect(failure).toBeInstanceOf(PlanIsolationSetupError)
     expect(failure.cause).toBeInstanceOf(Error)
     expect(failure.message).toContain("state directory is missing or unsafe")
-    expect(readFileSync(workflowPath(wt.worktree))).toEqual(workflowBefore)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION))).toEqual(workflowBefore)
     expect(readLedger(wt.worktree, SESSION).tasks).toEqual(tasksBefore)
     expect(f.requests).toHaveLength(requestsBefore)
     expect(readFileSync(join(child, "unowned.txt"), "utf8")).toBe("preserve")
@@ -284,7 +284,7 @@ describe("external foreground imported-plan controller", () => {
   test("controller refuses a workflow without a live attachment epoch instead of using runtime.instance", async () => {
     const f = fixture({ attach: false })
     await expect(f.controller.importPlan(SESSION, save())).rejects.toThrow("session remains held")
-    expect(readWorkflow(wt.worktree)).toBeNull()
+    expect(readWorkflow(wt.worktree, SESSION)).toBeNull()
     expect(f.requests).toHaveLength(0)
     expect(existsSync(sessionDir(wt.worktree, SESSION))).toBe(false)
   })
@@ -302,12 +302,12 @@ describe("external foreground imported-plan controller", () => {
     expect(restored.metadata.held).toBe(true)
     expect(effectiveHold(wt.worktree, SESSION)).toBe(true)
     expect(admissionEpoch(wt.worktree, SESSION)).toBeUndefined()
-    expect(readWorkflow(wt.worktree)?.owner.instance).toBe(restored.epoch)
+    expect(readWorkflow(wt.worktree, SESSION)?.owner.instance).toBe(restored.epoch)
     expect(f.requests).toHaveLength(beforeDispatches)
 
-    const workflowBeforeStatus = readFileSync(workflowPath(wt.worktree))
+    const workflowBeforeStatus = readFileSync(workflowPath(wt.worktree, SESSION))
     f.controller.status(SESSION, true)
-    expect(readFileSync(workflowPath(wt.worktree))).toEqual(workflowBeforeStatus)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION))).toEqual(workflowBeforeStatus)
     expect(f.requests).toHaveLength(beforeDispatches)
     expect(await detachAdmission(f.runtime, SESSION, restored.epoch, "test-restore-exit")).toBe(true)
   })
@@ -317,7 +317,7 @@ describe("external foreground imported-plan controller", () => {
     const submitted = await f.controller.importPlan(SESSION, save())
     if (!submitted.result.ok) throw new Error(submitted.result.text)
     expect((await approve(f.controller, submitted.result.wf.id, submitted.planSha)).ok).toBe(true)
-    const workflowBefore = readFileSync(workflowPath(wt.worktree))
+    const workflowBefore = readFileSync(workflowPath(wt.worktree, SESSION))
     const dispatchesBefore = f.requests.length
     let releasePreflight!: (value: { compatible: boolean; controls: Record<string, "supported">; problems: string[] }) => void
     let entered = false
@@ -330,7 +330,7 @@ describe("external foreground imported-plan controller", () => {
     holdAdmission(wt.worktree, SESSION, "stale-controller-test")
     releasePreflight({ compatible: true, controls: SYNTHETIC_CONTROL_STATUSES, problems: [] })
     await expect(running).rejects.toThrow("session remains held")
-    expect(readFileSync(workflowPath(wt.worktree))).toEqual(workflowBefore)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION))).toEqual(workflowBefore)
     expect(f.requests).toHaveLength(dispatchesBefore)
     expect(effectiveHold(wt.worktree, SESSION)).toBe(true)
   })
@@ -348,7 +348,7 @@ describe("external foreground imported-plan controller", () => {
       expect(f.reconciliations).toBe(0)
       expect(f.claims).toBe(0)
       expect(f.requests).toHaveLength(0)
-      expect(existsSync(workflowPath(wt.worktree))).toBe(false)
+      expect(existsSync(workflowPath(wt.worktree, SESSION))).toBe(false)
     }
   })
 
@@ -361,13 +361,13 @@ describe("external foreground imported-plan controller", () => {
     expect((await approve(f.controller, submitted.result.wf.id, submitted.planSha)).ok).toBe(true)
     const requestsBefore = f.requests.length
     const claimsBefore = f.claims
-    const workflowBefore = readFileSync(workflowPath(wt.worktree))
+    const workflowBefore = readFileSync(workflowPath(wt.worktree, SESSION))
 
     await expect(f.controller.run(SESSION)).rejects.toThrow("required control statuses unavailable")
 
     expect(f.claims).toBe(claimsBefore)
     expect(f.requests).toHaveLength(requestsBefore)
-    expect(readFileSync(workflowPath(wt.worktree))).toEqual(workflowBefore)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION))).toEqual(workflowBefore)
   })
   test("imports and reviews, then explicit local approval runs serial workers and independent verifiers", async () => {
     const source = save()
@@ -381,14 +381,14 @@ describe("external foreground imported-plan controller", () => {
     if (!submitted.result.ok) return
     expect(submitted.result.wf.phase).toBe("pending_approval")
     expect(submitted.result.wf.engine).toBe(ENGINE)
-    expect(readEvents(wt.worktree, submitted.result.wf!.id).find(event => event.type === "created")?.data).toMatchObject({ engine: ENGINE })
+    expect(readEvents(wt.worktree, submitted.result.wf!.id, SESSION).find(event => event.type === "created")?.data).toMatchObject({ engine: ENGINE })
     expect(submitted.renderedPlan).toContain("## Review (advisory)")
     expect(submitted.planSha).toBe(canonicalPlanSha(plan()))
     expect(f.requests.map(r => r.role)).toEqual(["reviewer"])
-    const stateBeforeStatus = readFileSync(workflowPath(wt.worktree), "utf8")
+    const stateBeforeStatus = readFileSync(workflowPath(wt.worktree, SESSION), "utf8")
     const runsBeforeStatus = JSON.stringify(f.runtime.runs.status())
     expect(f.controller.status(SESSION, true)).toMatchObject({ workflow: { phase: "pending_approval" } })
-    expect(readFileSync(workflowPath(wt.worktree), "utf8")).toBe(stateBeforeStatus)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION), "utf8")).toBe(stateBeforeStatus)
     expect(JSON.stringify(f.runtime.runs.status())).toBe(runsBeforeStatus)
     expect(f.preflights).toBe(1)
     expect(f.requests).toHaveLength(1)
@@ -437,19 +437,19 @@ describe("external foreground imported-plan controller", () => {
     expect(() => f.controller.decide(wrongID)).toThrow("terminal reader")
     const wrongHash = await operatorReceipt("approve", wf.id, "wrong", `APPROVE ${wf.id} wrong`)
     expect(() => f.controller.decide(wrongHash)).toThrow("does not match")
-    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...wf, owner: { ...wf.owner, instance: "foreign-live-process" } }))
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...wf, owner: { ...wf.owner, instance: "foreign-live-process" } }), SESSION)
     const ownerReceipt = await operatorReceipt("approve", wf.id, submitted.planSha, `APPROVE ${wf.id} ${submitted.planSha}`)
     expect(() => f.controller.decide(ownerReceipt)).toThrow("live foreign workflow owner")
     expect(() => f.controller.decide(ownerReceipt)).toThrow("terminal reader")
-    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf))
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf), SESSION)
     writeFileSync(join(wt.worktree, wf.planRef!.mdPath), "edited")
     const editedMdReceipt = await operatorReceipt("approve", wf.id, submitted.planSha, `APPROVE ${wf.id} ${submitted.planSha}`)
     expect(() => f.controller.decide(editedMdReceipt)).toThrow("changed")
     expect(readLedger(wt.worktree, SESSION).tasks).toHaveLength(0)
-    expect(readWorkflow(wt.worktree)?.phase).toBe("pending_approval")
-    const raw = JSON.parse(readFileSync(planJsonPath(wt.worktree, wf.id), "utf8")) as Plan
+    expect(readWorkflow(wt.worktree, SESSION)?.phase).toBe("pending_approval")
+    const raw = JSON.parse(readFileSync(planJsonPath(wt.worktree, wf.id, SESSION), "utf8")) as Plan
     raw.goal = "modified"
-    writeFileSync(planJsonPath(wt.worktree, wf.id), JSON.stringify(raw))
+    writeFileSync(planJsonPath(wt.worktree, wf.id, SESSION), JSON.stringify(raw))
     const editedJsonReceipt = await operatorReceipt("approve", wf.id, submitted.planSha, `APPROVE ${wf.id} ${submitted.planSha}`)
     expect(() => f.controller.decide(editedJsonReceipt)).toThrow("changed")
   })
@@ -460,13 +460,13 @@ describe("external foreground imported-plan controller", () => {
     if (!submitted.result.ok) throw new Error(submitted.result.text)
     const receipt = await operatorReceipt("approve", submitted.result.wf.id, submitted.planSha,
       `APPROVE ${submitted.result.wf.id} ${submitted.planSha}`)
-    const lock = join(flowDir(wt.worktree), "workflow.lock")
+    const lock = join(flowDir(wt.worktree, SESSION), "workflow.lock")
     symlinkSync("unknown-busy-owner", lock)
     try {
       expect(() => f.controller.decide(receipt)).toThrow(FlowTransactionBusyError)
       expect(() => f.controller.decide(receipt)).toThrow("terminal reader")
     } finally { unlinkSync(lock) }
-    expect(readWorkflow(wt.worktree)?.phase).toBe("pending_approval")
+    expect(readWorkflow(wt.worktree, SESSION)?.phase).toBe("pending_approval")
     expect(readLedger(wt.worktree, SESSION).tasks).toHaveLength(0)
   })
 
@@ -483,9 +483,9 @@ describe("external foreground imported-plan controller", () => {
       get() {
         if (!replaced) {
           replaced = true
-          writeFileSync(planJsonPath(wt.worktree, original.id), canonicalPlanJson(replacement))
-          const current = readWorkflow(wt.worktree)!
-          withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...current, planRef: { ...current.planRef!, jsonSha: canonicalPlanSha(replacement) } }))
+          writeFileSync(planJsonPath(wt.worktree, original.id, SESSION), canonicalPlanJson(replacement))
+          const current = readWorkflow(wt.worktree, SESSION)!
+          withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...current, planRef: { ...current.planRef!, jsonSha: canonicalPlanSha(replacement) } }), SESSION)
         }
         return runtimeWorktree
       },
@@ -498,7 +498,7 @@ describe("external foreground imported-plan controller", () => {
     } finally {
       Object.defineProperty(f.runtime, "worktree", { configurable: true, writable: true, value: runtimeWorktree })
     }
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "pending_approval", planRef: { jsonSha: canonicalPlanSha(replacement) } })
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "pending_approval", planRef: { jsonSha: canonicalPlanSha(replacement) } })
     expect(readLedger(wt.worktree, SESSION).tasks).toHaveLength(0)
   })
 
@@ -532,10 +532,10 @@ describe("external foreground imported-plan controller", () => {
       const { f, wf, sha } = await pending()
       const receipt = await operatorReceipt("approve", wf.id, sha, line(wf, sha), { sessionID: "ses_other" })
       const before = controlBytes()
-      expect(() => f.controller.decide(receipt)).toThrow("another session")
+      expect(() => f.controller.decide(receipt)).toThrow("does not match")
       expect(controlBytes()).toEqual(before)
       expect(() => f.controller.decide(receipt)).toThrow("terminal reader")
-      expect(readWorkflow(wt.worktree)?.phase).toBe("pending_approval")
+      expect(readWorkflow(wt.worktree, SESSION)?.phase).toBe("pending_approval")
     })
 
     test("a stale expectedRevision refuses before effects", async () => {
@@ -559,7 +559,7 @@ describe("external foreground imported-plan controller", () => {
       expect(() => f.controller.decide(oldReceipt)).toThrow(/subject hash|revision/)
       expect(controlBytes()).toEqual(before)
       expect(readLedger(wt.worktree, SESSION).tasks).toHaveLength(0)
-      expect(readWorkflow(wt.worktree)?.phase).toBe("pending_approval")
+      expect(readWorkflow(wt.worktree, SESSION)?.phase).toBe("pending_approval")
     })
 
     test("a subject kind other than plan refuses before effects", async () => {
@@ -584,7 +584,7 @@ describe("external foreground imported-plan controller", () => {
       expect(f.controller.decide(receipt).ok).toBe(true)
       const after = controlBytes()
       expect(() => f.controller.decide(receipt)).toThrow("terminal reader")
-      const forged = { action: "approve", sessionID: SESSION, workflowID: wf.id, expectedRevision: readWorkflow(wt.worktree)!.lastSeq, subject: { kind: "plan", id: wf.id, sha256: sha } }
+      const forged = { action: "approve", sessionID: SESSION, workflowID: wf.id, expectedRevision: readWorkflow(wt.worktree, SESSION)!.lastSeq, subject: { kind: "plan", id: wf.id, sha256: sha } }
       expect(() => Reflect.apply(f.controller.decide, undefined, [forged])).toThrow("terminal reader")
       expect(controlBytes()).toEqual(after)
     })
@@ -593,7 +593,7 @@ describe("external foreground imported-plan controller", () => {
       const { f, wf, sha } = await pending()
       const receipt = await operatorReceipt("approve", wf.id, sha, line(wf, sha))
       expect(f.controller.cancel(SESSION).ok).toBe(true)
-      expect(readWorkflow(wt.worktree)?.phase).toBe("cancelled")
+      expect(readWorkflow(wt.worktree, SESSION)?.phase).toBe("cancelled")
       const before = controlBytes()
       expect(() => f.controller.decide(receipt)).toThrow()
       expect(controlBytes()).toEqual(before)
@@ -601,35 +601,35 @@ describe("external foreground imported-plan controller", () => {
 
     test("a fault at index-rename during approve leaves the old revision; repair quarantines orphan-tagged tasks and requires a fresh receipt", async () => {
       const { f, wf, sha } = await pending()
-      const committed = readWorkflow(wt.worktree)!
+      const committed = readWorkflow(wt.worktree, SESSION)!
       const receipt = await operatorReceipt("approve", wf.id, sha, line(wf, sha))
-      const indexBefore = readFileSync(workflowPath(wt.worktree))
+      const indexBefore = readFileSync(workflowPath(wt.worktree, SESSION))
       __setCommitFaultHook(stage => { if (stage === "index-rename") throw new Error("injected index-rename") })
       try { expect(() => f.controller.decide(receipt)).toThrow("injected index-rename") }
       finally { __setCommitFaultHook(null) }
 
       // the index (commit point) never moved; the precommit ledger tags exist but are not approval authority
-      expect(readFileSync(workflowPath(wt.worktree)).equals(indexBefore)).toBe(true)
-      expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "pending_approval", lastSeq: committed.lastSeq })
-      expect(readWorkflow(wt.worktree)?.approval).toBeUndefined()
+      expect(readFileSync(workflowPath(wt.worktree, SESSION)).equals(indexBefore)).toBe(true)
+      expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "pending_approval", lastSeq: committed.lastSeq })
+      expect(readWorkflow(wt.worktree, SESSION)?.approval).toBeUndefined()
       const orphanTagged = readLedger(wt.worktree, SESSION).tasks.filter(task => task.wf?.id === wf.id)
       expect(orphanTagged.length).toBeGreaterThan(0)
       expect(() => f.controller.decide(receipt)).toThrow("terminal reader")
 
-      const repaired = repairOnLoad(f.runtime, ENGINE)
+      const repaired = repairOnLoad(f.runtime, ENGINE, undefined, SESSION)
       expect(repaired?.ok).toBe(true)
       const after = readLedger(wt.worktree, SESSION).tasks
       expect(after.every(task => task.wf === undefined && task.status === "cancelled")).toBe(true)
       expect(after.some(task => /never committed/.test(task.error ?? ""))).toBe(true)
       // repair neither approves nor commits: still pending at the same revision, running is refused
-      expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "pending_approval", lastSeq: committed.lastSeq })
+      expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "pending_approval", lastSeq: committed.lastSeq })
       await expect(f.controller.run(SESSION)).rejects.toThrow()
-      expect(readEvents(wt.worktree, wf.id).some(event => event.type === "approval_precommit_quarantined")).toBe(true)
+      expect(readEvents(wt.worktree, wf.id, SESSION).some(event => event.type === "approval_precommit_quarantined")).toBe(true)
 
       // a fresh receipt for the same unchanged subject and revision approves with newly tagged tasks
       const fresh = await operatorReceipt("approve", wf.id, sha, line(wf, sha))
       expect(f.controller.decide(fresh).ok).toBe(true)
-      const approved = readWorkflow(wt.worktree)!
+      const approved = readWorkflow(wt.worktree, SESSION)!
       expect(approved.phase).toBe("executing")
       const tagged = readLedger(wt.worktree, SESSION).tasks.filter(task => task.wf)
       expect(tagged.length).toBeGreaterThan(0)
@@ -639,9 +639,9 @@ describe("external foreground imported-plan controller", () => {
 
     test("approval stores the subject and receipt revision; tasks carry parent wid plus subject hash and nothing else", async () => {
       const { f, wf, sha } = await pending()
-      const revision = readWorkflow(wt.worktree)!.lastSeq
+      const revision = readWorkflow(wt.worktree, SESSION)!.lastSeq
       expect((await approve(f.controller, wf.id, sha)).ok).toBe(true)
-      const approved = readWorkflow(wt.worktree)!
+      const approved = readWorkflow(wt.worktree, SESSION)!
       expect(approved.phase).toBe("executing")
       expect(approved.approval).toMatchObject({ by: "user_command", receiptRevision: revision, subject: { kind: "plan", id: wf.id, sha256: sha } })
       const tasks = readLedger(wt.worktree, SESSION).tasks
@@ -653,7 +653,7 @@ describe("external foreground imported-plan controller", () => {
     test("run operates on the approved unit: no new workflow is started, and an edit after approval invalidates it", async () => {
       const { f, wf, sha } = await pending()
       expect((await approve(f.controller, wf.id, sha)).ok).toBe(true)
-      const created = () => readEvents(wt.worktree).filter(event => event.type === "created").length
+      const created = () => readEvents(wt.worktree, undefined, SESSION).filter(event => event.type === "created").length
       const createdBefore = created()
       writeFileSync(join(wt.worktree, wf.planRef!.mdPath), "edited after approval")
       await expect(f.controller.run(SESSION)).rejects.toThrow("approved plan or rendered file changed")
@@ -664,7 +664,7 @@ describe("external foreground imported-plan controller", () => {
     test("a successful run never starts another workflow and every dispatched task stays under the parent subject", async () => {
       const { f, wf, sha } = await pending()
       expect((await approve(f.controller, wf.id, sha)).ok).toBe(true)
-      const created = () => readEvents(wt.worktree).filter(event => event.type === "created").length
+      const created = () => readEvents(wt.worktree, undefined, SESSION).filter(event => event.type === "created").length
       const createdBefore = created()
       await f.controller.run(SESSION)
       expect(created()).toBe(createdBefore)
@@ -687,11 +687,11 @@ describe("external foreground imported-plan controller", () => {
         if (engineCase === "missing") delete wf.engine
         else if (engineCase === "foreign") wf.engine = "other-engine"
         else wf.engine = { engine: ENGINE }
-        withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf))
-        return readFileSync(workflowPath(wt.worktree))
+        withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf), SESSION)
+        return readFileSync(workflowPath(wt.worktree, SESSION))
       }
       const unchanged = (bytes: Buffer) => {
-        expect(bytes.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
+        expect(bytes.equals(readFileSync(workflowPath(wt.worktree, SESSION)))).toBe(true)
         expect(existsSync(ledgerPath(wt.worktree, SESSION))).toBe(false)
       }
 
@@ -708,7 +708,7 @@ describe("external foreground imported-plan controller", () => {
       unchanged(before)
 
       before = persist("pending_approval")
-      const pending = readWorkflow(wt.worktree)!
+      const pending = readWorkflow(wt.worktree, SESSION)!
       const approvalReceipt = await operatorReceipt("approve", pending.id, planSha, `APPROVE ${pending.id} ${planSha}`)
       expect(() => f.controller.decide(approvalReceipt)).toThrow("engine identity")
       const rejectionReceipt = await operatorReceipt("reject", pending.id, planSha, `REJECT ${pending.id} ${planSha} no`)
@@ -746,9 +746,9 @@ describe("external foreground imported-plan controller", () => {
           const cancelled = canceller.controller.cancel(SESSION)
           expect(cancelled.ok).toBe(true)
           if (cancelled.ok) expect(cancelled.wf.stopIntent?.kind).toBe("cancel")
-          const current = readWorkflow(wt.worktree)!
-          withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...current, engine: "other-engine" }))
-          cancelledBytes = readFileSync(workflowPath(wt.worktree))
+          const current = readWorkflow(wt.worktree, SESSION)!
+          withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...current, engine: "other-engine" }), SESSION)
+          cancelledBytes = readFileSync(workflowPath(wt.worktree, SESSION))
           return outcome
         },
       }
@@ -756,8 +756,8 @@ describe("external foreground imported-plan controller", () => {
 
     await expect(owner.controller.importPlan(SESSION, save())).rejects.toThrow("engine identity")
     expect(cancelledBytes).toBeDefined()
-    expect(cancelledBytes?.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ stopIntent: expect.objectContaining({ kind: "cancel" }), engine: "other-engine" })
+    expect(cancelledBytes?.equals(readFileSync(workflowPath(wt.worktree, SESSION)))).toBe(true)
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ stopIntent: expect.objectContaining({ kind: "cancel" }), engine: "other-engine" })
     expect(existsSync(ledgerPath(wt.worktree, SESSION))).toBe(false)
     expect(owner.reconciliations).toBe(0)
     expect(canceller.requests).toHaveLength(0)
@@ -770,26 +770,26 @@ describe("external foreground imported-plan controller", () => {
     let planJsonAtCompletion: Buffer | undefined
     let planMdAtCompletion: Buffer | undefined
     const f = fixture({ onReviewComplete() {
-      const current = readWorkflow(wt.worktree)!
-      eventsAtCompletion = readFileSync(eventsPath(wt.worktree))
-      planJsonAtCompletion = readFileSync(planJsonPath(wt.worktree, current.id))
+      const current = readWorkflow(wt.worktree, SESSION)!
+      eventsAtCompletion = readFileSync(eventsPath(wt.worktree, SESSION))
+      planJsonAtCompletion = readFileSync(planJsonPath(wt.worktree, current.id, SESSION))
       planMdAtCompletion = readFileSync(join(wt.worktree, planMdPath(current.id)))
       expectedWorkflow = rewriteCommitted(wt.worktree, { engine: "foreign-engine" })
-      foreignWorkflowBytes = readFileSync(workflowPath(wt.worktree))
+      foreignWorkflowBytes = readFileSync(workflowPath(wt.worktree, SESSION))
     } })
 
     await expect(f.controller.importPlan(SESSION, save())).rejects.toThrow("workflow engine identity mismatch")
 
     expect(foreignWorkflowBytes).toBeDefined()
-    expect(readFileSync(workflowPath(wt.worktree)).equals(foreignWorkflowBytes!)).toBe(true)
-    expect(expectedWorkflow).toEqual(readWorkflow(wt.worktree))
+    expect(readFileSync(workflowPath(wt.worktree, SESSION)).equals(foreignWorkflowBytes!)).toBe(true)
+    expect(expectedWorkflow).toEqual(readWorkflow(wt.worktree, SESSION))
     expect(eventsAtCompletion).toBeDefined()
-    expect(readFileSync(eventsPath(wt.worktree)).equals(eventsAtCompletion!)).toBe(true)
-    expect(readFileSync(planJsonPath(wt.worktree, readWorkflow(wt.worktree)!.id)).equals(planJsonAtCompletion!)).toBe(true)
-    expect(readFileSync(join(wt.worktree, planMdPath(readWorkflow(wt.worktree)!.id))).equals(planMdAtCompletion!)).toBe(true)
+    expect(readFileSync(eventsPath(wt.worktree, SESSION)).equals(eventsAtCompletion!)).toBe(true)
+    expect(readFileSync(planJsonPath(wt.worktree, readWorkflow(wt.worktree, SESSION)!.id, SESSION)).equals(planJsonAtCompletion!)).toBe(true)
+    expect(readFileSync(join(wt.worktree, planMdPath(readWorkflow(wt.worktree, SESSION)!.id))).equals(planMdAtCompletion!)).toBe(true)
     expect(existsSync(ledgerPath(wt.worktree, SESSION))).toBe(false)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "reviewing", engine: "foreign-engine" })
-    expect(readWorkflow(wt.worktree)?.approval).toBeUndefined()
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "reviewing", engine: "foreign-engine" })
+    expect(readWorkflow(wt.worktree, SESSION)?.approval).toBeUndefined()
     expect(f.requests.map(request => request.role)).toEqual(["reviewer"])
   })
 
@@ -797,12 +797,12 @@ describe("external foreground imported-plan controller", () => {
     let lockPath: string | undefined
     let before: { workflow: Buffer; events: Buffer; planJson: Buffer; planMd: Buffer } | undefined
     const f = fixture({ onReviewComplete() {
-      const wf = readWorkflow(wt.worktree)!
-      lockPath = join(flowDir(wt.worktree), "workflow.lock")
+      const wf = readWorkflow(wt.worktree, SESSION)!
+      lockPath = join(flowDir(wt.worktree, SESSION), "workflow.lock")
       before = {
-        workflow: readFileSync(workflowPath(wt.worktree)),
-        events: readFileSync(eventsPath(wt.worktree)),
-        planJson: readFileSync(planJsonPath(wt.worktree, wf.id)),
+        workflow: readFileSync(workflowPath(wt.worktree, SESSION)),
+        events: readFileSync(eventsPath(wt.worktree, SESSION)),
+        planJson: readFileSync(planJsonPath(wt.worktree, wf.id, SESSION)),
         planMd: readFileSync(join(wt.worktree, planMdPath(wf.id))),
       }
       symlinkSync("held-by-another-process", lockPath)
@@ -815,10 +815,10 @@ describe("external foreground imported-plan controller", () => {
     }
     expect(before).toBeDefined()
     const snapshot = before!
-    expect(readFileSync(workflowPath(wt.worktree)).equals(snapshot.workflow)).toBe(true)
-    expect(readFileSync(eventsPath(wt.worktree)).equals(snapshot.events)).toBe(true)
-    expect(readFileSync(planJsonPath(wt.worktree, readWorkflow(wt.worktree)!.id)).equals(snapshot.planJson)).toBe(true)
-    expect(readFileSync(join(wt.worktree, planMdPath(readWorkflow(wt.worktree)!.id))).equals(snapshot.planMd)).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION)).equals(snapshot.workflow)).toBe(true)
+    expect(readFileSync(eventsPath(wt.worktree, SESSION)).equals(snapshot.events)).toBe(true)
+    expect(readFileSync(planJsonPath(wt.worktree, readWorkflow(wt.worktree, SESSION)!.id, SESSION)).equals(snapshot.planJson)).toBe(true)
+    expect(readFileSync(join(wt.worktree, planMdPath(readWorkflow(wt.worktree, SESSION)!.id))).equals(snapshot.planMd)).toBe(true)
     expect(snapshot.planMd.toString("utf8")).not.toContain("verdict:")
     clearReviewSession("child_1")
   })
@@ -827,11 +827,11 @@ describe("external foreground imported-plan controller", () => {
     const f = fixture()
     const wf = newWorkflow(SESSION, currentOwner(Date.now(), f.session!.epoch), "command", "legacy record", ENGINE)
     delete wf.engine
-    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf))
-    const before = readFileSync(workflowPath(wt.worktree))
+    withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf), SESSION)
+    const before = readFileSync(workflowPath(wt.worktree, SESSION))
     const status = readForegroundStatus({ worktree: wt.worktree, config: DEFAULT_CONFIG, log: () => {} }, SESSION)
     expect(status).toContain("planning")
-    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION)).equals(before)).toBe(true)
   })
 
   test("new workflows require a nonempty engine bounded to 512 characters", () => {
@@ -846,7 +846,7 @@ describe("external foreground imported-plan controller", () => {
     writeFileSync(outside, JSON.stringify(plan()))
     expect(f.controller.status(SESSION, true)).toMatchObject({ workflow: null })
     expect(readForegroundStatus({ worktree: wt.worktree, config: DEFAULT_CONFIG, log: () => {} }, SESSION)).toContain("workflow: none")
-    expect(existsSync(workflowPath(wt.worktree))).toBe(false)
+    expect(existsSync(workflowPath(wt.worktree, SESSION))).toBe(false)
     await expect(f.controller.importPlan(SESSION, outside)).rejects.toThrow("inside the worktree")
     symlinkSync(outside, join(wt.worktree, "linked.json"))
     await expect(f.controller.importPlan(SESSION, "linked.json")).rejects.toThrow("inside the worktree")
@@ -855,13 +855,13 @@ describe("external foreground imported-plan controller", () => {
     await expect(f.controller.importPlan(SESSION, "import.json")).rejects.toThrow("canonical")
     expect(f.preflights).toBe(0)
     expect(f.requests).toHaveLength(0)
-    expect(existsSync(workflowPath(wt.worktree))).toBe(false)
+    expect(existsSync(workflowPath(wt.worktree, SESSION))).toBe(false)
   })
 
   test("status refuses incomplete workflow, ledger, and mode state without repairing files", () => {
     const f = fixture()
     for (const [path, contents, message] of [
-      [workflowPath(wt.worktree), '{"version":1,"id":"wf","sessionID":"ses_local","phase":"planning"}', "workflow"],
+      [workflowPath(wt.worktree, SESSION), '{"version":1,"id":"wf","sessionID":"ses_local","phase":"planning"}', "workflow"],
       [ledgerPath(wt.worktree, SESSION), '{"version":1,"tasks":[{}]}', "ledger"],
       [modeStatePath(wt.worktree, SESSION), '{"mode":"ulw"}', "mode"],
     ]) {
@@ -885,7 +885,7 @@ describe("external foreground imported-plan controller", () => {
     if (!submitted.result.ok) throw new Error(submitted.result.text)
     expect(submitted.result.wf.phase).toBe("planning")
     expect((await approve(f.controller, submitted.result.wf.id, submitted.planSha)).ok).toBe(false)
-    await expect(f.controller.importPlan("other_session", source)).rejects.toThrow("another session")
+    await expect(f.controller.importPlan("other_session", source)).rejects.toThrow("session remains held")
     await expect(f.controller.importPlan(SESSION, source)).rejects.toThrow("revision must be 2")
     const revised = { ...plan(), revision: 2 }
     await expect(f.controller.importPlan(SESSION, source, undefined, plan())).rejects.toThrow("revision must be 2")
@@ -907,15 +907,15 @@ describe("external foreground imported-plan controller", () => {
     const claim = f.runtime.runs.claim(SESSION, f.runtime.instance, process.pid)
     f.runtime.runs.registerIntent(claim, { executionId: "lost", ownerSession: SESSION, taskId: "task", attemptId: "attempt", generation: claim.generation, role: "worker", cwd: wt.worktree, policyID: f.runtime.policy.resolve("worker").id, kind: "host", engine: f.runtime.host.identity.engine, profile: "legacy-unowned" })
     f.runtime.runs.bindVendorRef(claim, "lost", JSON.stringify({ executionID: "lost", vendorSessionID: "unknown-child" }))
-    const before = readFileSync(workflowPath(wt.worktree), "utf8")
+    const before = readFileSync(workflowPath(wt.worktree, SESSION), "utf8")
     const ledger = JSON.stringify(readLedger(wt.worktree, SESSION))
-    await expect(f.controller.resume("other_session")).rejects.toThrow("no workflow owned by this session")
-    expect(readFileSync(workflowPath(wt.worktree), "utf8")).toBe(before)
+    await expect(f.controller.resume("other_session")).rejects.toThrow("no active workflow to resume")
+    expect(readFileSync(workflowPath(wt.worktree, SESSION), "utf8")).toBe(before)
     await expect(f.controller.resume(SESSION)).rejects.toThrow("execution run is owned by another operation")
     expect(f.reconciliations).toBe(0)
     expect(f.requests).toHaveLength(1)
     expect(JSON.stringify(readLedger(wt.worktree, SESSION))).toBe(ledger)
-    expect(readFileSync(workflowPath(wt.worktree), "utf8")).toBe(before)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION), "utf8")).toBe(before)
     expect(f.runtime.runs.status().claim).toBeDefined()
   })
 
@@ -959,7 +959,7 @@ describe("external foreground imported-plan controller", () => {
     const state = JSON.parse(readFileSync(statePath, "utf8"))
     state.claim.pid = 2_147_483_647
     writeFileSync(statePath, JSON.stringify(state))
-    const before = readFileSync(workflowPath(wt.worktree), "utf8")
+    const before = readFileSync(workflowPath(wt.worktree, SESSION), "utf8")
     const ledger = JSON.stringify(readLedger(wt.worktree, SESSION))
     const stateBefore = readFileSync(statePath)
 
@@ -974,7 +974,7 @@ describe("external foreground imported-plan controller", () => {
     expect(execution.fence).toBeUndefined()
     expect(readFileSync(statePath).equals(stateBefore)).toBe(true)
     expect(JSON.stringify(readLedger(wt.worktree, SESSION))).toBe(ledger)
-    expect(readFileSync(workflowPath(wt.worktree), "utf8")).toBe(before)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION), "utf8")).toBe(before)
     expect(f.runtime.runs.status().claim).toBeDefined()
   })
 
@@ -992,9 +992,9 @@ describe("external foreground imported-plan controller", () => {
     f.runtime.runs.recordTerminal(claim, "critic-exec", { outcome: "completed", terminalAt: Date.now() })
     f.runtime.runs.reconcile(claim, "critic-exec", { outcome: "terminal", quiescent: true, evidence: "fixture settled" })
     f.runtime.runs.release(claim)
-    const before = readFileSync(workflowPath(wt.worktree), "utf8")
+    const before = readFileSync(workflowPath(wt.worktree, SESSION), "utf8")
     await expect(f.controller.resume(SESSION)).rejects.toThrow("role critic is not schedulable by plan workflows")
-    expect(readFileSync(workflowPath(wt.worktree), "utf8")).toBe(before)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION), "utf8")).toBe(before)
   })
 
   test.each(["unknown origin", "audit-only origin", "mismatched session", "mismatched attempt", "mismatched role", "unsettled origin"])("recovery refuses historical role exemption with %s", async invalid => {
@@ -1002,7 +1002,7 @@ describe("external foreground imported-plan controller", () => {
     let originID = "historical-ralplan"
     let originRevision = 1
     if (invalid === "audit-only origin") {
-      originRevision = withFlowTransaction(wt.worktree, tx => appendEvents(tx, [{ wf: originID, type: "created", actor: "code", data: { kind: "ralplan" } }]))
+      originRevision = withFlowTransaction(wt.worktree, tx => appendEvents(tx, [{ wf: originID, type: "created", actor: "code", data: { kind: "ralplan" } }]), SESSION)
     } else if (invalid !== "unknown origin") {
       const origin = startRalplan(f.runtime, SESSION, "earlier planning")
       if (!origin.ok) throw new Error(origin.text)
@@ -1013,7 +1013,7 @@ describe("external foreground imported-plan controller", () => {
     const submitted = await f.controller.importPlan(SESSION, save())
     if (!submitted.result.ok) throw new Error(submitted.result.text)
     expect((await approve(f.controller, submitted.result.wf.id, submitted.planSha)).ok).toBe(true)
-    const originEvents = readEvents(wt.worktree, originID)
+    const originEvents = readEvents(wt.worktree, originID, SESSION)
     if (invalid === "unknown origin") expect(originEvents).toEqual([])
     else {
       expect(originEvents[0]).toMatchObject({ type: "created", actor: "code", data: { kind: "ralplan" } })
@@ -1043,11 +1043,11 @@ describe("external foreground imported-plan controller", () => {
       delete execution.reconciliation
       writeFileSync(path, JSON.stringify(state))
     }
-    const before = readFileSync(workflowPath(wt.worktree), "utf8")
+    const before = readFileSync(workflowPath(wt.worktree, SESSION), "utf8")
     const ledgerBefore = JSON.stringify(readLedger(wt.worktree, SESSION))
     const requestCount = f.requests.length
     await expect(f.controller.resume(SESSION)).rejects.toThrow("role critic is not schedulable by plan workflows")
-    expect(readFileSync(workflowPath(wt.worktree), "utf8")).toBe(before)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION), "utf8")).toBe(before)
     expect(JSON.stringify(readLedger(wt.worktree, SESSION))).toBe(ledgerBefore)
     expect(f.requests).toHaveLength(requestCount)
   })
@@ -1075,7 +1075,7 @@ describe("external foreground imported-plan controller", () => {
     record.vendorRef = JSON.stringify({ executionID })
     record.boundaryRef = { executionID }
     writeFileSync(statePath, JSON.stringify(state))
-    const workflowBefore = readFileSync(workflowPath(wt.worktree), "utf8")
+    const workflowBefore = readFileSync(workflowPath(wt.worktree, SESSION), "utf8")
     const ledgerBefore = JSON.stringify(readLedger(wt.worktree, SESSION))
     const requestsBefore = f.requests.length
     const stateBefore = readFileSync(statePath)
@@ -1090,7 +1090,7 @@ describe("external foreground imported-plan controller", () => {
     expect(unresolved.terminal).toBeUndefined()
     expect(unresolved.reconciliation).toBeUndefined()
     expect(readFileSync(statePath).equals(stateBefore)).toBe(true)
-    expect(readFileSync(workflowPath(wt.worktree), "utf8")).toBe(workflowBefore)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION), "utf8")).toBe(workflowBefore)
     expect(JSON.stringify(readLedger(wt.worktree, SESSION))).toBe(ledgerBefore)
   })
 
@@ -1187,20 +1187,20 @@ describe("external foreground imported-plan controller", () => {
     const submitting = owner.controller.importPlan(SESSION, save())
     await waitFor(() => owner.requests.length === 1)
     const canceller = fixture({ instance: "cancel-controller", attach: false })
-    const workflowBefore = readFileSync(workflowPath(wt.worktree), "utf8")
+    const workflowBefore = readFileSync(workflowPath(wt.worktree, SESSION), "utf8")
     expect(() => canceller.controller.cancel("wrong_session")).toThrow("no workflow owned by this session")
-    expect(readFileSync(workflowPath(wt.worktree), "utf8")).toBe(workflowBefore)
-    const reviewing = readWorkflow(wt.worktree)!
+    expect(readFileSync(workflowPath(wt.worktree, SESSION), "utf8")).toBe(workflowBefore)
+    const reviewing = readWorkflow(wt.worktree, SESSION)!
     const originalOwner = reviewing.owner
     const cancelled = canceller.controller.cancel(SESSION)
     expect(cancelled.ok).toBe(true)
     if (cancelled.ok) expect(cancelled.wf.stopIntent?.kind).toBe("cancel")
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "reviewing", stopIntent: expect.objectContaining({ kind: "cancel" }), owner: originalOwner })
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "reviewing", stopIntent: expect.objectContaining({ kind: "cancel" }), owner: originalOwner })
     expect(canceller.controller.status(SESSION, true)).toMatchObject({ workflow: { phase: "reviewing", pendingCancel: true } })
     const result = await submitting
     expect(result.result.ok).toBe(false)
     expect(owner.cancellationRequests).toHaveLength(1)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "reviewing", stopIntent: expect.objectContaining({ kind: "cancel" }), owner: originalOwner })
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "reviewing", stopIntent: expect.objectContaining({ kind: "cancel" }), owner: originalOwner })
     expect(owner.runtime.runs.status().executions.at(-1)).toMatchObject({ fence: expect.anything(), reconciliation: { outcome: "unknown", quiescent: false } })
     expect(owner.runtime.runs.status().claim).toBeDefined()
     expect(readLedger(wt.worktree, SESSION).tasks).toHaveLength(0)
@@ -1215,12 +1215,12 @@ describe("external foreground imported-plan controller", () => {
     const cancelled = canceller.controller.cancel(SESSION)
     expect(cancelled.ok).toBe(true)
     if (cancelled.ok) expect(cancelled.wf.stopIntent?.kind).toBe("cancel")
-    expect(readWorkflow(wt.worktree)?.stopIntent?.kind).toBe("cancel")
+    expect(readWorkflow(wt.worktree, SESSION)?.stopIntent?.kind).toBe("cancel")
     const result = await submitting
     expect(result.result.ok).toBe(false)
     expect(owner.cancellationRequests).toHaveLength(1)
-    expect(readWorkflow(wt.worktree)?.phase).toBe("cancelled")
-    expect(readWorkflow(wt.worktree)?.stopIntent).toBeNull()
+    expect(readWorkflow(wt.worktree, SESSION)?.phase).toBe("cancelled")
+    expect(readWorkflow(wt.worktree, SESSION)?.stopIntent).toBeNull()
     expect(owner.runtime.runs.status().claim).toBeUndefined()
     expect(owner.runtime.runs.status().executions.at(-1)?.terminal?.quiescentAt).toBeGreaterThan(0)
     expect(readLedger(wt.worktree, SESSION).tasks).toHaveLength(0)
@@ -1235,20 +1235,20 @@ describe("external foreground imported-plan controller", () => {
       eventSeq: number
     } | undefined
     const owner = fixture({ onReviewComplete: async () => {
-      const before = readWorkflow(wt.worktree)!
+      const before = readWorkflow(wt.worktree, SESSION)!
       const cancelled = await cancelInSubprocess(wt.worktree, SESSION)
       expect(cancelled.ok).toBe(true)
       expect(cancelled.pendingCancel).toBe(true)
-      const current = readWorkflow(wt.worktree)!
+      const current = readWorkflow(wt.worktree, SESSION)!
       expect(current).toMatchObject({ id: before.id, phase: "reviewing", stopIntent: expect.objectContaining({ kind: "cancel" }), engine: ENGINE })
-      const events = readEvents(wt.worktree, before.id)
+      const events = readEvents(wt.worktree, before.id, SESSION)
       cancelledSnapshot = {
         workflowID: before.id,
-        planJson: readFileSync(planJsonPath(wt.worktree, before.id)),
+        planJson: readFileSync(planJsonPath(wt.worktree, before.id, SESSION)),
         planMd: readFileSync(join(wt.worktree, planMdPath(before.id))),
         eventSeq: Math.max(0, ...events.map((event) => event.seq)),
       }
-      expect(readFileSync(planJsonPath(wt.worktree, before.id)).equals(cancelledSnapshot.planJson)).toBe(true)
+      expect(readFileSync(planJsonPath(wt.worktree, before.id, SESSION)).equals(cancelledSnapshot.planJson)).toBe(true)
       expect(readFileSync(join(wt.worktree, planMdPath(before.id))).equals(cancelledSnapshot.planMd)).toBe(true)
     } })
 
@@ -1256,14 +1256,14 @@ describe("external foreground imported-plan controller", () => {
     expect(submitted.result.ok).toBe(false)
     expect(cancelledSnapshot).toBeDefined()
     const snapshot = cancelledSnapshot!
-    expect(readFileSync(planJsonPath(wt.worktree, snapshot.workflowID)).equals(snapshot.planJson)).toBe(true)
+    expect(readFileSync(planJsonPath(wt.worktree, snapshot.workflowID, SESSION)).equals(snapshot.planJson)).toBe(true)
     expect(snapshot.planMd.toString("utf8")).not.toContain("verdict:")
-    const laterEvents = readEvents(wt.worktree, snapshot.workflowID).filter((event) => event.seq > snapshot.eventSeq)
+    const laterEvents = readEvents(wt.worktree, snapshot.workflowID, SESSION).filter((event) => event.seq > snapshot.eventSeq)
     const committedReviewEvents = new Set<string>(["review_aborted", "review_iterate", "review_okay", "review_none"])
     expect(laterEvents.some(event => committedReviewEvents.has(String(event.data?.event)))).toBe(false)
     expect(readFileSync(join(wt.worktree, planMdPath(snapshot.workflowID))).equals(snapshot.planMd)).toBe(true)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ id: snapshot.workflowID, phase: "cancelled" })
-    expect(readWorkflow(wt.worktree)?.stopIntent).toBeNull()
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ id: snapshot.workflowID, phase: "cancelled" })
+    expect(readWorkflow(wt.worktree, SESSION)?.stopIntent).toBeNull()
   })
 
   test("local controller cancellation requests queue stop without sharing or releasing its claim", async () => {
@@ -1278,12 +1278,12 @@ describe("external foreground imported-plan controller", () => {
     const cancelled = owner.controller.cancel(SESSION)
     expect(cancelled.ok).toBe(true)
     if (cancelled.ok) expect(cancelled.wf.stopIntent?.kind).toBe("cancel")
-    expect(readWorkflow(wt.worktree)?.stopIntent?.kind).toBe("cancel")
+    expect(readWorkflow(wt.worktree, SESSION)?.stopIntent?.kind).toBe("cancel")
 
     expect(await stopped).toEqual(new Error("execution unresolved; fence retained"))
     expect(owner.cancellationRequests).toHaveLength(1)
     expect(owner.requests.filter(request => request.role === "worker")).toHaveLength(1)
-    expect(readWorkflow(wt.worktree)?.stopIntent?.kind).toBe("cancel")
+    expect(readWorkflow(wt.worktree, SESSION)?.stopIntent?.kind).toBe("cancel")
     const status = owner.runtime.runs.status()
     expect(status.claim).toEqual(claimBefore)
     expect(status.executions.at(-1)).toMatchObject({
@@ -1298,18 +1298,18 @@ describe("external foreground imported-plan controller", () => {
     expect((await approve(owner.controller, submitted.result.wf.id, submitted.planSha)).ok).toBe(true)
     const stopped = owner.controller.run(SESSION).then(() => null, (error: unknown) => error)
     await waitFor(() => owner.requests.some(request => request.role === "worker"))
-    const runningWorkflow = readWorkflow(wt.worktree)!
+    const runningWorkflow = readWorkflow(wt.worktree, SESSION)!
     const originalOwner = runningWorkflow.owner
     const cancelled = await cancelInSubprocess(wt.worktree, SESSION)
     expect(cancelled.ok).toBe(true)
     expect(cancelled.pendingCancel).toBe(true)
     expect(cancelled.owner).toEqual(originalOwner)
-    expect(readWorkflow(wt.worktree)?.owner).toEqual(originalOwner)
-    expect(readWorkflow(wt.worktree)?.stopIntent?.kind).toBe("cancel")
+    expect(readWorkflow(wt.worktree, SESSION)?.owner).toEqual(originalOwner)
+    expect(readWorkflow(wt.worktree, SESSION)?.stopIntent?.kind).toBe("cancel")
     expect(await stopped).toEqual(new Error("execution unresolved; fence retained"))
     expect(owner.cancellationRequests).toHaveLength(1)
     expect(owner.requests.filter(request => request.role === "worker")).toHaveLength(1)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "executing", stopIntent: expect.objectContaining({ kind: "cancel" }), owner: originalOwner })
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "executing", stopIntent: expect.objectContaining({ kind: "cancel" }), owner: originalOwner })
     const execution = owner.runtime.runs.status().executions.at(-1)!
     expect(execution.fence).toBeDefined()
     expect(execution.terminal?.quiescentAt).toBeUndefined()
@@ -1326,13 +1326,13 @@ describe("external foreground imported-plan controller", () => {
     expect(paused.ok).toBe(true)
     if (paused.ok) expect(paused.wf.stopIntent).toMatchObject({ kind: "pause" })
     // pause keeps the phase and stays pending while the review activity is registered
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "reviewing", stopIntent: { kind: "pause" } })
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "reviewing", stopIntent: { kind: "pause" } })
     expect(owner.controller.status(SESSION, true)).toMatchObject({ workflow: { phase: "reviewing", stopIntent: "pause" } })
     await submitting
     expect(owner.cancellationRequests).toHaveLength(1)
     // the review's finally released the activity and ran the one settlement routine
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "paused", pausedFrom: { phase: "reviewing" } })
-    expect(readEvents(wt.worktree, readWorkflow(wt.worktree)!.id).filter(e => e.type === "pause_settled")).toHaveLength(1)
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "paused", pausedFrom: { phase: "reviewing" } })
+    expect(readEvents(wt.worktree, readWorkflow(wt.worktree, SESSION)!.id, SESSION).filter(e => e.type === "pause_settled")).toHaveLength(1)
     expect(readLedger(wt.worktree, SESSION).tasks).toHaveLength(0)
     clearReviewSession("child_1")
   })
@@ -1343,15 +1343,15 @@ describe("external foreground imported-plan controller", () => {
     await waitFor(() => owner.requests.length === 1)
     const paused = owner.controller.pause(SESSION)
     expect(paused.ok).toBe(true)
-    const pauseToken = readWorkflow(wt.worktree)!.stopIntent!.token
+    const pauseToken = readWorkflow(wt.worktree, SESSION)!.stopIntent!.token
     const cancelled = owner.controller.cancel(SESSION)
     expect(cancelled.ok).toBe(true)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "reviewing", stopIntent: { kind: "cancel" } })
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "reviewing", stopIntent: { kind: "cancel" } })
     // the review finally may settle the cancel before importPlan re-reads the record; either outcome is a refusal
     await submitting.then(() => null, () => null)
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, SESSION)!
     expect(wf).toMatchObject({ phase: "cancelled", stopIntent: null })
-    const events = readEvents(wt.worktree, wf.id)
+    const events = readEvents(wt.worktree, wf.id, SESSION)
     expect(events.filter(e => e.type === "cancel_settled")).toHaveLength(1)
     expect(events.filter(e => e.type === "pause_settled")).toHaveLength(0)
     expect(events.find(e => e.type === "stop_requested" && e.data?.kind === "cancel")?.data?.replaces).toBe(pauseToken)
@@ -1370,26 +1370,26 @@ describe("external foreground imported-plan controller", () => {
     await waitFor(() => owner.requests.some(request => request.role === "worker"))
     const paused = owner.controller.pause(SESSION)
     expect(paused.ok).toBe(true)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "executing", stopIntent: { kind: "pause" } })
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "executing", stopIntent: { kind: "pause" } })
     release()
     const error = await running
     expect(String(error ?? "")).not.toContain("workflow changed")
     // the interrupted task was not counted as an outcome; no task is cancelled by the pause
     expect(readLedger(wt.worktree, SESSION).tasks.some(task => task.status === "cancelled" && /pause/.test(task.error ?? ""))).toBe(false)
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, SESSION)!
     expect(["executing", "paused"]).toContain(wf.phase)
     expect(wf.stopIntent?.kind).toBe("pause")
-    expect(readEvents(wt.worktree, wf.id).some(e => e.type === "transition" && ["settle_fail", "settle_ok", "user_stop"].includes(String(e.data?.event)))).toBe(false)
+    expect(readEvents(wt.worktree, wf.id, SESSION).some(e => e.type === "transition" && ["settle_fail", "settle_ok", "user_stop"].includes(String(e.data?.event)))).toBe(false)
   })
 
   test("a foreign sid pause or cancel is refused with no index or revision change", async () => {
     const owner = fixture({ hangReview: true })
     const submitting = owner.controller.importPlan(SESSION, save())
     await waitFor(() => owner.requests.length === 1)
-    const before = readFileSync(workflowPath(wt.worktree), "utf8")
+    const before = readFileSync(workflowPath(wt.worktree, SESSION), "utf8")
     expect(() => owner.controller.pause("wrong_session")).toThrow()
     expect(() => owner.controller.cancel("wrong_session")).toThrow()
-    expect(readFileSync(workflowPath(wt.worktree), "utf8")).toBe(before)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION), "utf8")).toBe(before)
     owner.controller.cancel(SESSION)
     await submitting
     clearReviewSession("child_1")
@@ -1416,7 +1416,7 @@ describe("external foreground imported-plan controller", () => {
     if (opts.via === "subprocess") expect((await cancelInSubprocess(wt.worktree, SESSION, "pause")).ok).toBe(true)
     else expect(owner.controller.pause(SESSION).ok).toBe(true)
     await running
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, SESSION)!
     expect(wf).toMatchObject({ phase: "paused", pausedFrom: { phase: "executing" } })
     return { owner, wf, planSha: submitted.planSha }
   }
@@ -1441,11 +1441,11 @@ describe("external foreground imported-plan controller", () => {
     const outcome = await owner.controller.resumePaused(SESSION, keep)
     expect(outcome.kept).toBe(true)
     expect(starts(owner)).toBe(before)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ id: wf.id, phase: "paused", lastSeq: wf.lastSeq })
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ id: wf.id, phase: "paused", lastSeq: wf.lastSeq })
   })
 
   const PRECONDITIONS: Array<[string, (ctx: Awaited<ReturnType<typeof pausedExecuting>>) => void | Promise<void>, RegExp]> = [
-    ["subject: the saved plan json changed", ({ wf }) => writeFileSync(planJsonPath(wt.worktree, wf.id), "{}"), /subject|approved plan/],
+    ["subject: the saved plan json changed", ({ wf }) => writeFileSync(planJsonPath(wt.worktree, wf.id, SESSION), "{}"), /subject|approved plan/],
     ["subject: the rendered plan changed", ({ wf }) => writeFileSync(join(wt.worktree, wf.planRef!.mdPath), "tampered\n"), /subject|approved plan|rendered/],
     ["unrelated-tasks: an unrelated open task exists", () => {
       const ledger = readLedger(wt.worktree, SESSION)
@@ -1471,11 +1471,11 @@ describe("external foreground imported-plan controller", () => {
       const ctx = await pausedExecuting()
       const before = starts(ctx.owner)
       await mutate(ctx)
-      const revision = readWorkflow(wt.worktree)!.lastSeq
+      const revision = readWorkflow(wt.worktree, SESSION)!.lastSeq
       await expect(resumeIt(ctx.owner)).rejects.toThrow(message)
       expect(starts(ctx.owner)).toBe(before)
-      expect(readWorkflow(wt.worktree)!.lastSeq).toBe(revision)
-      expect(readWorkflow(wt.worktree)!.phase === "paused" || readWorkflow(wt.worktree)!.stopIntent?.kind === "cancel").toBe(true)
+      expect(readWorkflow(wt.worktree, SESSION)!.lastSeq).toBe(revision)
+      expect(readWorkflow(wt.worktree, SESSION)!.phase === "paused" || readWorkflow(wt.worktree, SESSION)!.stopIntent?.kind === "cancel").toBe(true)
       expect(getQueue(ctx.owner.runtime).isRunning(SESSION)).toBe(false)
     })
   }
@@ -1489,7 +1489,7 @@ describe("external foreground imported-plan controller", () => {
     const before = starts(ctx.owner)
     await expect(resumeIt(ctx.owner)).rejects.toThrow(/preflight|admission|host|control/)
     expect(starts(ctx.owner)).toBe(before)
-    expect(readWorkflow(wt.worktree)!.phase).toBe("paused")
+    expect(readWorkflow(wt.worktree, SESSION)!.phase).toBe("paused")
   })
 
   test("W5 a change injected between the choice and the commit is caught by the recheck", async () => {
@@ -1500,7 +1500,7 @@ describe("external foreground imported-plan controller", () => {
       return true
     })).rejects.toThrow(/subject|approved plan|rendered|authority/)
     expect(starts(ctx.owner)).toBe(before)
-    expect(readWorkflow(wt.worktree)!.phase).toBe("paused")
+    expect(readWorkflow(wt.worktree, SESSION)!.phase).toBe("paused")
   })
 
   test("W5 clean resume: one resume commit, attempt 2, only residual tasks run, done tasks retained, new token on the current epoch", async () => {
@@ -1516,8 +1516,8 @@ describe("external foreground imported-plan controller", () => {
       return true
     })
     expect(outcome.kept).toBe(false)
-    const finished = readWorkflow(wt.worktree)!
-    const events = readEvents(wt.worktree, finished.id)
+    const finished = readWorkflow(wt.worktree, SESSION)!
+    const events = readEvents(wt.worktree, finished.id, SESSION)
     expect(events.filter(event => event.type === "resumed")).toHaveLength(1)
     expect(events.find(event => event.type === "resumed")?.data).toMatchObject({ attempt: 2, token: ctx.wf.stopIntent!.token })
     expect(finished.stopIntent).toBeNull()
@@ -1536,7 +1536,7 @@ describe("external foreground imported-plan controller", () => {
     expect(owner.controller.pause(SESSION).ok).toBe(true)
     await submitting.then(() => null, () => null)
     clearReviewSession("child_1")
-    const paused = readWorkflow(wt.worktree)!
+    const paused = readWorkflow(wt.worktree, SESSION)!
     expect(paused).toMatchObject({ phase: "paused", pausedFrom: { phase: "reviewing" } })
     const reviewsBefore = owner.requests.filter(request => request.title.includes("plan review")).length
     options.hangReview = false
@@ -1544,7 +1544,7 @@ describe("external foreground imported-plan controller", () => {
     expect(outcome.kept).toBe(false)
     expect(owner.requests.filter(request => request.title.includes("plan review"))).toHaveLength(reviewsBefore + 1)
     expect(owner.requests.some(request => request.role === "worker")).toBe(false)
-    const after = readWorkflow(wt.worktree)!
+    const after = readWorkflow(wt.worktree, SESSION)!
     expect(after).toMatchObject({ id: paused.id, phase: "pending_approval", stopIntent: null })
     expect(after.planRef?.jsonSha).toBe(paused.planRef?.jsonSha)
     // a receipt minted before the pause/resume no longer matches the revision
@@ -1561,8 +1561,8 @@ describe("external foreground imported-plan controller", () => {
       const unregister = registerSkillPermissionActivity(wt.worktree, SESSION, submitted.result.wf!.owner.instance, wait)
       const requested = await cancelInSubprocess(wt.worktree, SESSION, kind)
       expect(requested.ok).toBe(true)
-      expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "pending_approval", stopIntent: { kind } })
-      const types = () => readEvents(wt.worktree, submitted.result.wf!.id).map(e => e.type)
+      expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "pending_approval", stopIntent: { kind } })
+      const types = () => readEvents(wt.worktree, submitted.result.wf!.id, SESSION).map(e => e.type)
       expect(types().filter(t => t === "pause_settled" || t === "cancel_settled")).toHaveLength(0)
       // the owner observes the foreign stop: it holds, aborts the broker wait, and still waits for the wait to unregister
       const waiting = observeStopSettlement(owner.runtime, SESSION, submitted.result.wf!.owner.instance, "owner")
@@ -1570,7 +1570,7 @@ describe("external foreground imported-plan controller", () => {
       expect(wait.signal.aborted).toBe(true)
       unregister()
       expect(observeStopSettlement(owner.runtime, SESSION, submitted.result.wf!.owner.instance, "owner").kind).toBe("settled")
-      expect(readWorkflow(wt.worktree)!.phase).toBe(kind === "pause" ? "paused" : "cancelled")
+      expect(readWorkflow(wt.worktree, SESSION)!.phase).toBe(kind === "pause" ? "paused" : "cancelled")
       rmSync(join(wt.worktree, ".otter"), { recursive: true, force: true })
       wt.cleanup(); wt = tempGitWorktree(); wt.worktree = realpathSync(wt.worktree)
     }
@@ -1590,9 +1590,9 @@ describe("external foreground imported-plan controller", () => {
   test("architect 3: a user stop marker after the pause refuses the Resume with zero commits", async () => {
     const ctx = await pausedExecuting()
     writeFileSync(join(sessionDir(wt.worktree, SESSION), "abort.json"), JSON.stringify({ reason: "user_stop", at: Date.now() }))
-    const revision = readWorkflow(wt.worktree)!.lastSeq
+    const revision = readWorkflow(wt.worktree, SESSION)!.lastSeq
     await expect(resumeIt(ctx.owner)).rejects.toThrow(/stop marker|cancel-or-end/)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "paused", lastSeq: revision })
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "paused", lastSeq: revision })
   })
 
   test("architect 5: a worker that completes (and writes a file) after the stop never advances a task, verification or the ledger", async () => {
@@ -1603,7 +1603,7 @@ describe("external foreground imported-plan controller", () => {
       expect(tasks.every(task => task.verify_result === undefined && task.review === undefined && task.finishedAt === undefined)).toBe(true)
       // the late write really happened (worktree isolation is off) yet no ledger, verification or review effect followed
       expect(existsSync(join(wt.worktree, "mod1.py"))).toBe(true)
-      expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "paused" })
+      expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "paused" })
       void ctx
       wt.cleanup(); wt = tempGitWorktree(); wt.worktree = realpathSync(wt.worktree)
     }
@@ -1617,14 +1617,14 @@ describe("external foreground imported-plan controller", () => {
     expect(submitted.result.wf.phase).toBe("pending_approval")
     const oldReceipt = await operatorReceipt("approve", wid, submitted.planSha, `APPROVE ${wid} ${submitted.planSha}`)
     expect(owner.controller.pause(SESSION).ok).toBe(true)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "paused", pausedFrom: { phase: "pending_approval" } })
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "paused", pausedFrom: { phase: "pending_approval" } })
     const outcome = await resumeIt(owner)
     expect(outcome.kept).toBe(false)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "pending_approval", stopIntent: null })
-    const control = readFileSync(workflowPath(wt.worktree))
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "pending_approval", stopIntent: null })
+    const control = readFileSync(workflowPath(wt.worktree, SESSION))
     const ledger = existsSync(ledgerPath(wt.worktree, SESSION)) ? readFileSync(ledgerPath(wt.worktree, SESSION)) : undefined
     expect(() => owner.controller.decide(oldReceipt)).toThrow(/revision/)
-    expect(readFileSync(workflowPath(wt.worktree)).equals(control)).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION)).equals(control)).toBe(true)
     if (ledger) expect(readFileSync(ledgerPath(wt.worktree, SESSION)).equals(ledger)).toBe(true)
     else expect(existsSync(ledgerPath(wt.worktree, SESSION))).toBe(false)
     expect(owner.requests.some(request => request.role === "worker")).toBe(false)
@@ -1650,7 +1650,7 @@ describe("external foreground imported-plan controller", () => {
     await waitFor(() => workers.length === 2)
     expect(owner.controller.pause(SESSION).ok).toBe(true)
     await running
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "paused" })
+    expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ phase: "paused" })
     const paused = readLedger(wt.worktree, SESSION).tasks
     expect(paused.map(task => task.status)).toEqual(["done", "pending", "pending"])
     const doneBefore = JSON.stringify(paused[0])
@@ -1675,7 +1675,7 @@ describe("external foreground imported-plan controller", () => {
   test("plain resume of a paused workflow requires the explicit choice path", async () => {
     const ctx = await pausedExecuting()
     await expect(ctx.owner.controller.resume(SESSION)).rejects.toThrow(/paused|Keep\/Resume/)
-    expect(readWorkflow(wt.worktree)!.phase).toBe("paused")
+    expect(readWorkflow(wt.worktree, SESSION)!.phase).toBe("paused")
   })
 
   test("boot-epoch refusal precedes controller import, run, and resume state access", async () => {
@@ -1697,15 +1697,15 @@ describe("external foreground imported-plan controller", () => {
 
     const source = save()
     await expect(f.controller.importPlan(SESSION, source)).rejects.toBe(refused)
-    expect(existsSync(workflowPath(wt.worktree))).toBe(false)
+    expect(existsSync(workflowPath(wt.worktree, SESSION))).toBe(false)
     expect(existsSync(sessionDir(wt.worktree, SESSION))).toBe(true)
 
-    const workflow = withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...newWorkflow(SESSION, currentOwner(Date.now(), f.session!.epoch), "command", "test", ENGINE), phase: "executing" }))
-    const before = readFileSync(workflowPath(wt.worktree))
+    const workflow = withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...newWorkflow(SESSION, currentOwner(Date.now(), f.session!.epoch), "command", "test", ENGINE), phase: "executing" }), SESSION)
+    const before = readFileSync(workflowPath(wt.worktree, SESSION))
     await expect(f.controller.run(SESSION)).rejects.toBe(refused)
     await expect(f.controller.resume(SESSION)).rejects.toBe(refused)
-    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
-    expect(readWorkflow(wt.worktree)?.id).toBe(workflow.id)
+    expect(readFileSync(workflowPath(wt.worktree, SESSION)).equals(before)).toBe(true)
+    expect(readWorkflow(wt.worktree, SESSION)?.id).toBe(workflow.id)
     expect(epochChecks).toBe(3)
     expect(claimCalls).toBe(0)
     expect(statusCalls).toBe(0)
@@ -1724,7 +1724,7 @@ describe("external foreground imported-plan controller", () => {
     f.runtime.host.prepare = async () => { hostCalls++; throw new Error("unexpected host execution") }
     await expect(f.controller.importPlan(SESSION, save())).rejects.toBe(refused)
     expect(submissions).toBe(1)
-    expect(existsSync(workflowPath(wt.worktree))).toBe(false)
+    expect(existsSync(workflowPath(wt.worktree, SESSION))).toBe(false)
     expect(existsSync(sessionDir(wt.worktree, SESSION))).toBe(true)
     expect(existsSync(join(wt.worktree, ".otter", "plans"))).toBe(false)
     expect(hostCalls).toBe(0)
@@ -1772,9 +1772,9 @@ describe("external foreground imported-plan controller", () => {
     expect(events).toEqual(["admitPlanSubmission", "admitNewExecution:1", "consumePlanSubmission", "admitNewExecution:2"])
     expect(a5HadClaimAndNoIntent).toBe(true)
     expect(f.requests).toHaveLength(0)
-    const workflow = readWorkflow(wt.worktree)!
+    const workflow = readWorkflow(wt.worktree, SESSION)!
     expect(workflow).toMatchObject({ phase: "pending_approval", review: { verdict: "none", note: "aborted" } })
-    expect(JSON.parse(readFileSync(planJsonPath(wt.worktree, workflow.id), "utf8"))).toEqual(plan())
+    expect(JSON.parse(readFileSync(planJsonPath(wt.worktree, workflow.id, SESSION), "utf8"))).toEqual(plan())
     expect(readFileSync(join(wt.worktree, planMdPath(workflow.id)), "utf8")).toContain("verdict: none")
     expect(f.runtime.runs.status()).toMatchObject({ executions: [], claim: undefined })
     const otherOwner = f.runtime.runs.claim("other-session", "same-boot-owner", process.pid)
@@ -1853,3 +1853,34 @@ describe("plan skills carried to workers", () => {
     expect(prompt(withSkills, ledger.tasks[0]!.id).startsWith(prompt(ledger, ledger.tasks[0]!.id))).toBe(true)
   })
 })
+
+test("two controller sessions import independently and B executes while A remains unchanged", async () => {
+  const f = fixture({ worker(request) {
+    const module = request.title.match(/module (\d)/)?.[1]
+    if (!module) throw new Error("unexpected worker request")
+    writeFileSync(join(request.cwd, `mod${module}.py`), `VALUE = ${module}\n`)
+    return { status: "completed", text: "Open issues: none" }
+  } })
+  const secondSession = "ses_independent"
+  attachAdmission(f.runtime, secondSession, { engine: ENGINE, model: MODEL })
+  const a = await f.controller.importPlan(SESSION, save())
+  if (!a.result.ok) throw new Error(a.result.text)
+  const aIndex = readFileSync(workflowPath(wt.worktree, SESSION))
+  const aEvents = readFileSync(eventsPath(wt.worktree, SESSION))
+  const aPlan = readFileSync(planJsonPath(wt.worktree, a.result.wf.id, SESSION))
+  const b = await f.controller.importPlan(secondSession, save({ ...plan(), goal: "independent second plan" }))
+  if (!b.result.ok) throw new Error(b.result.text)
+  expect(b.result.wf.id).not.toBe(a.result.wf.id)
+  expect(b.planSha).not.toBe(a.planSha)
+  const approved = await withTerminalLine(`APPROVE ${b.result.wf.id} ${b.planSha}`, async () =>
+    f.controller.decide(await humanDecision("approve", planBinding(secondSession, b.result.wf!, b.planSha))))
+  expect(approved.ok).toBe(true)
+  const finished = await f.controller.run(secondSession)
+  expect(finished.workflow.phase).toBe("done")
+  expect(finished.run.done).toBe(3)
+  expect(readFileSync(workflowPath(wt.worktree, SESSION))).toEqual(aIndex)
+  expect(readFileSync(eventsPath(wt.worktree, SESSION))).toEqual(aEvents)
+  expect(readFileSync(planJsonPath(wt.worktree, a.result.wf.id, SESSION))).toEqual(aPlan)
+  expect(readWorkflow(wt.worktree, SESSION)).toMatchObject({ id: a.result.wf.id, phase: "pending_approval", planRef: { jsonSha: a.planSha } })
+  expect(readForegroundStatus(f.runtime, SESSION)).toContain(a.result.wf.id)
+}, 30_000)

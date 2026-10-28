@@ -40,7 +40,7 @@ function currentSnapshot(runtime: ExecutionRuntime, expected: Workflow): Workflo
       return { result: changedResult(current) }
     }
     return { current }
-  })
+  }, expected.sessionID)
 }
 
 function submitPlanIn(
@@ -121,7 +121,7 @@ export function importedPlan(value: unknown, revision: number, runtime: Executio
 export function savedPlan(runtime: ExecutionRuntime, wf: Workflow): Plan | null {
   if (!wf.planRef) return null
   try {
-    const value = readJson<unknown>(planJsonPath(runtime.worktree, wf.id), null)
+    const value = readJson<unknown>(planJsonPath(runtime.worktree, wf.id, wf.sessionID), null)
     const plan = importedPlan(value, wf.planRef.revision, runtime)
     // Authority is the committed hash: the rendered view must verify from disk (no-follow regular file, matching sha).
     return canonicalPlanSha(plan) === wf.planRef.jsonSha &&
@@ -160,7 +160,7 @@ async function writeAndReviewImportedPlan(runtime: ExecutionRuntime, wf: Workflo
   const mdPath = planMdPath(wf.id)
   const initialMd = renderPlanMd(wf.id, plan)
   const submitted = withFlowTransaction(runtime.worktree, (tx) =>
-    submitPlanIn(tx, runtime, wf, plan, "code", planSha, initialMd))
+    submitPlanIn(tx, runtime, wf, plan, "code", planSha, initialMd), wf.sessionID)
   if (!submitted.ok) return { result: submitted, planSha }
   return reviewSubmittedPlan(runtime, submitted.wf, plan, signal)
 }
@@ -193,7 +193,7 @@ export async function reviewSubmittedPlan(runtime: ExecutionRuntime, submittedWf
   const view: ReviewView = { verdict: review.verdict, findings: review.findings, ...(note ? { note } : {}) }
   const reviewedMd = renderPlanMd(wf.id, plan, view)
   const result = withFlowTransaction(runtime.worktree, (tx) =>
-    reviewPlanIn(tx, runtime, submitted.wf, mdPath, reviewedMd, event, planSha, view, note))
+    reviewPlanIn(tx, runtime, submitted.wf, mdPath, reviewedMd, event, planSha, view, note), submittedWf.sessionID)
   if (!result.ok) return { result, planSha }
   if (admissionRefusal) throw admissionRefusal
   return { result, planSha, ...(result.ok ? { renderedPlan: renderPlanMd(wf.id, plan, view) } : {}) }

@@ -3,6 +3,14 @@ import type { Subject } from "../workflows/types.ts"
 
 export type OperatorDecision = LocalOperatorDecision
 
+/** The operator submitted a line, but it did not grant the displayed decision. */
+export class OperatorDecisionInputError extends Error {
+  constructor() {
+    super("local operator decision did not match workflow ID and subject hash; enter the exact displayed APPROVE or REJECT line")
+    this.name = "OperatorDecisionInputError"
+  }
+}
+
 /** What an operator decision is about; the controller refuses a receipt whose binding is no longer current. */
 export type DecisionBinding = {
   sessionID: string
@@ -77,7 +85,7 @@ export async function humanDecision(
     if (answer.startsWith(`${reject} `) && answer.slice(reject.length).trim() && action !== "approve") {
       return issue({ ...binding, action: "reject", reason: answer.slice(reject.length).trim() })
     }
-    throw new Error("local operator decision did not match workflow ID and subject hash")
+    throw new OperatorDecisionInputError()
   } finally { terminal.close() }
 }
 

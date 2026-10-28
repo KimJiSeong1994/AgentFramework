@@ -77,14 +77,14 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
     if (refusal) throw new Error(refusal)
   }
 
-  function activeWorkflowForHost(): Workflow | null {
-    const wf = activeWorkflow(root)
+  function activeWorkflowForHost(sessionID?: string): Workflow | null {
+    const wf = activeWorkflow(root, sessionID)
     if (wf) assertWorkflowEngine(wf)
     return wf
   }
 
   function assertAdmission(sessionID: string, expectedEpoch?: string): string {
-    const persisted = readAnyWorkflowChecked(root).wf
+    const persisted = readAnyWorkflowChecked(root, sessionID).wf
     if (persisted?.sessionID === sessionID) assertWorkflowEngine(persisted)
     const epoch = admissionEpoch(root, sessionID)
     if (!epoch || effectiveHold(root, sessionID) || !isAdmissionCurrent(root, sessionID, epoch)) {
@@ -101,15 +101,15 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
   }
 
   /** Any-kind active workflow: the approved-unit kinds (ultragoal/autoresearch) occupy the same slot as a plan. */
-  function activeAnyForHost(): WorkflowEnvelope | null {
-    const wf = activeAnyWorkflow(root)
+  function activeAnyForHost(sessionID?: string): WorkflowEnvelope | null {
+    const wf = activeAnyWorkflow(root, sessionID)
     if (wf) assertWorkflowEngine(wf)
     return wf
   }
 
   /** The active workflow when it is a plan or an approved-unit kind; planning-only kinds stop through their own host. */
-  function activeUnitHostWorkflow(): WorkflowEnvelope | null {
-    const wf = activeAnyForHost()
+  function activeUnitHostWorkflow(sessionID?: string): WorkflowEnvelope | null {
+    const wf = activeAnyForHost(sessionID)
     return wf && (wf.kind === "plan" || isUnitKind(wf.kind)) ? wf : null
   }
 
@@ -131,7 +131,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
 
   function assertWorkflowUnchanged<T extends WorkflowEnvelope>(expected: T | null, sessionID: string, expectedEpoch: string): T | null {
     assertAdmission(sessionID, expectedEpoch)
-    const current = (expected !== null && expected.kind !== "plan" ? activeAnyForHost() : activeWorkflowForHost()) as T | null
+    const current = (expected !== null && expected.kind !== "plan" ? activeAnyForHost(sessionID) : activeWorkflowForHost(sessionID)) as T | null
     if (current?.id !== expected?.id) throw new Error("workflow changed during foreground operation")
     if (current && current.sessionID !== sessionID) throw new Error("another session owns the workflow")
     if (current) {
@@ -142,7 +142,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
   }
 
   function assertWorkflowRecordUnchanged<T extends WorkflowEnvelope>(expected: T, sessionID: string, expectedEpoch: string): T {
-    const current = (expected.kind !== "plan" ? readAnyWorkflowChecked(root).wf : readWorkflow(root)) as T | null
+    const current = (expected.kind !== "plan" ? readAnyWorkflowChecked(root, sessionID).wf : readWorkflow(root, sessionID)) as T | null
     if (!current || current.id !== expected.id) throw new Error("workflow changed during foreground operation")
     assertWorkflowEngine(current)
     if (current.sessionID !== sessionID) throw new Error("another session owns the workflow")
@@ -159,7 +159,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
   function stopOwnerIsCurrent(sessionID: string, workflowID: string, expectedEpoch: string): boolean {
     try {
       const store = getOwnedSession(root, sessionID)
-      const current = readAnyWorkflowChecked(root).wf
+      const current = readAnyWorkflowChecked(root, sessionID).wf
       return !!store && store.epoch === expectedEpoch && store.sessionID === sessionID &&
         current?.id === workflowID && current.sessionID === sessionID && current.owner.instance === expectedEpoch &&
         current.owner.pid === process.pid && isStopPending(current)
@@ -186,7 +186,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
     }
   }
 
-  function wid(): string { return readAnyWorkflowChecked(root).wf?.id ?? "" }
+  function wid(sessionID?: string): string { return readAnyWorkflowChecked(root, sessionID).wf?.id ?? "" }
 
   async function withAdmissionBoundDispatch<T>(sessionID: string, epoch: string, operation: () => Promise<T>): Promise<T> {
     const host = runtime.host
@@ -209,7 +209,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
           const result = await handle.run()
           // A stop recorded while the model ran closes admission by design; the finished execution is still this
           // owner's and must reach terminal+quiescent reconciliation, so its late result is diagnostic, not a throw.
-          if (!stopOwnerIsCurrent(sessionID, wid(), epoch)) assertAdmission(sessionID, epoch)
+          if (!stopOwnerIsCurrent(sessionID, wid(sessionID), epoch)) assertAdmission(sessionID, epoch)
           return result
         },
         requestCancel: (reason, deadlineAt) => handle.requestCancel(reason, deadlineAt),
@@ -230,7 +230,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
   function workflow(sessionID: string, phase?: Workflow["phase"]): Workflow
   function workflow(sessionID: string, phase: Workflow["phase"] | undefined, any: true): WorkflowEnvelope
   function workflow(sessionID: string, phase?: Workflow["phase"], any = false): WorkflowEnvelope {
-    const wf = any ? activeAnyForHost() : activeWorkflowForHost()
+    const wf = any ? activeAnyForHost(sessionID) : activeWorkflowForHost(sessionID)
     if (!wf || wf.sessionID !== sessionID) throw new Error("no workflow owned by this session")
     if (phase && wf.phase !== phase) throw new Error(`workflow is ${wf.phase}, expected ${phase}`)
     assertWorkflowOwner(wf, sessionID)
@@ -256,7 +256,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
           origin.supervisorSessionID === sessionID && origin.role === execution.role &&
           origin.attemptId === execution.attemptId && origin.revision !== null && origin.revision > 0 && origin.revision < wf.lastSeq &&
           isWorkflowKind(origin.kind) && kindAllowsRole(origin.kind, execution.role) &&
-          (history ??= readEvents(root)).some(event => event.wf === origin.workflowID && event.audit !== true && event.type === "created" && event.actor === "code" &&
+          (history ??= readEvents(root, undefined, sessionID)).some(event => event.wf === origin.workflowID && event.audit !== true && event.type === "created" && event.actor === "code" &&
             event.data?.kind === origin.kind && event.seq <= origin.revision!)) continue
         throw new Error(`role ${execution.role} is not schedulable by ${wf.kind} workflows; recovery refused`)
       }
@@ -271,7 +271,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
     allowHeldAttachment: boolean,
     anyUnitKind: boolean,
   ): WorkflowEnvelope {
-    const wf = anyUnitKind ? activeUnitHostWorkflow() : activeWorkflowForHost()
+    const wf = anyUnitKind ? activeUnitHostWorkflow(sessionID) : activeWorkflowForHost(sessionID)
     if (!wf || wf.sessionID !== sessionID) throw new Error("no workflow owned by this session")
     if ((workflowID !== undefined && wf.id !== workflowID) ||
       (planSha !== undefined && (wf.kind !== "plan" || wf.planRef?.jsonSha !== planSha))) {
@@ -324,7 +324,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
   /** Every foreground settle point is the one owner-aware routine; it settles only a recorded stop, never advances. */
   function settleStop(sessionID: string, workflowID: string): void {
     runtime.linuxAdmission?.assertBootEpoch()
-    const current = readAnyWorkflowChecked(root).wf
+    const current = readAnyWorkflowChecked(root, sessionID).wf
     if (!current || current.id !== workflowID || current.sessionID !== sessionID || !isStopPending(current)) return
     assertWorkflowEngine(current)
     const result = observeStopSettlement(runtime, sessionID, current.owner.instance, "controller")
@@ -342,7 +342,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
 
   function validateImportedPlan(value: unknown, sessionID?: string) {
     runtime.linuxAdmission?.assertBootEpoch()
-    const existing = activeWorkflowForHost()
+    const existing = activeWorkflowForHost(sessionID)
     if (existing && sessionID && existing.sessionID !== sessionID) throw new Error("another session owns the workflow")
     if (existing && existing.phase !== "planning") throw new Error(`workflow is ${existing.phase}, not awaiting a plan`)
     const revision = existing ? 1 + existing.counters.code_invalid + existing.counters.review_iterations + existing.counters.user_rejections : 1
@@ -353,7 +353,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
     runtime.linuxAdmission?.assertBootEpoch()
     if (!flowOn(runtime.config)) throw new Error("plan workflow is disabled")
     if (!sessionID || sessionID.includes("/") || sessionID.includes("\\") || sessionID === "." || sessionID === "..") throw new Error("invalid session ID")
-    const existing = activeWorkflowForHost()
+    const existing = activeWorkflowForHost(sessionID)
     if (existing && existing.sessionID !== sessionID) throw new Error(`another session owns the workflow: ${existing.sessionID}; use /resume ${existing.sessionID}`)
     const epoch = assertAdmission(sessionID)
     if (existing && existing.phase !== "planning") throw new Error(`workflow is ${existing.phase}, not awaiting a plan`)
@@ -413,10 +413,10 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
     // Consume first: a receipt is spent even when a later check refuses it.
     const decision = consumeOperatorDecision(receipt)
     runtime.linuxAdmission?.assertBootEpoch()
-    const persisted = readWorkflow(root)
+    const sessionID = expectedSessionID ?? decision.sessionID
+    const persisted = readWorkflow(root, sessionID)
     if (persisted) assertWorkflowEngine(persisted)
     if (!persisted) throw new Error("decision workflow ID or subject hash does not match")
-    const sessionID = expectedSessionID ?? persisted.sessionID
     // Every refusal below happens before any effect: no index, ledger or event write has occurred yet.
     if (decision.sessionID !== sessionID || persisted.sessionID !== sessionID) throw new Error("decision receipt belongs to another session")
     if (TERMINAL.has(persisted.phase)) throw new Error(`workflow is ${persisted.phase}; decision refused`)
@@ -577,7 +577,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
       current = authority.wf
     } else {
       // Non-plan owner authority: the committed unit workflow must still be this session's, owned by this epoch.
-      const fresh = activeAnyForHost()
+      const fresh = activeAnyForHost(sessionID)
       if (!fresh || fresh.id !== wf.id || fresh.sessionID !== sessionID) throw new Error("workflow changed during reconciliation")
       current = fresh
     }
@@ -617,7 +617,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
       assertWorkflowRecordUnchanged(wf, sessionID, epoch)
       if (result.refused) throw new LinuxAdmissionRefused(result.refused.phase, result.refused.reasons)
       if (runtime.runs.status().executions.some(e => !settled(e))) throw new Error("execution unresolved; fence retained")
-      const current = readAnyWorkflowChecked(root).wf
+      const current = readAnyWorkflowChecked(root, sessionID).wf
       if (!current || current.id !== wf.id || current.sessionID !== sessionID) throw new Error("workflow changed during foreground run")
       assertWorkflowEngine(current)
       if (isStopPending(current)) {
@@ -628,7 +628,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
         const settled = settleOwned(runtime, { sessionID, workflowID: wf.id, epoch }, "controller")
         if (settled.kind === "settled" && !settled.result.ok) throw new Error(settled.result.text)
       }
-      const finished = readAnyWorkflowChecked(root).wf
+      const finished = readAnyWorkflowChecked(root, sessionID).wf
       if (!finished || finished.id !== wf.id || finished.sessionID !== sessionID) throw new Error("workflow changed during foreground run")
       assertWorkflowEngine(finished)
       return { run: result, workflow: finished, ...(isolated ? { planWorktree: isolated } : {}) }
@@ -714,13 +714,13 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
       choose,
     })
     if (outcome.kind === "refused") throw new Error(`resume refused (${outcome.precondition}): ${outcome.reason}`)
-    if (outcome.kind === "kept") return { kept: true as const, view: outcome.view, workflow: readWorkflow(root) ?? wf }
+    if (outcome.kind === "kept") return { kept: true as const, view: outcome.view, workflow: readWorkflow(root, sessionID) ?? wf }
     // Dispatch by the phase the pause was taken in. Only the residual of an approved execution runs tasks.
     const resumed = outcome.wf
     // Planning kinds resume at their stage with no dispatch here; their driver (P6a S2/S3) runs the next turn.
     // Unit kinds resumed into execution run only their residual tagged tasks; every other non-plan stage waits for its driver.
     if (resumed.kind !== "plan") {
-      const after = readAnyWorkflowChecked(root).wf ?? resumed
+      const after = readAnyWorkflowChecked(root, sessionID).wf ?? resumed
       // Autoresearch resumes into its experiment_run stage and returns to its driver: no queue run, no worker prepare.
       if (resumed.kind === "ultragoal" && resumed.phase === "executing") {
         const result = await runInternal(sessionID, signal, true)
@@ -747,13 +747,13 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
       }
     }
     // planning: admitted at its stage with no turn; pending_approval: the decision prompt needs a new receipt (revision changed)
-    return { kept: false as const, view: outcome.view, workflow: readWorkflow(root) ?? resumed }
+    return { kept: false as const, view: outcome.view, workflow: readWorkflow(root, sessionID) ?? resumed }
   }
 
   /** Resume of a settled pause: shows the residual, needs the human choice, rechecks, then dispatches by `pausedFrom`. */
   async function resumePausedBy(sessionID: string, choose: ResumeChoice, signal?: AbortSignal) {
     runtime.linuxAdmission?.assertBootEpoch()
-    const persisted = activeUnitHostWorkflow()
+    const persisted = activeUnitHostWorkflow(sessionID)
     if (!persisted || persisted.sessionID !== sessionID) throw new Error("no workflow owned by this session")
     if (isCancelPending(persisted)) throw new Error("workflow cancellation is pending")
     if (persisted.phase !== "paused") {
@@ -764,7 +764,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
 
   async function resume(sessionID: string, signal?: AbortSignal, runOptions?: RunOptions) {
     runtime.linuxAdmission?.assertBootEpoch()
-    const persisted = activeUnitHostWorkflow()
+    const persisted = activeUnitHostWorkflow(sessionID)
     if (persisted?.sessionID === sessionID) {
       if (isCancelPending(persisted)) throw new Error("workflow cancellation is pending")
       if (persisted.phase === "paused" || persisted.stopIntent) throw new Error("a paused or stopping workflow resumes only through the explicit Keep/Resume choice")
@@ -772,7 +772,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
     if (COMMON_ENGINES.has(runtime.host.identity.engine)) {
       assertRecoveryIdentity(sessionID)
     } else {
-      const wf = activeWorkflowForHost()
+      const wf = activeWorkflowForHost(sessionID)
       if (!wf) throw new Error("no active workflow to resume")
       if (wf.sessionID !== sessionID) throw new Error("no workflow owned by this session")
     }
@@ -794,7 +794,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
       if (requested.result.ok) settleStop(sessionID, wf.id)
     }).catch(() => runtime.log("foreground stop settlement failed", { sessionID }))
     if (requested.result.ok) settleStop(sessionID, wf.id)
-    const latest = readAnyWorkflowChecked(root).wf
+    const latest = readAnyWorkflowChecked(root, sessionID).wf
     const result = requested.result
     if (result.ok && latest?.id === wf.id) return { ...result, wf: latest }
     return result

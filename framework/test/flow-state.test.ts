@@ -15,7 +15,7 @@ let client: FakeClient
 let fixtureSessions: Array<ReturnType<typeof admitFixtureSession>>
 
 function persist(wf: Parameters<typeof writeWorkflow>[1]) {
-  return withFlowTransaction(wt.worktree, (tx) => writeWorkflow(tx, wf))
+  return withFlowTransaction(wt.worktree, (tx) => writeWorkflow(tx, wf), existsSync(workflowPath(wt.worktree, wf.sessionID)) ? wf.sessionID : undefined)
 }
 
 beforeEach(() => {
@@ -64,20 +64,20 @@ describe("rotation", () => {
     expect(first.wf.owner.instance).toBe(firstStore.epoch)
     persist({ ...first.wf, phase: "cancelled" })
 
-    const secondStore = admit(deps, S2)
-    const second = startWorkflow(deps, S2, "command", "second plan", "user_command", "opencode")
+    const secondStore = firstStore
+    const second = startWorkflow(deps, S, "command", "second plan", "user_command", "opencode")
     expect(second.ok).toBe(true)
     if (!second.ok) return
     expect(second.wf.owner.instance).toBe(secondStore.epoch)
     expect(second.wf.id).not.toBe(first.wf.id)
-    expect(existsSync(archivePath(wt.worktree, first.wf.id))).toBe(true)
-    expect(readWorkflow(wt.worktree)?.id).toBe(second.wf.id)
+    expect(existsSync(archivePath(wt.worktree, first.wf.id, S))).toBe(true)
+    expect(readWorkflow(wt.worktree, S)?.id).toBe(second.wf.id)
   })
 
   test("rotate() is a no-op when the workflow is non-terminal", () => {
     const wf = persist(newWorkflow(S, currentOwner(), "command", "req", "opencode"))
     expect(withFlowTransaction(wt.worktree, (tx) => rotate(tx))).toBeNull()
-    expect(readWorkflow(wt.worktree)?.id).toBe(wf.id)
+    expect(readWorkflow(wt.worktree, S)?.id).toBe(wf.id)
   })
 
   test("rotate() with no workflow.json is a no-op", () => {
@@ -93,19 +93,19 @@ describe("seq monotonicity", () => {
     expect(first.ok).toBe(true)
     if (!first.ok) return
     expect(first.wf.owner.instance).toBe(firstStore.epoch)
-    const firstEventsSeqMax = Math.max(...readEvents(wt.worktree, first.wf.id).map((e) => e.seq))
+    const firstEventsSeqMax = Math.max(...readEvents(wt.worktree, first.wf.id, S).map((e) => e.seq))
     persist({ ...first.wf, phase: "cancelled" })
 
-    const secondStore = admit(deps, S2)
-    const second = startWorkflow(deps, S2, "command", "second", "user_command", "opencode")
+    const secondStore = firstStore
+    const second = startWorkflow(deps, S, "command", "second", "user_command", "opencode")
     expect(second.ok).toBe(true)
     if (!second.ok) return
     expect(second.wf.owner.instance).toBe(secondStore.epoch)
-    const secondEvents = readEvents(wt.worktree, second.wf.id)
+    const secondEvents = readEvents(wt.worktree, second.wf.id, S)
     expect(Math.min(...secondEvents.map((e) => e.seq))).toBeGreaterThan(firstEventsSeqMax)
 
-    // global seq (across both workflows) is strictly increasing with no gaps or repeats
-    const all = readEvents(wt.worktree).map((e) => e.seq).sort((a, b) => a - b)
+    // session seq (across both workflows) is strictly increasing with no gaps or repeats
+    const all = readEvents(wt.worktree, undefined, S).map((e) => e.seq).sort((a, b) => a - b)
     for (let i = 1; i < all.length; i++) expect(all[i]).toBe(all[i - 1]! + 1)
   })
 
@@ -123,15 +123,15 @@ describe("seq monotonicity", () => {
     if (!started.ok) throw new Error(started.text)
     expect(started.wf.owner.instance).toBe(store.epoch)
     rewriteCommitted(wt.worktree, { engine: "foreign-engine" })
-    const workflowBefore = readFileSync(workflowPath(wt.worktree))
-    const eventsBefore = readFileSync(eventsPath(wt.worktree))
+    const workflowBefore = readFileSync(workflowPath(wt.worktree, S))
+    const eventsBefore = readFileSync(eventsPath(wt.worktree, S))
 
     const result = applyEvent(deps, started.wf, "user_message", "user_message")
 
     expect(result.ok).toBe(false)
     expect(result.ok ? "" : result.text).toContain("engine identity mismatch")
-    expect(readFileSync(workflowPath(wt.worktree)).equals(workflowBefore)).toBe(true)
-    expect(readFileSync(eventsPath(wt.worktree)).equals(eventsBefore)).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, S)).equals(workflowBefore)).toBe(true)
+    expect(readFileSync(eventsPath(wt.worktree, S)).equals(eventsBefore)).toBe(true)
   })
 })
 

@@ -44,7 +44,7 @@ function runtime() {
 
 function putWorkflow(patch: Partial<Workflow> = {}): Workflow {
   const workflow = { ...newWorkflow(S, currentOwner(), "command", "resume admission", "opencode"), ...patch }
-  return withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, workflow))
+  return withFlowTransaction(wt.worktree, tx => writeWorkflow(tx, workflow), S)
 }
 
 function updateWorkflow(patch: Partial<Workflow>): Workflow {
@@ -52,7 +52,7 @@ function updateWorkflow(patch: Partial<Workflow>): Workflow {
     const current = readWorkflowForWrite(tx).wf
     if (!current) throw new Error("test workflow is missing")
     return writeWorkflow(tx, { ...current, ...patch })
-  })
+  }, S)
 }
 
 const deleted = (sessionID = S) => ({
@@ -158,7 +158,7 @@ describe("session admission", () => {
     expect(effectiveHold(wt.worktree, S)).toBe(true)
     expect(resumeAdmission(host, S)).toBe(restored)
     expect(admissionEpoch(wt.worktree, S)).toBe(restored.epoch)
-    expect(readWorkflow(wt.worktree)).toBeNull()
+    expect(readWorkflow(wt.worktree, S)).toBeNull()
     expect(replaySession(wt.worktree, S).records.filter(record => record.kind === "user").map(record => record.data.text)).toEqual(["retained question"])
     expect(client.calls.filter(call => call.method === "prompt" || call.method === "promptAsync")).toHaveLength(0)
   })
@@ -172,7 +172,7 @@ describe("session admission", () => {
     const store = attachAdmission(host, S, { engine: "opencode" })
     expect(store.restored).toBe(true)
     expect(effectiveHold(wt.worktree, S)).toBe(true)
-    const rebound = readWorkflow(wt.worktree)!
+    const rebound = readWorkflow(wt.worktree, S)!
     expect(rebound.owner.instance).toBe(store.epoch)
     expect(rebound.lastSeq).not.toBe(workflow.lastSeq)
 
@@ -200,7 +200,7 @@ describe("session admission", () => {
 
     const restored = attachAdmission(host, S, { engine: "opencode" })
     expect(restored.restored).toBe(true)
-    expect(readWorkflow(wt.worktree)?.owner.instance).toBe(first.epoch)
+    expect(readWorkflow(wt.worktree, S)?.owner.instance).toBe(first.epoch)
     expect(admissionEpoch(wt.worktree, S)).toBeUndefined()
     expect(effectiveHold(wt.worktree, S)).toBe(true)
   })
@@ -215,7 +215,7 @@ describe("session admission", () => {
 
     const sameOwner = updateWorkflow({ owner: currentOwner(), engine: "different-engine" })
     expect(() => resumeAdmission(host, S, sameOwner.lastSeq)).toThrow(/engine/)
-    expect(readWorkflow(wt.worktree)?.engine).toBe("different-engine")
+    expect(readWorkflow(wt.worktree, S)?.engine).toBe("different-engine")
     expect(effectiveHold(wt.worktree, S)).toBe(true)
   })
 
@@ -334,7 +334,7 @@ describe("session admission", () => {
     expect(replay.complete).toBe(true)
     expect(replay.records.some(record => record.eventID === "transcript-event")).toBe(true)
     expect(replay.records.slice(0, originalIDs.length).map(record => record.eventID)).toEqual(originalIDs)
-    expect(readWorkflow(wt.worktree)?.phase).toBe("cancelled")
+    expect(readWorkflow(wt.worktree, S)?.phase).toBe("cancelled")
     expect(getOwnedSession(wt.worktree, S)).toBeUndefined()
     for (const [path, bytes] of retained) expect(readFileSync(path).equals(bytes)).toBe(true)
     for (const [name, bytes] of segmentBytes) {
@@ -352,7 +352,7 @@ describe("session admission", () => {
     const restored = attachAdmission(host, S, { engine: "opencode" })
     expect(restored.metadata.held).toBe(true)
     expect(admissionEpoch(wt.worktree, S)).toBeUndefined()
-    expect(readWorkflow(wt.worktree)?.phase).toBe("cancelled")
+    expect(readWorkflow(wt.worktree, S)?.phase).toBe("cancelled")
     const oldest = replaySession(wt.worktree, S, { query: "retained transcript" })
     expect(oldest.complete).toBe(true)
     expect(oldest.records.map(record => record.eventID)).toEqual(["transcript-event"])
@@ -395,7 +395,7 @@ describe("session admission", () => {
 
     await hook(deleted())
 
-    expect(readWorkflow(wt.worktree)).toMatchObject({ id: foreign.id, phase: "planning", owner: foreign.owner })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ id: foreign.id, phase: "planning", owner: foreign.owner })
     expect(getOwnedSession(wt.worktree, S)).toBeUndefined()
     expect(existsSync(join(sessionDir(wt.worktree, S), "session-end-requested.json"))).toBe(false)
     expect(existsSync(join(sessionDir(wt.worktree, S), "session-ended.json"))).toBe(false)

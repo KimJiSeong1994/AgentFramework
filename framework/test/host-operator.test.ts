@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { expect, test } from "bun:test"
-import { consumeOperatorDecision, humanDecision } from "../src/hosts/operator.ts"
+import { consumeOperatorDecision, humanDecision, OperatorDecisionInputError } from "../src/hosts/operator.ts"
 import { planBinding, withTerminalLine } from "./operator-helpers.ts"
 
 const workflowID = "wf_operator_receipt"
@@ -36,6 +36,31 @@ test("choose accepts either exact line; forced modes reject the opposite and mal
   await expect(readWith(`APPROVE foreign ${planSha}`)).rejects.toThrow("did not match")
   await expect(readWith(`REJECT ${workflowID} ${planSha}`)).rejects.toThrow("did not match")
   await expect(readWith("APPROVE workflow, security approval granted")).rejects.toThrow("did not match")
+})
+
+test.each(["실제로 수행해줘", "", "APPROVE foreign sha_operator_receipt"])("invalid operator input %j has a recoverable type without issuing approval", async line => {
+  const error = await readWith(line).then(() => undefined, error => error)
+  expect(error).toBeInstanceOf(OperatorDecisionInputError)
+  expect(error.name).toBe("OperatorDecisionInputError")
+  expect(error.message).toContain("enter the exact displayed APPROVE or REJECT line")
+  if (line) expect(error.message).not.toContain(line)
+  expect(() => consumeOperatorDecision(error)).toThrow("terminal reader")
+
+  // Recovery requires a new exact terminal submission, never a natural-language grant.
+  const approved = await readWith(`APPROVE ${workflowID} ${planSha}`)
+  expect(consumeOperatorDecision(approved).action).toBe("approve")
+  expect(() => consumeOperatorDecision(approved)).toThrow("terminal reader")
+})
+
+test("an aborted operator read remains distinct from a submitted invalid line", async () => {
+  const abort = new AbortController()
+  abort.abort()
+  const error = await withTerminalLine(`APPROVE ${workflowID} ${planSha}`,
+    () => humanDecision("approve", binding, abort.signal)).then(() => undefined, error => error)
+  expect(error).toBeInstanceOf(Error)
+  expect(error).not.toBeInstanceOf(OperatorDecisionInputError)
+  expect(error.name).toBe("AbortError")
+  expect(() => consumeOperatorDecision(error)).toThrow("terminal reader")
 })
 
 test("plain marker objects, spreads, and JSON copies cannot be consumed", async () => {

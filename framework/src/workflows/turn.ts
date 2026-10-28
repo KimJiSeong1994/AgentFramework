@@ -158,7 +158,7 @@ export function bindingStaleReason(runtime: Pick<ExecutionRuntime, "worktree">, 
   }
   if (binding.workflowID !== null) {
     let committed: ReturnType<typeof readCommitted>
-    try { committed = readCommitted(runtime.worktree) }
+    try { committed = readCommitted(runtime.worktree, {}, binding.supervisorSessionID) }
     catch { return "workflow state is unreadable" }
     if (committed.state !== "ok") return "workflow state is unavailable"
     const { wf } = committed
@@ -229,7 +229,7 @@ class SummaryUnusable extends Error {}
 function stopCauseOf(runtime: Pick<ExecutionRuntime, "worktree">, binding: TurnBinding): string | undefined {
   if (binding.workflowID === null) return undefined
   try {
-    const committed = readCommitted(runtime.worktree)
+    const committed = readCommitted(runtime.worktree, {}, binding.supervisorSessionID)
     if (committed.state !== "ok" || committed.wf.id !== binding.workflowID || !committed.wf.stopIntent) return undefined
     return `workflow_${committed.wf.stopIntent.kind}:${committed.wf.stopIntent.token}`
   } catch { return undefined }

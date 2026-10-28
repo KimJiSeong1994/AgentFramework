@@ -1,3 +1,4 @@
+import type { ModelApiAction, ModelApiInput } from "./model-api.ts"
 import type { OtterConfig, ModelSelection } from "../config.ts"
 import type { CheckRun } from "../data/check.ts"
 import type { SkillTaskFactInput, SkillVerificationFactInput } from "../telemetry/skills.ts"
@@ -18,7 +19,7 @@ export type ComboRoute = Readonly<{ engine: ComboEngine; model: string }>
 /** role -> route; only roles that differ from the anchor; keys are ExecutionRole */
 export type ComboRoutes = Readonly<Partial<Record<ExecutionRole, ComboRoute>>>
 export type WorkflowReadOnlyRole = (typeof WORKFLOW_READ_ONLY_ROLES)[number]
-export const EXECUTION_TOOL_NAMES = Object.freeze(["read", "glob", "grep", "list", "bash", "write", "edit", "patch", "apply_patch", "multiedit", "webfetch", "skill", "todowrite", "todoread", "delegate", "otter_flow", "db_query", "schema_lookup", "memory", "task"] as const)
+export const EXECUTION_TOOL_NAMES = Object.freeze(["read", "glob", "grep", "list", "bash", "model_api", "write", "edit", "patch", "apply_patch", "multiedit", "webfetch", "skill", "todowrite", "todoread", "delegate", "otter_flow", "db_query", "schema_lookup", "memory", "task"] as const)
 
 const CLI_WRITE_CAPABILITY = Object.freeze({
   main: false, worker: true, reviewer: false,
@@ -103,6 +104,7 @@ export type ExecutionRequest = {
 
 /** One effect the chat model asks for; shown to the human before anything happens. */
 export type ChatAction =
+  | ModelApiAction
   | Readonly<{ tool: "write"; path: string; content: string }>
   | Readonly<{ tool: "edit"; path: string; oldText: string; newText: string }>
   /** Several exact-text edits, possibly across files, approved together and applied all-or-nothing. */
@@ -119,6 +121,11 @@ export type ActionGate = Readonly<{
   approve(action: ChatAction, signal: AbortSignal): Promise<ChatActionDecision>
   /** Run an approved command in the worktree; interactive commands get the real terminal and return no output. */
   run(action: Extract<ChatAction, { tool: "bash" }>, signal: AbortSignal): Promise<{ ok: boolean; text: string; exitCode?: number | null }>
+  /** Optional host-owned API capability; preparation resolves a user-configured target before approval. */
+  modelApi?: Readonly<{
+    prepare(input: ModelApiInput): ModelApiAction
+    run(action: ModelApiAction, signal: AbortSignal): Promise<{ ok: true; text: string } | { ok: false; error: string }>
+  }>
   /** The turn used its tool rounds: the human decides whether it may use `rounds` more. Without this the turn fails. */
   extendRounds?(used: number, rounds: number, signal: AbortSignal): Promise<boolean>
 }>

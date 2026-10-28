@@ -102,7 +102,7 @@ test("chat execution (the default) changes only main: its tools, its prompt and 
     expect(acting.resolve(role)).toEqual(readOnly.resolve(role))
   }
   expect(acting.resolve("main").id).not.toBe(readOnly.resolve("main").id)
-  expect(acting.resolve("main").tools.allowed).toEqual(["read", "list", "glob", "grep", "memory", "write", "edit", "bash"])
+  expect(acting.resolve("main").tools.allowed).toEqual(["read", "list", "glob", "grep", "memory", "write", "edit", "bash", "model_api"])
   // Without planningOnlyMain (the OpenCode runtime) the option does nothing.
   expect(createExecutionPolicy(DEFAULT_CONFIG, { chatExecuteMain: true }).resolve("main")).toEqual(createExecutionPolicy(DEFAULT_CONFIG).resolve("main"))
 })
@@ -124,4 +124,17 @@ test("chat.combo in config alone changes no ID; empty routes match the frozen ba
     else expect(routed.resolve(role)).toEqual(plain.resolve(role))
   }
   expect(routed.resolve("planner").model).toEqual({ providerID: "claude", modelID: "opus" })
+})
+
+
+test("model_api is only a chat execution main capability", async () => {
+  const { DEFAULT_CONFIG } = await import("../src/config.ts")
+  const { createExecutionPolicy } = await import("../src/hosts/tool-policy.ts")
+  const { EXECUTION_ROLES } = await import("../src/hosts/types.ts")
+  for (const options of [{}, { planningOnlyMain: true }, { planningOnlyMain: true, chatExecuteMain: true }]) {
+    const policy = createExecutionPolicy(DEFAULT_CONFIG, options)
+    for (const role of EXECUTION_ROLES) {
+      expect(policy.resolve(role).tools.allowed.includes("model_api")).toBe(role === "main" && options.chatExecuteMain === true)
+    }
+  }
 })

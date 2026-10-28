@@ -108,7 +108,7 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
     }
     const settled = settleOwned(runtime, { sessionID, workflowID: wf.id, epoch }, "idle")
     const current = settled.kind === "settled" && settled.result.ok && settled.result.wf.kind === "plan" ? settled.result.wf : wf
-    const latest = readWorkflow(deps.worktree)
+    const latest = readWorkflow(deps.worktree, sessionID)
     const latestRefusal = latest && workflowEngineRefusal(latest, runtime.host.identity.engine)
     if (latestRefusal) {
       deps.log("workflow idle skipped: engine identity refused", { sessionID, reason: latestRefusal })
@@ -122,7 +122,7 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
     if (current.phase === "executing" && !isStopPending(current)) {
       const key = (current.taskIds ?? []).slice().sort().join(",")
       if (key && executingNotified.get(current.id) !== key) {
-        const latest = readWorkflow(deps.worktree)
+        const latest = readWorkflow(deps.worktree, sessionID)
         const refusal = latest && workflowEngineRefusal(latest, runtime.host.identity.engine)
         if (refusal) {
           deps.log("workflow idle resume skipped: engine identity refused", { sessionID, reason: refusal })
@@ -143,7 +143,7 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
       const asking = await lastAssistantAsks(deps, sessionID)
       if (!admitted()) return { action: "ignored", why: "held" }
       if (asking) return { action: "workflow", wfId: current.id }
-      const latest = readWorkflow(deps.worktree)
+      const latest = readWorkflow(deps.worktree, sessionID)
       if (!latest || latest.id !== current.id || latest.engine !== current.engine || latest.lastSeq !== current.lastSeq || latest.phase !== current.phase) {
         return { action: "ignored", why: "state_changed" }
       }
@@ -155,7 +155,7 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
       if (current.counters.nudges < deps.config.flow.nudge_max) {
         const r = applyEvent(runtime, current, "nudge", "code")
         if (r.ok) {
-          const beforePrompt = readWorkflow(deps.worktree)
+          const beforePrompt = readWorkflow(deps.worktree, sessionID)
           const promptRefusal = beforePrompt && workflowEngineRefusal(beforePrompt, runtime.host.identity.engine)
           if (promptRefusal || !beforePrompt || beforePrompt.id !== r.wf.id || beforePrompt.engine !== r.wf.engine ||
               beforePrompt.lastSeq !== r.wf.lastSeq || beforePrompt.phase !== r.wf.phase) {
@@ -188,7 +188,7 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
       // Only an already-owned live epoch may finish a recorded stop (pause or cancel) under hold; the one settlement
       // routine proves quiescence itself and commits only stop events.
       try {
-        const checked = readWorkflowChecked(deps.worktree)
+        const checked = readWorkflowChecked(deps.worktree, sessionID)
         const wf = checked.corrupt ? null : checked.wf
         if (wf && wf.stopIntent && wf.sessionID === sessionID && !workflowEngineRefusal(wf, runtime.host.identity.engine)) {
           settleOwned(runtime, { sessionID, workflowID: wf.id }, "idle", { heldSafety: true, stopOnly: true })
@@ -201,7 +201,7 @@ export function createIdleLoop(deps: HookDeps): (sessionID: string, now?: number
     // §5.6: the workflow branch runs first and never falls through to the legacy paths while a workflow is owned.
     // It runs even when loop.idle is disabled (settle is state repair, not continuation).
     if (flowOn(deps.config)) {
-      const wf = activeWorkflow(deps.worktree)
+      const wf = activeWorkflow(deps.worktree, sessionID)
       if (wf && wf.sessionID === sessionID) {
         const refusal = workflowEngineRefusal(wf, runtime.host.identity.engine)
         if (refusal) {
@@ -280,7 +280,7 @@ export async function offerResume(deps: HookDeps, sessionID: string): Promise<nu
   if (open.length === 0) return 0
   const workflowIDs = new Set(open.flatMap((task) => task.wf ? [task.wf.id] : []))
   const runtime = workflowIDs.size > 0 ? getOpenCodeRuntime(deps) : undefined
-  const linkedWorkflow = runtime && readWorkflow(deps.worktree)
+  const linkedWorkflow = runtime && readWorkflow(deps.worktree, sessionID)
   const linkedRefusal = workflowIDs.size === 0 ? undefined
     : !linkedWorkflow || [...workflowIDs].some((id) => id !== linkedWorkflow.id)
       ? "workflow identity unavailable; recovery refused"
@@ -292,7 +292,7 @@ export async function offerResume(deps: HookDeps, sessionID: string): Promise<nu
   const told = new Set(ledger.resumeNotifiedFor ?? [])
   if (open.every((t) => told.has(t.id))) return 0
   if (linkedWorkflow) {
-    const latest = readWorkflow(deps.worktree)
+    const latest = readWorkflow(deps.worktree, sessionID)
     const refusal = latest && workflowEngineRefusal(latest, runtime!.host.identity.engine)
     if (refusal || !latest || latest.id !== linkedWorkflow.id || latest.engine !== linkedWorkflow.engine ||
         latest.lastSeq !== linkedWorkflow.lastSeq || latest.phase !== linkedWorkflow.phase) {
@@ -303,7 +303,7 @@ export async function offerResume(deps: HookDeps, sessionID: string): Promise<nu
   const sent = await sendMessage(deps, sessionID, resumeMessage(open.length, open.map((t) => t.title)))
   if (!sent || !admitted()) return 0
   if (linkedWorkflow) {
-    const latest = readWorkflow(deps.worktree)
+    const latest = readWorkflow(deps.worktree, sessionID)
     const refusal = latest && workflowEngineRefusal(latest, runtime!.host.identity.engine)
     if (!latest || latest.id !== linkedWorkflow.id || latest.engine !== linkedWorkflow.engine ||
         latest.lastSeq !== linkedWorkflow.lastSeq || latest.phase !== linkedWorkflow.phase || refusal) {

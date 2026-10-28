@@ -101,7 +101,7 @@ function begin(h: ReturnType<typeof harness>, request = "build the widget") {
 }
 
 const committed = (): RalplanWorkflow => {
-  const read = readCommitted(wt.worktree)
+  const read = readCommitted(wt.worktree, {}, SID)
   if (read.state !== "ok" || read.wf.kind !== "ralplan") throw new Error("no committed ralplan")
   return read.wf
 }
@@ -128,7 +128,7 @@ describe("ralplan stage and phase order", () => {
     expect(final).toMatchObject({ stage: "pending_execution", phase: "pending_approval" })
     expect(h.seen.map(item => item.role)).toEqual(["planner", "architect", "critic"])
     expect(h.seen.map(item => item.promptId)).toEqual(["ralplan.planner", "ralplan.architect", "ralplan.critic"])
-    const types = readEvents(wt.worktree, wf.id).map(event => event.type)
+    const types = readEvents(wt.worktree, wf.id, SID).map(event => event.type)
     for (const type of ["planner_saved", "architect_verdict", "critic_verdict", "consensus_verified"]) expect(types).toContain(type)
   })
 
@@ -188,7 +188,7 @@ describe("join table", () => {
       expect(result).toMatchObject({ status: "blocked", reason: "stopped before revision" })
       expect(committed()).toMatchObject({ stage: "revision", phase: "planning" })
       expect(existsSync(join(dir(wf), "consensus.json"))).toBe(false)
-      expect(readEvents(wt.worktree, wf.id).map(event => event.type)).not.toContain("consensus_verified")
+      expect(readEvents(wt.worktree, wf.id, SID).map(event => event.type)).not.toContain("consensus_verified")
     })
   }
 
@@ -272,7 +272,7 @@ describe("join table", () => {
 function rmCommitted() {
   // each looped case starts from a free slot: the fixture drops the index (the next harness uses a fresh session)
   stopHeartbeat()
-  rmSync(workflowPath(wt.worktree), { force: true })
+  rmSync(workflowPath(wt.worktree, SID), { force: true })
 }
 
 describe("independence and ordering of the reviewers", () => {
@@ -366,7 +366,7 @@ describe("cap", () => {
     expect(existsSync(join(dir(final), "pending-approval.md"))).toBe(false)
     expect(existsSync(join(dir(final), "consensus.json"))).toBe(false)
     expect(final.artifacts.some(ref => ref.key === "pending-approval.md" || ref.key === "consensus.json")).toBe(false)
-    expect(readEvents(wt.worktree, wf.id).map(event => event.type)).toEqual(expect.arrayContaining(["cap_reached"]))
+    expect(readEvents(wt.worktree, wf.id, SID).map(event => event.type)).toEqual(expect.arrayContaining(["cap_reached"]))
     expect(readLedger(wt.worktree, SID).tasks).toHaveLength(0)
     // no handoff, no choice, no retry from the cap
     expect(nextStep(final)).toMatchObject({ kind: "blocked" })
@@ -407,7 +407,7 @@ describe("same-hash consensus and stale verdicts", () => {
     const wf = begin(h)
     await runRalplan(h.runtime, SID, wf.id, { stopBefore: "architect" })
     const atArchitect = committed()
-    const before = readFileSync(workflowPath(wt.worktree))
+    const before = readFileSync(workflowPath(wt.worktree, SID))
     const stale = { status: "CLEAR", decision: "APPROVE", planSha: "9".repeat(64), ref: "x", findings: 0 } as const
     expect(() => reduce(atArchitect, { type: "architect", result: stale, artifact: { key: opener(1, "architect"), path: "x", sha256: "d".repeat(64) } })).toThrow("stale architect verdict")
     const at = ralplanDataOf(atArchitect).iterations[0]!
@@ -415,7 +415,7 @@ describe("same-hash consensus and stale verdicts", () => {
     expect(() => reduce(good, { type: "critic", result: { verdict: "OKAY", planSha: "8".repeat(64), ref: "y", findings: 0 }, artifact: { key: "k", path: "y", sha256: "e".repeat(64) } })).toThrow("stale critic verdict")
     // a verdict for a stage the workflow is not in
     expect(() => reduce(atArchitect, { type: "critic", result: { verdict: "OKAY", planSha: at.planSha, ref: "y", findings: 0 }, artifact: { key: "k", path: "y", sha256: "e".repeat(64) } })).toThrow()
-    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, SID)).equals(before)).toBe(true)
     // the CAS commit refuses a transition built from an outdated revision
     const outdated = { ...atArchitect, lastSeq: atArchitect.lastSeq - 1 } as RalplanWorkflow
     expect(commitRalplan(wt.worktree, outdated, fresh => reduce(fresh, { type: "retry" })).ok).toBe(false)
@@ -439,11 +439,11 @@ describe("same-hash consensus and stale verdicts", () => {
     }))
     expect(tampered.ok).toBe(true)
     const staged = committed()
-    const before = readFileSync(workflowPath(wt.worktree))
+    const before = readFileSync(workflowPath(wt.worktree, SID))
     const emitted = emitConsensus(h.runtime, staged)
     expect(emitted.ok).toBe(false)
     if (!emitted.ok) expect(emitted.text).toContain("critic receipt")
-    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, SID)).equals(before)).toBe(true)
     expect(committed().stage).toBe("consensus_emit")
     expect(existsSync(join(dir(staged), "consensus.json"))).toBe(false)
   })
@@ -461,7 +461,7 @@ describe("same-hash consensus and stale verdicts", () => {
       expect(result.status).toBe("blocked")
       expect(committed().stage).toBe("consensus_emit")
       expect(existsSync(join(dir(staged), "pending-approval.md"))).toBe(false)
-      expect(readEvents(wt.worktree, wf.id).map(event => event.type)).not.toContain("consensus_verified")
+      expect(readEvents(wt.worktree, wf.id, SID).map(event => event.type)).not.toContain("consensus_verified")
       rmCommitted()
     }
   })
@@ -474,7 +474,7 @@ describe("same-hash consensus and stale verdicts", () => {
     const attempt = withFlowTransaction(wt.worktree, tx => {
       try { commitRevision(tx, { ...final, phase: "pending_approval" } as never, [{ wf: final.id, type: "x", actor: "code" }]); return "committed" }
       catch (error) { return (error as Error).message }
-    })
+    }, SID)
     expect(attempt).toContain("pending-approval.md")
   })
 })
@@ -500,13 +500,13 @@ describe("no execution", () => {
     const h = harness({ planner: [plan()], architect: [CLEAN_A], critic: [CLEAN_C] })
     const final = await toPending(h)
     const sha = ralplanDataOf(final).consensus!.planSha
-    const before = readFileSync(workflowPath(wt.worktree))
+    const before = readFileSync(workflowPath(wt.worktree, SID))
     const executionsBefore = h.runtime.runs.status().executions.length
     const wrong = confirmExecute(h.runtime, SID, final.id, final.lastSeq, "yes")
     expect(wrong).toMatchObject({ ok: false })
     if (!wrong.ok) expect(wrong.text).toContain(executeConfirmation(final.id, sha))
     expect(confirmExecute(h.runtime, SID, final.id, final.lastSeq + 3, executeConfirmation(final.id, sha)).ok).toBe(false)
-    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, SID)).equals(before)).toBe(true)
     expect(committed()).toMatchObject({ stage: "pending_execution", phase: "pending_approval" })
     expect(h.runtime.runs.status().executions.length).toBe(executionsBefore)
     expect(readLedger(wt.worktree, SID).tasks).toHaveLength(0)
@@ -534,7 +534,7 @@ describe("no execution", () => {
     expect(done).toMatchObject({ stage: "terminal", phase: "done" })
     expect(ralplanDataOf(done).choice).toMatchObject({ kind: "stop_here", executed: false })
     expect(consensusLine(wt.worktree, done)).toBe(`Architect CLEAR/APPROVE + Critic OKAY · ${PLANNING_COMPLETE_TEXT}`)
-    expect(readEvents(wt.worktree, done.id).map(event => event.type)).toContain("stop_here")
+    expect(readEvents(wt.worktree, done.id, SID).map(event => event.type)).toContain("stop_here")
     expect(readLedger(wt.worktree, SID).tasks).toHaveLength(0)
     expect(stopHere(h.runtime, SID, done.id, done.lastSeq).ok).toBe(false)
   })
@@ -561,7 +561,7 @@ describe("no execution", () => {
     const result = await runRalplan(h.runtime, SID, wf.id)
     expect(result.status).toBe("pending_execution")
     expect(ralplanDataOf(committed()).attempts).toBe(0)
-    expect(readEvents(wt.worktree, wf.id).filter(event => event.type === "attempt_failed")).toHaveLength(1)
+    expect(readEvents(wt.worktree, wf.id, SID).filter(event => event.type === "attempt_failed")).toHaveLength(1)
     expect(committed().kind).toBe("ralplan")
   })
 })
@@ -653,7 +653,7 @@ describe("input budget", () => {
       if (!changed && request.text.startsWith(RALPLAN_SUMMARIZE_PROMPT.text)) {
         changed = true
         const wf = committed()
-        withFlowTransaction(wt.worktree, tx => commitRevision(tx, wf, [{ wf: wf.id, type: "test_revision_change", actor: "code" }]))
+        withFlowTransaction(wt.worktree, tx => commitRevision(tx, wf, [{ wf: wf.id, type: "test_revision_change", actor: "code" }]), SID)
       }
     })
     const started = startRalplan(h.runtime, SID, "plan it", { seed: bigSeed(h, 14_800) })
@@ -722,7 +722,7 @@ describe("seeded from a verified DI spec", () => {
       version: 2 as const, id: "wf_di_seed", kind: "deep-interview" as const, stage: "crystallize" as const, phase: "planning" as const, engine: "fixture",
       sessionID: SID, owner, stopIntent: null, artifacts: [], data: {}, lastSeq: 0, createdAt: 1, updatedAt: 1,
     }
-    const live = withFlowTransaction(wt.worktree, tx => commitRevision(tx, base as never, [{ wf: base.id, type: "created", actor: "code" }]))
+    const live = withFlowTransaction(wt.worktree, tx => commitRevision(tx, base as never, [{ wf: base.id, type: "created", actor: "code" }]), SID)
     const directory = workflowArtifactDirectory(wt.worktree, SID, base.id)
     mkdirSync(directory, { recursive: true })
     writeFileSync(join(directory, "spec.md"), SPEC)
@@ -737,14 +737,14 @@ describe("seeded from a verified DI spec", () => {
     // edit the spec before the handoff: refused, index unchanged
     const specPath = join(wt.worktree, predecessor.artifacts[0]!.path)
     writeFileSync(specPath, "edited\n")
-    const before = readFileSync(workflowPath(wt.worktree))
+    const before = readFileSync(workflowPath(wt.worktree, SID))
     const refused = handoffToRalplan(h.runtime, SID, predecessor, "plan it", events)
     expect(refused.ok).toBe(false)
-    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, SID)).equals(before)).toBe(true)
     writeFileSync(specPath, SPEC)
     const handed = handoffToRalplan(h.runtime, SID, predecessor, "plan it", events)
     if (!handed.ok) throw new Error(handed.text)
-    const read = readCommitted(wt.worktree)
+    const read = readCommitted(wt.worktree, {}, SID)
     expect(read.state === "ok" && read.wf.kind === "ralplan" && read.wf.lineage?.predecessor).toMatchObject({ id: "wf_di_seed", kind: "deep-interview", artifact: { sha256: sha256(Buffer.from(SPEC)) } })
     expect(ralplanDataOf(handed.wf).seed).toMatchObject({ workflowID: "wf_di_seed", specSha: sha256(Buffer.from(SPEC)) })
     expect(await runRalplan(h.runtime, SID, handed.wf.id).then(result => result.status)).toBe("pending_execution")

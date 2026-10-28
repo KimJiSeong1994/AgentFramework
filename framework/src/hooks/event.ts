@@ -370,7 +370,7 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
           // A session held by its own recorded stop (pending or settled pause, pending cancel) is still this lifetime.
           const stopHeld = (() => {
             try {
-              const current = readWorkflow(deps.worktree)
+              const current = readWorkflow(deps.worktree, id)
               return !!current && current.sessionID === id && current.stopIntent !== null &&
                 current.owner.instance === expectedEpoch && current.owner.pid === process.pid
             } catch { return false }
@@ -398,7 +398,7 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
             deps.log("session.deleted: admission hold failed", { sessionID: id, error: (e as Error).message })
             return
           }
-          const workflow = readWorkflow(deps.worktree)
+          const workflow = readWorkflow(deps.worktree, id)
           const workflowID = workflow?.sessionID === id ? workflow.id : null
           if (workflow?.sessionID === id) {
             const refusal = workflowEngineRefusal(workflow, runtime.host.identity.engine)
@@ -452,7 +452,7 @@ export function createEventHook(deps: HookDeps): NonNullable<Hooks["event"]> {
             deps.log("session.deleted: attachment epoch changed before end", { sessionID: id, epoch: expectedEpoch })
             return
           }
-          const latestWorkflow = readWorkflow(deps.worktree)
+          const latestWorkflow = readWorkflow(deps.worktree, id)
           if (workflowID !== (latestWorkflow?.sessionID === id ? latestWorkflow.id : null)) {
             deps.log("session.deleted: workflow changed before end", { sessionID: id, epoch: expectedEpoch })
             return

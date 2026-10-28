@@ -137,3 +137,17 @@ describe("captured command runner", () => {
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 })
+
+
+test("model API approval shows the exact full prompt and is never covered by folder grants", () => {
+  const action = { tool: "model_api" as const, target: "remote", model: "test", prompt: Array.from({ length: 45 }, (_, i) => `line ${i}`).join("\n"),
+    url: "https://provider.example/v1/chat/completions", protocol: "openai-compatible" as const,
+    apiKeyEnv: "OTTER_MODEL_API_KEY", maxOutputTokens: 123, timeoutSeconds: 42 }
+  const shown = describeAction(action)
+  expect(shown.title).toContain("remote / test")
+  expect(shown.preview.join("\n")).toContain(action.url)
+  expect(shown.preview.join("\n")).toContain(action.prompt)
+  expect(shown.preview.join("\n")).toContain("123 tokens")
+  expect(grantDirectory(action)).toBeUndefined()
+  expect(coveredByGrant(action, new Set(["."]))).toBe(false)
+})

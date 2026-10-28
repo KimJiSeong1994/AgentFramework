@@ -2,18 +2,19 @@
 //   1. events are durably appended (file + directory fsync),
 //   2. an immutable snapshot sessions/<sid>/workflows/<wid>/revisions/<seq>.json is durably written (O_EXCL-style: an
 //      existing file with other bytes is refused, identical bytes are idempotent),
-//   3. the worktree-wide index workflow/workflow.json {version,id,sessionID,kind,revision,path,sha256} is durably
+//   3. the selected session index workflow.json {version,id,sessionID,kind,revision,path,sha256} is durably
 //      replaced. The index rename is the commit point.
 // Readers admit only the index-bound revision. Snapshots, plan artifacts and events above/outside the committed
 // revision are orphans and never authority. Nothing here deletes: terminal history, superseded snapshots and
 // retained legacy bytes stay on disk.
 import { createHash } from "node:crypto"
 import { lstatSync, readdirSync } from "node:fs"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import { readBoundedBytes, stateRoot } from "../state/store.ts"
+import { workflowDirectory } from "../state/workflow-scope.ts"
 import { durableWriteBytes, type DurableWriteStage } from "../state/durable.ts"
 import {
-  appendEventsDurable, CorruptWorkflowError, flowTxWorktree, lastEventSeq, LegacyWorkflowError, readAllEventLines,
+  appendEventsDurable, CorruptWorkflowError, flowTxWorktree, flowTxSessionID, lastEventSeq, LegacyWorkflowError, readAllEventLines,
   type FlowEventLine, type FlowTx,
 } from "../flow/state.ts"
 import { parseEnvelope, requiredArtifactKeys } from "./registry.ts"
@@ -45,8 +46,7 @@ function fault(stage: CommitStage): void {
   faultHook?.(stage)
 }
 
-const workflowDirectory = (worktree: string) => join(stateRoot(worktree), "workflow")
-const indexPath = (worktree: string) => join(workflowDirectory(worktree), "workflow.json")
+const indexPath = (worktree: string, sessionID?: string) => join(workflowDirectory(worktree, sessionID), "workflow.json")
 
 export function snapshotRelativePath(sessionID: string, workflowID: string, revision: number): string {
   return `sessions/${sessionID}/workflows/${workflowID}/revisions/${revision}.json`
@@ -118,8 +118,8 @@ function legacyShape(value: Record<string, unknown>): { terminal: boolean; id: s
 }
 
 /** Read the committed workflow: index -> bounded no-follow snapshot read -> hash and identity checks. Never mutates. */
-export function readCommitted(worktree: string, limits: { index?: number; snapshot?: number } = {}): CommittedRead {
-  const path = indexPath(worktree)
+export function readCommitted(worktree: string, limits: { index?: number; snapshot?: number } = {}, sessionID?: string): CommittedRead {
+  const path = indexPath(worktree, sessionID)
   const failure = (error: unknown, what: string, bytesRead: number): CommittedRead => {
     const code = (error as NodeJS.ErrnoException | undefined)?.code === "oversize" ? "oversize" as const : "unreadable" as const
     const extra = (error as { bytesRead?: unknown }).bytesRead
@@ -130,15 +130,18 @@ export function readCommitted(worktree: string, limits: { index?: number; snapsh
   try { ({ bytes: raw, bytesRead: rawBytes } = readBoundedBytes(path, limits.index ?? INDEX_MAX)) }
   catch (error) { return failure(error, "index unreadable", 0) }
   if (raw === undefined) return { state: "none" }
+  if (!chainIsPlain(worktree, relative(stateRoot(worktree), path))) return { state: "corrupt", reason: "index path is not a plain directory chain", code: "invalid", bytesRead: rawBytes }
   let value: unknown
   try { value = JSON.parse(raw.toString("utf8")) }
   catch { return { state: "corrupt", reason: "index is not valid JSON", code: "invalid", bytesRead: rawBytes } }
   if (value !== null && typeof value === "object" && !Array.isArray(value) && (value as Record<string, unknown>).version === 1) {
+    if (sessionID !== undefined && (value as Record<string, unknown>).sessionID !== sessionID) return { state: "corrupt", reason: "legacy workflow belongs to another session", code: "invalid", bytesRead: rawBytes }
     return { state: "legacy", bytes: raw, bytesRead: rawBytes, ...legacyShape(value as Record<string, unknown>) }
   }
   let index: WorkflowIndex
   try { index = parseIndex(value) }
   catch { return { state: "corrupt", reason: "index is malformed", code: "invalid", bytesRead: rawBytes } }
+  if (sessionID !== undefined && index.sessionID !== sessionID) return { state: "corrupt", reason: "index belongs to another session", code: "invalid", bytesRead: rawBytes }
   if (!chainIsPlain(worktree, index.path)) return { state: "corrupt", reason: "snapshot path is not a plain directory chain", code: "invalid", bytesRead: rawBytes }
   let bytes: Buffer | undefined
   let snapshotBytes = 0
@@ -177,8 +180,8 @@ export function eventAdmitted(bound: EventBound, event: Pick<FlowEventLine, "seq
   return event.seq <= bound.revision && !bound.orphans.some(([first, last]) => event.seq >= first && event.seq <= last)
 }
 
-export function committedEventBound(worktree: string): EventBound {
-  const committed = readCommitted(worktree)
+export function committedEventBound(worktree: string, sessionID?: string): EventBound {
+  const committed = readCommitted(worktree, {}, sessionID)
   switch (committed.state) {
     case "ok": return eventBoundOf(committed.wf)
     case "none": return { revision: 0, orphans: [] }
@@ -200,13 +203,13 @@ function writeRetained(path: string, bytes: Buffer): void {
 }
 
 /** Derived history copy used by status; byte-identical to the committed snapshot. */
-export function writeArchiveCopy(worktree: string, wf: WorkflowEnvelope): void {
-  writeRetained(join(workflowDirectory(worktree), "archive", `${wf.id}.json`), Buffer.from(`${JSON.stringify(wf)}\n`, "utf8"))
+export function writeArchiveCopy(worktree: string, wf: WorkflowEnvelope, sessionID?: string): void {
+  writeRetained(join(workflowDirectory(worktree, sessionID), "archive", `${wf.id}.json`), Buffer.from(`${JSON.stringify(wf)}\n`, "utf8"))
 }
 
 /** Preserve a terminal pre-v2 inline record byte-for-byte; it is never deleted or converted. */
-export function legacyArchive(worktree: string, id: string, bytes: Buffer): void {
-  writeRetained(join(workflowDirectory(worktree), "legacy", `${id}.v1.json`), bytes)
+export function legacyArchive(worktree: string, id: string, bytes: Buffer, sessionID?: string): void {
+  writeRetained(join(workflowDirectory(worktree, sessionID), "legacy", `${id}.v1.json`), bytes)
 }
 
 // ------------------------------------------------------------------ commit
@@ -223,10 +226,12 @@ function stageHook(prefix: "snapshot" | "index"): (stage: DurableWriteStage) => 
  */
 export function commitRevision(tx: FlowTx, wf: WorkflowEnvelope, events: CommitEvent[], now = Date.now(), options: CommitOptions = {}): WorkflowEnvelope {
   const worktree = flowTxWorktree(tx)
+  const sessionID = flowTxSessionID(tx)
+  if (sessionID !== undefined && wf.sessionID !== sessionID) throw new Error("workflow commit belongs to another session")
   if (events.length === 0) throw new TypeError("a workflow commit must append at least one event")
   if (!ID_RE.test(wf.id) || !ID_RE.test(wf.sessionID)) throw new Error("invalid workflow identity")
-  const current = readCommitted(worktree)
-  const path = indexPath(worktree)
+  const current = readCommitted(worktree, {}, sessionID)
+  const path = indexPath(worktree, sessionID)
   if (current.state === "corrupt") throw new CorruptWorkflowError(path)
   if (current.state === "legacy") {
     if (!current.terminal) throw new LegacyWorkflowError(path)
@@ -248,11 +253,11 @@ export function commitRevision(tx: FlowTx, wf: WorkflowEnvelope, events: CommitE
 
   // Cutover baseline: a terminal pre-v2 record's revision is the last seq its own events used, so every older row
   // (including other pre-v2 workflows) stays admitted history and only rows above it can be precommit orphans.
-  const previousRevision = current.state === "ok" ? current.wf.lastSeq : current.state === "legacy" ? Math.max(current.revision, lastEventSeq(worktree)) : 0
+  const previousRevision = current.state === "ok" ? current.wf.lastSeq : current.state === "legacy" ? Math.max(current.revision, lastEventSeq(worktree, sessionID)) : 0
   const carried: SeqRange[] = current.state === "ok" ? current.wf.orphanedEvents ?? [] : []
   const fresh: SeqRange[] = []
   // Non-audit events above the previous committed revision belong to a commit that never reached the index.
-  for (const line of readAllEventLines(worktree)) {
+  for (const line of readAllEventLines(worktree, sessionID)) {
     if (line.seq > previousRevision && line.audit !== true) fresh.push([line.seq, line.seq])
   }
   const orphans = mergeRanges([...carried, ...fresh])
@@ -270,7 +275,7 @@ export function commitRevision(tx: FlowTx, wf: WorkflowEnvelope, events: CommitE
 
   const { relative, bytes } = writeSnapshot(worktree, next, seq)
 
-  if (current.state === "legacy") legacyArchive(worktree, current.id, current.bytes)
+  if (current.state === "legacy") legacyArchive(worktree, current.id, current.bytes, sessionID)
   const index: WorkflowIndex = { version: 2, id: next.id, sessionID: next.sessionID, kind: next.kind, revision: seq, path: relative, sha256: sha256Hex(bytes) }
   durableWriteBytes(path, Buffer.from(`${JSON.stringify(index)}\n`, "utf8"), stageHook("index"))
   return next
@@ -330,10 +335,10 @@ function writeSnapshot(worktree: string, next: WorkflowEnvelope, seq: number): {
   return { relative, bytes }
 }
 
-function orphansAbove(worktree: string, carried: readonly SeqRange[], previousRevision: number): Array<[number, number]> {
+function orphansAbove(worktree: string, carried: readonly SeqRange[], previousRevision: number, sessionID?: string): Array<[number, number]> {
   const fresh: SeqRange[] = []
   // Non-audit events above the previous committed revision belong to a commit that never reached the index.
-  for (const line of readAllEventLines(worktree)) {
+  for (const line of readAllEventLines(worktree, sessionID)) {
     if (line.seq > previousRevision && line.audit !== true) fresh.push([line.seq, line.seq])
   }
   return mergeRanges([...carried, ...fresh])
@@ -364,7 +369,9 @@ export type HandoffInput = {
  */
 export function commitHandoff(tx: FlowTx, input: HandoffInput, now = Date.now()): { predecessor: WorkflowEnvelope; successor: WorkflowEnvelope } {
   const worktree = flowTxWorktree(tx)
+  const sessionID = flowTxSessionID(tx)
   const { predecessor, successor } = input
+  if (sessionID !== undefined && (predecessor.sessionID !== sessionID || successor.sessionID !== sessionID)) throw new Error("workflow handoff belongs to another session")
   if (input.predecessorEvents.length === 0 || input.successorEvents.length === 0) throw new TypeError("a handoff must append events for both workflows")
   if (!ID_RE.test(predecessor.id) || !ID_RE.test(successor.id) || predecessor.id === successor.id) throw new Error("invalid handoff identity")
   if (successor.lastSeq !== 0) throw new Error(`workflow ${successor.id} must start from lastSeq 0 in a new slot`)
@@ -377,8 +384,8 @@ export function commitHandoff(tx: FlowTx, input: HandoffInput, now = Date.now())
   if (TERMINAL.has(successor.phase) || successor.stopIntent !== null) throw new Error("handoff successor must start live")
   if (successor.owner.instance !== predecessor.owner.instance || successor.owner.pid !== predecessor.owner.pid) throw new Error("handoff refused: owner epoch differs")
 
-  const current = readCommitted(worktree)
-  const path = indexPath(worktree)
+  const current = readCommitted(worktree, {}, sessionID)
+  const path = indexPath(worktree, sessionID)
   if (current.state === "corrupt") throw new CorruptWorkflowError(path)
   if (current.state === "legacy") throw new LegacyWorkflowError(path)
   if (current.state !== "ok") throw new Error("handoff refused: no committed predecessor")
@@ -397,7 +404,7 @@ export function commitHandoff(tx: FlowTx, input: HandoffInput, now = Date.now())
   const seeded = verifyArtifact(worktree, artifact)
   if (seeded.state !== "verified") throw new Error(`handoff artifact ${input.artifactKey} is ${seeded.state}: ${seeded.reason}; refusing handoff`)
 
-  const orphans = orphansAbove(worktree, committed.orphanedEvents ?? [], committed.lastSeq)
+  const orphans = orphansAbove(worktree, committed.orphanedEvents ?? [], committed.lastSeq, sessionID)
   const events = [...input.predecessorEvents, ...input.successorEvents]
   const lastSeq = appendEventsDurable(tx, events, now, () => fault("events-fsync"))
   const predecessorSeq = lastSeq - input.successorEvents.length
@@ -421,7 +428,7 @@ export function commitHandoff(tx: FlowTx, input: HandoffInput, now = Date.now())
   fault("archive-write")
   // The committed occupant was non-terminal, so any existing archive/<id>.json is the derived copy of a failed earlier
   // attempt (an orphan revision); the derived copy is replaced rather than refused, and is rewritten on every retry.
-  durableWriteBytes(join(workflowDirectory(worktree), "archive", `${doneEnvelope.id}.json`), Buffer.from(`${JSON.stringify(doneEnvelope)}\n`, "utf8"))
+  durableWriteBytes(join(workflowDirectory(worktree, sessionID), "archive", `${doneEnvelope.id}.json`), Buffer.from(`${JSON.stringify(doneEnvelope)}\n`, "utf8"))
   const index: WorkflowIndex = { version: 2, id: successorEnvelope.id, sessionID: successorEnvelope.sessionID, kind: successorEnvelope.kind, revision: lastSeq, path: next.relative, sha256: sha256Hex(next.bytes) }
   durableWriteBytes(path, Buffer.from(`${JSON.stringify(index)}\n`, "utf8"), stageHook("index"))
   return { predecessor: doneEnvelope, successor: successorEnvelope }
@@ -435,26 +442,29 @@ export type SessionCommitted = { wf: WorkflowEnvelope; path: string; sha256: str
  * another session's workflow is observed, never adopted.
  */
 export function readSessionCommitted(worktree: string, sessionID: string): SessionCommitted | null {
-  const committed = readCommitted(worktree)
+  const committed = readCommitted(worktree, {}, sessionID)
   if (committed.state === "ok" && committed.wf.sessionID === sessionID) {
     return { wf: committed.wf, path: committed.index.path, sha256: committed.index.sha256, current: true }
   }
-  const root = join(workflowDirectory(worktree), "archive")
-  let names: string[]
-  try { names = readdirSync(root).filter((name) => name.endsWith(".json")).sort() }
-  catch { return null }
+  if (committed.state === "corrupt" || committed.state === "legacy" && !committed.terminal) return null
+  const roots = [...new Set([workflowDirectory(worktree, sessionID), workflowDirectory(worktree)])].map(dir => join(dir, "archive"))
   let best: SessionCommitted | null = null
-  for (const name of names) {
-    try {
-      const { bytes } = readBoundedBytes(join(root, name), SNAPSHOT_MAX)
-      if (!bytes) continue
-      const wf = parseEnvelope(JSON.parse(bytes.toString("utf8")))
-      if (wf.sessionID !== sessionID || !TERMINAL.has(wf.phase)) continue
-      const relative = snapshotRelativePath(wf.sessionID, wf.id, wf.lastSeq)
-      const snapshot = readBoundedBytes(join(stateRoot(worktree), relative), SNAPSHOT_MAX).bytes
-      if (!snapshot || !snapshot.equals(bytes) || !chainIsPlain(worktree, relative)) continue
-      if (!best || wf.updatedAt >= best.wf.updatedAt) best = { wf, path: relative, sha256: sha256Hex(snapshot), current: false }
-    } catch { continue }
+  for (const root of roots) {
+    let names: string[]
+    try { names = readdirSync(root).filter((name) => name.endsWith(".json")).sort() }
+    catch { continue }
+    for (const name of names) {
+      try {
+        const { bytes } = readBoundedBytes(join(root, name), SNAPSHOT_MAX)
+        if (!bytes) continue
+        const wf = parseEnvelope(JSON.parse(bytes.toString("utf8")))
+        if (wf.sessionID !== sessionID || !TERMINAL.has(wf.phase)) continue
+        const relative = snapshotRelativePath(wf.sessionID, wf.id, wf.lastSeq)
+        const snapshot = readBoundedBytes(join(stateRoot(worktree), relative), SNAPSHOT_MAX).bytes
+        if (!snapshot || !snapshot.equals(bytes) || !chainIsPlain(worktree, relative)) continue
+        if (!best || wf.updatedAt >= best.wf.updatedAt) best = { wf, path: relative, sha256: sha256Hex(snapshot), current: false }
+      } catch { continue }
+    }
   }
   return best
 }

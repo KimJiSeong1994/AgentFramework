@@ -86,7 +86,7 @@ export function createToolAfterHook(deps: HookDeps): NonNullable<Hooks["tool.exe
     // §5.5/§5.2: a delegate call returning in the owning session settles the workflow (T15/T16, or the T18
     // pendingCancel completion once the queue has wound down).
     if (firstTerminal && input.tool === "delegate" && flowOn(deps.config)) {
-      const wf = activeWorkflow(deps.worktree)
+      const wf = activeWorkflow(deps.worktree, input.sessionID)
       if (wf && wf.sessionID === input.sessionID) {
         const refusal = workflowEngineRefusal(wf, runtime.host.identity.engine)
         if (refusal) {

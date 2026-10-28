@@ -178,7 +178,7 @@ export function createCommandHook(
         if (runState.claim || runState.executions.some(execution => !settled(execution))) {
           throw new Error("session execution claim or intent is not settled")
         }
-        const checked = readWorkflowChecked(runtime.worktree)
+        const checked = readWorkflowChecked(runtime.worktree, input.sessionID)
         if (checked.corrupt) throw new Error("workflow state is corrupt")
         const workflow = checked.wf?.sessionID === input.sessionID ? checked.wf : null
         await assertSDKSessionQuiescent(context, vendor)

@@ -204,7 +204,7 @@ export function createPlanConversation(
       const facts = turnFacts(runtime, mainPrompt)
       let window = selectWindow(history, pending, promptPrefix(mainPrompt, runtime.config.delegate.verify_allow, undefined, facts, pinnedNote), limit, tokenLimit, trimTargetPercent)
       if (!window) throw new ModelRequestError("input_budget", "conversation message is too large for the reserved context budget")
-      const workflow = activeWorkflow(runtime.worktree)
+      const workflow = activeWorkflow(runtime.worktree, sessionID)
       if (workflow?.sessionID === sessionID) {
         const refusal = workflowEngineRefusal(workflow, runtime.host.identity.engine)
         if (refusal || workflow.phase !== "planning") {

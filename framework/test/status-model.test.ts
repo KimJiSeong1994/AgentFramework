@@ -56,14 +56,14 @@ describe("status v1 model", () => {
     expect(wf.updatedAt).toBe(500)
   })
 
-  test("foreign status reports the actual owner liveness without taking over", () => {
+  test("foreign status excludes another session workflow without taking over", () => {
     const deps = setup()
     const dead = newStatusWorkflow(SESSION, { instance: "dead-instance", pid: 9_999_999}, "command", "request")
     writeStatusWorkflow(wt.worktree, dead)
-    expect(statusJson(deps, "ses_viewer").workflow?.ownerLive).toBe(false)
+    expect(statusJson(deps, "ses_viewer").workflow).toBeNull()
     writeLedger(wt.worktree, emptyLedger(SESSION))
     writeStatusWorkflow(wt.worktree, newStatusWorkflow(SESSION, currentOwner(), "command", "request"))
-    expect(statusJson(deps, "ses_viewer").workflow?.ownerLive).toBe(true)
+    expect(statusJson(deps, "ses_viewer").workflow).toBeNull()
   })
 
   test("orphan queue pointers are reported stale and never repaired by status", () => {
@@ -244,8 +244,8 @@ describe("status v1 model", () => {
 
   test("surfaces bounded malformed-state errors without exposing file content or mutating it", () => {
     const deps = setup()
-    mkdirSync(join(stateRoot(wt.worktree), "workflow"), { recursive: true })
-    const path = workflowPath(wt.worktree)
+    mkdirSync(flowDir(wt.worktree, SESSION), { recursive: true })
+    const path = workflowPath(wt.worktree, SESSION)
     const secret = "DO_NOT_LEAK_THIS_JSON_CONTENT"
     writeFileSync(path, JSON.stringify({ secret }))
     const before = readFileSync(path)
@@ -321,10 +321,10 @@ describe("status v1 model", () => {
   test("rejects oversize workflow, mode, and ledger files with source-specific errors", () => {
     const deps = setup()
     const root = stateRoot(wt.worktree)
-    mkdirSync(join(root, "workflow"), { recursive: true })
-    writeFileSync(workflowPath(wt.worktree), " ".repeat(STATUS_LIMITS.workflow + 1))
+    mkdirSync(flowDir(wt.worktree, SESSION), { recursive: true })
+    writeFileSync(workflowPath(wt.worktree, SESSION), " ".repeat(STATUS_LIMITS.workflow + 1))
     expect(() => statusJson(deps, SESSION)).toThrow(expect.objectContaining({ source: "workflow", code: "oversize" }))
-    publishWorkflow(wt.worktree, newStatusWorkflow(SESSION, currentOwner(), "command", "request"))
+    publishWorkflow(wt.worktree, newStatusWorkflow(SESSION, currentOwner(), "command", "request"), Date.now(), SESSION)
     const modePath = join(root, "sessions", SESSION, "mode.json")
     mkdirSync(join(root, "sessions", SESSION), { recursive: true })
     writeFileSync(modePath, " ".repeat(STATUS_LIMITS.mode + 1))
@@ -452,7 +452,7 @@ describe("status v1 model", () => {
     const extraSessionIDs = Array.from({ length: STATUS_LIMITS.sessionsCount }, (_, index) => `ses_${"界".repeat(60)}_${String(index).padStart(2, "0")}`)
     for (const id of extraSessionIDs) writeLedger(wt.worktree, emptyLedger(id, now))
 
-    const archiveDir = join(flowDir(wt.worktree), "archive")
+    const archiveDir = join(flowDir(wt.worktree, sessionID), "archive")
     mkdirSync(archiveDir, { recursive: true })
     const archiveIDs = Array.from({ length: STATUS_LIMITS.historyCount }, (_, index) => `wf_${"w".repeat(120)}_${String(index).padStart(2, "0")}`)
     for (const id of archiveIDs) {
@@ -668,7 +668,7 @@ describe("status v1 model", () => {
 
   test("detail reports the bounded archive scan cap without inventing omitted counts", () => {
     const deps = setup()
-    const archiveDir = join(flowDir(wt.worktree), "archive")
+    const archiveDir = join(flowDir(wt.worktree, SESSION), "archive")
     mkdirSync(archiveDir, { recursive: true })
     for (let index = 0; index <= STATUS_LIMITS.archiveEntries; index++) {
       const id = `wf_archive_${String(index).padStart(4, "0")}`
@@ -685,7 +685,7 @@ describe("status v1 model", () => {
 
   test("detail skips and counts an individual oversized archive without reading its contents", () => {
     const deps = setup()
-    const archiveDir = join(flowDir(wt.worktree), "archive")
+    const archiveDir = join(flowDir(wt.worktree, SESSION), "archive")
     mkdirSync(archiveDir, { recursive: true })
     const oversized = {
       ...newStatusWorkflow(SESSION, currentOwner(), "command", "archive cap"),

@@ -64,7 +64,7 @@ function currentWorkflowRefusal(runtime: ReturnType<typeof getOpenCodeRuntime>, 
     if (authority.refuse) return `otter: ${authority.refuse}`
     if (!authority.wf) return "otter: workflow changed meanwhile; stop and check /status"
     return undefined
-  })
+  }, expected.sessionID)
 }
 
 export function createOtterFlowTool(deps: HookDeps): ToolDefinition {
@@ -90,7 +90,7 @@ export function createOtterFlowTool(deps: HookDeps): ToolDefinition {
 
       // op === "plan"
       runtime.linuxAdmission?.assertBootEpoch()
-      const wf = activeWorkflow(deps.worktree)
+      const wf = activeWorkflow(deps.worktree, ctx.sessionID)
       const engineRefusal = wf && workflowEngineRefusal(wf, runtime.host.identity.engine)
       if (engineRefusal) return { title: "otter_flow: refused", output: `otter: ${engineRefusal}` }
       if (!wf || wf.sessionID !== ctx.sessionID) {
@@ -166,7 +166,7 @@ export function createOtterFlowTool(deps: HookDeps): ToolDefinition {
         return applyEventIn(tx, runtime, current, "submit_valid", "model_tool", {}, (w) => ({
           ...w, planRef: { jsonSha, mdPath, mdSha, revision: plan.revision },
         }), { jsonSha })
-      })
+      }, ctx.sessionID)
       if (!submitted.ok) return { title: "otter_flow: refused", output: `otter: ${submitted.text}` }
 
       const preReviewRefusal = currentWorkflowRefusal(runtime, submitted.wf)
@@ -221,7 +221,7 @@ export function createOtterFlowTool(deps: HookDeps): ToolDefinition {
           planRef: { ...w.planRef!, mdSha: reviewedMdSha },
           review: { verdict: result.verdict, findings: result.findings, planSha: jsonSha, ...(note ? { note } : {}) },
         }), { findings: result.findings.length })
-      })
+      }, ctx.sessionID)
       if (!reviewed.ok) {
         if (admissionRefusal) return { title: "otter_flow: refused", output: `${admissionRefusal.message}\n${reviewed.text}` }
         return { title: "otter_flow: workflow changed", output: `otter: ${reviewed.text}` }

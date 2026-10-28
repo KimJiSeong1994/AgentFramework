@@ -22,7 +22,7 @@ Review the runtime, queue, workflow callers and their tests as one integration c
 committing the queue without its new host contracts leaves unresolved imports. Native-host
 and Seatbelt qualification results are a separate review scope, not proof that the core
 is safe for untrusted workloads. The common terminal uses installed vendor CLIs, not
-provider SDK adapters. Earlier macOS Seatbelt experiments do not qualify this runtime.
+provider SDK adapters for its primary inference. The optional `model_api` chat tool makes a separate, explicitly approved HTTP request. Earlier macOS Seatbelt experiments do not qualify this runtime.
 Linux verifier admission requires its own platform qualification.
 Core changes still require regression tests and type checking. Native containment claims
 additionally require the corresponding platform qualification, not just passing unit tests.
@@ -95,8 +95,8 @@ Every execution is approved by the local human, one action at a time or one plan
 
 | `chat.execute` | Chat model tools | Approval |
 | --- | --- | --- |
-| `"ask"` (default) | `read list glob grep memory` + `write edit multiedit bash` | every write, edit and command (read-only commands run without asking) |
-| `"auto-edit"` | same | commands only; file edits apply and are noted |
+| `"ask"` (default) | `read list glob grep memory` + `write edit multiedit bash model_api` | every write, edit, command and model API call (read-only commands run without asking) |
+| `"auto-edit"` | same | commands and model API calls; file edits apply and are noted |
 | `"plan"` | `read list glob grep memory` | none (read-only; the model points to `/plan` and `!<command>`) |
 
 - The mode shapes the main role's tool set, so it is part of main's policy identity (`otter:main:<sha>`); it applies
@@ -130,6 +130,57 @@ Every execution is approved by the local human, one action at a time or one plan
 - **Context**: Claude/Codex chat uses a 96,000-character conversation window (vendor main input estimate 49,152
   tokens); local defaults to 24,000 conversation characters and an 8,192-token input estimate (configurable with
   `/context budget`). OpenCode keeps its existing 24,000-character conversation window.
+
+### Approved direct model API calls
+
+In chat `ask` and `auto-edit` modes, the agent can request `model_api`. Otter shows the
+resolved destination URL, model, exact prompt, output-token limit and timeout before an
+**Allow once / Deny** decision. Each call needs a fresh decision; command allow rules,
+folder grants, skill consent and `auto-edit` do not approve API requests. Planning and
+worker/reviewer roles do not receive this tool. No request is sent after a denied or
+cancelled approval. The selected endpoint and payload are frozen before approval.
+
+For installed local Ollama, ask for example: “Use the model_api tool with target local
+and model gemma4:31b to review this function.” `local` defaults to
+`http://127.0.0.1:11434/api/chat`; the model must already be available. Otter sends only
+the tool's explicit prompt, not the whole session, and returns the response to the agent
+as reference text. This does not change the primary chat engine.
+
+Configure named targets in the **user** `~/.config/otter/otter.jsonc` (or the Otter
+configuration directory under `XDG_CONFIG_HOME`), never the project's configuration:
+
+```jsonc
+{
+  "model_api": {
+    "targets": {
+      "local": {
+        "url": "http://127.0.0.1:11434/api/chat",
+        "protocol": "ollama"
+      },
+      "remote": {
+        "url": "https://your-provider.example/v1/chat/completions",
+        "protocol": "openai-compatible",
+        "api_key_env": "OTTER_MODEL_API_KEY"
+      }
+    }
+  }
+}
+```
+
+`url` is the full endpoint. Remote targets require HTTPS; HTTP is accepted only for
+literal loopback addresses or localhost. Redirects are refused. Export the named key
+environment variable before starting Otter; the host reads it only when sending an
+approved request and does not put its value in model prompts or approval records.
+Project settings and model output cannot select arbitrary URLs or credential variables.
+The compatible protocol uses Chat Completions with `max_tokens`; providers requiring a
+different API or token field are not supported by this tool.
+
+The tool accepts `target`, `model`, `prompt` (up to 16 KiB), optional `maxOutputTokens`
+(1–4096, default 1024) and `timeoutSeconds` (1–600, default 120). It makes one request,
+without retries, with a 256 KiB response bound and 16 KiB returned-text bound. API errors
+are reported without copying response bodies. Escape/session cancellation aborts the
+local request; a provider may already have processed the request or incurred charges.
+
 
 ### Optional repository graph search (`repo_search`)
 
@@ -570,9 +621,17 @@ typing it explicitly is refused before discovery or switching, while the switch
 guards still recheck ownership. These commands do not run model inference. Settled
 model-request errors return to the composer only when persistence and ownership
 remain safe; transcript append failures stay fail-closed without draft restoration.
-The full-screen terminal returns to conversation after execution. Readline still
-exits after execution; rejection exits either frontend. Model switching never
-turns recovery into a different-model replay.
+Both full-screen and readline chat return to the composer after plan execution;
+failed task counts remain visible and incomplete nonterminal runs are held. Recoverable plan
+submission, decision and execution errors keep the session held with a bounded
+diagnostic: `/status` inspects retained work and `/continue` rechecks ownership,
+workflow state and execution before resuming eligible work. Nothing retries automatically.
+At a plan's typed approval prompt, natural language, empty input or a mismatched workflow/hash
+keeps the plan pending and returns to the composer; use `/continue` to review it and
+enter the exact displayed `APPROVE` or `REJECT` line. An invalid line never grants approval.
+Input disconnection, cancellation, lost ownership, failed persistence and host-admission
+failures retain their fail-closed handling. Explicit plan rejection exits either frontend.
+Model switching never turns recovery into a different-model replay.
 
 Bare `otter` opens a model-unselected home with `/model`, `/help`, and `/quit` actions.
 The TUI follows the GJC arrangement: an empty session opens a bordered welcome box
@@ -683,10 +742,11 @@ and the double-Ctrl+C shutdown control remain available in these overlays.
 Escape dismisses transient input UI or interrupts running work (a model turn or workflow step, a queue execution,
 an unconfirmed cancel). With nothing running it never stops a workflow: an idle Escape on a restored interview or
 approved plan only says `Nothing is running; Escape does not stop the <kind> workflow`; `/cancel` stops it and
-`/pause` keeps it. When chat is held only because another session owns the active workflow, the session is an
-`observer`: held commands plus `/model` (the palette and `/help` list it). Switching the model there never touches
-the other session's workflow; chat stays blocked until that workflow is resolved (`/resume <owner>`). A hold on this
-session itself, unresolved execution ownership or corrupt workflow state still refuse `/model`. While busy,
+`/pause` keeps it. Each session has its own active workflow: a retained plan or interview
+in another session does not block new chat, model selection, planning or approved execution.
+Use `/resume <sessionID>` to reopen that session's workflow. Session holds, corrupt state
+in the selected session and unresolved worktree execution ownership still require recovery.
+While busy,
 Alt+Q on macOS / Alt+Enter on Linux queues text for later serial turns; queued
 text never answers choices or supplies execution approval.
 
@@ -1022,7 +1082,7 @@ Configured in the **user** config only:
 
 ### Otter workflows: truth labels and the four kinds
 
-Otter owns four workflow kinds on one authority (`workflow/workflow.json`) and never runs GJC. They are started only by
+Otter owns four workflow kinds on one authority per session (`sessions/<sid>/workflow/workflow.json`) and never runs GJC. They are started only by
 a submitted `/skill:<name>` command that matches a **builtin protected name** (or by choosing one in the intent offer); a project or home skill with the same
 name cannot supply instructions or redirect the kind (it is shown as refused), and model output or text that merely
 mentions `/skill:ralplan` starts nothing. **Invoking a name is not consent to execute anything.**
@@ -1215,7 +1275,7 @@ otter status --worktree /path/to/repo --json
 Use the workflow ID and `sessionID` from that status. For approval or rejection, use the
 `planRef.jsonSha` from the active workflow record (the canonical plan hash, not the rendered
 Markdown hash); the original approval prompt also prints this value. If it was not retained,
-the record is `workflow/workflow.json` under Otter's external control-plane state root. Specify the
+the record is `sessions/<sessionID>/workflow/workflow.json` under Otter's external control-plane state root (older sessions may retain `workflow/workflow.json`). Specify the
 original engine and exact model explicitly; Otter refuses missing or
 mismatched engine/model/session evidence and never falls back to another selection:
 
@@ -1569,8 +1629,8 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
 - **Flow core** (`framework/src/flow/{machine,state,owner,status}.ts`, `framework/src/flow/runtime.ts`): the plan
   workflow state machine, event log and ownership/authority rules from ralplan §5.2/§5.3 are implemented and unit
   tested; M0 had no user-facing entry (`/plan`, `/approve`, `otter_flow` and the reviewer shipped in M1, see above).
-  Workflow state lives at `<stateRoot(worktree)>/workflow/` (`workflow.json` the single active workflow,
-  `archive/<id>.json` terminal ones, `events.jsonl` an append-only global-seq event log) — outside the worktree,
+  Workflow state lives at `<stateRoot(worktree)>/sessions/<sid>/workflow/` (`workflow.json` the session's active workflow,
+  `archive/<id>.json` terminal ones, `events.jsonl` an append-only sequence per session) — outside the worktree,
   next to the ledger, so a worker cannot edit it. Tests create workflows directly via `flow/state.ts`/`flow/runtime.ts`.
 - **`/status` (live, M0):** a code-rendered, read-only status command. `command.execute.before` marks the command
   turn with its literal name; `chat.message` consumes that mark and, only for `status`, rewrites the command's own
@@ -1579,7 +1639,9 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   mode, ledger counts, queue running, last 5 events) followed by `Reply only: ok`, starting with the marker
   `[otter status]` so e2e can prove the model never produced it. It never rewrites an owner, starts a
   heartbeat or repairs workflow state. A dead owner remains held until proven same-session
-  reattachment and explicit Resume; another session may only observe it.
+  reattachment and explicit Resume; another session starts independent work without adopting it.
+  Legacy global workflow state stays at its original path for its exact owning session. Shared checkout execution
+  claims remain worktree-wide, so unresolved file-changing execution still prevents conflicting execution.
 - **Config wiring (ARCH-13):** the `config` hook registers `status` (template `"Reply only: ok"`) only when
   `config.flow.enabled` and hook id `command.status` are both on, and records exactly the command names it wrote
   (a user-defined `status`/`stop` command of the same name wins and is left alone — `hooks/command.ts` never acts
