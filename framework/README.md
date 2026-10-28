@@ -626,6 +626,10 @@ failed task counts remain visible and incomplete nonterminal runs are held. Reco
 submission, decision and execution errors keep the session held with a bounded
 diagnostic: `/status` inspects retained work and `/continue` rechecks ownership,
 workflow state and execution before resuming eligible work. Nothing retries automatically.
+A held plan in `reviewing` can retry its saved canonical review through explicit `/continue`; it must reach
+pending approval and receive a fresh human decision before code execution. Unconfirmed execution termination
+keeps the hold and points to `/status`, without replaying work.
+CLI `approve` and `reject` require explicit `--session`, `--workflow` and `--sha`; no global-workflow fallback is used.
 At a plan's typed approval prompt, natural language, empty input or a mismatched workflow/hash
 keeps the plan pending and returns to the composer; use `/continue` to review it and
 enter the exact displayed `APPROVE` or `REJECT` line. An invalid line never grants approval.
@@ -1640,7 +1644,11 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   `[otter status]` so e2e can prove the model never produced it. It never rewrites an owner, starts a
   heartbeat or repairs workflow state. A dead owner remains held until proven same-session
   reattachment and explicit Resume; another session starts independent work without adopting it.
-  Legacy global workflow state stays at its original path for its exact owning session. Shared checkout execution
+  Legacy global workflow state stays at its original path for its exact owning session.
+  An unreadable or malformed legacy index blocks new workflow routing until repaired; it is never treated as
+  evidence that a fresh workflow may be started. Existing scoped sessions keep their own authority.
+  Session detachment checks that session's operations, so another session's execution does not prevent an idle
+  attachment from closing. Failed attachment release is displayed and does not emit a successful closed-session callback. Shared checkout execution
   claims remain worktree-wide, so unresolved file-changing execution still prevents conflicting execution.
 - **Config wiring (ARCH-13):** the `config` hook registers `status` (template `"Reply only: ok"`) only when
   `config.flow.enabled` and hook id `command.status` are both on, and records exactly the command names it wrote

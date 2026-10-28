@@ -762,6 +762,39 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
     return resumePausedWorkflow(sessionID, persisted, choose, signal)
   }
 
+  /** Retry only the saved advisory review; approval and worker dispatch remain separate explicit operations. */
+  async function resumeReview(sessionID: string, signal?: AbortSignal): Promise<PlanSubmission> {
+    runtime.linuxAdmission?.assertBootEpoch()
+    const wf = workflow(sessionID, "reviewing")
+    if (wf.stopIntent) throw new Error("a stopping workflow resumes only through the explicit Keep/Resume choice")
+    const epoch = assertAdmission(sessionID, wf.owner.instance)
+    const assertReviewRecovery = () => {
+      assertRecoveryIdentity(sessionID, wf.id, wf.planRef?.jsonSha)
+      // Synthetic and legacy engines also need the no-replay boundary for this recovery entry point.
+      const status = runtime.runs.status()
+      if (queue.isRunning(sessionID) || sessionActivityBlocker(root, sessionID) || status.claim) {
+        throw new Error("execution run is owned by another operation")
+      }
+      if (status.executions.some(execution => !settled(execution))) throw new Error("execution unresolved; review not restarted")
+    }
+    assertReviewRecovery()
+    const plan = savedPlan(runtime, wf)
+    if (!plan) throw new Error("canonical plan or rendered file changed; review not restarted")
+    const preflight = await runtime.host.preflight(runtime.host.identity.profile)
+    assertHostAdmission(preflight, runtime.host.identity.controlProfile)
+    assertWorkflowUnchanged(wf, sessionID, epoch)
+    assertReviewRecovery()
+    // Recheck the artifacts after asynchronous preflight before handing the saved subject to the reviewer.
+    if (!savedPlan(runtime, wf)) throw new Error("canonical plan or rendered file changed; review not restarted")
+    try {
+      const submitted = await withAdmissionBoundDispatch(sessionID, epoch, () => reviewSubmittedPlan(runtime, wf, plan, signal))
+      assertWorkflowRecordUnchanged(wf, sessionID, epoch)
+      return submitted
+    } finally {
+      if (isAdmissionCurrent(root, sessionID, epoch) || stopOwnerIsCurrent(sessionID, wf.id, epoch)) settleStop(sessionID, wf.id)
+    }
+  }
+
   async function resume(sessionID: string, signal?: AbortSignal, runOptions?: RunOptions) {
     runtime.linuxAdmission?.assertBootEpoch()
     const persisted = activeUnitHostWorkflow(sessionID)
@@ -804,7 +837,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
   const pause = (sessionID: string): AnyFlowResult => stop(sessionID, "pause", "pause requested")
 
   return {
-    validateImportedPlan, importPlan, decide, run, runApprovedUnit, resume, resumePaused: resumePausedBy, status, cancel, pause, assertRecoveryIdentity,
+    validateImportedPlan, importPlan, decide, run, runApprovedUnit, resume, resumeReview, resumePaused: resumePausedBy, status, cancel, pause, assertRecoveryIdentity,
     pendingPlanWorktree, reviewPlanWorktree, applyPlanWorktree, discardPlanWorktree,
   }
 }

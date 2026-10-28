@@ -6,12 +6,14 @@ import { currentOwner } from "../src/flow/owner.ts"
 import { newWorkflow, readWorkflow, readWorkflowForWrite, withFlowTransaction, type Workflow } from "../src/flow/state.ts"
 import { writeWorkflow } from "./commit-fixture.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
-import { beginExecutionActivity } from "../src/hosts/runtime.ts"
+import { beginExecutionActivity, beginStageReservation, executionActivity } from "../src/hosts/runtime.ts"
+import { registerSkillPermissionActivity } from "../src/skills/activity.ts"
 import { sessionDir } from "../src/state/store.ts"
 import { emptyLedger, ledgerPath, writeLedger } from "../src/state/ledger.ts"
 import { getOwnedSession, inspectSessionAttachment, replaySession, readSessionMetadata } from "../src/sessions/store.ts"
 import {
   admissionEpoch,
+  assertAdmissionQuiescent,
   attachAdmission,
   attachHeldAdmission,
   captureAdmissionLease,
@@ -277,6 +279,72 @@ describe("session admission", () => {
     expect(readSessionMetadata(wt.worktree, S)?.held).toBe(true)
     expect(existsSync(join(sessionDir(wt.worktree, S), "session-ended.json"))).toBe(false)
     expect(existsSync(sessionDir(wt.worktree, S))).toBe(true)
+  })
+
+  test("idle session detach preserves another session's active claim, intent, fence and activity", async () => {
+    const host = runtime()
+    const active = attachAdmission(host, S, { engine: "opencode" })
+    const idle = attachAdmission(host, `${S}_idle`, { engine: "opencode" })
+    const claim = host.runs.claim(S, host.instance, process.pid)
+    host.runs.registerIntent(claim, {
+      executionId: "detach-active-intent", ownerSession: S, taskId: "task", attemptId: "attempt",
+      generation: claim.generation, role: "worker", cwd: wt.worktree, policyID: "detach-test",
+      kind: "host", engine: host.host.identity.engine, profile: "legacy-unowned",
+    })
+    host.runs.fence(claim, "detach-active-intent", "retirement remains unproven")
+    let aborted = false
+    const releaseActivity = beginExecutionActivity(host, S, "review", { abort: () => { aborted = true } })
+    expect(releaseActivity).toBeTruthy()
+    const before = host.runs.status()
+    try {
+      expect(() => assertAdmissionQuiescent(host, idle.sessionID)).toThrow(/activity/)
+      expect(await detachAdmission(host, idle.sessionID, idle.epoch, "session-switch")).toBe(true)
+      expect(getOwnedSession(wt.worktree, idle.sessionID)).toBeUndefined()
+      expect(getOwnedSession(wt.worktree, S)).toBe(active)
+      expect(isAdmissionCurrent(wt.worktree, S, active.epoch)).toBe(true)
+      expect(host.runs.status()).toEqual(before)
+      expect(executionActivity(wt.worktree)).toEqual({ sessionID: S, kind: "review" })
+      expect(aborted).toBe(false)
+    } finally { releaseActivity!() }
+    expect(() => assertAdmissionQuiescent(host, idle.sessionID)).toThrow(/claim|intent/)
+    expect(await detachAdmission(host, S, active.epoch, "session-switch")).toBe(false)
+    expect(getOwnedSession(wt.worktree, S)).toBe(active)
+    expect(host.runs.status()).toEqual(before)
+  })
+
+  test("detach refuses an unsettled own claim without an activity", async () => {
+    const host = runtime()
+    const store = attachAdmission(host, S, { engine: "opencode" })
+    host.runs.claim(S, host.instance, process.pid)
+    expect(await detachAdmission(host, S, store.epoch, "session-switch")).toBe(false)
+    expect(getOwnedSession(wt.worktree, S)).toBe(store)
+  })
+
+  test("detach fails closed for an execution claim or activity with malformed ownership", async () => {
+    const host = runtime()
+    const store = attachAdmission(host, S, { engine: "opencode" })
+    const releaseActivity = beginExecutionActivity(host, "", "review")
+    expect(releaseActivity).toBeTruthy()
+    try {
+      expect(await detachAdmission(host, S, store.epoch, "session-switch")).toBe(false)
+    } finally { releaseActivity!() }
+    host.runs.claim(" ", host.instance, process.pid)
+    expect(await detachAdmission(host, S, store.epoch, "session-switch")).toBe(false)
+    expect(getOwnedSession(wt.worktree, S)).toBe(store)
+  })
+
+  test("detach waits for own stage and permission activity across epochs", async () => {
+    const host = runtime()
+    const store = attachAdmission(host, S, { engine: "opencode" })
+    const releaseStage = beginStageReservation(wt.worktree, S)
+    try {
+      expect(await detachAdmission(host, S, store.epoch, "session-switch")).toBe(false)
+    } finally { releaseStage() }
+    const releasePermission = registerSkillPermissionActivity(wt.worktree, S, "older-epoch", new AbortController())
+    try {
+      expect(await detachAdmission(host, S, store.epoch, "session-switch")).toBe(false)
+    } finally { releasePermission() }
+    expect(await detachAdmission(host, S, store.epoch, "session-switch")).toBe(true)
   })
 
   test("corrupt hold authority and failed durable writes remain fail-closed", () => {

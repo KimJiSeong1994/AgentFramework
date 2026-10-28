@@ -71,6 +71,40 @@ test("existing corrupt own scope never falls back to a valid matching legacy wor
   expect(readCommitted(worktree).state).toBe("ok")
 })
 
+test.each(["truncated", "unreadable", "missing-session", "invalid-version", "invalid-index"])(
+  "damaged legacy authority (%s) blocks a second workflow and recovers in place",
+  damage => {
+    const original = commit(make("ses_a"))
+    const path = workflowPath(worktree)
+    const bytes = readFileSync(path)
+    const events = readFileSync(eventsPath(worktree))
+    if (damage === "unreadable") {
+      rmSync(path)
+      mkdirSync(path)
+    } else if (damage === "truncated") {
+      writeFileSync(path, bytes.subarray(0, 10))
+    } else {
+      const index = JSON.parse(bytes.toString("utf8"))
+      if (damage === "missing-session") delete index.sessionID
+      if (damage === "invalid-version") index.version = 99
+      if (damage === "invalid-index") { index.sessionID = "ses_foreign"; index.revision = -1 }
+      writeFileSync(path, JSON.stringify(index))
+    }
+    for (const sid of ["ses_a", "ses_new"]) {
+      expect(flowDir(worktree, sid)).toBe(flowDir(worktree))
+      expect(readCommitted(worktree, {}, sid).state).toBe("corrupt")
+      expect(readWorkflowChecked(worktree, sid).corrupt).toBeTruthy()
+      expect(() => commit(make(sid), sid)).toThrow("corrupt workflow state")
+      expect(existsSync(join(stateRoot(worktree), "sessions", sid, "workflow"))).toBe(false)
+    }
+    expect(readFileSync(eventsPath(worktree))).toEqual(events)
+    if (damage === "unreadable") rmSync(path, { recursive: true })
+    writeFileSync(path, bytes)
+    expect(readWorkflow(worktree, "ses_a")?.id).toBe(original.id)
+    expect(commit(original, "ses_a").lastSeq).toBe(2)
+  },
+)
+
 test("nested distinct session transactions remain explicitly pinned", () => {
   withFlowTransaction(worktree, a => {
     expect(flowTxSessionID(a)).toBe("ses_a")

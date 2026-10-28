@@ -86,7 +86,7 @@ function fixture(options: {
 describe("common planning conversation", () => {
   test("CLI runtime main follows chat.execute: ask (default) may write/edit/run with approval; plan stays read-only", () => {
     const ask = createCliRuntime({ worktree: wt.worktree, engine: "local", model: "fixture-model" }).policy.resolve("main")
-    expect(ask.tools.allowed).toEqual(["read", "list", "glob", "grep", "memory", "write", "edit", "bash"])
+    expect(ask.tools.allowed).toEqual(["read", "list", "glob", "grep", "memory", "write", "edit", "bash", "model_api"])
     expect(ask.tools.denied).toEqual(expect.arrayContaining(["delegate", "otter_flow", "task", "webfetch"]))
     expect(ask.tools.denied).not.toContain("bash")
     expect(ask.system[0]).toContain("approves or denies it before it happens")

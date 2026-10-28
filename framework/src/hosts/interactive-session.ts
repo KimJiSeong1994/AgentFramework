@@ -2278,7 +2278,7 @@ export async function runInteractiveSession(
         await deps.admitRuntime(selection.runtime)
       },
       resumeHeld: async revision => {
-        const epoch = sessionStore?.epoch
+        const epoch: string | undefined = sessionStore?.epoch
         if (!epoch || sessionStore?.epoch !== epoch) throw new InteractiveLaunchError("Session attachment changed during Resume preflight.")
         selection.runtime.linuxAdmission?.assertBootEpoch()
         await deps.admitRuntime(selection.runtime)
@@ -3740,17 +3740,33 @@ export async function runInteractiveSession(
         terminal.resume?.()
         if (choice !== 1 || abort.signal.aborted) continue
         try {
-          const epoch = sessionStore?.epoch
+          const epoch: string | undefined = sessionStore?.epoch
           selection.runtime.linuxAdmission?.assertBootEpoch()
           await deps.admitRuntime(selection.runtime)
           if (abort.signal.aborted) continue
           if (!epoch || sessionStore?.epoch !== epoch) throw new InteractiveLaunchError("Session attachment changed during Resume preflight.")
+          const execution = selection.runtime.runs.status()
+          if (execution.claim || execution.executions.some(item => !settled(item))) {
+            terminal.write("Resume remains held: execution termination is unconfirmed. /status shows the retained claim and execution evidence; no work was restarted.\n")
+            continue
+          }
           disposeNativeSkillOptService()
           sessionStore = resumeAdmission(selection.runtime, selection.sessionID, current?.lastSeq)
           terminal.bindView?.(currentViewIdentity())
           await refreshSkillCatalog()
           if (current?.phase === "executing") await runOwned(true)
-          else if (current?.phase === "pending_approval") {
+          else if (current?.phase === "reviewing" || current?.phase === "pending_approval") {
+            if (current.phase === "reviewing") {
+              try {
+                const reviewed = await selection.controller.resumeReview(selection.sessionID, abort.signal)
+                if (!reviewed.result.ok || reviewed.result.wf.phase !== "pending_approval") {
+                  throw new Error(!reviewed.result.ok ? reviewed.result.text : "Review did not reach pending approval.")
+                }
+              } catch (error) {
+                reportPlanOperationFailure(error, "plan_submission_failed")
+                continue
+              }
+            }
             const fresh = activeWorkflow(worktree, selection.sessionID)
             const plan = fresh && savedPlan(selection.runtime, fresh)
             if (!fresh || fresh.sessionID !== selection.sessionID || !fresh.planRef || !plan) throw new InteractiveLaunchError("Canonical restored plan is unavailable; approval refused.")
@@ -4375,8 +4391,9 @@ export async function runInteractiveSession(
       try {
         const drafts = terminal.draftSnapshot?.()
         if (drafts && !persistenceFailed) persist("notice", drafts)
-        await detachAdmission(attachedRuntime, sessionStore.sessionID, sessionStore.epoch, receivedSignal ?? "terminal_exit")
-        if (!persistenceFailed) recordClosedSession(sessionStore.sessionID, visibleWrite)
+        const detached = await detachAdmission(attachedRuntime, sessionStore.sessionID, sessionStore.epoch, receivedSignal ?? "terminal_exit")
+        if (!detached) visibleWrite("Session cleanup remains held; attachment release was not confirmed. Inspect /status before reopening this session.\n")
+        else if (!persistenceFailed) recordClosedSession(sessionStore.sessionID, visibleWrite)
       } catch (error) {
         visibleWrite(persistenceFailed
           ? "Session cleanup remains held after transcript persistence failed.\n"
