@@ -1711,7 +1711,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
 
             let snapshot: Uint8Array | undefined
             try {
-              if (name !== "model_api") {
+              if (!(gate && ["write", "edit", "multiedit", "bash", "model_api"].includes(name))) {
                 consumeSkillToolEffect(request, event, permit)
                 snapshot = readSkillToolSnapshot(request, event)
               }
@@ -1734,7 +1734,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               let gated: CliToolOutput | undefined
               let deniedByUser = false
               let commandExit: number | null | undefined
-              let apiEffectConsumed = false
+              let effectConsumed = false
               let preparingApi = name === "model_api"
               try {
                 gateSignal.throwIfAborted()
@@ -1751,18 +1751,19 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                 assertFixedPolicy(request)
                 deniedByUser = !decision.allow
                 if (!decision.allow) gated = { ok: false, error: `The user denied this action: ${decision.reason}` }
-                else if (action.tool === "model_api") {
+                else {
                   await revalidateSkillToolEffect(request, event, gateSignal)
                   gateSignal.throwIfAborted()
                   assertFixedPolicy(request)
                   if (checkLease(request, fixedLease).state === "cancelled") throw new Error("execution cancellation requested")
                   consumeSkillToolEffect(request, event, permit)
-                  apiEffectConsumed = true
-                  gated = await gate.modelApi!.run(action, gateSignal)
-                } else if (action.tool === "bash") {
-                  const ran = await gate.run(action, gateSignal)
-                  commandExit = ran.exitCode
-                  gated = ran.ok ? { ok: true, text: safeToolText(ran.text) } : { ok: false, error: safeToolText(ran.text) }
+                  effectConsumed = true
+                  if (action.tool === "model_api") gated = await gate.modelApi!.run(action, gateSignal)
+                  else if (action.tool === "bash") {
+                    const ran = await gate.run(action, gateSignal)
+                    commandExit = ran.exitCode
+                    gated = ran.ok ? { ok: true, text: safeToolText(ran.text) } : { ok: false, error: safeToolText(ran.text) }
+                  }
                 }
               } catch {
                 gated = { ok: false, error: preparingApi
@@ -1774,16 +1775,16 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                 return setFinal({ status: "cancelled", error: cancelReason })
               }
               if (gated !== undefined) {
-                // Denial/invalid target is still a settled skill call, with no network effect.
+                // Denial/invalid target is still a settled skill call, with no effect.
                 // Approved calls consume only after the fresh source check above.
-                if (name === "model_api" && !apiEffectConsumed) {
+                if (!effectConsumed) {
                   try {
                     await revalidateSkillToolEffect(request, event, gateSignal)
                     consumeSkillToolEffect(request, event, permit)
                   } catch {
                     finishTool("denied", false)
                     if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-                    return setFinal({ status: "failed", error: "Otter skill context changed before settling the API request" })
+                    return setFinal({ status: "failed", error: "Otter skill context changed before settling the action" })
                   }
                 }
                 // A command that ran and exited non-zero failed; only a human denial reads as denied.

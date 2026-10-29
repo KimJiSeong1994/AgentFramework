@@ -174,6 +174,7 @@ export type OtterConfig = {
      * worktree and run commands, each only after a local human approval; "auto-edit" applies file edits without asking
      * (commands still ask); "plan" keeps it read-only (execution only through /plan). Unset in DEFAULT_CONFIG for the
      * same policy-baseline reason as `intent`; the main role's tool set (and so its policy identity) follows the mode.
+     * Only user configuration can grant "auto-edit"; project configuration may only restrict the user's mode.
      */
     execute?: "ask" | "auto-edit" | "plan"
     /** Command prefixes the user chose "Always allow" for. Read from the user config only; a project value is ignored. */
@@ -500,7 +501,7 @@ function configIsAbsent(path: string): boolean {
 export function loadConfig(worktree: string): OtterConfig {
   let cfg = DEFAULT_CONFIG
   let selectorPath = projectConfigPath(worktree)
-  for (const p of [userConfigPath(), projectConfigPath(worktree)]) {
+  for (const [source, p] of [["user", userConfigPath()], ["project", projectConfigPath(worktree)]] as const) {
     let text: string
     try {
       text = readFileSync(p, "utf8")
@@ -545,7 +546,15 @@ export function loadConfig(worktree: string): OtterConfig {
         throw new ConfigError(p, "invalid-local-model")
       }
     }
+    const authorizedMode = chatExecuteMode(cfg)
     cfg = deepMerge(cfg, patch)
+    if (source === "project") {
+      // Repository-controlled settings may restrict execution, never grant approval.
+      const projectMode = chatExecuteMode(cfg)
+      if (authorizedMode === "plan" || (authorizedMode === "ask" && projectMode === "auto-edit")) {
+        cfg = { ...cfg, chat: { ...cfg.chat, execute: authorizedMode } }
+      }
+    }
   }
   if (cfg.delegate.verifier !== "legacy-unowned" && cfg.delegate.verifier !== "linux-single-use") {
     throw new ConfigError(selectorPath, "invalid-verifier-selector")

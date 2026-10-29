@@ -953,8 +953,9 @@ export function createCliTools(options: CliToolsOptions): CliTools {
       try {
         validateCliToolInput(name, input)
         assertRootIdentity(root, rootIdentity)
-        if (name === "multiread") {
-          for (const read of input.reads as Record<string, unknown>[]) validateReadTarget(root, read, rootIdentity)
+        if (name === "multiread" || name === "multiedit") {
+          const targets = name === "multiread" ? input.reads : input.edits
+          for (const target of targets as Record<string, unknown>[]) validateReadTarget(root, target, rootIdentity)
           return true
         }
         if (name === "memory" || name === "skill" || name === "bash" || name === "model_api" || name === "repo_search") return true
