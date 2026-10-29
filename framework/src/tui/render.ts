@@ -397,6 +397,49 @@ function markdownRows(source: string, width: number, ascii: boolean): Transcript
       case "paragraph":
         rows.push(...wrapSpans(inlineSegments(block.spans, []), width))
         break
+      case "table": {
+        const count = block.headers.length
+        const all = [block.headers, ...block.rows]
+        const natural = block.headers.map((_, column) => Math.max(1, ...all.map(row =>
+          displayWidth(row[column]!.map(span => span.text).join("")))))
+        const available = width - (count - 1) * 3
+        if (available < count * 8) {
+          // A narrow terminal or many columns: keep each field attached to its header.
+          for (const record of block.rows.length ? block.rows : [block.headers.map(() => [])]) {
+            blank()
+            record.forEach((cell, column) => rows.push(...wrapSpans([
+              ...inlineSegments(block.headers[column]!, ["focus"]), { text: ": ", styles: [] },
+              ...inlineSegments(cell, []),
+            ], width)))
+          }
+          break
+        }
+        const widths = natural.map(value => Math.min(value, 8))
+        let remaining = available - widths.reduce((sum, value) => sum + value, 0)
+        while (remaining > 0) {
+          let grew = false
+          for (let column = 0; column < count && remaining > 0; column += 1) {
+            if (widths[column]! < natural[column]!) { widths[column]! += 1; remaining -= 1; grew = true }
+          }
+          if (!grew) break
+        }
+        const separator: TranscriptSegment = { text: ascii ? " | " : " │ ", styles: ["muted"] }
+        all.forEach((record, recordIndex) => {
+          const cells = record.map((cell, column) => wrapSpans(inlineSegments(cell, recordIndex === 0 ? ["focus"] : []), widths[column]!))
+          const height = Math.max(...cells.map(cell => cell.length))
+          for (let row = 0; row < height; row += 1) {
+            const line: TranscriptSegment[] = []
+            cells.forEach((cell, column) => {
+              if (column) line.push(separator)
+              const content = cell[row] ?? []
+              line.push(...content)
+              if (column < count - 1) line.push({ text: " ".repeat(Math.max(0, widths[column]! - displayWidth(content.map(segment => segment.text).join("")))), styles: [] })
+            })
+            rows.push(line)
+          }
+        })
+        break
+      }
       case "heading": {
         const base: SemanticToken[] = ["heading"]
         const lead = block.level >= 3 ? [{ text: `${"#".repeat(block.level)} `, styles: base }] : []

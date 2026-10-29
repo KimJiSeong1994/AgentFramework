@@ -751,7 +751,7 @@ in another session does not block new chat, model selection, planning or approve
 Use `/resume <sessionID>` to reopen that session's workflow. Session holds, corrupt state
 in the selected session and unresolved worktree execution ownership still require recovery.
 While busy,
-Alt+Q on macOS / Alt+Enter on Linux queues text for later serial turns; queued
+Enter queues text for later serial turns (Alt+Q on macOS / Alt+Enter on Linux also work); queued
 text never answers choices or supplies execution approval.
 
 Sessions are saved automatically in the current canonical worktree's state directory and survive

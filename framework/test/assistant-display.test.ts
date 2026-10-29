@@ -49,3 +49,24 @@ test("fences remain opaque even with embedded template literals or tilde delimit
     expect(assistantDisplayText(prefix + code)).toBe("Summary\n\n## Example\n" + code)
   }
 })
+
+test("mixed and trailing real line breaks do not disable escaped report recovery", () => {
+  for (const report of [
+    '## 검토\\n\\n요약\\n\\n## 구성\\n- 항목\n',
+    '## 검토\n요약\\n\\n## 구성\\n- 항목\\n완료',
+    '## 검토\\r\\n\\r\\n요약\\r\\n## 구성\\r\\n- 항목',
+  ]) {
+    const result = assistantDisplayText(report)
+    expect(result).not.toContain("\\n")
+    expect(result).toContain("## 구성\n- 항목")
+    expect(assistantDisplayText(result)).toBe(result)
+  }
+})
+
+test("escaped plaintext tree diagrams regain their fence and layout", () => {
+  const report = '## 판단\\n\\n요약\\n\\n## 흐름\\n\\n```text\\nPDF\\n └─ Python\\n     ├─ pages/page.png\\n     └─ result.json\\n          ↓\\n     보고서\\n```\\n\\n## 결론\\n완료'
+  const result = assistantDisplayText(report)
+  expect(result).not.toContain("\\n")
+  expect(result).toContain("```text\nPDF\n └─ Python\n")
+  expect(assistantDisplayText(result)).toBe(result)
+})

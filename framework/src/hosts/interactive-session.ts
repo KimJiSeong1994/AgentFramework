@@ -362,11 +362,26 @@ function defaultGitTopLevel(directory: string): string | undefined {
 export function createReadlineTerminal(): Terminal {
   let reader: ReturnType<typeof createInterface> | undefined
   let inputClosed = false
-  const read = (prompt: string, signal?: AbortSignal, cancelOnEscape = false): Promise<string | undefined> => {
-    if (signal?.aborted || inputClosed) return Promise.resolve(undefined)
+  let activeLine: ((line: string) => void) | undefined
+  let control: ((action: TerminalControl) => void) | undefined
+  let queueAllowed = false
+  const queued: string[] = []
+  const ensureReader = () => {
+    if (inputClosed) return undefined
     if (!reader) {
       const created = createInterface({ input: process.stdin, output: process.stderr, terminal: process.stderr.isTTY === true })
       reader = created
+      created.on("line", (line: string) => {
+        if (activeLine) { activeLine(line); return }
+        const command = line.trim()
+        if (!command) return
+        if (control && ["/cancel", "/pause", "/quit"].includes(command)) {
+          control(command === "/cancel" ? "cancel" : command === "/pause" ? "pause" : "quit")
+          return
+        }
+        queued.push(line)
+        process.stderr.write(`Queued for the next turn (${queued.length} waiting).\n`)
+      })
       created.once("close", () => {
         if (reader === created) {
           reader = undefined
@@ -374,7 +389,12 @@ export function createReadlineTerminal(): Terminal {
         }
       })
     }
-    const activeReader = reader
+    return reader
+  }
+  const read = (prompt: string, signal?: AbortSignal, cancelOnEscape = false): Promise<string | undefined> => {
+    if (signal?.aborted || inputClosed) return Promise.resolve(undefined)
+    if (activeLine) throw new Error("terminal input already has an owner")
+    const activeReader = ensureReader()
     if (!activeReader) return Promise.resolve(undefined)
     const keypressInput = process.stdin as unknown as {
       on: (event: "keypress", listener: (text: string, key: { name?: string }) => void) => unknown
@@ -385,7 +405,7 @@ export function createReadlineTerminal(): Terminal {
       const finish = (line: string | undefined, discardReader = false) => {
         if (settled) return
         settled = true
-        activeReader.off("line", onLine)
+        if (activeLine === onLine) activeLine = undefined
         activeReader.off("close", onClose)
         activeReader.off("SIGINT", onReadlineInterrupt)
         if (cancelOnEscape) keypressInput.off("keypress", onKeypress)
@@ -403,7 +423,7 @@ export function createReadlineTerminal(): Terminal {
       const onKeypress = (_text: string, key: { name?: string }) => {
         if (key.name === "escape") finish(undefined, true)
       }
-      activeReader.once("line", onLine)
+      activeLine = onLine
       activeReader.once("close", onClose)
       activeReader.once("SIGINT", onReadlineInterrupt)
       if (cancelOnEscape) keypressInput.on("keypress", onKeypress)
@@ -425,11 +445,21 @@ export function createReadlineTerminal(): Terminal {
     }),
     readInput(input, signal) {
       if (signal.aborted || inputClosed) return Promise.resolve(undefined)
+      if (activeLine) throw new Error("terminal input already has an owner")
+      if (input.kind === "chat" && queueAllowed && queued.length) return Promise.resolve(queued.shift()!)
       const rendered = renderInput(input.title, input.hint, input.prompt, terminal.presentation?.())
       terminal.write(rendered.chrome)
       return read(rendered.prompt, signal, input.kind === "selection")
     },
     readLine(prompt, signal) { return read(prompt, signal) },
+    controls(handler) { control = handler },
+    queueAdmission(allowed) { queueAllowed = allowed },
+    draftSnapshot: () => ({ draft: reader?.line ?? "", queued: [...queued] }),
+    sessionChanged() {
+      if (queued.length) terminal.write("Queued input expired with the previous session.\n")
+      queued.length = 0
+      queueAllowed = false
+    },
     async choose(title, choices, signal) {
       if (!choices.length || signal.aborted) return undefined
       const lines = [...terminalSafeText(title).split("\n"), ...choices.map((choice, index) => `  ${index + 1}) ${terminalSafeText(choice)}`)]
@@ -452,9 +482,10 @@ export function createReadlineTerminal(): Terminal {
       reader = undefined
       current?.close()
     },
-    resume: () => {},
+    resume: () => { ensureReader() },
     close: () => {
       inputClosed = true
+      queued.length = 0
       reader?.close()
       reader = undefined
     },

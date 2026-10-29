@@ -1032,7 +1032,7 @@ def run_queue(temp_root: Path):
         session.send_text("first turn\r")
         session.wait_events(lambda item: item.get("type") == "turn.started" and item.get("turn") == 1, "gated first turn")
         session.send_text("queued one")
-        session.send(b"\x1bq" if sys.platform == "darwin" else b"\x1b\r")
+        session.send(b"\r")
         session._wait(lambda: "queued 1" in session.screen.current_text(), "first busy FIFO queue item")
         session.send_text("queued two")
         session.send(b"\x1bq" if sys.platform == "darwin" else b"\x1b\r")
