@@ -109,7 +109,7 @@ A verified interview spec connects to ralplan in the same live session; consensu
 Supported terminals default to a full-screen transcript, status line and composer (minimum 60x20).
 OTTER_TUI=0 forces readline; unsupported terminals fall back with a notice. NO_COLOR disables styling.
 Enter sends, enhanced Shift+Enter/Ctrl+J inserts a newline, Escape cancels, and a second Ctrl+C
-strictly within 500ms requests shutdown. Busy turns can be queued with macOS Alt+Q / Linux Alt+Enter.
+strictly within 500ms requests shutdown. While busy, Enter queues the next turn (macOS Alt+Q / Linux Alt+Enter also work).
 
 Engine sign-in (the vendor CLI keeps the credential; otter never reads or stores one):
   auth     [status | --diagnose]                     show codex/claude sign-in status; --diagnose compares your shell with otter's model calls

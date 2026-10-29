@@ -18,6 +18,7 @@ export type MarkdownBlock =
   | { readonly kind: "list-continuation"; readonly indent: number; readonly spans: readonly InlineSpan[] }
   | { readonly kind: "quote"; readonly spans: readonly InlineSpan[] }
   | { readonly kind: "code"; readonly language: string; readonly lines: readonly string[]; readonly closed: boolean }
+  | { readonly kind: "table"; readonly headers: readonly (readonly InlineSpan[])[]; readonly rows: readonly (readonly (readonly InlineSpan[])[])[] }
   | { readonly kind: "rule" }
   | { readonly kind: "blank" }
 
@@ -27,6 +28,33 @@ const rule = /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/u
 const quote = /^ {0,3}>\s?(.*)$/u
 const listItem = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/u
 const wordCharacter = /[\p{L}\p{N}]/u
+
+/** Pipes inside code spans and escaped pipes belong to a cell, not the table structure. */
+function tableCells(line: string): string[] | undefined {
+  const cells: string[] = []
+  let cell = ""
+  let separators = 0
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index]!
+    if (char === "\\" && (line[index + 1] === "|" || line[index + 1] === "\\")) {
+      cell += line[++index]
+    } else if (char === "`") {
+      let end = index + 1
+      while (line[end] === "`") end += 1
+      const marker = line.slice(index, end)
+      const close = line.indexOf(marker, end)
+      if (close >= 0) { cell += line.slice(index, close + marker.length); index = close + marker.length - 1 }
+      else { cell += marker; index = end - 1 }
+    } else if (char === "|") {
+      cells.push(cell.trim()); cell = ""; separators += 1
+    } else cell += char
+  }
+  if (!separators) return undefined
+  cells.push(cell.trim())
+  if (!cells[0]) cells.shift()
+  if (!cells.at(-1)) cells.pop()
+  return cells.length ? cells : undefined
+}
 
 function isWhitespace(value: string | undefined): boolean {
   return value === undefined || /\s/u.test(value)
@@ -129,6 +157,22 @@ export function parseMarkdown(source: string): MarkdownBlock[] {
     }
     if (!line.trim()) {
       blocks.push({ kind: "blank" })
+      continue
+    }
+    const headers = tableCells(line)
+    const divider = headers && tableCells(lines[index + 1] ?? "")
+    if (headers && divider?.length === headers.length && divider.every(cell => /^:?-{3,}:?$/u.test(cell))) {
+      const table: InlineSpan[][][] = []
+      index += 1
+      while (index + 1 < lines.length) {
+        if (fenceOpen.test(lines[index + 1]!)) break
+        const cells = tableCells(lines[index + 1]!)
+        if (!cells || cells.length !== headers.length) break
+        table.push(cells.map(cell => parseInline(cell)))
+        index += 1
+      }
+      blocks.push({ kind: "table", headers: headers.map(cell => parseInline(cell)), rows: table })
+      listContent = undefined
       continue
     }
     const headingMatch = heading.exec(line)

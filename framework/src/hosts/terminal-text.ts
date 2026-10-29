@@ -1,8 +1,8 @@
-/** Display-only recovery for a single-line, double-escaped Markdown report.
+/** Display-only recovery for double-escaped Markdown reports, including mixed line endings.
  * Keep model/history bytes and code examples intact; never decode arbitrary JSON escapes.
  */
 export function assistantDisplayText(value: string): string {
-  if (/[\r\n]/u.test(value) || /^[\s]*[\[{"`~]/u.test(value)) return value
+  if (/^[\s]*[\[{"`~]/u.test(value)) return value
   // Match entire delimiter runs: a template-literal backtick cannot close a triple fence.
   // An unmatched delimiter protects the remainder rather than guessing at code boundaries.
   const parts: string[] = []
@@ -21,13 +21,20 @@ export function assistantDisplayText(value: string): string {
     if (!close) break
   }
   parts.push(value.slice(cursor))
-  const prose = parts.filter((_, index) => index % 2 === 0).join("")
+  const prose = parts.filter((_, index) => index % 2 === 0).join("").replace(/(?<!\\)\\r\\n/gu, "\\n")
   // Unquoted Windows paths make literal backslashes ambiguous; leave that answer untouched.
   if (/[A-Za-z]:\\|\\\\[A-Za-z]/u.test(prose)) return value
   if (!prose.includes("\\n\\n") ||
       !/\\n(?:#{1,6} |[-*] |\d+\. |\|)/u.test(prose) ||
       (prose.match(/(?<!\\)\\n/gu)?.length ?? 0) < 3) return value
-  return parts.map((part, index) => index % 2 ? part : part.replace(/(?<!\\)\\(?:r\\n|n)/gu, "\n")).join("")
+  const decodeLines = (text: string) => text.replace(/(?<!\\)\\(?:r\\n|n)/gu, "\n")
+  return parts.map((part, index) => {
+    if (index % 2 === 0) return decodeLines(part)
+    // Plain-text tree diagrams carry layout, not string-literal escapes. Other code stays opaque.
+    const diagram = /^(`{3,}|~{3,})(?:text|plaintext)\\(?:r\\n|n)([\s\S]*?)\\(?:r\\n|n)\1$/u.exec(part)
+    return diagram && /[└├│→]/u.test(diagram[2]!) && !/[A-Za-z]:\\|\\\\[A-Za-z]/u.test(diagram[2]!)
+      ? decodeLines(part) : part
+  }).join("")
 }
 
 /** Escape control and bidirectional-override characters so untrusted text (model output, answers) cannot drive the terminal. */

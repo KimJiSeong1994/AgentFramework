@@ -1144,10 +1144,9 @@ export class TuiApp implements Terminal {
         const operatorShell = this.pending.kind === "chat" && command.startsWith("!") && command.slice(1).trim().length > 0
         if (!transientSelection && !operatorShell) this.transcript.append({ provenance: "user", text })
         this.pending.finish(text)
-      } else if (action === "queue" && command) {
-        this.queue.push(this.editor.submit())
       } else if (command) {
-        this.status = "Busy · use Alt+Q (macOS) / Alt+Enter (Linux) to queue the next turn"
+        this.queue.push(this.editor.submit())
+        this.status = `Queued ${this.queue.length} · will run after the current work completes`
       }
     }
     this.draw()
