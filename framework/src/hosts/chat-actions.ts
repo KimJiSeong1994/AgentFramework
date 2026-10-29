@@ -182,6 +182,16 @@ export function describeAction(action: ChatAction, maxLines = 40): { title: stri
 
 export type CommandResult = { ok: boolean; text: string; exitCode: number | null; signal: string | null; durationMs: number; status: "complete" | "error" | "cancelled" | "timeout"; lines: string[] }
 
+export function packageInstallFailureHint(command: string, output: string): string | undefined {
+  if (!/\bpip(?:3(?:\.\d+)?)?\s+install\b/u.test(command) ||
+      !/Could not install packages due to an OSError/u.test(output) ||
+      !/Operation not permitted|Permission denied|\[Errno (?:1|13)\]/u.test(output)) return undefined
+  return "Package installation failed inside Python/pip, not at the Otter approval gate. " +
+    "Inspect the selected interpreter, project environment and the denied path; an inaccessible editable install or .pth entry in the global environment can cause this. " +
+    "Use the project's existing virtual environment or package manager. If none exists, propose creating a project .venv without system-site-packages, then install and run tests with that environment's Python through the normal approval gate. " +
+    "Do not retry with sudo, chmod protected directories, delete global .pth registrations, or claim the package was installed."
+}
+
 /** Run a captured command (no terminal, no stdin) in the worktree; Esc/cancel or the time limit stops its group. */
 export async function runCapturedCommand(command: string, cwd: string, timeoutMs: number, signal: AbortSignal): Promise<CommandResult> {
   const handle = startShell(command, { cwd, timeoutMs, maxOutputChars: COMMAND_OUTPUT_CHARS, env: { OTTER_CHAT_COMMAND: "1" } })
@@ -193,9 +203,11 @@ export async function runCapturedCommand(command: string, cwd: string, timeoutMs
     const status = run.killed ? "cancelled" : run.timedOut ? "timeout" : run.ok ? "complete" : "error"
     const outcome = status === "cancelled" ? "cancelled by the user" : status === "timeout" ? `timed out after ${Math.round(timeoutMs / 1000)}s`
       : run.signal ? `signal ${run.signal}` : `exit ${run.exitCode ?? "?"}`
+    const hint = status === "error" ? packageInstallFailureHint(command, run.output) : undefined
+    const output = [run.output, ...(hint ? [`[otter] ${hint}`] : [])].filter(Boolean).join("\n")
     return {
       ok: status === "complete", exitCode: run.exitCode, signal: run.signal, durationMs: run.ms, status,
-      text: `${outcome}\n${run.output || "(no output)"}`, lines: run.output ? run.output.split("\n").slice(-200) : [],
+      text: `${outcome}\n${output || "(no output)"}`, lines: output ? output.split("\n").slice(-200) : [],
     }
   } finally {
     signal.removeEventListener("abort", stop)

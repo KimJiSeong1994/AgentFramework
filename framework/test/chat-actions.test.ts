@@ -2,7 +2,20 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { allowedByRules, clearAllowRules, commandRule, coveredByGrant, describeAction, grantDirectory, readAllowRules, readOnlyCommand, refusedCommand, runCapturedCommand, saveAllowRule } from "../src/hosts/chat-actions.ts"
+import { allowedByRules, clearAllowRules, commandRule, coveredByGrant, describeAction, grantDirectory, packageInstallFailureHint, readAllowRules, readOnlyCommand, refusedCommand, runCapturedCommand, saveAllowRule } from "../src/hosts/chat-actions.ts"
+
+test("pip OS permission failures recommend environment isolation without elevating or hiding the failure", () => {
+  const error = "ERROR: Could not install packages due to an OSError: [Errno 1] Operation not permitted: '/protected/old-project'"
+  const hint = packageInstallFailureHint("python3 -m pip install 'pytest-timeout>=2.4.0'", error)
+  expect(hint).toContain("not at the Otter approval gate")
+  expect(hint).toContain("existing virtual environment")
+  expect(hint).toContain("normal approval gate")
+  expect(hint).toContain("Do not retry with sudo")
+  expect(packageInstallFailureHint("pip3 install pytest", error)).toBe(hint)
+  expect(packageInstallFailureHint("cat file", error)).toBeUndefined()
+  expect(packageInstallFailureHint("pip install pytest", "No matching distribution found")).toBeUndefined()
+  expect(packageInstallFailureHint("pip install pytest", "Successfully installed pytest")).toBeUndefined()
+})
 
 describe("refused commands never reach the human", () => {
   test.each([
