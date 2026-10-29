@@ -84,6 +84,25 @@ function fixture(options: {
 }
 
 describe("common planning conversation", () => {
+  for (const engine of ["local", "claude", "codex"] as const) {
+    test(`${engine} offers approved chat editing in ask and auto-edit modes`, () => {
+      mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
+      for (const mode of ["ask", "auto-edit", "plan"] as const) {
+        writeFileSync(join(wt.worktree, ".otter", "otter.jsonc"), JSON.stringify({ chat: { execute: mode } }))
+        const runtime = createCliRuntime({ worktree: wt.worktree, engine, model: engine === "codex" ? "gpt-6-astra" : "fixture-model" })
+        const tools = runtime.policy.resolve("main").tools
+        for (const tool of ["write", "edit", "bash"]) {
+          expect(tools.allowed.includes(tool)).toBe(mode !== "plan")
+          expect(tools.denied.includes(tool)).toBe(mode === "plan")
+        }
+        for (const role of ["planner", "reviewer", "critic"] as const) {
+          expect(runtime.policy.resolve(role).tools.allowed).not.toContain("edit")
+        }
+        expect(runtime.policy.resolve("worker").tools.allowed).toContain("edit")
+      }
+    })
+  }
+
   test("CLI runtime main follows chat.execute: ask (default) may write/edit/run with approval; plan stays read-only", () => {
     const ask = createCliRuntime({ worktree: wt.worktree, engine: "local", model: "fixture-model" }).policy.resolve("main")
     expect(ask.tools.allowed).toEqual(["read", "list", "glob", "grep", "memory", "write", "edit", "bash", "model_api"])

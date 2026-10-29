@@ -54,7 +54,8 @@ process.exit(child.exitCode)
     const transport = createCliTransport({ engine: "codex", model: "gpt-6-astra", prompt: "Reply LOCAL_CODEX_OK.",
       deadlineAt: Date.now() + 15000, maxOutputBytes: 4096 })
     expect(await transport.preflight?.()).toMatchObject({ compatible: true })
-    expect(await transport.run()).toEqual({ status: "completed", text: "LOCAL_CODEX_OK", quiescent: true })
+    expect(await transport.run()).toEqual({ status: "completed", text: "LOCAL_CODEX_OK", quiescent: true,
+      usage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 } })
     expect(requests).toHaveLength(1)
     const request = requests[0]!
     expect(request.model).toBe("gpt-6-astra")

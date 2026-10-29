@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import { isAbsolute } from "node:path"
 import catalog from "./codex-models-0.159.3.json"
+import { HOST_INFERENCE_INSTRUCTIONS } from "./inference-instructions.ts"
 
 // Generated from Codex 0.159.3's public `codex debug models --bundled` metadata export.
 // Original base instructions and source model-message prompts are excluded; only verified
@@ -13,7 +14,7 @@ export const CODEX_VERSION = "0.159.3"
 // Catalog provenance stays fixed; CLI releases are admitted only after qualifying
 // this profile's instructions, native-tool removal, and execution protocol.
 export const CODEX_SUPPORTED_VERSIONS = Object.freeze(["0.159.3", "0.163.0"] as const)
-export const CODEX_INSTRUCTIONS = "You are an Otter text-only inference engine. Follow the supplied Otter JSON response protocol. Native tools are unavailable; propose Otter tool requests only as JSON text."
+export const CODEX_INSTRUCTIONS = HOST_INFERENCE_INSTRUCTIONS
 
 export type CodexProfile = Readonly<{
   version: string

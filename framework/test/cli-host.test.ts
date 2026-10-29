@@ -12,6 +12,7 @@ import type { ExecutionRunStore, ExecutionRunStatus } from "../src/hosts/run-sta
 import type { CliHostActivity } from "../src/hosts/cli-progress.ts"
 import { estimateTokens } from "../src/tokens.ts"
 import { CODEX_INSTRUCTIONS, createCodexProfile } from "../src/hosts/codex-profile.ts"
+import { HOST_INFERENCE_INSTRUCTIONS } from "../src/hosts/inference-instructions.ts"
 import { createCliRuntime } from "../src/hosts/cli-runtime.ts"
 import { loadConfig } from "../src/config.ts"
 import { attachAdmission } from "../src/sessions/admission.ts"
@@ -1495,7 +1496,7 @@ describe("common CLI execution host", () => {
       expect(prompt).toContain(subject.request.text)
       expect(prompt).not.toContain("한")
       expect(prompt).toContain(SKILL_DROPPED_RESULT)
-      expect(estimatedTokens(prompt) + estimateTokens(subject.request.policy.nativeContext?.instructions ?? "")).toBeLessThanOrEqual(WORKER_INPUT_LIMIT)
+      expect(estimatedTokens(prompt) + estimateTokens(engine === "claude" ? HOST_INFERENCE_INSTRUCTIONS : subject.request.policy.nativeContext?.instructions ?? "")).toBeLessThanOrEqual(WORKER_INPUT_LIMIT)
     }
   })
 
@@ -1641,7 +1642,7 @@ describe("route-aware common CLI host", () => {
     architect: { engine: "codex", model: "gpt-5.6-sol" },
   }
 
-  function routed(options: { failPreflightFor?: string; wrongSnapshotModel?: boolean; codexHash?: string; routes?: ComboRoutes; anchor?: { engine: "local" | "codex" | "claude"; model: string }; hashFor?: (model: string) => string } = {}) {
+  function routed(options: { tools?: readonly string[]; failPreflightFor?: string; wrongSnapshotModel?: boolean; codexHash?: string; routes?: ComboRoutes; anchor?: { engine: "local" | "codex" | "claude"; model: string }; hashFor?: (model: string) => string } = {}) {
     const anchor = options.anchor ?? { engine: "local" as const, model: "anchor-model" }
     const table: Record<string, { engine: string; model: string }> = { ...(options.routes ?? routes) }
     const snapshotFor = (role: ExecutionRole) => {
@@ -1651,7 +1652,7 @@ describe("route-aware common CLI host", () => {
         role,
         model: Object.freeze({ providerID: target.engine, modelID: options.wrongSnapshotModel ? anchor.model : target.model }),
         maxOutputTokens: 20_000,
-        tools: Object.freeze({ allowed: Object.freeze([...ALL_TOOLS]), denied: Object.freeze([] as string[]) }),
+        tools: Object.freeze({ allowed: Object.freeze([...(options.tools ?? ALL_TOOLS)]), denied: Object.freeze([] as string[]) }),
         system: Object.freeze([`fixed ${role} constraint`]),
         ...(target.engine === "codex" ? (() => {
           const codex = createCodexProfile(target.model)
@@ -1723,14 +1724,44 @@ describe("route-aware common CLI host", () => {
       loadLocalModel: () => loadConfig(root).local_model })
     return {
       host, requests, transports, makeRequest, retentionCalls,
-      async dispatch(role: ExecutionRole) {
+      async dispatch(role: ExecutionRole, text?: string) {
         active = role
         currentRole = role
-        const handle = await host.prepare(makeRequest(role))
+        const request = makeRequest(role)
+        const handle = await host.prepare(text === undefined ? request : { ...request, text })
         return handle.run()
       },
     }
   }
+
+  test("input budgets count external instructions for the dispatched engine, including Claude routes", async () => {
+    const selections = {
+      local: { engine: "local" as const, model: "fixture" },
+      claude: { engine: "claude" as const, model: "opus" },
+      codex: { engine: "codex" as const, model: "gpt-6-astra" },
+    }
+    for (const [anchorEngine, workerEngine] of [["codex", "claude"], ["claude", "codex"], ["local", "claude"], ["claude", "local"]] as const) {
+      const options = { anchor: selections[anchorEngine], routes: { worker: selections[workerEngine] }, tools: ["write"] }
+      const probe = routed(options)
+      expect((await probe.dispatch("worker", "")).status).toBe("completed")
+      const base = probe.transports.find(transport => transport.prompt.length > 0)!.prompt
+      const externalTokens = workerEngine === "local" ? 0 : estimateTokens(HOST_INFERENCE_INSTRUCTIONS)
+      const available = WORKER_INPUT_LIMIT - estimatedTokens(base) - externalTokens
+      expect(available).toBeGreaterThan(32)
+      const fitting = routed(options)
+      expect((await fitting.dispatch("worker", "x".repeat((available - 8) * 4))).status).toBe("completed")
+      const inference = fitting.transports.find(transport => transport.prompt.length > 0)!
+      expect(inference.engine).toBe(workerEngine)
+      expect(estimatedTokens(inference.prompt) + externalTokens).toBeLessThanOrEqual(WORKER_INPUT_LIMIT)
+      expect(inference.prompt).not.toContain(HOST_INFERENCE_INSTRUCTIONS)
+
+      const overflowing = routed(options)
+      expect(await overflowing.dispatch("worker", "x".repeat((available + 8) * 4))).toMatchObject({
+        status: "failed", error: expect.stringContaining("estimated input budget"),
+      })
+      expect(overflowing.requests).toEqual([])
+    }
+  })
 
   test("local combo routes receive retention under a cloud anchor", async () => {
     mkdirSync(join(root, ".otter"))
@@ -1966,12 +1997,16 @@ describe("host-provided skill tool", () => {
     expect(listed.every(line => line.length <= "- skill-00: ".length + 160)).toBe(true)
 
     // A long Korean task that fits on its own but not with the catalog: the turn runs without skills.
-    const longText = "가나다라 ".repeat(2_050)
+    const probe = harness({ role: "main", taskText: "", responses: [JSON.stringify({ type: "final", text: "ok" })] })
+    expect(await (await probe.host.prepare(probe.request)).run()).toEqual({ status: "completed", text: "ok" })
+    const available = 8192 - estimatedTokens(probe.prompts[0]!) - estimateTokens(probe.request.policy.nativeContext?.instructions ?? "")
+    const tokensPerRepeat = estimateTokens("가나다라 ".repeat(1000)) / 1000
+    const longText = "가나다라 ".repeat(Math.max(1, Math.floor((available - 96) / tokensPerRepeat)))
     const plain = harness({ role: "main", taskText: longText, responses: [JSON.stringify({ type: "final", text: "ok" })] })
     expect(await (await plain.host.prepare(plain.request)).run()).toEqual({ status: "completed", text: "ok" })
     const crowded = harness({ role: "main", taskText: longText, responses: [JSON.stringify({ type: "final", text: "ok" })] })
     expect(await (await crowded.host.prepare({ ...crowded.request, skillTool: many })).run()).toEqual({ status: "completed", text: "ok" })
-    expect(estimateTokens(plain.prompts[0]!)).toBeLessThanOrEqual(8192)
+    expect(estimatedTokens(plain.prompts[0]!) + estimateTokens(plain.request.policy.nativeContext?.instructions ?? "")).toBeLessThanOrEqual(8192)
     expect(crowded.prompts[0]).not.toContain("Available skills")
     expect(crowded.prompts[0]).not.toContain("- skill: allowed")
   })
