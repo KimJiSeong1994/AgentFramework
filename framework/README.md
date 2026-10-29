@@ -95,9 +95,14 @@ Every execution is approved by the local human, one action at a time or one plan
 
 | `chat.execute` | Chat model tools | Approval |
 | --- | --- | --- |
-| `"ask"` (default) | `read list glob grep memory` + `write edit multiedit bash model_api` | every write, edit, command and model API call (read-only commands run without asking) |
+| `"ask"` (default) | `read list glob grep memory` + `write edit multiedit bash model_api` | every write, edit, command and model API call |
 | `"auto-edit"` | same | commands and model API calls; file edits apply and are noted |
 | `"plan"` | `read list glob grep memory` | none (read-only; the model points to `/plan` and `!<command>`) |
+
+Only user configuration can grant `auto-edit`; project configuration may restrict the user's
+mode but cannot elevate `ask` or `plan`. Shell commands, including inspection commands such as
+`git status`, require approval or a saved user command rule. Use `read`, `list`, `glob` and `grep`
+for routine inspection without shell execution.
 
 These modes apply equally to Codex, Claude and local Ollama engines. In the default `ask` mode,
 all three can request real file edits and test commands through Otter's approval gate. Codex and

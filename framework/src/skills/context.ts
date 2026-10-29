@@ -190,10 +190,11 @@ function scopeMatches(state: ContextState, request: Scope): boolean {
     request.taskID === scope.taskID && request.attemptID === scope.attemptID && request.generation === scope.generation &&
     request.cwd === scope.cwd && request.role === scope.role && request.policy === scope.policy && request.deadlineAt === scope.deadlineAt
 }
+function policyToolName(name: string): string { return name === "multiedit" ? "edit" : name }
 function callMatches(state: ContextState, call: CallState, event = call.event): boolean {
   const tupleMatches = () => current(state) && !call.consumed && event.type === "tool-before" && event.sessionID === state.scope.executionID &&
     event.callID === call.callID && event.name === call.tool && skillArgumentDigest(event.input) === call.digest &&
-    state.scope.policy.tools.allowed.includes(event.name) && !state.scope.policy.tools.denied.includes(event.name)
+    state.scope.policy.tools.allowed.includes(policyToolName(event.name)) && !state.scope.policy.tools.denied.includes(policyToolName(event.name))
   return tupleMatches() && call.validate() === true && tupleMatches()
 }
 function callFor(state: ContextState, event: ToolBefore): CallState {
@@ -732,8 +733,8 @@ export function bindSkillInvocation(
   if (request.supervisorSessionID !== source.session.store.sessionID) return refuse("Skill invocation cannot cross supervisor sessions.")
   if (source.capture.descriptor.kind !== "skill") return refuse("Protected workflows cannot become ordinary skill execution contexts.")
   const declared = source.capture.descriptor.kind === "skill" ? source.capture.descriptor.allowedTools : undefined
-  const allowedTools = EXECUTION_TOOL_NAMES.filter(tool => request.policy.tools.allowed.includes(tool) &&
-    !request.policy.tools.denied.includes(tool) && (declared === undefined || declared.includes(tool)))
+  const allowedTools = EXECUTION_TOOL_NAMES.filter(tool => request.policy.tools.allowed.includes(policyToolName(tool)) &&
+    !request.policy.tools.denied.includes(policyToolName(tool)) && (declared === undefined || declared.includes(tool)))
   const cancel = new AbortController()
   const unregister = source.session.registerInvocationCancellation(source.capture.name, source.revision, cancel)
   let foreground: ForegroundSkillInvocation | undefined
@@ -847,7 +848,7 @@ export async function prepareSkillToolCall(
   if (!state) return
   if (state.seenCalls.has(event.callID) || event.sessionID !== request.executionID || typeof event.callID !== "string" || !event.callID ||
       !(EXECUTION_TOOL_NAMES as readonly string[]).includes(event.name) ||
-      !request.policy.tools.allowed.includes(event.name) || request.policy.tools.denied.includes(event.name)) {
+      !request.policy.tools.allowed.includes(policyToolName(event.name)) || request.policy.tools.denied.includes(policyToolName(event.name))) {
     return refuse("Skill tool call identity or base role is not admissible.")
   }
   const digest = skillArgumentDigest(event.input)

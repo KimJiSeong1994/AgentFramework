@@ -51,29 +51,6 @@ export function commandRule(command: string): string | undefined {
 }
 
 /**
- * Read-only commands that run without asking (each run is still shown and recorded): inspecting the repository and files.
- * Only a plain command qualifies: chaining, pipes, redirection or substitution fall back to asking, and options that write
- * or execute (`find -delete/-exec`, `git branch -d`, `sed -i` ...) are not on the list.
- */
-const READ_ONLY: readonly RegExp[] = [
-  /^git (status|diff|log|show|blame|ls-files|rev-parse|describe)(\s|$)/u,
-  /^git branch(\s+(-a|-r|-v|-vv|--list|--show-current|--all|--remotes|--verbose))*\s*$/u,
-  /^git remote( -v)?\s*$/u,
-  /^(ls|pwd|wc|head|tail|cat|stat|file|du|df|tree|which|whereis|uname|date|env|printenv|echo)(\s|$)/u,
-  /^(rg|grep|egrep|fgrep)(\s|$)/u,
-  /^[A-Za-z0-9._-]+ --?(version|v)\s*$/u,
-]
-const READ_ONLY_REFUSED = /(^|\s)(-delete|-exec|-execdir|-ok|-fprint|--output|-o)(\s|=|$)/u
-
-/** True when the command only reads (and so runs without asking); false means the human decides as usual. */
-export function readOnlyCommand(command: string): boolean {
-  const trimmed = command.trim()
-  if (!trimmed || /[;&|<>`$(){}\\\n]/u.test(trimmed) || READ_ONLY_REFUSED.test(trimmed)) return false
-  if (/^(env|printenv)(\s|$)/u.test(trimmed)) return false // may print credentials; ask instead
-  return READ_ONLY.some(pattern => pattern.test(trimmed))
-}
-
-/**
  * Whether a saved rule covers this command. A rule is a word prefix (`bun test` covers `bun test foo.test.ts`; `make`
  * covers `make install`), and only for a command without chaining, pipes, redirection or substitution.
  */

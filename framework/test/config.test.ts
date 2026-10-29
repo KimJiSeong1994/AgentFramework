@@ -55,15 +55,35 @@ describe("chat.worktree", () => {
 })
 
 describe("chat.execute", () => {
-  test("absent means ask; auto-edit and plan are accepted; any other value is refused at load; the default config stays policy-neutral", () => {
+  test("absent means ask; user modes are accepted; any other value is refused at load; defaults stay policy-neutral", () => {
     expect(chatExecuteMode(loadConfig(worktree))).toBe("ask")
     for (const mode of ["auto-edit", "plan", "ask"] as const) {
-      put(projectConfigPath(worktree), JSON.stringify({ chat: { execute: mode } }))
+      put(userConfigPath(), JSON.stringify({ chat: { execute: mode } }))
       expect(chatExecuteMode(loadConfig(worktree))).toBe(mode)
     }
     put(projectConfigPath(worktree), '{"chat":{"execute":"always"}}')
     refused(projectConfigPath(worktree), "invalid-chat-execute")
     expect(DEFAULT_CONFIG.chat).toEqual({})
+  })
+
+  for (const userMode of [undefined, "ask", "auto-edit", "plan"] as const) {
+    for (const projectMode of [undefined, "ask", "auto-edit", "plan"] as const) {
+      test(`project ${projectMode ?? "unset"} cannot escalate user ${userMode ?? "unset"}`, () => {
+        put(userConfigPath(), JSON.stringify({ chat: { execute: userMode, intent: "off" } }))
+        put(projectConfigPath(worktree), JSON.stringify({ chat: { execute: projectMode, worktree: "off" } }))
+        const config = loadConfig(worktree)
+        const expected = userMode === "plan" || projectMode === "plan" ? "plan"
+          : userMode === "auto-edit" && projectMode !== "ask" ? "auto-edit" : "ask"
+        expect(chatExecuteMode(config)).toBe(expected)
+        expect(config.chat).toMatchObject({ intent: "off", worktree: "off" })
+        expect(DEFAULT_CONFIG.chat).toEqual({})
+      })
+    }
+  }
+
+  test("project auto-edit alone cannot bypass the default approval requirement", () => {
+    put(projectConfigPath(worktree), '{"chat":{"execute":"auto-edit"}}')
+    expect(chatExecuteMode(loadConfig(worktree))).toBe("ask")
   })
 })
 

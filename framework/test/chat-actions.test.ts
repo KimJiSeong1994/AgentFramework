@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { allowedByRules, clearAllowRules, commandRule, coveredByGrant, describeAction, grantDirectory, packageInstallFailureHint, readAllowRules, readOnlyCommand, refusedCommand, runCapturedCommand, saveAllowRule } from "../src/hosts/chat-actions.ts"
+import { allowedByRules, clearAllowRules, commandRule, coveredByGrant, describeAction, grantDirectory, packageInstallFailureHint, readAllowRules, refusedCommand, runCapturedCommand, saveAllowRule } from "../src/hosts/chat-actions.ts"
 
 test("pip OS permission failures recommend environment isolation without elevating or hiding the failure", () => {
   const error = "ERROR: Could not install packages due to an OSError: [Errno 1] Operation not permitted: '/protected/old-project'"
@@ -83,17 +83,6 @@ describe("always-allow rules", () => {
     mkdirSync(join(home, "otter"), { recursive: true })
     writeFileSync(join(home, "otter", "otter.jsonc"), '{ "chat": { "allow": ["git status", "rm -rf x; y", 3, "bun test"] } }')
     expect(readAllowRules()).toEqual(["git status", "bun test"])
-  })
-})
-
-describe("read-only commands run without asking", () => {
-  test.each(["git status", "git diff --stat", "git log -5 --oneline", "git show HEAD", "git branch", "git branch -a", "ls -la src",
-    "cat README.md", "head -20 a.ts", "wc -l a.ts", "rg TODO src", "grep -rn foo .", "pwd", "bun --version", "node -v"])("%s", command => {
-    expect(readOnlyCommand(command)).toBe(true)
-  })
-  test.each(["git push", "git branch -D main", "git checkout x", "cat a > b", "ls; rm -rf x", "cat $(id)", "grep x a | sh",
-    "find . -delete", "rg x -o out", "env", "printenv", "rm a", "bun test", "sed -i s/a/b/ f", "git stash"])("%s still asks", command => {
-    expect(readOnlyCommand(command)).toBe(false)
   })
 })
 

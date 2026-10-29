@@ -63,7 +63,7 @@ import { commandInsertion, interactiveActions, interactiveHelp, parseSkillOptCom
 import { fileComboStore, fileDefaultModelStore, validateComboRoutes, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
 import { COMBO_PRESETS, comboPresetSummary } from "./combo-presets.ts"
 import { runTerminalShell, type ShellResult } from "./operator-shell.ts"
-import { actionPaths, allowedByRules, clearAllowRules, commandRule, coveredByGrant, describeAction, grantDirectory, readAllowRules, readOnlyCommand, refusedCommand, runCapturedCommand, runInteractiveCommand, saveAllowRule, type CommandResult } from "./chat-actions.ts"
+import { actionPaths, allowedByRules, clearAllowRules, commandRule, coveredByGrant, describeAction, grantDirectory, readAllowRules, refusedCommand, runCapturedCommand, runInteractiveCommand, saveAllowRule, type CommandResult } from "./chat-actions.ts"
 import { createChatCheckpoints, type ChatCheckpoints } from "./chat-checkpoint.ts"
 import { closeSessionHistory, projectHasWiki, renderFacts, worktreeFacts } from "../sessions/history.ts"
 import { lintWiki, statusWiki } from "../wiki/wiki.ts"
@@ -1242,7 +1242,7 @@ export async function runInteractiveSession(
     const mainTools = runtime.policy?.resolve("main").tools.allowed ?? []
     if (!mainTools.includes("bash") || !mainTools.includes("edit")) return undefined
     const note = (text: string) => terminal.write(terminalSafeText(`${text}\n`))
-    type Decided = { decision: ChatActionDecision; how: "asked" | "rule" | "read-only" | "auto-edit" | "grant" | "denied" | "refused" }
+    type Decided = { decision: ChatActionDecision; how: "asked" | "rule" | "auto-edit" | "grant" | "denied" | "refused" }
     const decide = async (action: ChatAction, signal: AbortSignal): Promise<Decided> => {
       const { title, preview } = describeAction(action)
       if (action.tool === "bash") {
@@ -1250,10 +1250,6 @@ export async function runInteractiveSession(
         if (refused) {
           note(`Refused (${refused}): ${action.command}. Run it yourself with !<command> if you mean it.`)
           return { how: "refused", decision: { allow: false, reason: `refused by Otter (${refused}); the user can run it with !<command>` } }
-        }
-        if (!action.interactive && readOnlyCommand(action.command)) {
-          note(`Read-only, allowed: ${title}`)
-          return { how: "read-only", decision: { allow: true } }
         }
         if (allowedByRules(action.command, deps.chatAllow.read())) {
           note(`Allowed by your rule: ${title}`)

@@ -2089,12 +2089,12 @@ describe("chat execution through the action gate", () => {
     return { value, approvals, runs }
   }
 
-  async function bindModelApiSkill(subject: ReturnType<typeof harness>) {
+  async function bindActionSkill(subject: ReturnType<typeof harness>, allowedTools = "model_api") {
     root = realpathSync.native(root)
     const directory = join(root, ".agents", "skills", "api-review")
     mkdirSync(directory, { recursive: true })
     const path = join(directory, "SKILL.md")
-    writeFileSync(path, "---\nname: api-review\ndescription: Review through an approved model request\nallowed-tools: [model_api]\n---\nUse model_api within its approval gate.\n")
+    writeFileSync(path, "---\nname: api-review\ndescription: Review through an approved model request\nallowed-tools: [" + allowedTools + "]\n---\nUse tools within their approval gate.\n")
     const runtime = createCliRuntime({ worktree: root, engine: "local", model: "fixture-model" })
     const store = attachAdmission(runtime, OWNER, { engine: "local", model: "fixture-model" })
     const roots = await resolveSkillRoots({ projectRoot: root })
@@ -2242,7 +2242,7 @@ describe("chat execution through the action gate", () => {
     const run = harness({ role: "main", tools: [...CHAT_TOOLS, "model_api"], responses: [
       JSON.stringify({ type: "tool", name: "model_api", input: { target: "local", model: "fixture-model", prompt: "hello" } }), final("handled without an API request"),
     ] })
-    await bindModelApiSkill(run)
+    await bindActionSkill(run)
     expect(await (await run.host.prepare({ ...run.request, actionGate: subject.value })).run()).toEqual({ status: "completed", text: "handled without an API request" })
     expect(requests).toBe(0)
     expect(subject.approvals).toHaveLength(failure === "denial" ? 1 : 0)
@@ -2264,11 +2264,66 @@ describe("chat execution through the action gate", () => {
     const run = harness({ role: "main", tools: [...CHAT_TOOLS, "model_api"], responses: [
       JSON.stringify({ type: "tool", name: "model_api", input: { target: "local", model: "fixture-model", prompt: "hello" } }),
     ] })
-    skillPath = await bindModelApiSkill(run)
+    skillPath = await bindActionSkill(run)
     expect(await (await run.host.prepare({ ...run.request, actionGate: subject.value })).run()).toMatchObject({ status: "failed" })
     expect(subject.approvals).toHaveLength(1)
     expect(requests).toBe(0)
     expect(run.prompts).toHaveLength(1)
+  })
+
+  test.each(["bash", "write", "edit", "multiedit"] as const)("skill-bound %s rejects permission narrowing during approval", async name => {
+    writeFileSync(join(root, "seed.txt"), "seed")
+    let skillPath = ""
+    const subject = gate(() => {
+      writeFileSync(skillPath, "---\nname: api-review\ndescription: narrowed\nallowed-tools: [read]\n---\nRead only.\n")
+      return true
+    })
+    const input = name === "bash" ? { command: "echo should-not-run" }
+      : name === "write" ? { path: "seed.txt", content: "changed" }
+        : name === "edit" ? { path: "seed.txt", oldText: "seed", newText: "changed" }
+          : { edits: [{ path: "seed.txt", oldText: "seed", newText: "changed" }] }
+    const run = harness({ role: "main", tools: CHAT_TOOLS, responses: [JSON.stringify({ type: "tool", name, input }), final("done")] })
+    skillPath = await bindActionSkill(run, "bash, write, edit, multiedit")
+    expect(await (await run.host.prepare({ ...run.request, actionGate: subject.value })).run()).toMatchObject({ status: "failed" })
+    expect(subject.approvals).toHaveLength(1)
+    expect(subject.runs).toHaveLength(0)
+    expect(readFileSync(join(root, "seed.txt"), "utf8")).toBe("seed")
+  })
+
+  test.each(["bash", "write", "edit", "multiedit"] as const)("skill-bound %s settles user denial without effects", async name => {
+    writeFileSync(join(root, "seed.txt"), "seed")
+    const subject = gate(() => false)
+    const input = name === "bash" ? { command: "echo should-not-run" }
+      : name === "write" ? { path: "seed.txt", content: "changed" }
+        : name === "edit" ? { path: "seed.txt", oldText: "seed", newText: "changed" }
+          : { edits: [{ path: "seed.txt", oldText: "seed", newText: "changed" }] }
+    const run = harness({ role: "main", tools: CHAT_TOOLS, responses: [JSON.stringify({ type: "tool", name, input }), final("done")] })
+    await bindActionSkill(run, "bash, write, edit, multiedit")
+    expect(await (await run.host.prepare({ ...run.request, actionGate: subject.value })).run()).toEqual({ status: "completed", text: "done" })
+    expect(subject.approvals).toHaveLength(1)
+    expect(subject.runs).toHaveLength(0)
+    expect(run.prompts[1]).toContain("The user denied this action")
+    expect(readFileSync(join(root, "seed.txt"), "utf8")).toBe("seed")
+  })
+
+  test("skill-bound multiedit validates every target again after approval and preserves atomicity", async () => {
+    for (const changePath of [false, true]) {
+      writeFileSync(join(root, "one.txt"), "seed")
+      writeFileSync(join(root, "two.txt"), "seed")
+      const subject = gate(() => {
+        if (changePath) { rmSync(join(root, "two.txt")); mkdirSync(join(root, "two.txt")) }
+        return true
+      })
+      const run = harness({ role: "main", tools: CHAT_TOOLS, responses: [JSON.stringify({ type: "tool", name: "multiedit", input: {
+        edits: ["one.txt", "two.txt"].map(path => ({ path, oldText: "seed", newText: "changed" })),
+      } }), final("done")] })
+      await bindActionSkill(run, "edit, multiedit")
+      const outcome = await (await run.host.prepare({ ...run.request, actionGate: subject.value })).run()
+      expect(outcome.status).toBe(changePath ? "failed" : "completed")
+      expect(subject.approvals).toHaveLength(1)
+      expect(readFileSync(join(root, "one.txt"), "utf8")).toBe(changePath ? "seed" : "changed")
+      if (!changePath) expect(readFileSync(join(root, "two.txt"), "utf8")).toBe("changed")
+    }
   })
 
   test.each(["no gate", "no capability", "worker", "planner", "not allowed"] as const)("model_api is unavailable with %s", async boundary => {

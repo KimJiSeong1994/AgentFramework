@@ -2139,12 +2139,28 @@ describe("interactive terminal", () => {
     expect(h.calls.output.join("")).toContain("Edits in the whole worktree are allowed until this turn ends.")
   })
 
-  test("chat execution: read-only commands run without asking; a folder grant lasts for its turn only", async () => {
+  test.each(["git status", "rg --pre=./helper needle input.txt", "git diff --ext-diff", "custom-command --version"])("shell approval cannot be bypassed by a read-only-looking command: %s", async command => {
+    const decisions: Array<{ allow: boolean; reason?: string }> = []
+    const h = harness({
+      chatExecute: "ask", lines: ["go", "/quit"],
+      choose: async (_title, values) => values.indexOf("Deny"),
+      onGate: async gate => {
+        decisions.push(await gate.approve({ tool: "bash", command, interactive: false, timeoutMs: 1000 }, new AbortController().signal))
+      },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(decisions).toHaveLength(1)
+    expect(decisions[0]!.allow).toBe(false)
+    expect(h.calls.choices.map(choice => choice.title)).toEqual([`Allow otter to run: ${command}?`])
+    expect(h.calls.chatRuns).toHaveLength(0)
+  })
+
+  test("chat execution: shell commands require approval; a folder grant lasts for its turn only", async () => {
     const decisions: Array<{ allow: boolean; reason?: string }> = []
     let gates = 0
     const h = harness({
       chatExecute: "ask", lines: ["first", "second", "/quit"],
-      choose: async (_title, values) => { const grant = values.findIndex(value => value.startsWith("Allow edits in")); return grant >= 0 ? grant : values.indexOf("Deny") },
+      choose: async (_title, values) => { const grant = values.findIndex(value => value.startsWith("Allow edits in")); return grant >= 0 ? grant : values.indexOf("Allow once") },
       onGate: async gate => {
         const signal = new AbortController().signal
         const edit = (path: string) => ({ tool: "edit" as const, path, oldText: "a", newText: "b" })
@@ -2161,11 +2177,11 @@ describe("interactive terminal", () => {
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
     expect(decisions).toEqual([{ allow: true }, { allow: true }, { allow: true }, { allow: true }, { allow: true }])
     expect(h.calls.choices.map(choice => choice.title)).toEqual([
-      "Allow otter to edit src/a.ts (-1 / +1)?", "Allow otter to edit test/c.ts (-1 / +1)?", "Allow otter to edit src/a.ts (-1 / +1)?",
+      "Allow otter to run: git status?", "Allow otter to edit src/a.ts (-1 / +1)?", "Allow otter to edit test/c.ts (-1 / +1)?", "Allow otter to edit src/a.ts (-1 / +1)?",
     ])
-    expect(h.calls.choices[0]!.values).toEqual(["Allow once", "Allow edits in src/ for this turn", "Deny"])
+    expect(h.calls.choices[1]!.values).toEqual(["Allow once", "Allow edits in src/ for this turn", "Deny"])
     const out = h.calls.output.join("")
-    expect(out).toContain("Read-only, allowed: Run: git status")
+    expect(out).toContain("Allowed: Run: git status")
     expect(out).toContain("Edit src/deep/b.ts (-1 / +1) (allowed for this turn under src)")
     expect(out).toContain("Edits in src/ are allowed until this turn ends.")
   })
