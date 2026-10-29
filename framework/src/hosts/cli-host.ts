@@ -593,6 +593,7 @@ function buildBasePrompt(request: ExecutionRequest, available: readonly CliToolN
       : "File modification is unavailable in this request; do not request write/edit tools.",
     `Input estimate limit: ${inputLimit} estimated tokens, counting system instructions, tool schemas, title, task, included tool transcript, and separately supplied native instructions. The UTF-8 character estimate is heuristic and not an exact vendor token count. Older bounded tool results/history may be truncated or omitted to fit; the role instructions, title, and task are never dropped.`,
     "Respond with exactly one JSON object and no surrounding prose: {\"type\":\"tool\",\"name\":\"read\",\"input\":{...}} (with any allowed tool name) or {\"type\":\"final\",\"text\":\"...\"}. A single ```json fenced object is also accepted. Tool calls are repeatable; after each call, the Otter tool result is supplied in the next prompt. Unknown/malformed envelopes fail closed. Final text is returned unchanged; it may contain plan JSON or reviewer JSON.",
+    "For Markdown final answers, encode paragraph and line breaks with a single JSON newline escape, not a double-escaped literal backslash followed by n. After JSON decoding, prose should have real line breaks. Preserve intentional escape sequences inside code examples.",
     "Exact tool schemas (keys not shown are forbidden):",
     toolLines,
     ...skillLines,

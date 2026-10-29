@@ -1,4 +1,5 @@
 import { MIN_COLUMNS, MIN_ROWS, MIN_SIZE_LABEL } from "./capability.ts"
+import { assistantDisplayText } from "../hosts/terminal-text.ts"
 import { parseMarkdown, type InlineSpan, type InlineStyle } from "./markdown.ts"
 import { resolveTheme, semanticStyle, type SemanticToken, type Theme } from "./theme.ts"
 
@@ -514,7 +515,8 @@ export function transcriptDisplayRows(lines: readonly string[], columns: number,
     if (entry.kind === "text") {
       const speaker = entry.speaker
       const style = speakerStyle[speaker]
-      const text = entry.lines.join("\n")
+      const raw = entry.lines.join("\n")
+      const text = speaker === "Assistant" ? assistantDisplayText(raw) : raw
       if (style.label) {
         rows.push({ segments: [{ text: style.label, styles: style.labelStyle }], speaker, role: "first" })
         const content = speaker === "You"
