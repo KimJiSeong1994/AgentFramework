@@ -12,6 +12,7 @@ import {
 } from "./cli-tools.ts"
 import { createCliTransport, type CliEngine, type CliNativeIdentity, type CliTransportHandle, type CliTransportOptions } from "./cli-transport.ts"
 import { CODEX_INSTRUCTIONS, createCodexProfile } from "./codex-profile.ts"
+import { HOST_INFERENCE_INSTRUCTIONS } from "./inference-instructions.ts"
 import { parseTree, type Node, type ParseError } from "jsonc-parser"
 import { estimateTokens } from "../tokens.ts"
 import { prefilterSkills } from "../routing/retrieve.ts"
@@ -589,7 +590,7 @@ function buildBasePrompt(request: ExecutionRequest, available: readonly CliToolN
       : "Shell execution and verification are controlled by the outer Otter queue/controller; this role has no bash tool.",
     `Only these Otter tools may run: ${available.length ? available.join(", ") : "none"}. The allowed tool list determines this request's capabilities; tools marked denied must not be used. Tool paths are relative to the canonical worktree; absolute/traversal paths, protected directories (.git/.otter/.gjc), credential-like files, and symlink escapes are refused.`,
     allow.has("write") || allow.has("edit")
-      ? "File modification is available through the allowed Otter write/edit tools. Native filesystem restrictions do not mean that an allowed Otter write/edit tool is unavailable: the host executes JSON requests separately in the worktree. This does not grant native access or bypass approval. Inspect files and request edits; report actual denials, not restrictions inferred from the native sandbox or earlier assistant replies."
+      ? "File modification is available through the allowed Otter write/edit tools. Native filesystem restrictions do not mean that an allowed Otter write/edit tool is unavailable: the host executes JSON requests separately in the worktree. This does not grant native access or bypass approval. Inspect files and request edits; report actual denials, not restrictions inferred from the native sandbox or earlier assistant replies. Earlier refusals do not override the current role's offered tools."
       : "File modification is unavailable in this request; do not request write/edit tools.",
     `Input estimate limit: ${inputLimit} estimated tokens, counting system instructions, tool schemas, title, task, included tool transcript, and separately supplied native instructions. The UTF-8 character estimate is heuristic and not an exact vendor token count. Older bounded tool results/history may be truncated or omitted to fit; the role instructions, title, and task are never dropped.`,
     "Respond with exactly one JSON object and no surrounding prose: {\"type\":\"tool\",\"name\":\"read\",\"input\":{...}} (with any allowed tool name) or {\"type\":\"final\",\"text\":\"...\"}. A single ```json fenced object is also accepted. Tool calls are repeatable; after each call, the Otter tool result is supplied in the next prompt. Unknown/malformed envelopes fail closed. Final text is returned unchanged; it may contain plan JSON or reviewer JSON.",
@@ -1016,7 +1017,8 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             },
           })
           const inputLimit = roleInputLimit(request.role, route.engine, route.engine === "local" ? localContextInputTokens({ local_model: loadLocalModel() }) : undefined)
-          const nativeInstructionTokens = request.policy.nativeContext ? estimateTokens(request.policy.nativeContext.instructions) : 0
+          const nativeInstructionTokens = route.engine === "claude" ? estimateTokens(HOST_INFERENCE_INSTRUCTIONS)
+            : request.policy.nativeContext ? estimateTokens(request.policy.nativeContext.instructions) : 0
           let available = witnessRequested ? Object.freeze([] as CliToolName[]) : tools.available
           let basePrompt = buildBasePrompt(request, available, offered?.catalog, inputLimit)
           // Skills are optional: when the catalog would push the prompt over the limit, this turn runs without them

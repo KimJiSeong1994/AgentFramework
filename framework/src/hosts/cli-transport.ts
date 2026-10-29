@@ -9,6 +9,7 @@ import { createVendorProcess, vendorProcessEnvironment, type VendorProcessHandle
 import type { ExecutionCancelResult, ExecutionReconciliation } from "./types.ts"
 import { CODEX_INSTRUCTIONS, CODEX_VERSION, CODEX_SUPPORTED_VERSIONS, codexProfileArgv, createCodexProfile } from "./codex-profile.ts"
 import { isLocalKeepAlive } from "../config.ts"
+import { HOST_INFERENCE_INSTRUCTIONS } from "./inference-instructions.ts"
 
 export type CliEngine = "local" | "codex" | "claude"
 
@@ -445,7 +446,7 @@ function nativeArgv(engine: CliEngine, model: string, scratch: string, codexStat
     return [
       "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
       "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands",
-      "--no-chrome", "--no-session-persistence", "--output-format", "stream-json", "--verbose", "--model", model,
+      "--no-chrome", "--no-session-persistence", "--system-prompt", HOST_INFERENCE_INSTRUCTIONS, "--output-format", "stream-json", "--verbose", "--model", model,
     ]
   }
   if (engine === "codex") {

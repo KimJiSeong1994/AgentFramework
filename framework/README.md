@@ -99,6 +99,14 @@ Every execution is approved by the local human, one action at a time or one plan
 | `"auto-edit"` | same | commands and model API calls; file edits apply and are noted |
 | `"plan"` | `read list glob grep memory` | none (read-only; the model points to `/plan` and `!<command>`) |
 
+These modes apply equally to Codex, Claude and local Ollama engines. In the default `ask` mode,
+all three can request real file edits and test commands through Otter's approval gate. Codex and
+Claude receive host-tool instructions at their native instruction layer: their inference processes
+have no native editing tools, while the separate Otter host executes approved requests. Those native
+restrictions do not make an editing-enabled Otter chat read-only. An explicitly selected `plan` mode
+and planning/review roles remain read-only. Restart Otter and start a new session after native-profile
+changes; existing workflow ownership and policy checks are not bypassed.
+
 - The mode shapes the main role's tool set, so it is part of main's policy identity (`otter:main:<sha>`); it applies
   when a runtime is created (model selection, `/new`, model switch). Workers, reviewers and workflow roles are unchanged.
 - The host owns every decision (`ActionGate`, `src/hosts/chat-actions.ts`). Right before the effect it shows the action

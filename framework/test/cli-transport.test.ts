@@ -10,6 +10,7 @@ import {
   CliExecutableError, createCliTransport, findExecutable, nativeObservedUsageCanonicalByteBound, type CliEngine,
 } from "../src/hosts/cli-transport.ts"
 import { codexProfileArgv, createCodexProfile } from "../src/hosts/codex-profile.ts"
+import { HOST_INFERENCE_INSTRUCTIONS } from "../src/hosts/inference-instructions.ts"
 
 const CODEX_MODEL = "gpt-5.6-sol"
 
@@ -225,7 +226,7 @@ async function runClaudeFixture(chunks: string[]) {
   const expectedArgs = [
     "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
     "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome",
-    "--no-session-persistence", "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
+    "--no-session-persistence", "--system-prompt", HOST_INFERENCE_INSTRUCTIONS, "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
   ]
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
@@ -326,7 +327,7 @@ function installIdentityFixture(engine: "codex" | "claude", modifyAfterDispatch 
   const expectedArgs = engine === "codex" ? codexExpectedArgs() : [
     "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
     "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome",
-    "--no-session-persistence", "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
+    "--no-session-persistence", "--system-prompt", HOST_INFERENCE_INSTRUCTIONS, "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
   ]
   let source = fixtureSource({
     expectedArgs, prompt: "fixture prompt", marker, versionMarker, versionLinger, sourceRoot: sourceRoot(),
@@ -495,7 +496,7 @@ test("Claude uses the verified stdin launch and emits assistant text once before
   const expectedArgs = [
     "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
     "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome",
-    "--no-session-persistence", "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
+    "--no-session-persistence", "--system-prompt", HOST_INFERENCE_INSTRUCTIONS, "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
   ]
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
@@ -515,7 +516,7 @@ test("Claude permits only the observed safe-mode builtin plugin names", async ()
   const expectedArgs = [
     "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
     "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome",
-    "--no-session-persistence", "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
+    "--no-session-persistence", "--system-prompt", HOST_INFERENCE_INSTRUCTIONS, "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
   ]
   for (const plugins of [
     ["cc-plugin-agents-md", { name: "cc-plugin-telemetry" }],
@@ -542,7 +543,7 @@ test("Claude accepts ordered rate-limit metadata without treating it as text, fa
   const expectedArgs = [
     "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
     "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome",
-    "--no-session-persistence", "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
+    "--no-session-persistence", "--system-prompt", HOST_INFERENCE_INSTRUCTIONS, "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
   ]
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
@@ -620,7 +621,7 @@ test("Claude refuses unrecognized plugins and maps only the exact native login f
   const expectedArgs = [
     "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
     "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome",
-    "--no-session-persistence", "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
+    "--no-session-persistence", "--system-prompt", HOST_INFERENCE_INSTRUCTIONS, "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
   ]
   const prompt = "fixture prompt"
   const pluginMarker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
@@ -686,7 +687,7 @@ test.each([
   const expectedArgs = [
     "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
     "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome",
-    "--no-session-persistence", "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
+    "--no-session-persistence", "--system-prompt", HOST_INFERENCE_INSTRUCTIONS, "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
   ]
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
