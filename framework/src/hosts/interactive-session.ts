@@ -51,7 +51,7 @@ import { AdmissionRefusal, assertHostAdmission } from "./required-controls.ts"
 import { CODEX_SUPPORTED_VERSIONS } from "./codex-profile.ts"
 import { installedCodexVersion } from "./cli-transport.ts"
 import { describeEngine, describeUpdateFailure, engineInfo, planEngineUpdate, runEngineUpdate, UPDATABLE_ENGINES, verifyEngineUpdate, type EngineInfo, type EngineUpdatePlan, type UpdatableEngine } from "./engine-update.ts"
-import { boundedTerminalDiagnostic, terminalSafeText } from "./terminal-text.ts"
+import { assistantDisplayText, boundedTerminalDiagnostic, terminalSafeText } from "./terminal-text.ts"
 import { createWorkflowHost, requestWorkflowStop, type WorkflowHost } from "./workflow-session.ts"
 import { startRefusal } from "../workflows/registry.ts"
 import { ModelRequestError } from "../workflows/turn.ts"
@@ -4290,7 +4290,7 @@ export async function runInteractiveSession(
         if (turnSelection.engine === "local" && turnSelection.conversation.contextState) {
           persist("context-window", { version: 1, ...turnSelection.conversation.contextState() })
         }
-        const assistantText = terminalSafeText(turn.text)
+        const assistantText = terminalSafeText(assistantDisplayText(turn.text))
         if (terminal.writeText) terminal.writeText({ provenance: "assistant", text: assistantText })
         else visibleWrite(`\nConversation:\n${assistantText}\n`)
       }
