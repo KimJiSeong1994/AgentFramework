@@ -60,8 +60,8 @@ async function interview(h: Setup, request = "build the widget") {
   return { started: started.wf, result }
 }
 
-const committedKind = () => {
-  const read = readCommitted(wt.worktree)
+const committedKind = (sessionID: string) => {
+  const read = readCommitted(wt.worktree, {}, sessionID)
   if (read.state !== "ok") throw new Error(`no committed workflow (${read.state})`)
   return read.wf
 }
@@ -71,7 +71,7 @@ describe("live DI -> ralplan handoff (W3)", () => {
     const h = setup()
     const { started, result } = await interview(h)
     expect(result.status).toBe("handed_off")
-    const wf = committedKind()
+    const wf = committedKind(h.SID)
     expect(wf.kind).toBe("ralplan")
     expect(wf.sessionID).toBe(h.SID)
     expect(wf.owner.instance).toBe(h.store.epoch)
@@ -79,11 +79,11 @@ describe("live DI -> ralplan handoff (W3)", () => {
     expect(wf.lineage?.predecessor).toMatchObject({ id: started.id, kind: "deep-interview", artifact: { path: `.otter/workflows/${h.SID}/${started.id}/spec.md`, sha256: sha256(readFileSync(spec)) } })
     expect(ralplanDataOf(wf as never).seed).toMatchObject({ workflowID: started.id, specSha: sha256(readFileSync(spec)) })
 
-    const archive = JSON.parse(readFileSync(join(stateRoot(wt.worktree), "workflow", "archive", `${started.id}.json`), "utf8"))
+    const archive = JSON.parse(readFileSync(join(stateRoot(wt.worktree), "sessions", h.SID, "workflow", "archive", `${started.id}.json`), "utf8"))
     expect(archive).toMatchObject({ id: started.id, kind: "deep-interview", phase: "done", stage: "terminal" })
     expect(verifiedSpec(wt.worktree, archive)).toMatchObject({ ok: true })
 
-    const events = readEvents(wt.worktree)
+    const events = readEvents(wt.worktree, undefined, h.SID)
     expect(events.map(event => event.seq)).toEqual(events.map((_, i) => events[0]!.seq + i))
     expect(events.filter(event => event.wf === wf.id && event.type === "created")).toHaveLength(1)
     expect(events.filter(event => event.wf === started.id && event.type === "spec_written")).toHaveLength(1)
@@ -101,21 +101,21 @@ describe("live DI -> ralplan handoff (W3)", () => {
     const h = setup()
     const { result } = await interview(h)
     expect(result.status).toBe("handed_off")
-    const id = committedKind().id
+    const id = committedKind(h.SID).id
     await runRalplan(h.runtime, h.SID, id)
-    const pending = committedKind()
+    const pending = committedKind(h.SID)
     expect(pending).toMatchObject({ kind: "ralplan", stage: "pending_execution", phase: "pending_approval" })
     expect(readLedger(wt.worktree, h.SID).tasks).toHaveLength(0)
-    expect(readEvents(wt.worktree, id).map(event => event.type)).not.toContain("tasks_created")
+    expect(readEvents(wt.worktree, id, h.SID).map(event => event.type)).not.toContain("tasks_created")
 
     const planSha = ralplanDataOf(pending as never).consensus!.planSha
     expect(confirmExecute(h.runtime, h.SID, id, pending.lastSeq, "yes")).toMatchObject({ ok: false })
     expect(stopHere(h.runtime, h.SID, id, pending.lastSeq - 1)).toMatchObject({ ok: false })
-    expect(committedKind()).toMatchObject({ stage: "pending_execution", phase: "pending_approval", lastSeq: pending.lastSeq })
+    expect(committedKind(h.SID)).toMatchObject({ stage: "pending_execution", phase: "pending_approval", lastSeq: pending.lastSeq })
     // the typed confirmation is a handoff to ultragoal (decompose) and still executes nothing
     const typed = confirmExecute(h.runtime, h.SID, id, pending.lastSeq, executeConfirmation(id, planSha))
     expect(typed).toMatchObject({ ok: true })
-    expect(committedKind()).toMatchObject({ kind: "ultragoal", stage: "decompose", phase: "planning" })
+    expect(committedKind(h.SID)).toMatchObject({ kind: "ultragoal", stage: "decompose", phase: "planning" })
     expect(readLedger(wt.worktree, h.SID).tasks).toHaveLength(0)
   })
 
@@ -128,7 +128,7 @@ describe("live DI -> ralplan handoff (W3)", () => {
       handoff: () => ({ ok: false, text: "not now" }),
     })
     expect(result.status).toBe("done")
-    expect(committedKind()).toMatchObject({ kind: "deep-interview", phase: "done" })
+    expect(committedKind(h.SID)).toMatchObject({ kind: "deep-interview", phase: "done" })
     expect(notices.some(text => text.includes("Connecting to ralplan was refused: not now"))).toBe(true)
   })
 })
@@ -160,7 +160,7 @@ describe("fault matrix", () => {
         },
       })
       expect(armed).toBe(true)
-      const wf = committedKind()
+      const wf = committedKind(h.SID)
       if (stage === "index-dirfsync") {
         // the index rename is the commit point: a later fault can only report failure for a committed handoff
         expect(result.status).toBe("handed_off")
@@ -174,15 +174,14 @@ describe("fault matrix", () => {
         expect(result.status).toBe("stale")
         expect(wf).toMatchObject({ id: started.wf.id, kind: "deep-interview", stage: "crystallize", phase: "planning" })
       }
-      // exactly one live occupant, and a competing start from another session is refused in the fault window
-      // (a completed interview is terminal and legitimately yields the slot; only a live occupant must refuse)
-      if (wf.phase !== "done") {
-        const competing = startDeepInterview(h.runtime, other, "steal the slot")
-        expect(competing.ok).toBe(false)
-        if (!competing.ok) expect(competing.text).toContain("is active")
-        expect(startRalplan(h.runtime, other, "steal the slot").ok).toBe(false)
-      }
+      // A live workflow still excludes another start in its own session; another session is independent.
       __setCommitFaultHook(null)
+      if (wf.phase !== "done") {
+        expect(startDeepInterview(h.runtime, h.SID, "replace own workflow").ok).toBe(false)
+        expect(startDeepInterview(h.runtime, other, "independent request").ok).toBe(true)
+        expect(committedKind(h.SID)).toEqual(wf)
+        expect(committedKind(other).sessionID).toBe(other)
+      }
       if (wf.kind === "deep-interview" && wf.phase !== "done") {
         // retry is idempotent: the spec is recrystallized and the handoff now commits exactly once
         const again = await runDeepInterview(h.runtime, h.SID, started.wf.id, io([]), {
@@ -192,9 +191,9 @@ describe("fault matrix", () => {
           },
         })
         expect(again.status).toBe("handed_off")
-        expect(committedKind()).toMatchObject({ kind: "ralplan", lineage: { predecessor: { id: started.wf.id } } })
+        expect(committedKind(h.SID)).toMatchObject({ kind: "ralplan", lineage: { predecessor: { id: started.wf.id } } })
       }
-      expect(readEvents(wt.worktree).filter(event => event.type === "created" && event.data?.kind === "ralplan").length).toBeLessThanOrEqual(1)
+      expect(readEvents(wt.worktree, undefined, h.SID).filter(event => event.type === "created" && event.data?.kind === "ralplan").length).toBeLessThanOrEqual(1)
     })
   }
 })
@@ -207,7 +206,7 @@ describe("refused handoffs change nothing", () => {
       version: 2 as const, id, kind: "deep-interview" as const, stage: "crystallize" as const, phase: "planning" as const, engine: "local",
       sessionID: h.SID, owner: { instance: owner.instance, pid: owner.pid }, stopIntent: null, artifacts: [], data: {}, lastSeq: 0, createdAt: 1, updatedAt: 1,
     }
-    const live = withFlowTransaction(wt.worktree, tx => commitRevision(tx, base as never, [{ wf: id, type: "created", actor: "code" }]))
+    const live = withFlowTransaction(wt.worktree, tx => commitRevision(tx, base as never, [{ wf: id, type: "created", actor: "code" }]), h.SID)
     const directory = workflowArtifactDirectory(wt.worktree, h.SID, id)
     mkdirSync(directory, { recursive: true })
     writeFileSync(join(directory, "spec.md"), "SPEC-BYTES\n")
@@ -216,15 +215,15 @@ describe("refused handoffs change nothing", () => {
     const events = [{ wf: id, type: "spec_written", actor: "code" as const }]
     return { id, live, done, events, specPath: join(wt.worktree, spec.path) }
   }
-  const indexBytes = () => readFileSync(workflowPath(wt.worktree))
+  const indexBytes = (sessionID: string) => readFileSync(workflowPath(wt.worktree, sessionID))
 
   test("a held session", () => {
     const h = setup()
     const s = atCrystallize(h)
     holdAdmission(wt.worktree, h.SID, "operator_hold")
-    const before = indexBytes()
+    const before = indexBytes(h.SID)
     expect(handoffToRalplan(h.runtime, h.SID, s.done, "plan it", s.events)).toMatchObject({ ok: false })
-    expect(indexBytes().equals(before)).toBe(true)
+    expect(indexBytes(h.SID).equals(before)).toBe(true)
   })
 
   for (const kind of ["pause", "cancel"] as const) test(`a pending ${kind}`, () => {
@@ -233,11 +232,11 @@ describe("refused handoffs change nothing", () => {
       const s = atCrystallize(h)
       const stop = requestStop(h.runtime, h.SID, kind, "user")
       expect(stop.result.ok).toBe(true)
-      const current = committedKind()
-      const before = indexBytes()
+      const current = committedKind(h.SID)
+      const before = indexBytes(h.SID)
       const refused = handoffToRalplan(h.runtime, h.SID, { ...s.done, lastSeq: current.lastSeq } as never, "plan it", s.events)
       expect(refused.ok).toBe(false)
-      expect(indexBytes().equals(before)).toBe(true)
+      expect(indexBytes(h.SID).equals(before)).toBe(true)
     }
   })
 
@@ -246,28 +245,28 @@ describe("refused handoffs change nothing", () => {
     const s = atCrystallize(h)
     const foreign = `ses_foreign${counter++}`
     stores.push(attachAdmission(h.runtime, foreign, { engine: "local", model: "fixture-model" }))
-    const before = indexBytes()
+    const before = indexBytes(h.SID)
     expect(handoffToRalplan(h.runtime, foreign, s.done, "plan it", s.events)).toMatchObject({ ok: false })
-    expect(indexBytes().equals(before)).toBe(true)
+    expect(indexBytes(h.SID).equals(before)).toBe(true)
   })
 
   test("a changed live epoch", () => {
     const h = setup()
     const s = atCrystallize(h)
-    const before = indexBytes()
+    const before = indexBytes(h.SID)
     const refused = handoffToRalplan(h.runtime, h.SID, { ...s.done, owner: { instance: "att_other_epoch", pid: process.pid } } as never, "plan it", s.events)
     expect(refused.ok).toBe(false)
-    expect(indexBytes().equals(before)).toBe(true)
+    expect(indexBytes(h.SID).equals(before)).toBe(true)
   })
 
   test("a spec edited before the commit", () => {
     const h = setup()
     const s = atCrystallize(h)
     writeFileSync(s.specPath, "EDITED\n")
-    const before = indexBytes()
+    const before = indexBytes(h.SID)
     const refused = handoffToRalplan(h.runtime, h.SID, s.done, "plan it", s.events)
     expect(refused.ok).toBe(false)
-    expect(indexBytes().equals(before)).toBe(true)
+    expect(indexBytes(h.SID).equals(before)).toBe(true)
     expect(existsSync(s.specPath)).toBe(true)
   })
 
@@ -275,9 +274,9 @@ describe("refused handoffs change nothing", () => {
     const h = setup()
     const { started, result } = await interview(h)
     expect(result.status).toBe("handed_off")
-    const archived = JSON.parse(readFileSync(join(stateRoot(wt.worktree), "workflow", "archive", `${started.id}.json`), "utf8"))
-    const before = indexBytes()
+    const archived = JSON.parse(readFileSync(join(stateRoot(wt.worktree), "sessions", h.SID, "workflow", "archive", `${started.id}.json`), "utf8"))
+    const before = indexBytes(h.SID)
     expect(handoffToRalplan(h.runtime, h.SID, archived, "again", [{ wf: started.id, type: "spec_written", actor: "code" as const }])).toMatchObject({ ok: false })
-    expect(indexBytes().equals(before)).toBe(true)
+    expect(indexBytes(h.SID).equals(before)).toBe(true)
   })
 })

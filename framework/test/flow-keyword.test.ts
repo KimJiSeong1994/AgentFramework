@@ -58,7 +58,7 @@ describe("legacy plan keyword -> §5.3 keyword workflow (D3)", () => {
   for (const [label, text] of KEYWORD_MESSAGES) {
     test(`'${label}' + request starts a workflow: entry keyword, request without the keyword, actor user_keyword, flow suffix only, no legacy mode state`, async () => {
       const resultText = await sendText(text)
-      const wf = readWorkflow(wt.worktree)!
+      const wf = readWorkflow(wt.worktree, S)!
       expect(wf.entry).toBe("keyword")
       expect(wf.sessionID).toBe(S)
       expect(wf.phase).toBe("planning")
@@ -66,7 +66,7 @@ describe("legacy plan keyword -> §5.3 keyword workflow (D3)", () => {
       expect(wf.request).toBe(expectedRequest)
       expect(wf.request.toLowerCase()).not.toContain(label.toLowerCase())
 
-      const events = readEvents(wt.worktree, wf.id)
+      const events = readEvents(wt.worktree, wf.id, S)
       const created = events.find((e) => e.type === "created")
       expect(created?.actor).toBe("user_keyword")
 
@@ -81,13 +81,13 @@ describe("legacy plan keyword -> §5.3 keyword workflow (D3)", () => {
 
   test("an informational question about the keyword ('what is ralplan?') starts no workflow", async () => {
     const resultText = await sendText("what is ralplan?")
-    expect(activeWorkflow(wt.worktree)).toBeNull()
+    expect(activeWorkflow(wt.worktree, S)).toBeNull()
     expect(hasFlowSuffix(resultText)).toBe(false)
   })
 
   test("force: bypasses informational suppression and starts a workflow", async () => {
     await sendText("force: what is ralplan?")
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, S)!
     expect(wf.entry).toBe("keyword")
     expect(wf.sessionID).toBe(S)
   })
@@ -95,7 +95,7 @@ describe("legacy plan keyword -> §5.3 keyword workflow (D3)", () => {
   test("flow.enabled=false: the legacy <otter-mode name=\"plan\"> suffix runs instead, no workflow", async () => {
     const deps = makeDeps(client, wt.worktree, { flow: { enabled: false, max_code_invalid: 3, max_review_iterations: 2, nudge_max: 1, review_max_tool_calls: 6 } })
     const resultText = await sendText("ralplan: add a login button", S, deps)
-    expect(activeWorkflow(wt.worktree)).toBeNull()
+    expect(activeWorkflow(wt.worktree, S)).toBeNull()
     expect(hasModeSuffix(resultText)).toBe(true)
     expect(resultText).toContain('<otter-mode name="plan">')
     const mode = readModeState(wt.worktree, S)
@@ -109,69 +109,23 @@ describe("legacy plan keyword -> §5.3 keyword workflow (D3)", () => {
     expect(resultText).toContain(`plan is off while plan workflow ${wf.id} is active; /cancel first.`)
     expect(hasFlowSuffix(resultText)).toBe(true)
     expect(hasModeSuffix(resultText)).toBe(false)
-    const after = readWorkflow(wt.worktree)!
+    const after = readWorkflow(wt.worktree, S)!
     expect(after.id).toBe(wf.id)
     expect(after.phase).toBe("planning")
   })
 
-  test("foreign session with a dead owner + keyword refuses without replacing or dispatching", async () => {
+  test.each(["live", "dead"])("a %s foreign workflow stays unchanged while this session starts independently", async liveness => {
     mkdirSync(sessionDir(wt.worktree, OTHER), { recursive: true })
-    const old = putWorkflow(OTHER, { phase: "planning", owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 } })
-    const workflowBefore = readFileSync(workflowPath(wt.worktree))
-    const eventsBefore = (() => {
-      try {
-        return readFileSync(eventsPath(wt.worktree))
-      } catch {
-        return null
-      }
-    })()
-    const callsBefore = client.calls.length
-
+    const old = putWorkflow(OTHER, liveness === "dead" ? { phase: "planning", owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 } } : { phase: "planning" })
+    const workflowBefore = readFileSync(workflowPath(wt.worktree, OTHER))
+    const eventsBefore = readEvents(wt.worktree, old.id, OTHER)
     const resultText = await sendText("ralplan: add a login button", S)
-
-    expect(resultText).toContain(`session ${OTHER}`)
-    expect(resultText).toContain(`/resume ${OTHER}`)
-    expect(readFileSync(workflowPath(wt.worktree))).toEqual(workflowBefore)
-    const eventsAfter = (() => {
-      try {
-        return readFileSync(eventsPath(wt.worktree))
-      } catch {
-        return null
-      }
-    })()
-    expect(eventsAfter).toEqual(eventsBefore)
-    expect(readWorkflow(wt.worktree)?.id).toBe(old.id)
-    expect(readWorkflow(wt.worktree)?.phase).toBe("planning")
-    expect(client.calls.length).toBe(callsBefore)
-  })
-
-  test("foreign session with a live owner + keyword -> refusal text, no mutation", async () => {
-    mkdirSync(sessionDir(wt.worktree, OTHER), { recursive: true }) // owner liveness requires the owning session to exist
-    const old = putWorkflow(OTHER, { phase: "planning" }) // currentOwner(): this process, live
-    const wfBefore = readFileSync(workflowPath(wt.worktree))
-    const evBefore = (() => {
-      try {
-        return readFileSync(eventsPath(wt.worktree))
-      } catch {
-        return null
-      }
-    })()
-
-    const resultText = await sendText("ralplan: add a login button", S)
-    expect(resultText).toContain(`plan workflow ${old.id}`)
-    expect(resultText).toContain(`session ${OTHER}`)
-    expect(resultText).toContain(`/resume ${OTHER}`)
-
-    expect(readFileSync(workflowPath(wt.worktree))).toEqual(wfBefore)
-    const evAfter = (() => {
-      try {
-        return readFileSync(eventsPath(wt.worktree))
-      } catch {
-        return null
-      }
-    })()
-    expect(evAfter).toEqual(evBefore)
-    expect(readWorkflow(wt.worktree)!.id).toBe(old.id)
+    expect(hasFlowSuffix(resultText)).toBe(true)
+    const own = readWorkflow(wt.worktree, S)!
+    expect(own.sessionID).toBe(S)
+    expect(own.id).not.toBe(old.id)
+    expect(readFileSync(workflowPath(wt.worktree, OTHER))).toEqual(workflowBefore)
+    expect(readEvents(wt.worktree, old.id, OTHER)).toEqual(eventsBefore)
     expect(client.calls.length).toBe(0)
   })
 })

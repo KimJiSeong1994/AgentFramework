@@ -7,7 +7,7 @@
 // `git diff HEAD`, untracked non-ignored files copied), so a task sees earlier tasks' results and the user's WIP.
 // Child sessions are bound to the worktree with the SDK's per-request `directory` (verified on OpenCode 1.18.32:
 // `POST /session?directory=` and `GET /file/content?directory=` both resolve inside that directory).
-import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmdirSync, unlinkSync, writeFileSync, writeSync, type Stats } from "node:fs"
+import { closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmdirSync, unlinkSync, writeFileSync, writeSync, type Stats } from "node:fs"
 import { basename, dirname, join, relative, resolve, sep } from "node:path"
 import { stateBase, worktreeKey } from "../state/store.ts"
 import { hasGitMetadata, safeGit as git, safeGitBuffer as gitBuffer, safeGitSync } from "./git-boundary.ts"
@@ -28,7 +28,7 @@ export type TaskWorktree = {
    * Read-only view of the worktree's cumulative change against its durable baseline: changed files, a diff stat and the
    * path of the preserved patch. Writes only the patch file beside the worktree; `""` patch means no changes.
    */
-  preview(diffExclude: string[]): Promise<{ ok: true; files: string[]; stat: string; patch: string } | { ok: false; reason: string }>
+  preview(diffExclude: string[]): Promise<{ ok: true; tree: string; files: string[]; stat: string; patch: string } | { ok: false; reason: string }>
   /** Remove only the verified linked worktree and its durable recovery data. */
   remove(): Promise<void>
 }
@@ -687,7 +687,7 @@ function bindTaskWorktree(mainWorktree: string, paths: WorktreePaths & { baseDir
       catch { return { ok: false, reason: "task worktree ownership changed" } }
       const after = await store.snapshot(ownership.diffExclude)
       if (!after) return { ok: false, reason: "could not snapshot the worktree" }
-      if (after.tree === baseline.tree) return { ok: true, files: [], stat: "", patch: "" }
+      if (after.tree === baseline.tree) return { ok: true, tree: after.tree, files: [], stat: "", patch: "" }
       const raw = await gitBuffer(paths.child, ["diff", "--binary", baseline.tree, after.tree], store.env)
       const names = await gitBuffer(paths.child, ["diff", "--name-only", "-z", baseline.tree, after.tree], store.env)
       const stat = await git(paths.child, ["diff", "--stat", baseline.tree, after.tree], store.env)
@@ -697,7 +697,7 @@ function bindTaskWorktree(mainWorktree: string, paths: WorktreePaths & { baseDir
         if (lstatOrNull(patchFile)) unlinkOwnedFile(patchFile)
         writeFileSync(patchFile, raw, { flag: "wx", mode: 0o600 })
       } catch { return { ok: false, reason: "could not preserve the patch" } }
-      return { ok: true, files: nulPaths(names), stat, patch: patchFile }
+      return { ok: true, tree: after.tree, files: nulPaths(names), stat, patch: patchFile }
     },
     async remove() {
       assertOwnershipSync(mainWorktree, paths, ownership)
@@ -788,7 +788,8 @@ function nulPaths(bytes: Buffer): string[] {
 function copyRegularFile(src: string, dst: string, rel: string): void {
   const input = openSync(src, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
-    if (!fstatSync(input).isFile()) throw new Error(`git-config: nonregular import ${rel}`)
+    const info = fstatSync(input)
+    if (!info.isFile()) throw new Error(`git-config: nonregular import ${rel}`)
     const output = openSync(dst, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666)
     try {
       const chunk = Buffer.allocUnsafe(64 * 1024)
@@ -797,6 +798,8 @@ function copyRegularFile(src: string, dst: string, rel: string): void {
         let offset = 0
         while (offset < count) offset += writeSync(output, chunk, offset, count - offset)
       }
+      // Preserve ordinary file permissions, including executable scripts, but never privilege bits.
+      fchmodSync(output, info.mode & 0o777)
     } finally {
       closeSync(output)
     }

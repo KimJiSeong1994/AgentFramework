@@ -884,14 +884,14 @@ async function main(): Promise<void> {
     startupStage("runInteractiveSession-returned")
     record("session.exit", { code: result.code })
     if (flowScenario) {
-      const wf = readWorkflow(worktree)
+      const sid = `otter-${sessionPrefix}`
+      const wf = readWorkflow(worktree, sid)
       const wid = wf?.id ?? ""
-      const sid = wf?.sessionID ?? sessionPrefix
       const root = stateRoot(worktree)
       const listing = (dir: string): string[] => { try { return readdirSync(join(root, dir)) } catch { return [] } }
       report.stopEvidence = {
         phase: wf?.phase ?? null, stopKind: wf?.stopIntent?.kind ?? null,
-        eventTypes: readEvents(worktree, wid).map(event => event.type),
+        eventTypes: readEvents(worktree, wid, sid).map(event => event.type),
         checkpoints: listing(`sessions/${sid}/workflows/${wid}/checkpoints`),
         revisions: listing(`sessions/${sid}/workflows/${wid}/revisions`).length,
         taskStatuses: readLedger(worktree, sid).tasks.map(task => task.status),
@@ -982,16 +982,16 @@ async function main(): Promise<void> {
       }))
     }
     if (workflowScenario) {
-      const read = readCommitted(worktree)
       const sid = `otter-${sessionPrefix}`
+      const read = readCommitted(worktree, {}, sid)
       report.workflowEvidence = {
         state: read.state,
         kind: read.state === "ok" ? read.wf.kind : null,
         stage: read.state === "ok" ? read.wf.stage : null,
         phase: read.state === "ok" ? read.wf.phase : null,
         lineage: read.state === "ok" ? read.wf.lineage ?? null : null,
-        created: readEvents(worktree).filter(event => event.type === "created").map(event => (event.data as { kind?: string } | undefined)?.kind ?? null),
-        eventTypes: readEvents(worktree).map(event => event.type),
+        created: readEvents(worktree, undefined, sid).filter(event => event.type === "created").map(event => (event.data as { kind?: string } | undefined)?.kind ?? null),
+        eventTypes: readEvents(worktree, undefined, sid).map(event => event.type),
         ledgerTasks: readLedger(worktree, sid).tasks.length,
         gjcDirectory: existsSync(join(worktree, ".gjc")),
         implementationFiles: readdirSync(worktree).filter(name => !["README.md", ".agents", ".git", ".otter", ".pty-model-bin"].includes(name)),

@@ -27,6 +27,19 @@ function fixture(id: string): ReferenceFixture {
 }
 
 describe("KeyDecoder", () => {
+  test("Kitty functional keys never become private-use text and associated text decodes codepoints", () => {
+    const decoder = new KeyDecoder()
+    expect(decoder.feed("\x1b[57414u\x1b[57352u\x1b[57364u")).toEqual([
+      { type: "key", key: "enter" }, { type: "key", key: "up" }, { type: "key", key: "f1" },
+    ])
+    expect(decoder.feed("\x1b[97;1;97:54620u")).toEqual([{ type: "text", text: "a한" }])
+    expect(decoder.feed("\x1b[97;1;1114112u")).toEqual([])
+    expect(decoder.feed("\x1b[97;1;55296u")).toEqual([])
+    expect(decoder.feed("\x1b[57358u")).toEqual([])
+    expect(decoder.feed("\x1b[57400u")).toEqual([{ type: "key", key: "end" }])
+    expect(decoder.feed("\x1b[57400;129u")).toEqual([{ type: "text", text: "1" }])
+  })
+
   test("keeps legacy Ctrl+J distinct from carriage-return submission", () => {
     const decoder = new KeyDecoder()
     expect(decoder.feed("\n\r")).toEqual([

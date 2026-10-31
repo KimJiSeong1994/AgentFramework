@@ -84,14 +84,14 @@ describe("no GJC at runtime", () => {
         },
       })
       expect(result.status).toBe("handed_off")
-      const read = readCommitted(wt.worktree)
+      const read = readCommitted(wt.worktree, {}, h.SID)
       expect(read.state === "ok" && read.wf.kind).toBe("ralplan")
       if (read.state === "ok") expect((await runRalplan(h.runtime, h.SID, read.wf.id)).status).toBe("pending_execution")
       expect(existsSync(marker)).toBe(false)
       expect(existsSync(join(wt.worktree, ".gjc"))).toBe(false)
       expect(existsSync(join(home, ".gjc"))).toBe(false)
       expect(readdirSync(home)).toEqual([])
-      expect(readEvents(wt.worktree).length).toBeGreaterThan(0)
+      expect(readEvents(wt.worktree, undefined, h.SID).length).toBeGreaterThan(0)
     } finally {
       process.env.PATH = previous.PATH
       if (previous.HOME === undefined) delete process.env.HOME
@@ -151,26 +151,28 @@ describe("prompts and descriptors carry no executable GJC instructions", () => {
 })
 
 describe("protected names cannot be redirected", () => {
-  test("two sessions starting a deep-interview back to back (serialized by the flow lock) commit exactly one; the loser observes", () => {
+  test("two sessions start independent deep interviews without replacing each other", () => {
     const h = setup()
     const other = `ses_bw${counter++}`
     stores.push(attachAdmission(h.runtime, other, { engine: "local", model: "fixture-model" }))
     const first = startDeepInterview(h.runtime, h.SID, "one")
     const second = startDeepInterview(h.runtime, other, "two")
-    expect([first.ok, second.ok].filter(Boolean)).toHaveLength(1)
-    const loser = first.ok ? second : first
-    if (!loser.ok) expect(loser.text).toContain("is active")
-    expect(readEvents(wt.worktree).filter(event => event.type === "created")).toHaveLength(1)
+    expect(first.ok).toBe(true)
+    expect(second.ok).toBe(true)
+    expect(readCommitted(wt.worktree, {}, h.SID)).toMatchObject({ state: "ok", wf: { sessionID: h.SID, id: first.ok ? first.wf.id : "" } })
+    expect(readCommitted(wt.worktree, {}, other)).toMatchObject({ state: "ok", wf: { sessionID: other, id: second.ok ? second.wf.id : "" } })
+    expect(readEvents(wt.worktree, undefined, other).filter(event => event.type === "created")).toHaveLength(1)
+    expect(readEvents(wt.worktree, undefined, h.SID).filter(event => event.type === "created")).toHaveLength(1)
   })
 
   test("a ralplan start while a deep-interview is live is refused and the committed workflow is unchanged", () => {
     const h = setup()
     const first = startDeepInterview(h.runtime, h.SID, "build")
     if (!first.ok) throw new Error(first.text)
-    const before = readCommitted(wt.worktree)
+    const before = readCommitted(wt.worktree, {}, h.SID)
     const refused = startRalplan(h.runtime, h.SID, "plan")
     expect(refused.ok).toBe(false)
-    expect(readCommitted(wt.worktree)).toEqual(before)
+    expect(readCommitted(wt.worktree, {}, h.SID)).toEqual(before)
   })
 
   test("ultragoal and autoresearch names start exactly one owner kind and still grant no execution", () => {
@@ -179,7 +181,7 @@ describe("protected names cannot be redirected", () => {
     expect(startRefusal("autoresearch")).toBeUndefined()
     const ug = startUltragoal(h.runtime, h.SID, "ship")
     expect(ug.ok).toBe(true)
-    expect(readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)).toEqual(["ultragoal"])
+    expect(readEvents(wt.worktree, undefined, h.SID).filter(event => event.type === "created").map(event => event.data?.kind)).toEqual(["ultragoal"])
     expect(startAutoresearch(h.runtime, h.SID, "research")).toMatchObject({ ok: false })
   })
 
@@ -191,8 +193,8 @@ describe("protected names cannot be redirected", () => {
     if (!started.ok) throw new Error(started.text)
     const result = await runDeepInterview(h.runtime, h.SID, started.wf.id, io([]), {})
     expect(result.status).toBe("stuck")
-    expect(readEvents(wt.worktree).filter(event => event.type === "created")).toHaveLength(1)
-    const committed = readCommitted(wt.worktree)
+    expect(readEvents(wt.worktree, undefined, h.SID).filter(event => event.type === "created")).toHaveLength(1)
+    const committed = readCommitted(wt.worktree, {}, h.SID)
     expect(committed.state === "ok" && committed.wf.kind).toBe("deep-interview")
   })
 })

@@ -62,7 +62,8 @@ trap 'rm -rf "$TMP"' EXIT
 RESULTS="$TMP/results.tsv"; : > "$RESULTS"
 N_WARN=0; N_FAIL=0
 
-with_timeout() { perl -e 'alarm shift; exec @ARGV or exit 127' "$@"; }
+# The timeout wrapper must run even when the caller's locale is unavailable (macOS Perl can panic).
+with_timeout() { LC_ALL=C LANG=C perl -e 'alarm shift; exec @ARGV or exit 127' "$@"; }
 clean() { printf '%s' "$1" | tr '\n\t' '  ' | sed 's/  */ /g'; }
 
 report() { # status id name observed expected [fix]

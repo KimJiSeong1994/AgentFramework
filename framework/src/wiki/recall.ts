@@ -4,7 +4,8 @@
 // Ollama CLI run through the Otter CLI transport. Returned text is reference data, never instructions or tool
 // authority (knowledge/AGENTS.md "안전 및 개인정보"). Writing memory stays with capture/register + llm-wiki ingest.
 import { createHash } from "node:crypto"
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs"
+import { realpathSync } from "node:fs"
+import { FdTree, type FdStat } from "../skills/fd-tree.ts"
 import { join } from "node:path"
 import { z } from "zod"
 import { loadConfig, type OtterConfig } from "../config.ts"
@@ -101,38 +102,17 @@ export function currentMemoryConfig(worktree: string): OtterConfig["memory"] | u
 /** Test seam for the CLI engines; production uses the hardened Otter CLI transport. */
 export type MemoryTransportFactory = (options: CliTransportOptions) => CliTransportHandle
 
-function realDirectory(path: string): boolean {
+/** Read through held, no-follow ancestors and reject hardlinks and oversized pages. */
+function readPage(tree: FdTree, path: string): string | undefined {
   try {
-    const info = lstatSync(path)
-    return info.isDirectory() && !info.isSymbolicLink()
-  } catch {
-    return false
-  }
+    if (tree.statRelative(path).size > BigInt(MAX_PAGE_BYTES)) return undefined
+    const text = tree.readFileRelative(path).bytes.toString("utf8")
+    tree.assertStable()
+    return text.includes("\uFFFD") || text.includes("\0") ? undefined : text
+  } catch { return undefined }
 }
 
-/** Regular, single-link, bounded UTF-8 files only; symlinks are never followed. */
-function readPage(path: string): string | undefined {
-  let fd: number
-  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK) }
-  catch { return undefined }
-  try {
-    const info = fstatSync(fd)
-    if (!info.isFile() || info.nlink !== 1 || info.size > MAX_PAGE_BYTES) return undefined
-    const buffer = Buffer.alloc(info.size)
-    let offset = 0
-    while (offset < buffer.length) {
-      const read = readSync(fd, buffer, offset, buffer.length - offset, offset)
-      if (read === 0) break
-      offset += read
-    }
-    const text = buffer.subarray(0, offset).toString("utf8")
-    return text.includes("\uFFFD") || text.includes("\0") ? undefined : text
-  } catch {
-    return undefined
-  } finally {
-    closeSync(fd)
-  }
-}
+type CatalogSnapshot = { root: string; identity: Pick<FdStat, "dev" | "ino">; catalog: MemoryCandidate[] }
 
 const clip = (text: string, max: number) => [...text].length > max ? `${[...text].slice(0, max).join("")}…` : text
 
@@ -141,21 +121,29 @@ const clip = (text: string, max: number) => [...text].length > max ? `${[...text
  * deduplicated, at most 16 (the router's catalog bound). Source/report pages are evidence, not memory candidates.
  */
 export function memoryCatalog(worktree: string): MemoryCandidate[] | null {
-  const wiki = join(worktree, "knowledge", "wiki")
-  if (!realDirectory(join(worktree, "knowledge")) || !realDirectory(wiki)) return null
-  const index = readPage(join(wiki, "index.md"))
-  if (index === undefined) return null
-  const seen = new Set<string>()
-  const out: MemoryCandidate[] = []
-  for (const match of index.matchAll(/^\s*[-*]\s+\[([^\]\n]+)\]\(((?:concepts|entities)\/[a-z0-9][a-z0-9._-]*\.md)\)\s*(?:[—:-]+\s*(.*))?$/gmu)) {
-    const [, title, path, description] = match
-    if (seen.has(path!) || !realDirectory(join(wiki, path!.split("/")[0]!))) continue
-    if (readPage(join(wiki, path!)) === undefined) continue
-    seen.add(path!)
-    out.push({ path: path!, title: clip(title!.trim(), 120), description: clip((description ?? "").trim(), MAX_DESCRIPTION_CHARS) })
-    if (out.length >= MAX_CANDIDATES) break
-  }
-  return out
+  return catalogSnapshot(worktree)?.catalog ?? null
+}
+
+function catalogSnapshot(worktree: string): CatalogSnapshot | null {
+  let tree: FdTree | undefined
+  try {
+    const root = realpathSync(worktree)
+    tree = FdTree.openRoot(root)
+    const index = readPage(tree, "knowledge/wiki/index.md")
+    if (index === undefined) return null
+    const seen = new Set<string>()
+    const catalog: MemoryCandidate[] = []
+    for (const match of index.matchAll(/^\s*[-*]\s+\[([^\]\n]+)\]\(((?:concepts|entities)\/[a-z0-9][a-z0-9._-]*\.md)\)\s*(?:[—:-]+\s*(.*))?$/gmu)) {
+      const [, title, path, description] = match
+      if (seen.has(path!) || readPage(tree, `knowledge/wiki/${path!}`) === undefined) continue
+      seen.add(path!)
+      catalog.push({ path: path!, title: clip(title!.trim(), 120), description: clip((description ?? "").trim(), MAX_DESCRIPTION_CHARS) })
+      if (catalog.length >= MAX_CANDIDATES) break
+    }
+    tree.assertStable()
+    return { root, identity: tree.root.openedStat, catalog }
+  } catch { return null }
+  finally { tree?.close() }
 }
 
 /** Opening of the page body after its H1: enough to decide whether to read the whole page. */
@@ -226,8 +214,9 @@ export async function recallMemory(
   const text = typeof query === "string" ? query.trim() : ""
   if (!text || text.length > MAX_QUERY_CHARS || text.includes("\0")) return { status: "unavailable", reason: "input_bound" }
   if (containsSecret(text)) return { status: "unavailable", reason: "sensitive_input" }
-  const catalog = memoryCatalog(worktree)
-  if (catalog === null) return { status: "unavailable", reason: "no_wiki" }
+  const snapshot = catalogSnapshot(worktree)
+  if (snapshot === null) return { status: "unavailable", reason: "no_wiki" }
+  const { catalog } = snapshot
   if (catalog.length === 0) return { status: "unavailable", reason: "no_candidates" }
   const criteria: Record<string, string> = Object.fromEntries(catalog.map((page) => [page.path, `${page.title} — ${page.description}`]))
   criteria[NONE] = "No listed page is about this request: unrelated topic, too vague, or only general knowledge is needed."
@@ -236,7 +225,7 @@ export async function recallMemory(
   if (cached && Date.now() - cached.at <= SCORE_CACHE_TTL_MS) {
     scoreCache.delete(key)
     scoreCache.set(key, cached)
-    return linkScores(worktree, config, catalog, cached.scores)
+    return linkScores(snapshot, config, cached.scores)
   }
   if (cached) scoreCache.delete(key)
   if (inFlight) return { status: "unavailable", reason: "busy" }
@@ -265,7 +254,7 @@ export async function recallMemory(
     if (!classified.ok) return { status: "unavailable", reason: classified.reason }
     scoreCache.set(key, { scores: classified.scores, at: Date.now() })
     while (scoreCache.size > SCORE_CACHE_ENTRIES) scoreCache.delete(scoreCache.keys().next().value!)
-    return linkScores(worktree, config, catalog, classified.scores)
+    return linkScores(snapshot, config, classified.scores)
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener("abort", abort)
@@ -274,10 +263,11 @@ export async function recallMemory(
 }
 
 function linkScores(
-  worktree: string, config: Omit<z.infer<typeof settingsSchema>, "engine"> & { engine: ResolvedMemoryEngine },
-  catalog: MemoryCandidate[], scores: MemoryScores,
+  snapshot: CatalogSnapshot, config: Omit<z.infer<typeof settingsSchema>, "engine"> & { engine: ResolvedMemoryEngine },
+  scores: MemoryScores,
 ): MemoryRecall {
   {
+    const { catalog } = snapshot
     const none = scores.probabilities[NONE]!
     // Several pages may be linked: memory is split across pages, unlike a single skill choice.
     const links = catalog
@@ -287,8 +277,13 @@ function linkScores(
       .slice(0, config.max_pages)
       .flatMap(({ page, probability }) => {
         // Re-read after inference: a page removed or replaced by a symlink meanwhile is not returned.
-        const current = readPage(join(worktree, "knowledge", "wiki", page.path))
-        return current === undefined ? [] : [{ ...page, probability, head: pageHead(current) }]
+        let tree: FdTree | undefined
+        try {
+          tree = FdTree.openRoot(snapshot.root, snapshot.identity)
+          const current = readPage(tree, `knowledge/wiki/${page.path}`)
+          return current === undefined ? [] : [{ ...page, probability, head: pageHead(current) }]
+        } catch { return [] }
+        finally { tree?.close() }
       })
     if (links.length === 0) return { status: "abstained", engine: config.engine, candidates: catalog.length, scores }
     return { status: "linked", engine: config.engine, links, candidates: catalog.length, scores }
@@ -335,6 +330,7 @@ export async function takeMemoryPrefetch(sessionID: string, signal?: AbortSignal
   const entry = prefetches.get(sessionID)
   if (!entry) return undefined
   prefetches.delete(sessionID)
+  if (signal?.aborted) entry.controller.abort()
   if (Date.now() - entry.at > PREFETCH_TTL_MS) { entry.controller.abort(); return undefined }
   const onAbort = () => entry.controller.abort()
   signal?.addEventListener("abort", onAbort, { once: true })

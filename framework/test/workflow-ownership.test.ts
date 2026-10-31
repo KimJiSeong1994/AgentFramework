@@ -113,19 +113,19 @@ describe("SE5 resolveAuthority and reattach against real attachments", () => {
     const before = controlTree(wt.worktree)
     for (const cmd of MUTATIONS) {
       const result = resolveAuthority(host, cmd, B, "opencode")
-      expect(result.refuse).toContain(`session ${A}`)
-      expect(result.refuse).toContain(`/resume ${A}`)
+      expect(result.refuse).toBeUndefined()
+      expect(result.wf).toBeNull()
     }
     const start = startWorkflow(host, B, "command", "steal", "user_command", "opencode")
     expect(start.ok).toBe(false)
-    if (!start.ok) expect(start.text).toContain(`/resume ${A}`)
+    if (!start.ok) expect(start.text).toContain(`session ${B} has no live admission`)
     expect(controlTree(wt.worktree)).toEqual(before)
     expect(readWorkflow(wt.worktree)?.id).toBe(wf.id)
   })
 })
 
 describe("W9 reattach keeps the same id and slot", () => {
-  test("the reattached workflow keeps its id; another sid's start still refuses and the heartbeat is untouched", () => {
+  test("the reattached workflow keeps its id; an unadmitted sid cannot start and the heartbeat is untouched", () => {
     const host = ownerHost(wt.worktree)
     const { wf, store } = releasedWithHeldStore(wt.worktree, host, A, { phase: "planning" })
     const heartbeatBefore = readHeartbeat(wt.worktree, wf)
@@ -135,13 +135,13 @@ describe("W9 reattach keeps the same id and slot", () => {
     expect(readWorkflow(wt.worktree)?.id).toBe(wf.id)
     const start = startWorkflow(host, B, "command", "other", "user_command", "opencode")
     expect(start.ok).toBe(false)
-    if (!start.ok) expect(start.text).toContain(`session ${A}`)
+    if (!start.ok) expect(start.text).toContain(`session ${B} has no live admission`)
     expect(readHeartbeat(wt.worktree, wf)).toBe(heartbeatBefore)
   })
 })
 
 describe("SE6 restore follows its own sid-bound workflow", () => {
-  test("with the index on B's workflow, A's restore returns A's retained terminal history or null and never adopts B", () => {
+  test("each session retains its own current index and never adopts the other workflow", () => {
     const host = ownerHost(wt.worktree)
     attachAdmission(host, A, { engine: "opencode" })
     const first = startWorkflow(host, A, "command", "a work", "user_command", "opencode")
@@ -154,7 +154,7 @@ describe("SE6 restore follows its own sid-bound workflow", () => {
     if (!second.ok) throw new Error(second.text)
 
     const mine = readSessionCommitted(wt.worktree, A)
-    expect(mine).toMatchObject({ current: false, wf: { id: first.wf.id, sessionID: A, phase: "cancelled" } })
+    expect(mine).toMatchObject({ current: true, wf: { id: first.wf.id, sessionID: A, phase: "cancelled" } })
     expect(mine?.path).toContain(`sessions/${A}/workflows/${first.wf.id}/revisions/`)
     expect(mine?.wf.id).not.toBe(second.wf.id)
     expect(readSessionCommitted(wt.worktree, B)).toMatchObject({ current: true, wf: { id: second.wf.id } })

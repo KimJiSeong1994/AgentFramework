@@ -6,15 +6,17 @@
 // (orchestration/snapshot.ts: private index and object directory, the user's index/HEAD/objects untouched), so files a
 // command created, changed or deleted are covered. Outside Git only the files the model wrote or edited are backed up;
 // a command's effects there cannot be undone and are reported as such.
-import { lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { dirname, isAbsolute, join, relative, resolve } from "node:path"
+import { lstatSync, realpathSync } from "node:fs"
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { createSnapshotStore, type Snapshot, type SnapshotStore } from "../orchestration/snapshot.ts"
+import { FdTree, FdTreeError, type FdStat } from "../skills/fd-tree.ts"
 
 /** Turns kept for `/undo`; older ones are dropped. */
 export const MAX_CHECKPOINT_TURNS = 10
 const MAX_BACKUP_BYTES = 8 * 1024 * 1024
 
-type FileBackup = { path: string; before: Buffer | null; after?: Buffer | null }
+type FileState = { bytes: Buffer; stat: FdStat } | null
+type FileBackup = { path: string; before: FileState; after?: FileState }
 
 type TurnCheckpoint = {
   id: number
@@ -48,7 +50,8 @@ export type ChatCheckpoints = {
 }
 
 export function createChatCheckpoints(worktree: string, label: () => string): ChatCheckpoints {
-  const root = resolve(worktree)
+  const root = realpathSync(worktree)
+  const rootIdentity = lstatSync(root, { bigint: true })
   const turns: TurnCheckpoint[] = []
   let current: TurnCheckpoint | undefined
   let store: SnapshotStore | null | undefined
@@ -65,13 +68,22 @@ export function createChatCheckpoints(worktree: string, label: () => string): Ch
     const rel = relative(root, absolute)
     return rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel : undefined
   }
-  const read = (rel: string): Buffer | null => {
-    const absolute = join(root, rel)
+  const readFrom = (tree: FdTree, rel: string): FileState => {
     try {
-      const stat = lstatSync(absolute)
-      if (!stat.isFile() || stat.size > MAX_BACKUP_BYTES) return null
-      return readFileSync(absolute)
-    } catch { return null }
+      if (tree.statRelative(rel).size > BigInt(MAX_BACKUP_BYTES)) throw new Error("checkpoint file exceeds limit")
+      return tree.readFileRelative(rel)
+    } catch (error) {
+      if (error instanceof FdTreeError && error.code === 2) return null
+      throw error
+    }
+  }
+  const read = (rel: string): FileState => {
+    const tree = FdTree.openRoot(root, rootIdentity)
+    try {
+      const value = readFrom(tree, rel)
+      tree.assertStable()
+      return value
+    } finally { tree.close() }
   }
 
   return {
@@ -89,14 +101,19 @@ export function createChatCheckpoints(worktree: string, label: () => string): Ch
       if (current.git) return
       if (effect.tool === "bash") { current.uncovered = true; return }
       const rel = effect.path ? inside(effect.path) : undefined
-      if (rel && !current.files.has(rel)) current.files.set(rel, { path: rel, before: read(rel) })
+      if (rel && !current.files.has(rel)) {
+        try { current.files.set(rel, { path: rel, before: read(rel) }) }
+        catch { current.uncovered = true }
+      }
     },
     async endTurn() {
       const turn = current
       current = undefined
       if (!turn) return
       if (turn.git && store) turn.git.after = await store.snapshot().catch(() => null) ?? undefined
-      for (const file of turn.files.values()) file.after = read(file.path)
+      for (const file of turn.files.values()) {
+        try { file.after = read(file.path) } catch { turn.uncovered = true }
+      }
     },
     list() {
       return turns.filter(turn => !turn.undone).reverse().map(turn => ({ id: turn.id, label: turn.label, at: turn.at,
@@ -107,6 +124,7 @@ export function createChatCheckpoints(worktree: string, label: () => string): Ch
       if (!turn || turn === current) return undefined
       const restored: string[] = []
       const skipped: string[] = []
+      if (turn.git && (!turn.git.after || !store)) throw new Error("undo unavailable: the turn's final Git checkpoint could not be captured")
       if (turn.git?.before && turn.git.after && store) {
         const changed = await store.diff(turn.git.before, turn.git.after, 0)
         const now = await store.snapshot().catch(() => null)
@@ -120,13 +138,19 @@ export function createChatCheckpoints(worktree: string, label: () => string): Ch
         restored.push(...await store.restore(turn.git.before, restorable))
       } else {
         for (const file of turn.files.values()) {
-          const now = read(file.path)
-          const unchangedSince = (now === null && (file.after ?? null) === null) || (now !== null && file.after && now.equals(file.after))
-          if (!unchangedSince) { skipped.push(file.path); continue }
-          const absolute = join(root, file.path)
-          if (file.before === null) rmSync(absolute, { force: true })
-          else { mkdirSync(dirname(absolute), { recursive: true }); writeFileSync(absolute, file.before) }
-          restored.push(file.path)
+          let tree: FdTree | undefined
+          try {
+            if (file.after === undefined) throw new Error("checkpoint unavailable")
+            tree = FdTree.openRoot(root, rootIdentity)
+            const now = readFrom(tree, file.path)
+            const unchangedSince = now === null ? file.after === null : file.after !== null &&
+              now.stat.dev === file.after.stat.dev && now.stat.ino === file.after.stat.ino && now.bytes.equals(file.after.bytes)
+            if (!unchangedSince) throw new Error("checkpoint target changed")
+            const parent = dirname(file.path) === "." ? tree.root : tree.openDirectoryRelative(dirname(file.path))
+            tree.restoreFileAt(parent, basename(file.path), now, file.before?.bytes ?? null)
+            restored.push(file.path)
+          } catch { skipped.push(file.path) }
+          finally { tree?.close() }
         }
       }
       turn.undone = true

@@ -58,7 +58,7 @@ export class PlanIsolationSetupError extends Error {
 }
 
 export type PlanWorktreeReview =
-  | { ok: true; workflowID: string; path: string; files: string[]; stat: string; patch: string }
+  | { ok: true; workflowID: string; path: string; tree: string; files: string[]; stat: string; patch: string }
   | { ok: false; workflowID: string; reason: string }
 
 export type PlanWorktreeApply =
@@ -665,7 +665,7 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
     try {
       const wt = await openPlanWorktree(sessionID, workflowID)
       const preview = await wt.preview(runtime.config.delegate.diff_exclude)
-      return preview.ok ? { ok: true, workflowID, path: wt.path, files: preview.files, stat: preview.stat, patch: preview.patch } : { ok: false, workflowID, reason: preview.reason }
+      return preview.ok ? { ok: true, workflowID, path: wt.path, tree: preview.tree, files: preview.files, stat: preview.stat, patch: preview.patch } : { ok: false, workflowID, reason: preview.reason }
     } catch (error) { return { ok: false, workflowID, reason: (error as Error).message ?? String(error) } }
   }
 
@@ -673,9 +673,10 @@ export function createForegroundController(runtime: ExecutionRuntime, options: C
    * Apply the whole run to the checkout in one step (`git apply --check` first, apply marker, apply) and remove the
    * worktree only after it applied. A patch that does not apply leaves the checkout, the worktree and the patch intact.
    */
-  async function applyPlanWorktree(sessionID: string, workflowID: string): Promise<PlanWorktreeApply> {
+  async function applyPlanWorktree(sessionID: string, workflowID: string, expectedTree: string): Promise<PlanWorktreeApply> {
+    if (typeof expectedTree !== "string" || !expectedTree) return { ok: false, workflowID, reason: "review the plan worktree before applying", patch: "" }
     const wt = await openPlanWorktree(sessionID, workflowID)
-    const merged = await wt.merge(runtime.config.delegate.diff_exclude)
+    const merged = await wt.merge(runtime.config.delegate.diff_exclude, undefined, expectedTree)
     if (!merged.ok) return { ok: false, workflowID, reason: merged.reason, patch: merged.patch }
     await wt.remove()
     return { ok: true, workflowID, files: merged.files }

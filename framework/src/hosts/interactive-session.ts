@@ -2565,7 +2565,7 @@ export async function runInteractiveSession(
           await selection.controller.discardPlanWorktree(sessionID, workflowID)
           terminal.write("Worktree discarded; your checkout was not changed.\n")
         } else {
-          const applied = await selection.controller.applyPlanWorktree(sessionID, workflowID)
+          const applied = await selection.controller.applyPlanWorktree(sessionID, workflowID, review.tree)
           if (applied.ok) terminal.write(terminalSafeText(`Applied ${applied.files.length} file(s) to your checkout; worktree removed.\n`))
           else {
             let kept = applied.patch

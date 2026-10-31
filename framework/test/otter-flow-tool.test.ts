@@ -36,7 +36,7 @@ afterEach(() => {
 
 function putWorkflow(patch: Record<string, unknown> = {}) {
   const wf = { ...newWorkflow(S, currentOwner(Date.now(), owner.epoch), "command", "do the thing", "opencode"), ...patch }
-  return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf as any))
+  return withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf as any), S)
 }
 
 function ctx(sessionID = S, agent = "main") {
@@ -92,7 +92,7 @@ function readIfPresent(path: string) {
 }
 
 function statusInputSnapshot() {
-  return [workflowPath(wt.worktree), ledgerPath(wt.worktree, S), modeStatePath(wt.worktree, S), eventsPath(wt.worktree),
+  return [workflowPath(wt.worktree, S), ledgerPath(wt.worktree, S), modeStatePath(wt.worktree, S), eventsPath(wt.worktree, S),
     join(executionRunDirectory(wt.worktree), "state.json")].map(path => [path, readIfPresent(path)])
 }
 
@@ -153,15 +153,15 @@ describe('op:"plan" authority and phase gates', () => {
   ] as const) {
     test(`${label} workflow engine refuses plan mutation but remains observable`, async () => {
       putWorkflow({ engine })
-      const before = readFileSync(workflowPath(wt.worktree))
+      const before = readFileSync(workflowPath(wt.worktree, S))
       const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
       const result = await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx())
       expect(result).toMatchObject({ output: expect.stringContaining("engine identity") })
       expect(client.created).toEqual([])
       expect(existsSync(ledgerPath(wt.worktree, S))).toBe(false)
-      expect(before.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
+      expect(before.equals(readFileSync(workflowPath(wt.worktree, S)))).toBe(true)
       expect(await tool.execute({ op: "status" }, ctx())).toMatchObject({ output: expect.stringContaining("[otter status]") })
-      expect(before.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
+      expect(before.equals(readFileSync(workflowPath(wt.worktree, S)))).toBe(true)
     })
   }
 
@@ -169,9 +169,9 @@ describe('op:"plan" authority and phase gates', () => {
     putWorkflow({ phase: "planning" })
     const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     const res = (await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx(OTHER) as any)) as { output: string }
-    expect(res.output).toContain("owned by another session")
+    expect(res.output).toContain("no plan workflow is active in this session")
     expect(client.created.length).toBe(0)
-    expect(readWorkflow(wt.worktree)!.phase).toBe("planning")
+    expect(readWorkflow(wt.worktree, S)!.phase).toBe("planning")
   })
 
   test("no active workflow is refused", async () => {
@@ -194,31 +194,31 @@ describe("flow transaction consumers", () => {
   test("a held owner cannot submit a plan or create review artifacts", async () => {
     const workflow = putWorkflow({ phase: "planning" })
     holdAdmission(wt.worktree, S, "test-held")
-    const before = readFileSync(workflowPath(wt.worktree))
-    const events = readEvents(wt.worktree, workflow.id)
+    const before = readFileSync(workflowPath(wt.worktree, S))
+    const events = readEvents(wt.worktree, workflow.id, S)
     const result = await createOtterFlowTool(makeDeps(client, wt.worktree)).execute(
       { op: "plan", plan: validPlanArgs() }, ctx() as any,
     ) as { output: string }
     expect(result.output).toContain("held")
-    expect(readFileSync(workflowPath(wt.worktree))).toEqual(before)
-    expect(readEvents(wt.worktree, workflow.id)).toEqual(events)
-    expect(existsSync(planJsonPath(wt.worktree, workflow.id))).toBe(false)
+    expect(readFileSync(workflowPath(wt.worktree, S))).toEqual(before)
+    expect(readEvents(wt.worktree, workflow.id, S)).toEqual(events)
+    expect(existsSync(planJsonPath(wt.worktree, workflow.id, S))).toBe(false)
     expect(existsSync(join(wt.worktree, planMdPath(workflow.id)))).toBe(false)
     expect(client.created).toEqual([])
   })
 
   test("otter_flow refuses while the flow transaction is busy without writing artifacts or events", async () => {
     const workflow = putWorkflow({ phase: "planning" })
-    const workflowBefore = readFileSync(workflowPath(wt.worktree))
-    const eventsBefore = readEvents(wt.worktree, workflow.id)
-    const lock = join(flowDir(wt.worktree), "workflow.lock")
+    const workflowBefore = readFileSync(workflowPath(wt.worktree, S))
+    const eventsBefore = readEvents(wt.worktree, workflow.id, S)
+    const lock = join(flowDir(wt.worktree, S), "workflow.lock")
     symlinkSync("held-by-another-process", lock)
     try {
       const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
       await expect(tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any)).rejects.toBeInstanceOf(FlowTransactionBusyError)
-      expect(readFileSync(workflowPath(wt.worktree)).equals(workflowBefore)).toBe(true)
-      expect(readEvents(wt.worktree, workflow.id)).toEqual(eventsBefore)
-      expect(existsSync(planJsonPath(wt.worktree, workflow.id))).toBe(false)
+      expect(readFileSync(workflowPath(wt.worktree, S)).equals(workflowBefore)).toBe(true)
+      expect(readEvents(wt.worktree, workflow.id, S)).toEqual(eventsBefore)
+      expect(existsSync(planJsonPath(wt.worktree, workflow.id, S))).toBe(false)
       expect(existsSync(join(wt.worktree, planMdPath(workflow.id)))).toBe(false)
       expect(client.created).toEqual([])
     } finally {
@@ -233,12 +233,12 @@ describe("flow transaction consumers", () => {
     await native.acceptUserTurn()
     const workflow = putWorkflow({ phase: "planning" })
     const hook = createToolBeforeHook(deps)
-    const lock = join(flowDir(wt.worktree), "workflow.lock")
+    const lock = join(flowDir(wt.worktree, S), "workflow.lock")
     symlinkSync("held-by-another-process", lock)
     try {
       const call = primeNativeToolCall(native, "delegate", { tasks: [] })
       await expect(hook(call.input, call.output)).rejects.toBeInstanceOf(FlowTransactionBusyError)
-      expect(readEvents(wt.worktree, workflow.id).filter((event) => event.type === "boundary_denied")).toEqual([])
+      expect(readEvents(wt.worktree, workflow.id, S).filter((event) => event.type === "boundary_denied")).toEqual([])
     } finally {
       unlinkSync(lock)
     }
@@ -249,7 +249,7 @@ describe("flow transaction consumers", () => {
     deps.interactive = true
     const native = await createNativeToolFixture(deps, { sessionID: S })
     const workflow = putWorkflow({ phase: "planning", engine: "foreign-engine" })
-    const before = readFileSync(workflowPath(wt.worktree))
+    const before = readFileSync(workflowPath(wt.worktree, S))
     // A foreign engine voids admission: no fresh native turn is accepted, so no call can be minted.
     await native.deliverUserTurn()
     expect(() => primeNativeToolCall(native, "delegate", { tasks: [] })).toThrow(/accept a native user turn/)
@@ -257,8 +257,8 @@ describe("flow transaction consumers", () => {
     await expect(hook({ tool: "delegate", sessionID: S, callID: "foreign_engine_unminted" }, { args: { tasks: [] } })).rejects.toThrow(
       "otter: OpenCode tool call refused (stale-turn)",
     )
-    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
-    expect(readEvents(wt.worktree, workflow.id).filter((event) => event.type === "boundary_denied")).toEqual([])
+    expect(readFileSync(workflowPath(wt.worktree, S)).equals(before)).toBe(true)
+    expect(readEvents(wt.worktree, workflow.id, S).filter((event) => event.type === "boundary_denied")).toEqual([])
   })
 })
 
@@ -271,7 +271,7 @@ describe('op:"plan" invalid plans (T2/T3)', () => {
     expect(res.output).toContain("plan rejected")
     expect(res.output).toMatch(/^otter: plan rejected/)
     expect(client.created.length).toBe(0) // reviewer never invoked
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("planning")
     expect(wf.counters.code_invalid).toBe(1)
   })
@@ -281,7 +281,7 @@ describe('op:"plan" invalid plans (T2/T3)', () => {
     const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     const badPlan = { ...validPlanArgs(), steps: [{ title: "s1", files: ["x"], verify: "true" }] }
     for (let i = 0; i < 3; i++) await tool.execute({ op: "plan", plan: badPlan }, ctx() as any)
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("stuck")
     expect(wf.stuckCause).toBe("plan_invalid")
     expect(client.created.length).toBe(0)
@@ -297,9 +297,9 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
       run() {
         holdAdmission(wt.worktree, S, "review-owner-held")
         snapshot = {
-          workflow: readFileSync(workflowPath(wt.worktree)),
+          workflow: readFileSync(workflowPath(wt.worktree, S)),
           markdown: readFileSync(join(wt.worktree, planMdPath(initial.id))),
-          events: readEvents(wt.worktree, initial.id),
+          events: readEvents(wt.worktree, initial.id, S),
         }
       },
     }
@@ -308,10 +308,10 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
     ) as { output: string }
     expect(snapshot).toBeDefined()
     expect(result.output).toContain("held")
-    expect(readFileSync(workflowPath(wt.worktree)).equals(snapshot!.workflow)).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, S)).equals(snapshot!.workflow)).toBe(true)
     expect(readFileSync(join(wt.worktree, planMdPath(initial.id))).equals(snapshot!.markdown)).toBe(true)
-    expect(readEvents(wt.worktree, initial.id)).toEqual(snapshot!.events)
-    expect(readWorkflow(wt.worktree)?.phase).toBe("reviewing")
+    expect(readEvents(wt.worktree, initial.id, S)).toEqual(snapshot!.events)
+    expect(readWorkflow(wt.worktree, S)?.phase).toBe("reviewing")
   })
 
   test("same-engine cancellation during review returns changed without writing stale review artifacts", async () => {
@@ -321,14 +321,14 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
     client.replies.reviewer = {
       text: "VERDICT: OKAY",
       run() {
-        const current = readWorkflow(wt.worktree)!
+        const current = readWorkflow(wt.worktree, S)!
         const cancelled = requestCancel(deps, current).result
         expect(cancelled.ok).toBe(true)
-        const events = readEvents(wt.worktree, initial.id)
+        const events = readEvents(wt.worktree, initial.id, S)
         cancellationSnapshot = {
-          workflow: readFileSync(workflowPath(wt.worktree)),
+          workflow: readFileSync(workflowPath(wt.worktree, S)),
           eventsSeq: Math.max(0, ...events.map((event) => event.seq)),
-          planJson: readFileSync(planJsonPath(wt.worktree, initial.id)),
+          planJson: readFileSync(planJsonPath(wt.worktree, initial.id, S)),
           planMd: readFileSync(join(wt.worktree, planMdPath(initial.id))),
         }
       },
@@ -339,11 +339,11 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
     expect(cancellationSnapshot).toBeDefined()
     const snapshot = cancellationSnapshot!
     // The cancel was pending while the review ran; the otter_flow finally-observer then commits only cancel_settled.
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "cancelled", stopIntent: null })
-    expect(readFileSync(planJsonPath(wt.worktree, initial.id)).equals(snapshot.planJson)).toBe(true)
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "cancelled", stopIntent: null })
+    expect(readFileSync(planJsonPath(wt.worktree, initial.id, S)).equals(snapshot.planJson)).toBe(true)
     expect(readFileSync(join(wt.worktree, planMdPath(initial.id))).equals(snapshot.planMd)).toBe(true)
     expect(snapshot.planMd.toString("utf8")).not.toContain("verdict:")
-    const laterEvents = readEvents(wt.worktree, initial.id).filter((event) => event.seq > snapshot.eventsSeq)
+    const laterEvents = readEvents(wt.worktree, initial.id, S).filter((event) => event.seq > snapshot.eventsSeq)
     expect(laterEvents.length).toBeGreaterThan(0)
     for (const event of laterEvents) expect(["transition", "cancel_settled"]).toContain(event.type)
     expect(laterEvents.some(event => event.type === "transition" && ["review_okay", "review_none", "review_iterate", "review_aborted"].includes(String(event.data?.event)))).toBe(false)
@@ -358,7 +358,7 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
     expect(res.output).toContain("Plan saved to")
     expect(res.output).toContain("/approve or /reject")
 
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("pending_approval")
     expect(wf.review?.verdict).toBe("okay")
     expect(wf.planRef).toBeDefined()
@@ -377,7 +377,7 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
     const res = (await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any)) as { output: string }
     expect(res.output).toContain("Reviewer asked for changes")
     expect(res.output).toContain("step 2 needs a narrower verify command")
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("planning")
     expect(wf.counters.review_iterations).toBe(1)
   })
@@ -387,7 +387,7 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
     client.replies.reviewer = { text: "VERDICT: ITERATE" }
     const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any)
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("pending_approval")
     expect(wf.review?.note).toBe("cap")
   })
@@ -397,7 +397,7 @@ describe('op:"plan" valid submission (T4 -> review -> T7/pending_approval)', () 
     client.replies.reviewer = { text: "hard to say, seems okay-ish" }
     const tool = createOtterFlowTool(makeDeps(client, wt.worktree))
     await tool.execute({ op: "plan", plan: validPlanArgs() }, ctx() as any)
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("pending_approval")
     expect(wf.review?.verdict).toBe("none")
   })

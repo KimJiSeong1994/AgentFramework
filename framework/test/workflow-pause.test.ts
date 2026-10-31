@@ -54,12 +54,12 @@ function boot(phase: Workflow["phase"] = "executing", stage: string = "unit") {
   return { deps, runtime, wf }
 }
 
-const kindsOf = (wid: string) => readEvents(wt.worktree, wid).map(e => e.type)
-const transitions = (wid: string) => readEvents(wt.worktree, wid).filter(e => e.type === "transition").map(e => String(e.data?.event))
+const kindsOf = (wid: string) => readEvents(wt.worktree, wid, S).map(e => e.type)
+const transitions = (wid: string) => readEvents(wt.worktree, wid, S).filter(e => e.type === "transition").map(e => String(e.data?.event))
 const settleStop = (runtime: ReturnType<typeof boot>["runtime"], observer = "test"): SettleOutcome =>
   settleOwned(runtime, { sessionID: S, epoch: store.epoch }, observer, { stopOnly: true })
 
-const pauseTokenOf = () => readWorkflow(wt.worktree)!.stopIntent!.token
+const pauseTokenOf = () => readWorkflow(wt.worktree, S)!.stopIntent!.token
 
 type Blocker = { name: string; engage(ctx: ReturnType<typeof boot>): Promise<() => Promise<void> | void> }
 const BLOCKERS: Blocker[] = [
@@ -126,7 +126,7 @@ describe("W4 pause with live work", () => {
 
       const requested = requestStop(ctx.runtime, S, "pause", "user pause", { workflowID: before.id })
       expect(requested.result.ok).toBe(true)
-      const wf = readWorkflow(wt.worktree)!
+      const wf = readWorkflow(wt.worktree, S)!
       // AC1: immediate hold, no admission epoch, phase unchanged, intent recorded with pausedFrom === requestedFrom
       expect(effectiveHold(wt.worktree, S)).toBe(true)
       expect(admissionEpoch(wt.worktree, S)).toBeUndefined()
@@ -141,13 +141,13 @@ describe("W4 pause with live work", () => {
       await release()
       await requested.quiesce
       // the other blocker is still live: no settle, and observers see "waiting" (not a transition)
-      expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "executing" })
+      expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "executing" })
       expect(settleStop(ctx.runtime)).toMatchObject({ kind: "waiting" })
       extra()
       cleanups.splice(cleanups.indexOf(extra), 1)
 
       expect(settleStop(ctx.runtime)).toMatchObject({ kind: "settled" })
-      const after = readWorkflow(wt.worktree)!
+      const after = readWorkflow(wt.worktree, S)!
       expect(after).toMatchObject({ phase: "paused", pausedFrom: { phase: "executing" } })
       expect(after.stopIntent?.kind).toBe("pause") // settled marker
       expect(stopDisplay(after)).toBe("paused")
@@ -155,22 +155,22 @@ describe("W4 pause with live work", () => {
       // later observers (queue finally, review finally, idle) commit nothing more
       const revision = after.lastSeq
       expect(settleStop(ctx.runtime, "late")).toMatchObject({ kind: "none" })
-      expect(readWorkflow(wt.worktree)!.lastSeq).toBe(revision)
+      expect(readWorkflow(wt.worktree, S)!.lastSeq).toBe(revision)
     })
   }
 
   test("a pause with no blocker is one commit containing stop_requested and pause_settled", () => {
     const ctx = boot("pending_approval", "decision")
-    const seqBefore = readWorkflow(wt.worktree)!.lastSeq
-    const indexBefore = JSON.parse(readFileSync(workflowPath(wt.worktree), "utf8")).revision
+    const seqBefore = readWorkflow(wt.worktree, S)!.lastSeq
+    const indexBefore = JSON.parse(readFileSync(workflowPath(wt.worktree, S), "utf8")).revision
     const requested = requestStop(ctx.runtime, S, "pause", "idle pause", { workflowID: ctx.wf.id })
     expect(requested.result.ok).toBe(true)
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, S)!
     expect(wf).toMatchObject({ phase: "paused", pausedFrom: { phase: "pending_approval" } })
     // one revision: every new event (request, transition and settle) shares the single commit that moved the index
-    const added = readEvents(wt.worktree, wf.id).filter(e => e.seq > seqBefore)
+    const added = readEvents(wt.worktree, wf.id, S).filter(e => e.seq > seqBefore)
     expect(added.map(e => e.type)).toEqual(expect.arrayContaining(["stop_requested", "pause_settled"]))
-    expect(JSON.parse(readFileSync(workflowPath(wt.worktree), "utf8")).revision).toBe(wf.lastSeq)
+    expect(JSON.parse(readFileSync(workflowPath(wt.worktree, S), "utf8")).revision).toBe(wf.lastSeq)
     expect(wf.lastSeq).toBe(Math.max(...added.map(e => e.seq)))
     expect(indexBefore).toBeLessThan(wf.lastSeq)
     expect(committedSnapshot(wt.worktree).phase).toBe("paused")
@@ -185,7 +185,7 @@ describe("W4 pause with live work", () => {
     })
     expect(stopBlockers(ctx.runtime, S, store.epoch)).toContain("owned execution is not terminal and quiescent")
     requestStop(ctx.runtime, S, "pause", "x", { workflowID: ctx.wf.id })
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "executing", stopIntent: { kind: "pause" } })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "executing", stopIntent: { kind: "pause" } })
     expect(settleStop(ctx.runtime)).toMatchObject({ kind: "waiting" })
     expect(kindsOf(ctx.wf.id)).not.toContain("pause_settled")
     // proof arrives only as terminal+quiescent reconciliation, after which the same routine settles
@@ -214,7 +214,7 @@ describe("queue pause mode preserves the residual", () => {
     expect(tasks.map(t => t.status)).toEqual(["pending", "pending", "pending"])
     expect(tasks[0]).toMatchObject({ attempts: 0, error: `paused: workflow_pause:${requested.token}` })
     // the queue's finally observer (injected onSettled) proved quiescence and settled exactly once
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("paused")
     expect(kindsOf(wf.id).filter(k => k === "pause_settled")).toHaveLength(1)
     expect(transitions(wf.id)).not.toContain("settle_fail")
@@ -234,30 +234,30 @@ describe("queue pause mode preserves the residual", () => {
     await requested.quiesce
     await running
     expect(readLedger(wt.worktree, S).tasks.map(t => t.status)).toEqual(["cancelled", "cancelled"])
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "cancelled", stopIntent: null })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "cancelled", stopIntent: null })
   })
 })
 
 describe("foreign and unowned requests", () => {
   test("a foreign sid pause or cancel is refused with no index, revision or hold change", () => {
     const ctx = boot("executing")
-    const before = readFileSync(workflowPath(wt.worktree))
-    const eventsBefore = readEvents(wt.worktree).length
+    const before = readFileSync(workflowPath(wt.worktree, S))
+    const eventsBefore = readEvents(wt.worktree, undefined, S).length
     for (const kind of ["pause", "cancel"] as const) {
       const r = requestStop(ctx.runtime, "ses_foreign", kind, "x", { workflowID: ctx.wf.id })
       expect(r.result.ok).toBe(false)
     }
-    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
-    expect(readEvents(wt.worktree).length).toBe(eventsBefore)
+    expect(readFileSync(workflowPath(wt.worktree, S)).equals(before)).toBe(true)
+    expect(readEvents(wt.worktree, undefined, S).length).toBe(eventsBefore)
     expect(effectiveHold(wt.worktree, S)).toBe(false)
   })
 
   test("a stale expected revision is refused without mutation", () => {
     const ctx = boot("executing")
-    const before = readFileSync(workflowPath(wt.worktree))
+    const before = readFileSync(workflowPath(wt.worktree, S))
     const r = requestStop(ctx.runtime, S, "pause", "x", { workflowID: ctx.wf.id, expectedRevision: ctx.wf.lastSeq - 1 })
     expect(r.result.ok).toBe(false)
-    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, S)).equals(before)).toBe(true)
   })
 
   test("pause is refused from stuck and from a terminal workflow", () => {
@@ -281,7 +281,7 @@ describe("failure steal: a failing task during a pending pause", () => {
     cleanups.pop()
     // Every task is terminal (one failed, one user_stop marker): ordinary settlement would run user_stop/settle_fail.
     expect(settleOwned(ctx.runtime, { sessionID: S, epoch: store.epoch }, "idle")).toMatchObject({ kind: "settled" })
-    const after = readWorkflow(wt.worktree)!
+    const after = readWorkflow(wt.worktree, S)!
     expect(after.phase).toBe("paused")
     expect(transitions(after.id)).not.toContain("settle_fail")
     expect(transitions(after.id)).not.toContain("user_stop")
@@ -320,9 +320,9 @@ describe("cancel wins under every observer order", () => {
         else { reviewHold(); reviewHeld = false; observeStopSettlement(ctx.runtime, S, store.epoch, "review") }
       }
       expect(queueHeld || reviewHeld).toBe(false)
-      const wf = readWorkflow(wt.worktree)!
+      const wf = readWorkflow(wt.worktree, S)!
       expect(wf).toMatchObject({ phase: "cancelled", stopIntent: null })
-      const events = readEvents(wt.worktree, wf.id)
+      const events = readEvents(wt.worktree, wf.id, S)
       expect(events.filter(e => e.type === "cancel_settled")).toHaveLength(1)
       const replaced = events.find(e => e.type === "stop_requested" && e.data?.kind === "cancel")
       expect(replaced?.data?.replaces).toBe(pauseToken)
@@ -333,7 +333,7 @@ describe("cancel wins under every observer order", () => {
       // a late observer after the terminal commit changes nothing
       const revision = wf.lastSeq
       observeStopSettlement(ctx.runtime, S, store.epoch, "late-pause")
-      expect(readWorkflow(wt.worktree)!.lastSeq).toBe(revision)
+      expect(readWorkflow(wt.worktree, S)!.lastSeq).toBe(revision)
     })
   }
 
@@ -343,10 +343,10 @@ describe("cancel wins under every observer order", () => {
     expect(requestStop(ctx.runtime, S, "cancel", "c", { workflowID: ctx.wf.id }).result.ok).toBe(true)
     const refused = requestStop(ctx.runtime, S, "pause", "p", { workflowID: ctx.wf.id })
     expect(refused.result.ok).toBe(false)
-    expect(readWorkflow(wt.worktree)!.stopIntent?.kind).toBe("cancel")
+    expect(readWorkflow(wt.worktree, S)!.stopIntent?.kind).toBe("cancel")
     hold()
     observeStopSettlement(ctx.runtime, S, store.epoch, "test")
-    expect(readWorkflow(wt.worktree)!.phase).toBe("cancelled")
+    expect(readWorkflow(wt.worktree, S)!.phase).toBe("cancelled")
   })
 })
 
@@ -357,15 +357,15 @@ describe("settleOwned inertness", () => {
     cleanups.push(hold)
     requestStop(ctx.runtime, S, "pause", "p", { workflowID: ctx.wf.id })
     hold(); cleanups.pop()
-    const before = readFileSync(workflowPath(wt.worktree))
-    const eventsBefore = readEvents(wt.worktree).length
+    const before = readFileSync(workflowPath(wt.worktree, S))
+    const eventsBefore = readEvents(wt.worktree, undefined, S).length
     for (const ref of [
       { sessionID: S, epoch: "old-epoch" },
       { sessionID: "ses_foreign", epoch: store.epoch },
       { sessionID: S, workflowID: "wf_not_this_one", epoch: store.epoch },
     ]) expect(settleOwned(ctx.runtime, ref, "stale", { stopOnly: true }).kind).toBe("refused")
-    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
-    expect(readEvents(wt.worktree).length).toBe(eventsBefore)
+    expect(readFileSync(workflowPath(wt.worktree, S)).equals(before)).toBe(true)
+    expect(readEvents(wt.worktree, undefined, S).length).toBe(eventsBefore)
     expect(settleStop(ctx.runtime)).toMatchObject({ kind: "settled" })
   })
 
@@ -378,7 +378,7 @@ describe("settleOwned inertness", () => {
     ctx.runtime.runs.status()
     const held = settleOwned(ctx.runtime, { sessionID: S, epoch: store.epoch }, "repair", { heldSafety: true })
     expect(held.kind).toBe("held")
-    expect(readWorkflow(wt.worktree)!.phase).toBe("executing")
+    expect(readWorkflow(wt.worktree, S)!.phase).toBe("executing")
     expect(transitions(ctx.wf.id)).not.toContain("settle_ok")
   })
 })
@@ -402,20 +402,20 @@ describe("W6 cancel from every non-terminal phase retains records", () => {
         const r = requestStop(ctx.runtime, S, "cancel", "c", { workflowID: ctx.wf.id })
         expect(r.result.ok).toBe(true)
         if (live) {
-          const pending = readWorkflow(wt.worktree)!
+          const pending = readWorkflow(wt.worktree, S)!
           expect(pending).toMatchObject({ phase, stopIntent: { kind: "cancel" } }) // never cancelled before proof
           expect(stopDisplay(pending)).toBe("cancelling")
           hold!()
           observeStopSettlement(ctx.runtime, S, store.epoch, "test")
         }
-        const done = readWorkflow(wt.worktree)!
+        const done = readWorkflow(wt.worktree, S)!
         expect(done).toMatchObject({ phase: "cancelled", stopIntent: null })
         const after = new Set(filesOf(stateRoot(wt.worktree)))
         for (const [file, bytes] of before) {
           expect(after.has(file)).toBe(true)
           expect(readFileSync(file).equals(bytes)).toBe(true)
         }
-        expect(existsSync(eventsPath(wt.worktree))).toBe(true)
+        expect(existsSync(eventsPath(wt.worktree, S))).toBe(true)
         expect(after.size).toBeGreaterThan(before.size)
       })
     }
@@ -424,7 +424,7 @@ describe("W6 cancel from every non-terminal phase retains records", () => {
   test("stuck, a pending pause and a settled pause also cancel; a restart is a new id", () => {
     const stuck = boot("stuck", "terminal")
     expect(requestStop(stuck.runtime, S, "cancel", "c", { workflowID: stuck.wf.id }).result.ok).toBe(true)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ id: stuck.wf.id, phase: "cancelled" })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ id: stuck.wf.id, phase: "cancelled" })
     const restarted = startWorkflow(stuck.runtime, S, "command", "again", "user_command", "opencode")
     expect(restarted.ok).toBe(true)
     if (restarted.ok) expect(restarted.wf.id).not.toBe(stuck.wf.id)
@@ -433,9 +433,9 @@ describe("W6 cancel from every non-terminal phase retains records", () => {
   test("cancel from a settled pause goes through the same proof and retains the pause history", () => {
     const ctx = boot("executing")
     expect(requestStop(ctx.runtime, S, "pause", "p", { workflowID: ctx.wf.id }).result.ok).toBe(true)
-    expect(readWorkflow(wt.worktree)!.phase).toBe("paused")
+    expect(readWorkflow(wt.worktree, S)!.phase).toBe("paused")
     expect(requestStop(ctx.runtime, S, "cancel", "c", { workflowID: ctx.wf.id }).result.ok).toBe(true)
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("cancelled")
     expect(kindsOf(wf.id)).toEqual(expect.arrayContaining(["pause_settled", "cancel_settled"]))
   })
@@ -463,16 +463,16 @@ describe("crash windows (map Risk 10)", () => {
   test("a: a snapshot or index fault in the pause request commit keeps the old revision, the hold and no intent", () => {
     for (const stage of ["snapshot-rename", "index-rename"]) {
       const ctx = boot("executing")
-      const before = readFileSync(workflowPath(wt.worktree))
+      const before = readFileSync(workflowPath(wt.worktree, S))
       fail(stage)
       expect(() => requestStop(ctx.runtime, S, "pause", "p", { workflowID: ctx.wf.id })).toThrow("injected")
       __setCommitFaultHook(null)
-      expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
-      expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "executing", stopIntent: null })
+      expect(readFileSync(workflowPath(wt.worktree, S)).equals(before)).toBe(true)
+      expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "executing", stopIntent: null })
       expect(effectiveHold(wt.worktree, S)).toBe(true) // hold precedes the intent, so a crash leaves the session held
       // a retry after the fault commits the intent normally
       expect(requestStop(ctx.runtime, S, "pause", "p", { workflowID: ctx.wf.id }).result.ok).toBe(true)
-      expect(readWorkflow(wt.worktree)!.stopIntent?.kind).toBe("pause")
+      expect(readWorkflow(wt.worktree, S)!.stopIntent?.kind).toBe("pause")
       releaseFixtureSession(wt.worktree, store)
       wt.cleanup(); wt = tempGitWorktree({ "README.md": "fixture\n" })
     }
@@ -480,16 +480,16 @@ describe("crash windows (map Risk 10)", () => {
 
   test("b: a failing admission hold makes requestStop refuse with no new event and no intent", () => {
     const ctx = boot("executing")
-    const before = readFileSync(workflowPath(wt.worktree))
-    const events = readEvents(wt.worktree).length
+    const before = readFileSync(workflowPath(wt.worktree, S))
+    const events = readEvents(wt.worktree, undefined, S).length
     chmodSync(sessionDir(wt.worktree, S), 0o500)
     try {
       const refused = requestStop(ctx.runtime, S, "pause", "p", { workflowID: ctx.wf.id })
       expect(refused.result.ok).toBe(false)
     } finally { chmodSync(sessionDir(wt.worktree, S), 0o700) }
-    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
-    expect(readEvents(wt.worktree).length).toBe(events)
-    expect(readWorkflow(wt.worktree)!.stopIntent).toBeNull()
+    expect(readFileSync(workflowPath(wt.worktree, S)).equals(before)).toBe(true)
+    expect(readEvents(wt.worktree, undefined, S).length).toBe(events)
+    expect(readWorkflow(wt.worktree, S)!.stopIntent).toBeNull()
   })
 
   test("c: a fault in the pause_settled commit leaves the pause pending with checkpoints retained; a later settle commits exactly one", () => {
@@ -497,17 +497,17 @@ describe("crash windows (map Risk 10)", () => {
     const hold = beginStageReservation(wt.worktree, S)
     requestStop(ctx.runtime, S, "pause", "p", { workflowID: ctx.wf.id })
     hold()
-    const before = readFileSync(workflowPath(wt.worktree))
+    const before = readFileSync(workflowPath(wt.worktree, S))
     fail("index-rename")
     expect(() => settleStop(ctx.runtime)).toThrow("injected")
     __setCommitFaultHook(null)
-    expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "executing", stopIntent: { kind: "pause" } })
+    expect(readFileSync(workflowPath(wt.worktree, S)).equals(before)).toBe(true)
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "executing", stopIntent: { kind: "pause" } })
     // the settled checkpoint is written before the commit and retained; it is write-once so the retry reuses it
     expect(checkpointFiles(ctx.wf.id).some(name => name.endsWith("-settled.json"))).toBe(true)
     expect(settleStop(ctx.runtime)).toMatchObject({ kind: "settled" })
     expect(kindsOf(ctx.wf.id).filter(k => k === "pause_settled")).toHaveLength(1)
-    expect(readWorkflow(wt.worktree)!.phase).toBe("paused")
+    expect(readWorkflow(wt.worktree, S)!.phase).toBe("paused")
   })
 
   test("d: a fault in the cancel_settled commit after the outcome record is recoverable: a retry ends cancelled with one cancel_settled", () => {
@@ -520,9 +520,9 @@ describe("crash windows (map Risk 10)", () => {
     fail("index-rename")
     expect(() => settleStop(ctx.runtime)).toThrow("injected")
     __setCommitFaultHook(null)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "executing", stopIntent: { kind: "cancel" } })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "executing", stopIntent: { kind: "cancel" } })
     expect(settleStop(ctx.runtime)).toMatchObject({ kind: "settled" })
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "cancelled", stopIntent: null })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "cancelled", stopIntent: null })
     expect(kindsOf(ctx.wf.id).filter(k => k === "cancel_settled")).toHaveLength(1)
     expect(readLedger(wt.worktree, S).tasks.map(t => t.status)).toEqual(["cancelled"])
   })
@@ -530,8 +530,8 @@ describe("crash windows (map Risk 10)", () => {
   test("e: a fault between the resume commit and the admission token leaves the workflow resumed and the session held; an explicit Resume then admits", async () => {
     const ctx = boot("planning")
     requestStop(ctx.runtime, S, "pause", "p", { workflowID: ctx.wf.id })
-    expect(readWorkflow(wt.worktree)!.phase).toBe("paused")
-    const revision = readWorkflow(wt.worktree)!.lastSeq
+    expect(readWorkflow(wt.worktree, S)!.phase).toBe("paused")
+    const revision = readWorkflow(wt.worktree, S)!.lastSeq
     let committed = false
     __setCommitFaultHook(at => {
       if (at !== "index-dirfsync" || committed) return
@@ -542,11 +542,11 @@ describe("crash windows (map Risk 10)", () => {
     const outcome = await resumePaused(ctx.runtime, S, revision, { preflight: async () => {}, fence: () => "f", choose: async () => true }).catch((e: unknown) => e)
     expect(outcome).toBeInstanceOf(Error)
     __setCommitFaultHook(null)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "planning", stopIntent: null })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "planning", stopIntent: null })
     expect(effectiveHold(wt.worktree, S)).toBe(true)
     expect(kindsOf(ctx.wf.id).filter(k => k === "resumed")).toHaveLength(1)
     rmSync(abortPath(wt.worktree, S), { force: true })
-    resumeAdmission(ctx.runtime, S, readWorkflow(wt.worktree)!.lastSeq)
+    resumeAdmission(ctx.runtime, S, readWorkflow(wt.worktree, S)!.lastSeq)
     expect(effectiveHold(wt.worktree, S)).toBe(false)
   })
 })
@@ -609,14 +609,14 @@ describe("planning kinds reuse the stop, settle and resume routines", () => {
       expect(requestStop(runtime, "ses_other", "pause", "x").result).toMatchObject({ ok: false })
     })
 
-    test(`${kind}: a foreign session pause is refused naming the kind, and a stale expected revision changes nothing`, () => {
+    test(`${kind}: a foreign session pause cannot observe the workflow, and a stale expected revision changes nothing`, () => {
       const { runtime, wf } = bootKind()
-      const before = readFileSync(workflowPath(wt.worktree))
+      const before = readFileSync(workflowPath(wt.worktree, S))
       const foreign = requestStop(runtime, "ses_foreign", "pause", "x", { workflowID: wf.id }).result
       expect(foreign.ok).toBe(false)
-      if (!foreign.ok) expect(foreign.text).toContain(`${kind} workflow`)
+      if (!foreign.ok) expect(foreign.text).toBe("no active workflow")
       expect(requestStop(runtime, S, "pause", "x", { workflowID: wf.id, expectedRevision: wf.lastSeq + 9 }).result).toMatchObject({ ok: false })
-      expect(readFileSync(workflowPath(wt.worktree)).equals(before)).toBe(true)
+      expect(readFileSync(workflowPath(wt.worktree, S)).equals(before)).toBe(true)
     })
   }
 })

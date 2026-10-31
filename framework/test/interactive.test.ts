@@ -75,7 +75,7 @@ type HarnessOptions = {
   beforeRun?: (signal?: AbortSignal) => void
   /** Plan-worktree fixture: `run`/`resume` report an isolated run and the controller exposes review/apply/discard. */
   isolated?: {
-    review?: { ok: true; workflowID: string; path: string; files: string[]; stat: string; patch: string } | { ok: false; workflowID: string; reason: string }
+    review?: { ok: true; workflowID: string; path: string; tree: string; files: string[]; stat: string; patch: string } | { ok: false; workflowID: string; reason: string }
     apply?: { ok: true; workflowID: string; files: string[] } | { ok: false; workflowID: string; reason: string; patch: string }
     /** run() throws PlanIsolationUnavailableError once (no commit), then succeeds only when called with inPlace. */
     unavailable?: "no-commit" | "no-git"
@@ -255,7 +255,10 @@ function harness(options: HarnessOptions = {}) {
     },
     pendingPlanWorktree() { return options.isolated && !options.isolated.unavailable ? workflowID : undefined },
     async reviewPlanWorktree() { calls.events.push("review"); return options.isolated?.review },
-    async applyPlanWorktree() { calls.events.push("apply"); return options.isolated?.apply },
+    async applyPlanWorktree(_sessionID: string, _workflowID: string, tree: string) {
+      if (options.isolated?.review?.ok) expect(tree).toBe(options.isolated.review.tree)
+      calls.events.push("apply"); return options.isolated?.apply
+    },
     async discardPlanWorktree() { calls.events.push("discard") },
   } as unknown as ForegroundController
 
@@ -4619,7 +4622,7 @@ describe("intent routing", () => {
 })
 
 describe("plan worktree chooser (interactive)", () => {
-  const review = (workflowID: string) => ({ ok: true as const, workflowID, path: "/state/worktrees/s/wf-x", files: ["a.txt", "b.txt"], stat: " 2 files changed, 2 insertions(+)", patch: "/state/worktrees/s/wf-x.patch" })
+  const review = (workflowID: string) => ({ ok: true as const, workflowID, path: "/state/worktrees/s/wf-x", tree: "a".repeat(40), files: ["a.txt", "b.txt"], stat: " 2 files changed, 2 insertions(+)", patch: "/state/worktrees/s/wf-x.patch" })
   const launch = (h: ReturnType<typeof harness>) => launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
   const choices = (h: ReturnType<typeof harness>) => h.calls.choices.map(choice => choice.title)
   const approveThenPick = (pick: number) => async (title: string) => title === "Execution decision" ? 0 : title === "Apply the plan worktree?" ? pick : undefined

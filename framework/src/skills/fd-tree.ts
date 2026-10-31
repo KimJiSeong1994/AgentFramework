@@ -1,5 +1,5 @@
 import { dlopen, FFIType, ptr, read, toBuffer } from "bun:ffi"
-import { constants, fstatSync, lstatSync, type BigIntStats } from "node:fs"
+import { constants, fstatSync, ftruncateSync, fsyncSync, lstatSync, writeSync, type BigIntStats } from "node:fs"
 import { realpathSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 
@@ -167,6 +167,7 @@ export class FdTreeError extends Error {
 
 type Symbols = {
   openat: (dirfd: number, path: NativePointer, flags: number, mode: number) => number
+  unlinkat: (dirfd: number, path: NativePointer, flags: number) => number
   close: (fd: number) => number
   fstat: (fd: number, statbuf: NativePointer) => number
   fstatat: (dirfd: number, path: NativePointer, statbuf: NativePointer, flags: number) => number
@@ -211,6 +212,7 @@ const native = (() => {
   try {
     const library = dlopen(PROFILE.library, {
       openat: { args: [C.i32, C.ptr, C.i32, C.u32], returns: C.i32 },
+      unlinkat: { args: [C.i32, C.ptr, C.i32], returns: C.i32 },
       close: { args: [C.i32], returns: C.i32 },
       fstat: { args: [C.i32, C.ptr], returns: C.i32 },
       fstatat: { args: [C.i32, C.ptr, C.ptr, C.i32], returns: C.i32 },
@@ -758,6 +760,42 @@ export class FdTree {
       return Object.freeze({ bytes, stat: opened })
     } finally {
       if (native.close(fd) !== 0) throw mapErrno(errnoNumber(), "close file fd failed")
+    }
+  }
+
+  /** Restore one checkpoint target through its held parent, never through a pathname ancestor. */
+  restoreFileAt(parent: FdDirectory, name: string, expected: Readonly<{ bytes: Buffer; stat: FdStat }> | null, bytes: Buffer | null): void {
+    this.#assertOpen()
+    parent.assertOpen()
+    const component = componentName(name)
+    if (bytes && bytes.byteLength > MAX_FILE_BYTES) throw new FdTreeError("unsafe", "file exceeds snapshot byte limit")
+    this.assertStable()
+    if (expected === null && bytes === null) return
+    const flags = constants.O_RDWR | constants.O_NONBLOCK | PROFILE.oNoFollow | PROFILE.oCloexec |
+      (expected === null ? constants.O_CREAT | constants.O_EXCL : 0)
+    const fd = native.openat(parent.fd, ptr(nullTerminatedName(component)), flags, 0o600)
+    if (fd < 0) throw mapErrno(errnoNumber(), "open checkpoint target failed")
+    try {
+      const opened = nativeFstat(fd)
+      if (modeKind(opened.mode) !== "file" || opened.nlink !== 1n ||
+        (expected && (!sameStat(opened, expected.stat) || !readAll(fd, opened.size).equals(expected.bytes)))) {
+        throw new FdTreeError("race", "checkpoint target changed before restore")
+      }
+      if (expected) this.assertStable()
+      if (bytes === null) {
+        if (native.unlinkat(parent.fd, ptr(nullTerminatedName(component)), 0) !== 0) throw mapErrno(errnoNumber(), "unlink checkpoint target failed")
+      } else {
+        ftruncateSync(fd, 0)
+        let offset = 0
+        while (offset < bytes.byteLength) {
+          const count = writeSync(fd, bytes, offset, bytes.byteLength - offset, offset)
+          if (count <= 0) throw new FdTreeError("unreadable", "checkpoint write failed")
+          offset += count
+        }
+        fsyncSync(fd)
+      }
+    } finally {
+      native.close(fd)
     }
   }
 

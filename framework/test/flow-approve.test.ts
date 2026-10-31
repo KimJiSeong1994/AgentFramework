@@ -91,7 +91,7 @@ describe("/approve — dispatch path", () => {
     putApprovablePlan()
     const text = await runApprove()
     expect(text).toBe(APPROVE_TEMPLATE)
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("executing")
     const tasks = tasksForWorkflow(readLedger(wt.worktree, S), "wfid")
     expect(tasks.length).toBe(3)
@@ -103,7 +103,7 @@ describe("/approve — dispatch path", () => {
     const text = await runApprove()
     expect(text).toBe("no plan awaiting approval")
     expect(readLedger(wt.worktree, S).tasks.length).toBe(0)
-    expect(readWorkflow(wt.worktree)!.phase).toBe("planning")
+    expect(readWorkflow(wt.worktree, S)!.phase).toBe("planning")
   })
 
   test("other admitted session is refused (workflow owned by S), no mutation", async () => {
@@ -111,8 +111,8 @@ describe("/approve — dispatch path", () => {
     const deps = makeDeps(client, wt.worktree)
     otherFixtureSession = admitFixtureSession(deps, OTHER)
     const text = await runApprove(deps, OTHER)
-    expect(text).toContain(`already active in session ${S}`)
-    expect(readWorkflow(wt.worktree)!.phase).toBe(wf.phase)
+    expect(text).toBe("no plan awaiting approval")
+    expect(readWorkflow(wt.worktree, S)!.phase).toBe(wf.phase)
     expect(readLedger(wt.worktree, S).tasks.length).toBe(0)
   })
 
@@ -142,7 +142,7 @@ describe("/approve — dispatch path", () => {
     writeFileSync(require("node:path").join(wt.worktree, wf.planRef!.mdPath), "tampered\n")
     const text = await runApprove()
     expect(text).toBe("plan file edited; /plan again or revert")
-    expect(readWorkflow(wt.worktree)!.phase).toBe("pending_approval")
+    expect(readWorkflow(wt.worktree, S)!.phase).toBe("pending_approval")
   })
 
   test("plan json sha mismatch (canonical sha does not match planRef) is refused", async () => {
@@ -166,7 +166,7 @@ describe("/approve — dispatch path", () => {
   test("approval stores the plan subject and tags tasks with the parent workflow id plus subject hash only", async () => {
     const wf = putApprovablePlan()
     expect(await runApprove()).toBe(APPROVE_TEMPLATE)
-    const approved = readWorkflow(wt.worktree)!
+    const approved = readWorkflow(wt.worktree, S)!
     expect(approved.approval).toMatchObject({ by: "user_command", receiptRevision: wf.lastSeq, subject: { kind: "plan", id: wf.id, sha256: wf.planRef!.jsonSha } })
     const tasks = readLedger(wt.worktree, S).tasks
     expect(tasks).toHaveLength(3)
@@ -181,7 +181,7 @@ describe("/approve — dispatch path", () => {
       // no command.execute.before ran first, so no command turn is marked: this is plain prose
       await native.deliverUserTurn({ text })
     }
-    expect(readWorkflow(wt.worktree)!.phase).toBe("pending_approval")
+    expect(readWorkflow(wt.worktree, S)!.phase).toBe("pending_approval")
     expect(readLedger(wt.worktree, S).tasks.length).toBe(0)
   })
 
@@ -193,7 +193,7 @@ describe("/approve — dispatch path", () => {
     // The assistant message arrives through the actual SDK message.updated event callback, not chat.message.
     const { message } = await native.deliverAssistantMessage({ text: "assistant said /approve but this is not a command turn" })
     expect(client.calls).toContainEqual({ method: "message", args: { path: { id: S, messageID: message.id } } })
-    expect(readWorkflow(wt.worktree)!.phase).toBe("pending_approval")
+    expect(readWorkflow(wt.worktree, S)!.phase).toBe("pending_approval")
     expect(readLedger(wt.worktree, S).tasks).toHaveLength(0)
   })
 
@@ -206,25 +206,25 @@ describe("/approve — dispatch path", () => {
     fixtureSession = attachAdmission(getOpenCodeRuntime(deps), S, { engine: "opencode" })
     expect(fixtureSession.restored).toBe(true)
     expect(effectiveHold(wt.worktree, S)).toBe(true)
-    const rebound = readWorkflow(wt.worktree)!
+    const rebound = readWorkflow(wt.worktree, S)!
     expect(rebound.owner.instance).toBe(fixtureSession.epoch)
-    expect(readEvents(wt.worktree, rebound.id).map(event => event.type)).toContain("owner_reattached")
+    expect(readEvents(wt.worktree, rebound.id, S).map(event => event.type)).toContain("owner_reattached")
 
-    const workflowBeforeApprove = readWorkflow(wt.worktree)
-    const eventsBeforeApprove = readEvents(wt.worktree, rebound.id)
+    const workflowBeforeApprove = readWorkflow(wt.worktree, S)
+    const eventsBeforeApprove = readEvents(wt.worktree, rebound.id, S)
     const ledgerFile = ledgerPath(wt.worktree, S)
     const ledgerBeforeApprove = existsSync(ledgerFile) ? readFileSync(ledgerFile) : null
     const heldText = await runApprove(deps)
     expect(heldText).toContain("Otter session held")
-    expect(readWorkflow(wt.worktree)).toEqual(workflowBeforeApprove)
-    expect(readEvents(wt.worktree, rebound.id)).toEqual(eventsBeforeApprove)
+    expect(readWorkflow(wt.worktree, S)).toEqual(workflowBeforeApprove)
+    expect(readEvents(wt.worktree, rebound.id, S)).toEqual(eventsBeforeApprove)
     expect(existsSync(ledgerFile) ? readFileSync(ledgerFile) : null).toEqual(ledgerBeforeApprove)
 
     resumeAdmission(getOpenCodeRuntime(deps), S, rebound.lastSeq)
     expect(effectiveHold(wt.worktree, S)).toBe(false)
     const text = await runApprove(deps)
     expect(text).toBe(APPROVE_TEMPLATE)
-    const wf = readWorkflow(wt.worktree)!
+    const wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("executing")
     expect(wf.owner.instance).toBe(fixtureSession.epoch)
     expect(tasksForWorkflow(readLedger(wt.worktree, S), wf.id)).toHaveLength(3)
@@ -239,15 +239,15 @@ describe("/approve — dispatch path", () => {
     expect(fixtureSession.restored).toBe(true)
     expect(effectiveHold(wt.worktree, S)).toBe(true)
 
-    const workflowBefore = readWorkflow(wt.worktree)
-    const eventsBefore = readEvents(wt.worktree, "wfid")
+    const workflowBefore = readWorkflow(wt.worktree, S)
+    const eventsBefore = readEvents(wt.worktree, "wfid", S)
     const ledgerBefore = readLedger(wt.worktree, S)
     const path = ledgerPath(wt.worktree, S)
     const ledgerBytes = existsSync(path) ? readFileSync(path) : null
     const text = await runApprove(deps)
     expect(text).toContain("Otter session held")
-    expect(readWorkflow(wt.worktree)).toEqual(workflowBefore)
-    expect(readEvents(wt.worktree, "wfid")).toEqual(eventsBefore)
+    expect(readWorkflow(wt.worktree, S)).toEqual(workflowBefore)
+    expect(readEvents(wt.worktree, "wfid", S)).toEqual(eventsBefore)
     expect(existsSync(path) ? readFileSync(path) : null).toEqual(ledgerBytes)
     expect(tasksForWorkflow(ledgerBefore, "wfid")).toHaveLength(0)
   })
