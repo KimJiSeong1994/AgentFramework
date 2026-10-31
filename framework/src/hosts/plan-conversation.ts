@@ -212,6 +212,8 @@ export function createPlanConversation(
         }
       }
       busy = true
+      const cancelPrefetch = () => cancelMemoryPrefetch(sessionID)
+      signal?.addEventListener("abort", cancelPrefetch, { once: true })
       // Opt-in: recall of this user message overlaps the main model's first step; the turn's first memory call takes it.
       if (!skill) startMemoryPrefetch(runtime.worktree, sessionID, text, currentMemoryConfig(runtime.worktree))
       else cancelMemoryPrefetch(sessionID)
@@ -251,6 +253,8 @@ export function createPlanConversation(
         const plan = extractPlan(result.text)
         return { text: result.text, ...(plan === undefined ? {} : { plan }), ...(audit ? { skill: audit } : {}) }
       } finally {
+        signal?.removeEventListener("abort", cancelPrefetch)
+        cancelPrefetch()
         busy = false
       }
     },

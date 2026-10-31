@@ -24,6 +24,7 @@ import { readSessionMetadata } from "../src/sessions/store.ts"
 import { admissionEpoch, attachAdmission, detachAdmission, effectiveHold, holdAdmission } from "../src/sessions/admission.ts"
 import { tempGitWorktree, verifyScript, waitFor } from "./guards-helpers.ts"
 import { createLegacyVerifierExecutor } from "../src/orchestration/legacy-verifier.ts"
+import { createTaskWorktree, planWorktreeScope } from "../src/orchestration/worktree.ts"
 import { getQueue, workerPrompt } from "../src/orchestration/queue.ts"
 import { planBinding, withTerminalLine } from "./operator-helpers.ts"
 
@@ -220,6 +221,32 @@ console.log(JSON.stringify({ ok: result.ok, text: result.ok ? undefined : result
 }
 
 describe("external foreground imported-plan controller", () => {
+  test.each([false, true])("Apply refuses changes made after the reviewed tree (empty preview=%s)", async emptyPreview => {
+    const f = fixture()
+    const workflowID = "wf_apply_review"
+    const plan = (await createTaskWorktree(wt.worktree, SESSION, planWorktreeScope(workflowID), f.runtime.config.delegate.diff_exclude))!
+    if (!emptyPreview) writeFileSync(join(plan.path, "reviewed.txt"), "reviewed\n")
+    const review = await f.controller.reviewPlanWorktree(SESSION, workflowID)
+    expect(review.ok).toBe(true)
+    if (!review.ok) throw new Error(review.reason)
+    expect(review.files).toEqual(emptyPreview ? [] : ["reviewed.txt"])
+    writeFileSync(join(plan.path, "reviewed.txt"), "unreviewed\n")
+    writeFileSync(join(plan.path, "extra.txt"), "extra\n")
+    expect(await f.controller.applyPlanWorktree(SESSION, workflowID, review.tree)).toMatchObject({
+      ok: false, reason: "worktree changed since verification",
+    })
+    expect(existsSync(join(wt.worktree, "reviewed.txt"))).toBe(false)
+    expect(existsSync(join(wt.worktree, "extra.txt"))).toBe(false)
+    expect(existsSync(plan.path)).toBe(true)
+    expect(await f.controller.applyPlanWorktree(SESSION, workflowID, undefined as unknown as string)).toMatchObject({ ok: false })
+    const fresh = await f.controller.reviewPlanWorktree(SESSION, workflowID)
+    if (!fresh.ok) throw new Error(fresh.reason)
+    expect(fresh.tree).not.toBe(review.tree)
+    expect(await f.controller.applyPlanWorktree(SESSION, workflowID, fresh.tree)).toEqual({ ok: true, workflowID, files: ["extra.txt", "reviewed.txt"] })
+    expect(readFileSync(join(wt.worktree, "reviewed.txt"), "utf8")).toBe("unreviewed\n")
+    expect(existsSync(plan.path)).toBe(false)
+  }, 20_000)
+
   test("plan isolation setup failure preserves approved tasks and dispatches nothing", async () => {
     const f = fixture({ worker: request => {
       const module = request.title.match(/module (\d)/)?.[1]

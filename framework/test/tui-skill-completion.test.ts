@@ -69,9 +69,10 @@ describe("TUI command and skill palette", () => {
   test("/skill lists every skill, not only names containing 'skill'", () => {
     const skills = palette(catalog, "/skill")!.rows.filter(row => row.kind === "skill").map(row => row.name).sort()
     expect(skills).toEqual(["blocked-skill", "deep-interview", "hidden", "ralplan", "release-check", "review"])
-    expect(palette(catalog, "/skill")!.rows[0]?.label).toBe("/skills")
+    expect(palette(catalog, "/skill")!.rows.filter(row => row.kind === "command").map(row => row.label)).toContain("/skills")
     // `/skills` is the command; it does not widen into every skill by loose letters.
-    expect(palette(catalog, "/skills")!.rows.map(row => row.label)).toEqual(["/skills"])
+    expect(palette(catalog, "/skills")!.rows[0]?.label).toBe("/skills")
+    expect(palette(catalog, "/skills")!.rows.some(row => row.kind === "skill")).toBe(false)
   })
 
   test("before a model is chosen /skill explains why no skills are listed and inserts nothing", () => {

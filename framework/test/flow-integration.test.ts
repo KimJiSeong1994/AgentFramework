@@ -111,7 +111,7 @@ function primeCall(native: NativeToolFixture, tool: string, args: Record<string,
 }
 
 function eventTypes(worktree: string, wfId: string): string[] {
-  return readEvents(worktree, wfId).map((e) => e.type)
+  return readEvents(worktree, wfId, S).map((e) => e.type)
 }
 
 for (const [label, engine] of [
@@ -124,7 +124,7 @@ for (const [label, engine] of [
       ...newWorkflow(S, currentOwner(Date.now(), fixtureSession.epoch), "command", "preserve workflow", "opencode"),
       engine, phase: "reviewing",
     }))
-    const before = readFileSync(workflowPath(wt.worktree))
+    const before = readFileSync(workflowPath(wt.worktree, S))
     const deps = makeDeps(client, wt.worktree)
     await OtterPlugin({
       client: deps.client, directory: wt.worktree, worktree: wt.worktree,
@@ -133,7 +133,7 @@ for (const [label, engine] of [
       experimental_workspace: { register() { throw new Error("unexpected workspace registration") } },
       $,
     })
-    expect(before.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
+    expect(before.equals(readFileSync(workflowPath(wt.worktree, S)))).toBe(true)
     for (const [command, args, template] of [
       [PLAN_COMMAND, "new plan", PLAN_TEMPLATE],
       [APPROVE_COMMAND, "", APPROVE_TEMPLATE],
@@ -141,7 +141,7 @@ for (const [label, engine] of [
       [CANCEL_COMMAND, "", CANCEL_TEMPLATE],
     ] as const) {
       expect(await runCommand(deps, command, args, template)).toContain("Otter session held")
-      expect(before.equals(readFileSync(workflowPath(wt.worktree)))).toBe(true)
+      expect(before.equals(readFileSync(workflowPath(wt.worktree, S)))).toBe(true)
     }
     expect(eventTypes(wt.worktree, wf.id)).toEqual([])
     expect(existsSync(ledgerPath(wt.worktree, S))).toBe(false)
@@ -164,7 +164,7 @@ describe("1) /plan -> review (ITERATE then OKAY) -> /approve -> tasks done -> de
 
     const planText = await runCommand(deps, PLAN_COMMAND, "add a widget", PLAN_TEMPLATE)
     expect(planText).toBe(`Request: add a widget\n\n${PLAN_TEMPLATE}`)
-    let wf = readWorkflow(wt.worktree)!
+    let wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("planning")
     expect(wf.entry).toBe("command")
 
@@ -174,7 +174,7 @@ describe("1) /plan -> review (ITERATE then OKAY) -> /approve -> tasks done -> de
     client.replies.reviewer = { text: "- step 2 needs a narrower verify command\nVERDICT: ITERATE" }
     const iterateRes = (await tool.execute({ op: "plan", plan: validPlanArgs() }, toolCtx() as any)) as { output: string }
     expect(iterateRes.output).toContain("Reviewer asked for changes")
-    wf = readWorkflow(wt.worktree)!
+    wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("planning")
     expect(wf.counters.review_iterations).toBe(1)
 
@@ -182,13 +182,13 @@ describe("1) /plan -> review (ITERATE then OKAY) -> /approve -> tasks done -> de
     client.replies.reviewer = { text: "- looks solid\nVERDICT: OKAY" }
     const okayRes = (await tool.execute({ op: "plan", plan: validPlanArgs() }, toolCtx() as any)) as { output: string }
     expect(okayRes.output).toContain("Plan saved to")
-    wf = readWorkflow(wt.worktree)!
+    wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("pending_approval")
     expect(wf.review?.verdict).toBe("okay")
 
     const approveTurn = await runCommandTurn(deps, APPROVE_COMMAND, "", APPROVE_TEMPLATE)
     expect(approveTurn.text).toBe(APPROVE_TEMPLATE)
-    wf = readWorkflow(wt.worktree)!
+    wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("executing")
     const tagged = tasksForWorkflow(readLedger(wt.worktree, S), wf.id)
     expect(tagged.length).toBe(3)
@@ -212,7 +212,7 @@ describe("1) /plan -> review (ITERATE then OKAY) -> /approve -> tasks done -> de
     const afterHook = createToolAfterHook(deps)
     await afterHook(delegateCall.input, { title: "delegate", output: "ok", metadata: {} })
 
-    wf = readWorkflow(wt.worktree)!
+    wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("done")
 
     const types = eventTypes(wt.worktree, wf.id)
@@ -250,7 +250,7 @@ describe("2) /reject from pending_approval -> planning, counters.user_rejections
     const text = await runCommand(deps, REJECT_COMMAND, "needs more detail", `${REJECT_TEMPLATE_PREFIX}<reason>${REJECT_TEMPLATE_SUFFIX}`)
     expect(text).toBe(`${REJECT_TEMPLATE_PREFIX}needs more detail${REJECT_TEMPLATE_SUFFIX}`)
 
-    const after = readWorkflow(wt.worktree)!
+    const after = readWorkflow(wt.worktree, S)!
     expect(after.phase).toBe("planning")
     expect(after.counters.user_rejections).toBe(1)
     expect(eventTypes(wt.worktree, wf.id)).toContain("rejected")
@@ -289,7 +289,7 @@ describe("3) /cancel in executing while the queue runs -> pendingCancel, settles
     await createChatMessageHook(deps)({ sessionID: S, agent: "main", model: { providerID: "fixture", modelID: "native-tool-fixture" } } as never, { message: cancelMessage, parts: [cancelPart] } as never)
     expect(nativeMain.sessionID).toBe(S)
     expect(cancelPart.text).toBe(CANCEL_TEMPLATE)
-    let after = readWorkflow(wt.worktree)!
+    let after = readWorkflow(wt.worktree, S)!
     expect(after.phase).toBe("executing") // T18 queueRunning=true -> pendingCancel, phase unchanged
     expect(after.stopIntent?.kind).toBe("cancel")
 
@@ -297,7 +297,7 @@ describe("3) /cancel in executing while the queue runs -> pendingCancel, settles
     expect(q.isRunning(S)).toBe(false)
 
     await createIdleLoop(deps)(S) // settle: pendingCancel + queue stopped -> cancel_settled
-    after = readWorkflow(wt.worktree)!
+    after = readWorkflow(wt.worktree, S)!
     expect(after.phase).toBe("cancelled")
     expect(after.stopIntent).toBeNull()
 
@@ -314,14 +314,14 @@ describe("4) three invalid plans -> stuck(plan_invalid) -> /reject -> planning",
     const tool = createOtterFlowTool(deps)
     const badPlan = { ...validPlanArgs(), steps: [{ title: "s1", files: ["x"], verify: "true" }] } // too few steps + trivial verify
     for (let i = 0; i < 3; i++) await tool.execute({ op: "plan", plan: badPlan }, toolCtx() as any)
-    let wf = readWorkflow(wt.worktree)!
+    let wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("stuck")
     expect(wf.stuckCause).toBe("plan_invalid")
     expect(wf.counters.code_invalid).toBe(3)
 
     const text = await runCommand(deps, REJECT_COMMAND, "try again", `${REJECT_TEMPLATE_PREFIX}<reason>${REJECT_TEMPLATE_SUFFIX}`)
     expect(text).toBe(`${REJECT_TEMPLATE_PREFIX}try again${REJECT_TEMPLATE_SUFFIX}`)
-    wf = readWorkflow(wt.worktree)!
+    wf = readWorkflow(wt.worktree, S)!
     expect(wf.phase).toBe("planning")
     expect(wf.counters.user_rejections).toBe(1)
     expect(wf.counters.code_invalid).toBe(0)
@@ -350,12 +350,12 @@ describe("5) a foreign LIVE session refuses /approve without mutation", () => {
     }
     withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, wf))
 
-    const before = JSON.stringify(readWorkflow(wt.worktree))
-    const eventsBefore = readEvents(wt.worktree, wf.id)
+    const before = JSON.stringify(readWorkflow(wt.worktree, OTHER))
+    const eventsBefore = readEvents(wt.worktree, wf.id, OTHER)
     const text = await runCommand(deps, APPROVE_COMMAND, "", APPROVE_TEMPLATE, S)
-    expect(text).toContain(`already active in session ${OTHER}`)
-    expect(JSON.stringify(readWorkflow(wt.worktree))).toBe(before)
-    expect(readEvents(wt.worktree, wf.id)).toEqual(eventsBefore)
+    expect(text).toBe("no plan awaiting approval")
+    expect(JSON.stringify(readWorkflow(wt.worktree, OTHER))).toBe(before)
+    expect(readEvents(wt.worktree, wf.id, OTHER)).toEqual(eventsBefore)
     expect(readLedger(wt.worktree, S).tasks.length).toBe(0)
     expect(readLedger(wt.worktree, OTHER).tasks.length).toBe(0)
   })
@@ -386,15 +386,15 @@ describe("6) restored interrupted approve stays held (tagged tasks exist, phase 
     expect(fixtureSession.restored).toBe(true)
     expect(effectiveHold(wt.worktree, S)).toBe(true)
 
-    const beforeRepair = readWorkflow(wt.worktree)!
-    const eventsBeforeRepair = readEvents(wt.worktree, "wfid")
+    const beforeRepair = readWorkflow(wt.worktree, S)!
+    const eventsBeforeRepair = readEvents(wt.worktree, "wfid", S)
     const ledgerBeforeRepair = readLedger(wt.worktree, S)
     const r = repairOnLoad(getOpenCodeRuntime(deps), "opencode")
     expect(r).toBeNull()
-    const after = readWorkflow(wt.worktree)!
+    const after = readWorkflow(wt.worktree, S)!
     expect(after).toEqual(beforeRepair)
     expect(after.phase).toBe("pending_approval")
-    expect(readEvents(wt.worktree, "wfid")).toEqual(eventsBeforeRepair)
+    expect(readEvents(wt.worktree, "wfid", S)).toEqual(eventsBeforeRepair)
     expect(readLedger(wt.worktree, S)).toEqual(ledgerBeforeRepair)
     expect(tasksForWorkflow(ledgerBeforeRepair, "wfid")).toHaveLength(3)
   })
@@ -422,24 +422,24 @@ describe("7) same-session restored owner remains held until explicit Resume", ()
     fixtureSession = attachAdmission(getOpenCodeRuntime(deps), S, { engine: "opencode" })
     expect(fixtureSession.restored).toBe(true)
     expect(effectiveHold(wt.worktree, S)).toBe(true)
-    const rebound = readWorkflow(wt.worktree)!
+    const rebound = readWorkflow(wt.worktree, S)!
     expect(rebound.owner.instance).toBe(fixtureSession.epoch)
     expect(eventTypes(wt.worktree, "wfid")).toContain("owner_reattached")
 
-    const workflowBeforeApprove = readWorkflow(wt.worktree)
-    const eventsBeforeApprove = readEvents(wt.worktree, "wfid")
+    const workflowBeforeApprove = readWorkflow(wt.worktree, S)
+    const eventsBeforeApprove = readEvents(wt.worktree, "wfid", S)
     const ledgerFile = ledgerPath(wt.worktree, S)
     const ledgerBeforeApprove = existsSync(ledgerFile) ? readFileSync(ledgerFile) : null
     const heldText = await runCommand(deps, APPROVE_COMMAND, "", APPROVE_TEMPLATE)
     expect(heldText).toContain("Otter session held")
-    expect(readWorkflow(wt.worktree)).toEqual(workflowBeforeApprove)
-    expect(readEvents(wt.worktree, "wfid")).toEqual(eventsBeforeApprove)
+    expect(readWorkflow(wt.worktree, S)).toEqual(workflowBeforeApprove)
+    expect(readEvents(wt.worktree, "wfid", S)).toEqual(eventsBeforeApprove)
     expect(existsSync(ledgerFile) ? readFileSync(ledgerFile) : null).toEqual(ledgerBeforeApprove)
 
     resumeAdmission(getOpenCodeRuntime(deps), S, rebound.lastSeq)
     expect(effectiveHold(wt.worktree, S)).toBe(false)
     expect(await runCommand(deps, APPROVE_COMMAND, "", APPROVE_TEMPLATE)).toBe(APPROVE_TEMPLATE)
-    const after = readWorkflow(wt.worktree)!
+    const after = readWorkflow(wt.worktree, S)!
     expect(after.phase).toBe("executing")
     expect(after.owner.instance).toBe(fixtureSession.epoch)
     expect(after.owner.pid).toBe(process.pid)
@@ -478,8 +478,8 @@ describe("prose '/approve' typed as plain user text never approves", () => {
     await createConfigHook(deps)(hostConfig)
     expect(hostConfig.command?.[APPROVE_COMMAND]?.template).toBe(APPROVE_TEMPLATE)
     const commandHook = createCommandHook(deps, { flow: true })
-    const workflowBefore = readWorkflow(wt.worktree)
-    const eventsBefore = readEvents(wt.worktree, wf.id)
+    const workflowBefore = readWorkflow(wt.worktree, S)
+    const eventsBefore = readEvents(wt.worktree, wf.id, S)
     await commandHook({ command: APPROVE_COMMAND, sessionID: S, arguments: "" }, { parts: [] })
     const syntheticID = `synthetic_approve_${++messageSequence}`
     await expect(native.deliverUserTurn({
@@ -491,10 +491,10 @@ describe("prose '/approve' typed as plain user text never approves", () => {
     const modelID = `model_approve_${++messageSequence}`
     await native.deliverAssistantMessage({ messageID: modelID, text: APPROVE_TEMPLATE })
 
-    expect(readWorkflow(wt.worktree)!.phase).toBe("pending_approval")
+    expect(readWorkflow(wt.worktree, S)!.phase).toBe("pending_approval")
     expect(readLedger(wt.worktree, S).tasks.length).toBe(0)
-    expect(readWorkflow(wt.worktree)).toEqual(workflowBefore)
-    expect(readEvents(wt.worktree, wf.id)).toEqual(eventsBefore)
+    expect(readWorkflow(wt.worktree, S)).toEqual(workflowBefore)
+    expect(readEvents(wt.worktree, wf.id, S)).toEqual(eventsBefore)
   })
 })
 
@@ -570,8 +570,8 @@ describe("interactive conversation mode", () => {
     await createCommandHook(deps, { flow: true })({ command: APPROVE_COMMAND, sessionID: S, arguments: "" }, { parts: [] })
     const messageID = `interactive_missing_role_${++messageSequence}`
     const part: any = { id: `${messageID}_part`, sessionID: S, messageID, type: "text", text: APPROVE_TEMPLATE, synthetic: false }
-    const workflowBefore = readWorkflow(wt.worktree)
-    const eventsBefore = readEvents(wt.worktree, "interactive_pending")
+    const workflowBefore = readWorkflow(wt.worktree, S)
+    const eventsBefore = readEvents(wt.worktree, "interactive_pending", S)
     const ledgerBefore = readLedger(wt.worktree, S)
     // This deliberately malformed SDK callback lacks role and cannot borrow the pending typed command mark.
     await expect(createChatMessageHook(deps)({ sessionID: S, agent: "main" } as any, {
@@ -582,10 +582,10 @@ describe("interactive conversation mode", () => {
     expect(consumeCommandTurn(S)?.name).toBe(APPROVE_COMMAND)
     expect(consumeCommandTurn(S)).toBeNull()
 
-    expect(readWorkflow(wt.worktree)?.phase).toBe("pending_approval")
+    expect(readWorkflow(wt.worktree, S)?.phase).toBe("pending_approval")
     expect(readLedger(wt.worktree, S).tasks).toHaveLength(0)
-    expect(readWorkflow(wt.worktree)).toEqual(workflowBefore)
-    expect(readEvents(wt.worktree, "interactive_pending")).toEqual(eventsBefore)
+    expect(readWorkflow(wt.worktree, S)).toEqual(workflowBefore)
+    expect(readEvents(wt.worktree, "interactive_pending", S)).toEqual(eventsBefore)
     expect(readLedger(wt.worktree, S).tasks).toEqual(ledgerBefore.tasks) // an absent ledger materializes with a fresh createdAt on every read
     expect(existsSync(ledgerPath(wt.worktree, S))).toBe(false)
   })
@@ -631,9 +631,9 @@ describe("interactive conversation mode", () => {
     deps.interactive = true
     const firstRequest = "Add an export option and cover it with a test."
     const firstTurn = await runUserTurn(deps, firstRequest, { id: "interactive_first" })
-    const first = readWorkflow(wt.worktree)!
+    const first = readWorkflow(wt.worktree, S)!
     expect(first).toMatchObject({ phase: "planning", entry: "keyword", request: firstRequest })
-    expect(readEvents(wt.worktree, first.id).find((event) => event.type === "created")?.actor).toBe("user_keyword")
+    expect(readEvents(wt.worktree, first.id, S).find((event) => event.type === "created")?.actor).toBe("user_keyword")
 
     const toolBefore = createToolBeforeHook(deps)
     const delegate = primeCall(firstTurn.native, "delegate", { tasks: [] })
@@ -646,7 +646,7 @@ describe("interactive conversation mode", () => {
     )
 
     await runUserTurn(deps, "Also update the related docs.", { id: "interactive_second" })
-    const second = readWorkflow(wt.worktree)!
+    const second = readWorkflow(wt.worktree, S)!
     expect(second.id).toBe(first.id)
     expect(second.request).toBe(firstRequest)
   })
@@ -662,17 +662,17 @@ describe("interactive conversation mode", () => {
     fixtureSession = attachAdmission(getOpenCodeRuntime(deps), S, { engine: "opencode" })
     expect(fixtureSession.restored).toBe(true)
     expect(effectiveHold(wt.worktree, S)).toBe(true)
-    const rebound = readWorkflow(wt.worktree)!
+    const rebound = readWorkflow(wt.worktree, S)!
     expect(rebound.id).toBe(previous.id)
     expect(rebound.owner.instance).toBe(fixtureSession.epoch)
     expect(eventTypes(wt.worktree, previous.id)).toContain("owner_reattached")
 
-    const beforeTurn = readWorkflow(wt.worktree)
-    const eventsBeforeTurn = readEvents(wt.worktree, previous.id)
+    const beforeTurn = readWorkflow(wt.worktree, S)
+    const eventsBeforeTurn = readEvents(wt.worktree, previous.id, S)
     const heldTurn = await runUserTurn(deps, "Continue with the requested investigation.", { id: "interactive_restart_owner" })
     expect(heldTurn.part.text).toContain("Otter session held")
-    expect(readWorkflow(wt.worktree)).toEqual(beforeTurn)
-    expect(readEvents(wt.worktree, previous.id)).toEqual(eventsBeforeTurn)
+    expect(readWorkflow(wt.worktree, S)).toEqual(beforeTurn)
+    expect(readEvents(wt.worktree, previous.id, S)).toEqual(eventsBeforeTurn)
     expect(eventTypes(wt.worktree, previous.id)).not.toContain("owner_takeover")
 
     resumeAdmission(getOpenCodeRuntime(deps), S, rebound.lastSeq)
@@ -681,11 +681,13 @@ describe("interactive conversation mode", () => {
     const otherSession = admitFixtureSession(deps, OTHER)
     additionalFixtureSessions.push(otherSession)
     const foreignTurn = await runUserTurn(deps, "Start an unrelated request.", { id: "interactive_foreign_after_takeover", sessionID: OTHER })
-    expect(foreignTurn.part.text).toContain(`already active in session ${S}`)
-    const afterForeignTurn = readWorkflow(wt.worktree)!
+    expect(foreignTurn.part.text).toContain('<otter-flow phase="planning">')
+    expect(readWorkflow(wt.worktree, OTHER)).toMatchObject({ sessionID: OTHER, phase: "planning" })
+    expect(readWorkflow(wt.worktree, OTHER)?.id).not.toBe(previous.id)
+    const afterForeignTurn = readWorkflow(wt.worktree, S)!
     expect(afterForeignTurn.id).toBe(previous.id)
     expect(afterForeignTurn.owner.instance).toBe(fixtureSession.epoch)
-    expect(readEvents(wt.worktree, previous.id)).toEqual(eventsBeforeTurn)
+    expect(readEvents(wt.worktree, previous.id, S)).toEqual(eventsBeforeTurn)
   })
 
   test("child and synthetic turns do not start workflows", async () => {
@@ -704,11 +706,11 @@ describe("interactive conversation mode", () => {
     await expect(native.deliverUserTurn({
       parts: [{ type: "text", text: "Synthetic follow-up", synthetic: true }],
     })).rejects.toThrow("otter: OpenCode system channel refused (invalid-turn)")
-    expect(readWorkflow(wt.worktree)).toBeNull()
+    expect(readWorkflow(wt.worktree, S)).toBeNull()
     // A blank main turn is accepted but is not a plan request; assistant text never starts a workflow either.
     await native.deliverUserTurn({ text: "   " })
     await native.deliverAssistantMessage({ text: "Assistant-originated text" })
-    expect(readWorkflow(wt.worktree)).toBeNull()
+    expect(readWorkflow(wt.worktree, S)).toBeNull()
   })
 
   test("missing, foreign, stuck, cancelled and explicitly cancelled workflows never unlock writes", async () => {
@@ -733,8 +735,9 @@ describe("interactive conversation mode", () => {
     const otherSession = admitFixtureSession(deps, OTHER)
     additionalFixtureSessions.push(otherSession)
     const foreign = withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, newWorkflow(OTHER, currentOwner(Date.now(), otherSession.epoch), "keyword", "foreign request", "opencode")))
-    native = (await runUserTurn(deps, "Try to start another request", { id: "interactive_foreign" })).native
-    expect(readWorkflow(wt.worktree)?.id).toBe(foreign.id)
+    native = (await runUserTurn(deps, "   ", { id: "interactive_foreign" })).native
+    expect(readWorkflow(wt.worktree, S)).toBeNull()
+    expect(readWorkflow(wt.worktree, OTHER)?.id).toBe(foreign.id)
     await expect(invoke("delegate", { tasks: [] })).rejects.toThrow(unavailable)
 
     const stuck = withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, {
@@ -743,14 +746,14 @@ describe("interactive conversation mode", () => {
       stuckCause: "tasks_failed",
     }))
     await expect(invoke("delegate", { tasks: [] })).rejects.toThrow(unavailable)
-    expect(readWorkflow(wt.worktree)?.id).toBe(stuck.id)
+    expect(readWorkflow(wt.worktree, S)?.id).toBe(stuck.id)
 
     withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, { ...stuck, phase: "cancelled" }))
     await expect(invoke("delegate", { tasks: [] })).rejects.toThrow(unavailable)
 
     withFlowTransaction(wt.worktree, flowTx => writeWorkflow(flowTx, newWorkflow(S, currentOwner(Date.now(), fixtureSession.epoch), "keyword", "cancel request", "opencode")))
     const cancelTurn = await runCommandTurn(deps, CANCEL_COMMAND, "", CANCEL_TEMPLATE)
-    expect(readWorkflow(wt.worktree)?.phase).toBe("cancelled")
+    expect(readWorkflow(wt.worktree, S)?.phase).toBe("cancelled")
     native = cancelTurn.native
     await expect(invoke("delegate", { tasks: [] })).rejects.toThrow(unavailable)
   })
@@ -758,7 +761,7 @@ describe("interactive conversation mode", () => {
   test("interactive mode off retains ordinary main-tool behavior", async () => {
     const deps = makeDeps(client, wt.worktree)
     const turn = await runUserTurn(deps, "Please explain this code.", { id: "interactive_off" })
-    expect(readWorkflow(wt.worktree)).toBeNull()
+    expect(readWorkflow(wt.worktree, S)).toBeNull()
     const call = primeCall(turn.native, "read", { filePath: "README.md" })
     await createToolBeforeHook(deps)(call.input, call.output)
   })

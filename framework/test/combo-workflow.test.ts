@@ -80,7 +80,7 @@ describe("role combo end to end", () => {
     expect(dispatched.map(options => [options.engine, options.model])).toEqual([
       ["claude", "opus"], ["local", "arch-model"], ["claude", "sonnet"],
     ])
-    const committed = readCommitted(wt.worktree)
+    const committed = readCommitted(wt.worktree, {}, SID)
     if (committed.state !== "ok") throw new Error("no committed workflow")
     expect(committed.wf.engine).toBe(ANCHOR.engine)
 

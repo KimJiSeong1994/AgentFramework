@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { estimateTokens } from "../src/tokens.ts"
 import { ModelRequestError } from "../src/workflows/turn.ts"
+import { resetMemoryRecallState, takeMemoryPrefetch } from "../src/wiki/recall.ts"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { newWorkflow, withFlowTransaction, workflowPath } from "../src/flow/state.ts"
 import { writeWorkflow } from "./commit-fixture.ts"
@@ -80,7 +81,7 @@ function fixture(options: {
       }
     },
   }), { planningOnlyMain: true, chatExecuteMain: options.chatExecute === true, nativeContext: options.nativeContext })
-  return { runtime, requests, get cancels() { return cancels }, get started() { return !!resolveRun } }
+  return { runtime, requests, finish() { complete = true; resolveRun?.({ status: "completed", text: "done" }) }, get cancels() { return cancels }, get started() { return !!resolveRun } }
 }
 
 describe("common planning conversation", () => {
@@ -222,6 +223,44 @@ describe("common planning conversation", () => {
     expect(f.runtime.runs.status().executions[0]!.fence).toBeDefined()
     await expect(conversation.turn("Try again")).rejects.toThrow("existing execution claim")
     expect(f.requests).toHaveLength(1)
+  })
+
+  test.each(["cancel", "complete"] as const)("turn %s aborts unused background memory", async ending => {
+    resetMemoryRecallState()
+    const f = fixture({ hang: true })
+    mkdirSync(join(wt.worktree, ".otter"), { recursive: true })
+    writeFileSync(join(wt.worktree, ".otter/otter.jsonc"), JSON.stringify({ memory: { engine: "jev", prefetch: true } }))
+    mkdirSync(join(wt.worktree, "knowledge/wiki/concepts"), { recursive: true })
+    writeFileSync(join(wt.worktree, "knowledge/wiki/index.md"), "- [Note](concepts/note.md) — useful note\n")
+    writeFileSync(join(wt.worktree, "knowledge/wiki/concepts/note.md"), "# Note\nreference")
+    const originalFetch = globalThis.fetch
+    let memorySignal: AbortSignal | undefined
+    globalThis.fetch = (async (_url: unknown, options: RequestInit) => {
+      memorySignal = options.signal ?? undefined
+      return new Promise<Response>((_resolve, reject) => {
+        if (memorySignal?.aborted) { reject(new DOMException("aborted", "AbortError")); return }
+        memorySignal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true })
+      })
+    }) as typeof fetch
+    const abort = new AbortController()
+    const sessionID = `memory-${ending}`
+    const turn = createPlanConversation(f.runtime, sessionID).turn("Recall the useful note", abort.signal)
+    // Register rejection immediately while waiting for the in-flight prefetch.
+    const settled = turn.then(value => ({ value }), error => ({ error }))
+    try {
+      await waitFor(() => f.started && !!memorySignal)
+      if (ending === "cancel") abort.abort()
+      else f.finish()
+      const result = await settled
+      expect("error" in result).toBe(ending === "cancel")
+      expect(memorySignal?.aborted).toBe(true)
+      expect(await takeMemoryPrefetch(sessionID)).toBeUndefined()
+    } finally {
+      abort.abort()
+      await settled
+      globalThis.fetch = originalFetch
+      resetMemoryRecallState()
+    }
   })
 
   test("aborted input never launches and active cancellation joins owned handle", async () => {

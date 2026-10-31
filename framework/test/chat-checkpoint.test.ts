@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createChatCheckpoints } from "../src/hosts/chat-checkpoint.ts"
@@ -109,5 +109,58 @@ describe("chat checkpoints (outside Git)", () => {
     await checkpoints.endTurn()
     expect(checkpoints.list()[0]?.files).toBe(0)
     expect((await checkpoints.undo())?.restored).toEqual([])
+  })
+})
+
+
+describe("checkpoint recovery boundaries", () => {
+  test.each(["parent-symlink", "hardlink", "root-symlink", "root-replacement"])("undo refuses %s substitution without touching outside content", async mode => {
+    const root = workdir(false)
+    const outside = workdir(false)
+    mkdirSync(join(root, "src"))
+    writeFileSync(join(root, "src/a.txt"), "before")
+    mkdirSync(join(outside, "src"))
+    writeFileSync(join(outside, "src/a.txt"), "after")
+    const checkpoints = createChatCheckpoints(root, () => "edit")
+    await checkpoints.beforeEffect({ tool: "edit", path: "src/a.txt" })
+    writeFileSync(join(root, "src/a.txt"), "after")
+    await checkpoints.endTurn()
+    try {
+      if (mode === "parent-symlink") {
+        renameSync(join(root, "src"), join(root, "saved"))
+        symlinkSync(join(outside, "src"), join(root, "src"))
+      } else if (mode === "hardlink") {
+        rmSync(join(root, "src/a.txt"))
+        linkSync(join(outside, "src/a.txt"), join(root, "src/a.txt"))
+      } else {
+        const saved = `${root}-saved`
+        renameSync(root, saved)
+        dirs.push(saved)
+        if (mode === "root-symlink") symlinkSync(outside, root)
+        else {
+          mkdirSync(join(root, "src"), { recursive: true })
+          writeFileSync(join(root, "src/a.txt"), "after")
+        }
+      }
+      expect(await checkpoints.undo()).toMatchObject({ restored: [], skipped: ["src/a.txt"] })
+      expect(readFileSync(join(outside, "src/a.txt"), "utf8")).toBe("after")
+      expect(readFileSync(join(root, "src/a.txt"), "utf8")).toBe("after")
+    } finally { checkpoints.dispose() }
+  })
+
+  test("failed final Git capture refuses undo and retains its checkpoint", async () => {
+    const root = workdir(true)
+    const checkpoints = createChatCheckpoints(root, () => "edit")
+    try {
+      await checkpoints.beforeEffect({ tool: "edit", path: "a.txt" })
+      writeFileSync(join(root, "a.txt"), "after")
+      writeFileSync(join(root, ".otter"), "not a safe directory")
+      await checkpoints.endTurn()
+      rmSync(join(root, ".otter"))
+      await expect(checkpoints.undo()).rejects.toThrow("final Git checkpoint")
+      expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("after")
+      expect(checkpoints.list()).toHaveLength(1)
+      await expect(checkpoints.undo()).rejects.toThrow("final Git checkpoint")
+    } finally { checkpoints.dispose() }
   })
 })

@@ -151,12 +151,12 @@ describe("owner.authorize — §5.3 matrix (pure)", () => {
 
 describe("runtime.resolveAuthority — mutation/side effects", () => {
   function bytes() {
-    return readFileSync(workflowPath(wt.worktree))
+    return readFileSync(workflowPath(wt.worktree, S))
   }
 
   function eventBytes() {
     try {
-      return readFileSync(eventsPath(wt.worktree))
+      return readFileSync(eventsPath(wt.worktree, S))
     } catch {
       return null
     }
@@ -215,7 +215,7 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     expect(client.calls.length).toBe(callsBefore)
   })
 
-  test("other session, owner live -> refuse, no mutation", () => {
+  test("other session sees no workflow and cannot mutate the live owner", () => {
     const deps = makeDeps(client, wt.worktree)
     const store = admit(deps, S)
     const wf = putWorkflow({ sessionID: S, owner: currentOwner(Date.now(), store.epoch) })
@@ -224,16 +224,15 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     const ledgerBefore = ledgerBytes()
     for (const cmd of ["plan", "approve", "reject", "cancel"] as const) {
       const r = resolveAuthority(deps, cmd, OTHER, "opencode")
-      expect(r.refuse).toContain(`session ${S}`)
-      expect(r.refuse).toContain(`/resume ${S}`)
-      expect(r.wf?.id).toBe(wf.id)
+      expect(r.refuse).toBeUndefined()
+      expect(r.wf).toBeNull()
       expect(bytes()).toEqual(before)
       expect(eventBytes()).toEqual(eventsBefore)
       expect(ledgerBytes()).toEqual(ledgerBefore)
     }
   })
 
-  test("other session, owner dead -> status read-only byte-identical files", () => {
+  test("other session status does not disclose the dead owner and leaves files unchanged", () => {
     putWorkflow({ sessionID: S, owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 } })
     const deps = makeDeps(client, wt.worktree)
     const before = bytes()
@@ -241,13 +240,14 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     const ledgerBefore = ledgerBytes()
     const r = resolveAuthority(deps, "status", OTHER, "opencode")
     expect(r.refuse).toBeUndefined()
-    expect(r.ownerDead).toBe(true)
+    expect(r.ownerDead).toBeUndefined()
+    expect(r.wf).toBeNull()
     expect(bytes()).toEqual(before)
     expect(eventBytes()).toEqual(eventsBefore)
     expect(ledgerBytes()).toEqual(ledgerBefore)
   })
 
-  test("other session, dead owner -> every mutation refuses without mutation", () => {
+  test("other session authority lookup returns no workflow without mutation", () => {
     const wf = putWorkflow({ sessionID: S, owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 } })
     const deps = makeDeps(client, wt.worktree)
     const before = bytes()
@@ -256,9 +256,8 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     const callsBefore = client.calls.length
     for (const cmd of ["plan", "approve", "reject", "cancel"] as const) {
       const r = resolveAuthority(deps, cmd, OTHER, "opencode")
-      expect(r.refuse).toContain(`session ${S}`)
-      expect(r.refuse).toContain(`/resume ${S}`)
-      expect(r.wf?.id).toBe(wf.id)
+      expect(r.refuse).toBeUndefined()
+      expect(r.wf).toBeNull()
       expect(bytes()).toEqual(before)
       expect(eventBytes()).toEqual(eventsBefore)
       expect(ledgerBytes()).toEqual(ledgerBefore)
@@ -266,7 +265,7 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     expect(client.calls.length).toBe(callsBefore)
   })
 
-  test("direct workflow start refuses a foreign dead-owner workflow without rotation or events", () => {
+  test("unadmitted session start refuses without rotating a foreign workflow", () => {
     const wf = putWorkflow({ sessionID: S, owner: { instance: "inst_dead", pid: 9_999_999, heartbeatAt: 0 } })
     const deps = makeDeps(client, wt.worktree)
     const before = bytes()
@@ -278,20 +277,19 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
-      expect(result.text).toContain(`session ${S}`)
-      expect(result.text).toContain(`/resume ${S}`)
+      expect(result.text).toContain(`session ${OTHER} has no live admission`)
     }
     expect(bytes()).toEqual(before)
     expect(eventBytes()).toEqual(eventsBefore)
     expect(ledgerBytes()).toEqual(ledgerBefore)
-    expect(readWorkflow(wt.worktree)?.id).toBe(wf.id)
+    expect(readWorkflow(wt.worktree, S)?.id).toBe(wf.id)
     expect(client.calls.length).toBe(callsBefore)
   })
 
-  test("other session, dead owner -> status read-only and every mutation refuses", () => {
+  test("other session status and mutation lookups never adopt the dead owner", () => {
     // P5a intended change: committed snapshots live under sessions/<sid>/, so deleting that directory would delete
     // the index target (fail-closed corrupt, and session deletion never removes snapshots). Owner death is therefore
-    // modelled with a dead pid; every refusal assertion below is unchanged.
+    // modelled with a dead pid; unrelated session lookups still cannot adopt this workflow.
     const wf = putWorkflow({ sessionID: S, owner: currentOwner(Date.now(), "inst_owner", 9_999_999) })
     const deps = makeDeps(client, wt.worktree)
     const before = bytes()
@@ -299,16 +297,16 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     const ledgerBefore = ledgerBytes()
     const status = resolveAuthority(deps, "status", OTHER, "opencode")
     expect(status.refuse).toBeUndefined()
-    expect(status.ownerDead).toBe(true)
+    expect(status.ownerDead).toBeUndefined()
+    expect(status.wf).toBeNull()
     expect(bytes()).toEqual(before)
     expect(eventBytes()).toEqual(eventsBefore)
     expect(ledgerBytes()).toEqual(ledgerBefore)
     const callsBefore = client.calls.length
     for (const cmd of ["plan", "approve", "reject", "cancel"] as const) {
       const r = resolveAuthority(deps, cmd, OTHER, "opencode")
-      expect(r.refuse).toContain(`session ${S}`)
-      expect(r.refuse).toContain(`/resume ${S}`)
-      expect(r.wf?.id).toBe(wf.id)
+      expect(r.refuse).toBeUndefined()
+      expect(r.wf).toBeNull()
       expect(bytes()).toEqual(before)
       expect(eventBytes()).toEqual(eventsBefore)
       expect(ledgerBytes()).toEqual(ledgerBefore)
@@ -328,7 +326,7 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     expect(bytes()).toEqual(workflowBefore)
     expect(eventBytes()).toEqual(eventsBefore)
     expect(ledgerBytes()).toEqual(ledgerBefore)
-    expect(readWorkflow(wt.worktree)).toEqual(wf)
+    expect(readWorkflow(wt.worktree, S)).toEqual(wf)
   })
 
   test("held rebind remains blocked until validated explicit Resume, then updates workflow events", () => {
@@ -343,9 +341,9 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     expect(restored.restored).toBe(true)
     expect(effectiveHold(wt.worktree, S)).toBe(true)
 
-    const rebound = readWorkflow(wt.worktree)!
+    const rebound = readWorkflow(wt.worktree, S)!
     expect(rebound.owner.instance).toBe(restored.epoch)
-    expect(readEvents(wt.worktree, original.id).some(event => event.type === "owner_reattached")).toBe(true)
+    expect(readEvents(wt.worktree, original.id, S).some(event => event.type === "owner_reattached")).toBe(true)
     const workflowBeforeResume = bytes()
     const eventsBeforeResume = eventBytes()
     const ledgerBeforeResume = ledgerBytes()
@@ -374,7 +372,7 @@ describe("runtime.resolveAuthority — mutation/side effects", () => {
     expect(bytes()).not.toEqual(workflowBeforeOperation)
     expect(eventBytes()).not.toEqual(eventsBeforeOperation)
     expect(ledgerBytes()).toEqual(ledgerBeforeOperation)
-    expect(readEvents(wt.worktree, original.id).some(event => event.type === "transition" && event.data?.event === "user_message")).toBe(true)
+    expect(readEvents(wt.worktree, original.id, S).some(event => event.type === "transition" && event.data?.event === "user_message")).toBe(true)
   })
 
   test("session.deleted of the admitted owner -> cancelled before the dir is removed", () => {
@@ -424,14 +422,14 @@ describe("owner heartbeat timer", () => {
     const wf = putWorkflow({ sessionID: S, owner: currentOwner(Date.now(), "inst_this", process.pid) })
     let last = 0
     const hb = startHeartbeat(() => {
-      const cur = readWorkflow(wt.worktree)!
+      const cur = readWorkflow(wt.worktree, S)!
       last = Date.now()
       withFlowTransaction(wt.worktree, flowTx => writeHeartbeat(flowTx, cur, last))
       return true
     }, 10)
     await new Promise((r) => setTimeout(r, 60))
     hb.stop()
-    const cur = readWorkflow(wt.worktree)!
+    const cur = readWorkflow(wt.worktree, S)!
     expect(cur.lastSeq).toBe(wf.lastSeq) // heartbeats never mint revisions
     const beat = readHeartbeat(wt.worktree, cur)
     expect(beat).toBe(last)

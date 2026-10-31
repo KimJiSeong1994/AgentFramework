@@ -49,6 +49,7 @@ const KITTY_FUNCTIONAL_KEYS = new Map<number, string>([
 ])
 
 const KEYPAD_KEYS = new Map<number, string>([
+  [57399, "insert"],
   [57400, "end"],
   [57401, "down"],
   [57402, "pageDown"],
@@ -125,12 +126,12 @@ function eventForCodepoint(
 
   const hasNonShiftModifier = (modifiers & (2 | 4 | 8)) !== 0
   if (!hasNonShiftModifier) {
+    const functional = KITTY_FUNCTIONAL_KEYS.get(codepoint) ?? (codepoint === 57414 ? "enter" : undefined)
+    if (functional) return key(modifiedKey(functional, modifiers))
     if (textCodepoints) {
-      const textValue = [...textCodepoints]
-        .map(char => char.codePointAt(0)!)
-        .filter(printableCodepoint)
-        .map(value => String.fromCodePoint(value))
-        .join("")
+      const values = textCodepoints.split(":").map(value => /^\d+$/.test(value) ? Number(value) : NaN)
+      if (!values.every(printableCodepoint)) return undefined
+      const textValue = values.map(value => String.fromCodePoint(value)).join("")
       if (textValue) return text(textValue)
     }
     const keypadOperator = KEYPAD_PRINTABLE.get(codepoint)
@@ -138,7 +139,7 @@ function eventForCodepoint(
     if (modifiers === 0 && (rawModifiers & 128) !== 0 && codepoint >= 57399 && codepoint <= 57409) {
       return text(codepoint === 57409 ? "." : String((codepoint - 57399) % 10))
     }
-    if (printableCodepoint(codepoint)) {
+    if (printableCodepoint(codepoint) && !(codepoint >= 57344 && codepoint <= 63743)) {
       const printable = (modifiers & 1) !== 0 && shiftedKey !== undefined ? shiftedKey : codepoint
       if (printableCodepoint(printable)) return text(String.fromCodePoint(printable))
     }

@@ -3,7 +3,7 @@
 // failed/cancelled tasks preserved, patch kept when the merge no longer applies).
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { execFileSync, spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { createQueue } from "../src/orchestration/queue.ts"
 import { getOpenCodeRuntime } from "../src/hosts/opencode-runtime.ts"
@@ -29,6 +29,25 @@ const prompts = (agent: string) => client.calls.filter((c) => c.method === "prom
 const recoveryDir = (taskId: string) => join(worktreeRoot(wt.worktree), ".recovery", S, taskId)
 
 describe("task worktree", () => {
+  test("untracked imports preserve ordinary permissions and strip privilege bits", async () => {
+    const modes = [0o755, 0o700, 0o640, 0o4755]
+    for (const mode of modes) {
+      const path = join(wt.worktree, `tool-${mode.toString(8)}.sh`)
+      writeFileSync(path, "#!/bin/sh\nprintf copied\n")
+      chmodSync(path, mode)
+    }
+    const child = (await createTaskWorktree(wt.worktree, S, "permission-import", []))!
+    for (const mode of modes) {
+      const path = join(child.path, `tool-${mode.toString(8)}.sh`)
+      expect(lstatSync(path).mode & 0o7777).toBe(mode & 0o777)
+      expect(readFileSync(path, "utf8")).toBe("#!/bin/sh\nprintf copied\n")
+    }
+    const ran = spawnSync(join(child.path, "tool-755.sh"), [], { cwd: child.path, encoding: "utf8" })
+    expect(ran.status).toBe(0)
+    expect(ran.stdout).toBe("copied")
+    await child.remove()
+  })
+
   test.each(["symlink", "non-directory state"])("failed initial baseline is rolled back so the same task can retry after source repair: %s", async obstruction => {
     mkdirSync(join(wt.worktree, "safe-data"))
     if (obstruction === "symlink") symlinkSync("safe-data", join(wt.worktree, ".otter"))
@@ -810,7 +829,7 @@ describe("plan worktree (one worktree per approved plan)", () => {
 
   test("an unchanged plan worktree previews as empty", async () => {
     const plan = await make()
-    expect(await plan.preview([])).toEqual({ ok: true, files: [], stat: "", patch: "" })
+    expect(await plan.preview([])).toEqual({ ok: true, tree: plan.baseline.tree, files: [], stat: "", patch: "" })
     await plan.remove()
   })
 

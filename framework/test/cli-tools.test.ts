@@ -31,6 +31,18 @@ afterEach(() => {
 })
 
 describe("scoped CLI file tools", () => {
+  test("overlapping exact matches refuse single edits and the whole multi-edit batch", () => {
+    writeFileSync(join(root, "ambiguous.txt"), "aaa")
+    writeFileSync(join(root, "other.txt"), "before")
+    expect(tools.execute("edit", { path: "ambiguous.txt", oldText: "aa", newText: "X" }).ok).toBe(false)
+    expect(tools.execute("multiedit", { edits: [
+      { path: "other.txt", oldText: "before", newText: "after" },
+      { path: "ambiguous.txt", oldText: "aa", newText: "X" },
+    ] }).ok).toBe(false)
+    expect(readFileSync(join(root, "ambiguous.txt"), "utf8")).toBe("aaa")
+    expect(readFileSync(join(root, "other.txt"), "utf8")).toBe("before")
+  })
+
   test("multiread batches bounded read-only file ranges without partial disclosure", () => {
     writeFileSync(join(root, "a.txt"), "first\nsecond\n")
     writeFileSync(join(root, "b.txt"), "third")

@@ -737,9 +737,11 @@ describe("shared workflow worktree (S4)", () => {
     expect(ultragoalEvidence(wt.worktree, done, { final: true }).problems).toEqual([])
     // Apply happens once, at final review, through the controller; until then the worktree is kept
     expect(h.controller.pendingPlanWorktree(h.sid)).toBe(done.id)
-    expect(await h.controller.reviewPlanWorktree(h.sid, done.id)).toMatchObject({ ok: true, files: ["mod1.py", "mod2.py"] })
+    const review = await h.controller.reviewPlanWorktree(h.sid, done.id)
+    expect(review).toMatchObject({ ok: true, files: ["mod1.py", "mod2.py"] })
     expect(existsSync(join(wt.worktree, "mod1.py"))).toBe(false)
-    expect(await h.controller.applyPlanWorktree(h.sid, done.id)).toMatchObject({ ok: true, files: ["mod1.py", "mod2.py"] })
+    if (!review.ok) throw new Error(review.reason)
+    expect(await h.controller.applyPlanWorktree(h.sid, done.id, review.tree)).toMatchObject({ ok: true, files: ["mod1.py", "mod2.py"] })
     expect(readFileSync(join(wt.worktree, "mod2.py"), "utf8")).toBe("VALUE = 2\n")
     expect(existsSync(planPath)).toBe(false)
     expect(h.controller.pendingPlanWorktree(h.sid)).toBeUndefined()

@@ -1806,7 +1806,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             let output: CliToolOutput
             try {
               output = snapshot !== undefined ? formatCliReadResult(snapshot, envelope.input)
-                : name === "memory" ? await tools.recall(envelope.input, loadMemory(), AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now())),
+                : name === "memory" ? await tools.recall(envelope.input, loadMemory(), AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))]),
                   // Only main consumes the user-turn prefetch started by the planning conversation.
                   request.role === "main" ? request.supervisorSessionID : undefined)
                   : name === "repo_search" ? await tools.repoSearch(envelope.input, AbortSignal.any([
@@ -1818,14 +1818,14 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             catch {
               finishTool("failed", false)
               if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-              if (name === "repo_search" && Date.now() >= request.deadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed" })
+              if ((name === "repo_search" || name === "memory") && Date.now() >= request.deadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed" })
               return setFinal({ status: "failed", error: "Otter tool input or implementation failed closed" })
             }
-            if (name === "repo_search" && cancelled) {
+            if ((name === "repo_search" || name === "memory") && cancelled) {
               finishTool("failed", false)
               return setFinal({ status: "cancelled", error: cancelReason })
             }
-            if (name === "repo_search" && Date.now() >= request.deadlineAt) {
+            if ((name === "repo_search" || name === "memory") && Date.now() >= request.deadlineAt) {
               finishTool("failed", false)
               return setFinal({ status: "failed", error: "execution deadline elapsed" })
             }

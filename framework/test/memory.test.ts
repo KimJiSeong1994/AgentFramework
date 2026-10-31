@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DEFAULT_CONFIG, type OtterConfig } from "../src/config.ts"
@@ -162,6 +162,29 @@ describe("memory recall (Jev inference)", () => {
     try { expect(await memoryToolText(empty, "q", memory)).toContain("No memory: knowledge/wiki/index.md does not exist") }
     finally { rmSync(empty, { recursive: true, force: true }) }
     expect(requests).toHaveLength(0)
+  })
+
+  test.each(["concepts", "knowledge", "root"])("recall refuses %s ancestor substitution during inference", async level => {
+    writeFileSync(join(outside, "cache.md"), "# External\nPRIVATE_OUTSIDE_CONTENT")
+    mkdirSync(join(outside, "wiki", "concepts"), { recursive: true })
+    writeFileSync(join(outside, "wiki", "concepts", "cache.md"), "# External\nPRIVATE_OUTSIDE_CONTENT")
+    mkdirSync(join(outside, "knowledge", "wiki", "concepts"), { recursive: true })
+    writeFileSync(join(outside, "knowledge", "wiki", "concepts", "cache.md"), "# External\nPRIVATE_OUTSIDE_CONTENT")
+    let saved: string | undefined
+    handler = body => {
+      const target = level === "root" ? root : level === "knowledge" ? join(root, "knowledge") : join(root, "knowledge", "wiki", "concepts")
+      saved = `${target}-original`
+      renameSync(target, saved)
+      symlinkSync(outside, target)
+      return answer(body, { [CACHE]: 0.9, none: 0.1 })
+    }
+    try {
+      const result = await recallMemory(root, "cache", memory)
+      expect(result.status).toBe("abstained")
+      expect(JSON.stringify(result)).not.toContain("PRIVATE_OUTSIDE_CONTENT")
+    } finally {
+      if (level === "root" && saved) { rmSync(root); renameSync(saved, root) }
+    }
   })
 
   test("times out, honors cancellation, and admits one inference at a time", async () => {
@@ -354,6 +377,18 @@ describe("recall speed: score cache, latency samples, prefetch", () => {
     expect(memoryLatency("claude", "haiku").samples).toBe(0)
   })
 
+  test("an already cancelled consumer aborts prefetch immediately", async () => {
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    handler = async body => { await held; return answer(body, { [CACHE]: 0.9 }) }
+    expect(startMemoryPrefetch(root, "cancelled-prefetch", "cache", { ...memory, prefetch: true })).toBe(true)
+    const signal = AbortSignal.abort()
+    try {
+      expect(await takeMemoryPrefetch("cancelled-prefetch", signal)).toBeUndefined()
+      expect(await takeMemoryPrefetch("cancelled-prefetch")).toBeUndefined()
+    } finally { release() }
+  })
+
   test("prefetch is opt-in, runs once per turn, is consumed by the first memory call, and is cancelled by a newer turn", async () => {
     expect(startMemoryPrefetch(root, "s1", "프롬프트 날짜", memory)).toBe(false)
     expect(await takeMemoryPrefetch("s1")).toBeUndefined()
@@ -464,7 +499,7 @@ describe("/memory command", () => {
 describe("memory CLI tool", () => {
   test("is read-only, available to main, exact-schema validated, and asynchronous", async () => {
     const tools = createCliTools({ root, role: "main", allowed: ["read", "memory"], denied: [] })
-    expect(tools.available).toEqual(["read", "memory"])
+    expect(tools.available).toEqual(["read", "multiread", "memory"])
     expect(tools.validate("memory", { query: "캐시" })).toBe(true)
     expect(tools.validate("memory", { query: " " })).toBe(false)
     expect(tools.validate("memory", { query: "캐시", path: "x" })).toBe(false)

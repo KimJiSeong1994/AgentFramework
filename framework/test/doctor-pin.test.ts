@@ -29,10 +29,10 @@ function tree(opts: { framework?: string; installed?: string | null; opencodeBin
     chmodSync(join(bin, "opencode"), 0o755)
   }
 }
-function rows(only = "D12e") {
+function rows(only = "D12e", locale?: string) {
   const r = spawnSync("bash", [DOCTOR, "--json"], {
     encoding: "utf8",
-    env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, OTTER_DOCTOR_ONLY: only, OTTER_DOCTOR_ROOT: root },
+    env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, OTTER_DOCTOR_ONLY: only, OTTER_DOCTOR_ROOT: root, ...(locale ? { LC_ALL: locale, LANG: locale } : {}) },
   })
   return (JSON.parse(r.stdout).checks as Array<{ status: string; id: string; observed: string }>)
 }
@@ -88,4 +88,10 @@ test("an unfiltered run (no OTTER_DOCTOR_ONLY) does not short-circuit after D01/
   expect(ids).toContain("D01")
   expect(ids).toContain("D12e")
   expect(ids).toContain("D02")
+})
+
+
+test("version probes survive an unavailable caller locale", () => {
+  tree()
+  expect(rows("D12e", "otter_INVALID.UTF-8")).toEqual([expect.objectContaining({ id: "D12e", status: "PASS" })])
 })

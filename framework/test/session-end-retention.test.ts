@@ -75,16 +75,16 @@ describe("V-session-end-1 settled delete -> restore", () => {
     if (!started.ok) throw new Error(started.text)
     const wf = started.wf
     writeLedger(wt.worktree, emptyLedger(S))
-    const planJson = planJsonPath(wt.worktree, wf.id)
+    const planJson = planJsonPath(wt.worktree, wf.id, S)
     mkdirSync(dirname(planJson), { recursive: true })
     writeFileSync(planJson, '{"plan":"retained"}')
     const planMd = join(wt.worktree, ".otter", "plans", `${wf.id}.md`)
     mkdirSync(dirname(planMd), { recursive: true })
     writeFileSync(planMd, "# retained plan\n")
     const before = snapshotTree()
-    const eventsBefore = readFileSync(eventsPath(wt.worktree))
+    const eventsBefore = readFileSync(eventsPath(wt.worktree, S))
     const planBefore = [readFileSync(planJson), readFileSync(planMd), readFileSync(ledgerPath(wt.worktree, S))]
-    const indexTargetBefore = readCommitted(wt.worktree)
+    const indexTargetBefore = readCommitted(wt.worktree, {}, S)
     if (indexTargetBefore.state !== "ok") throw new Error("index not ok")
 
     await hook(deleted())
@@ -94,7 +94,7 @@ describe("V-session-end-1 settled delete -> restore", () => {
     for (const [path, bytes] of before) {
       if (path.endsWith("attach.lock")) continue // the matching attachment lock is the one file release removes
       if (!after.has(path)) throw new Error(`removed: ${path}`)
-      if (path === eventsPath(wt.worktree)) expect(after.get(path)!.subarray(0, bytes.length).equals(bytes)).toBe(true)
+      if (path === eventsPath(wt.worktree, S)) expect(after.get(path)!.subarray(0, bytes.length).equals(bytes)).toBe(true)
       else if (/segments\d+\.jsonl$/.test(path) || path.endsWith("workflow.json") || path.endsWith("heartbeat.json") ||
         path.endsWith("restore-hold.json") || path.endsWith("metadata.json") || path.endsWith("manifest.json") ||
         path.includes("/attachments/")) continue
@@ -106,11 +106,11 @@ describe("V-session-end-1 settled delete -> restore", () => {
       }
       else expect(after.get(path)!.equals(bytes)).toBe(true)
     }
-    expect(readFileSync(eventsPath(wt.worktree)).subarray(0, eventsBefore.length).equals(eventsBefore)).toBe(true)
+    expect(readFileSync(eventsPath(wt.worktree, S)).subarray(0, eventsBefore.length).equals(eventsBefore)).toBe(true)
     // the pre-delete committed snapshot (the former index target) is intact, and the new index target exists
     const oldTarget = join(stateRoot(wt.worktree), indexTargetBefore.index.path)
     expect(readFileSync(oldTarget).equals(indexTargetBefore.bytes)).toBe(true)
-    const next = readCommitted(wt.worktree)
+    const next = readCommitted(wt.worktree, {}, S)
     if (next.state !== "ok") throw new Error("index not ok after end")
     expect(existsSync(join(stateRoot(wt.worktree), next.index.path))).toBe(true)
     expect(next.wf).toMatchObject({ id: wf.id, phase: "cancelled" })
@@ -131,7 +131,7 @@ describe("V-session-end-1 settled delete -> restore", () => {
     const restored = attachAdmission(host, S, { engine: "opencode" })
     expect(restored.metadata.held).toBe(true)
     expect(admissionEpoch(wt.worktree, S)).toBeUndefined()
-    expect(readWorkflow(wt.worktree)).toMatchObject({ id: wf.id, phase: "cancelled" })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ id: wf.id, phase: "cancelled" })
     expect(readSessionCommitted(wt.worktree, S)).toMatchObject({ current: true, wf: { id: wf.id, phase: "cancelled" } })
     expect(client.calls.filter(call => call.method === "prompt" || call.method === "promptAsync")).toHaveLength(0)
   })
@@ -139,14 +139,14 @@ describe("V-session-end-1 settled delete -> restore", () => {
   test("a settled terminal workflow stays terminal and its index target is untouched by deletion", async () => {
     const { hook, store } = await attached()
     putWorkflow(currentOwner(Date.now(), store.epoch), { phase: "done", stage: "terminal" })
-    const index = readFileSync(workflowPath(wt.worktree))
+    const index = readFileSync(workflowPath(wt.worktree, S))
     const tree = snapshotTree()
 
     await hook(deleted())
 
-    expect(readFileSync(workflowPath(wt.worktree)).equals(index)).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, S)).equals(index)).toBe(true)
     for (const [path, bytes] of tree) if (path.includes("/workflows/")) expect(readFileSync(path).equals(bytes)).toBe(true)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "done" })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "done" })
     expect(getOwnedSession(wt.worktree, S)).toBeUndefined()
   })
 })
@@ -167,7 +167,7 @@ describe("V-session-end-2 active/unresolved", () => {
     expect(existsSync(join(sessionDir(wt.worktree, S), "session-ended.json"))).toBe(false)
     for (const [path] of tree) expect(existsSync(path)).toBe(true)
     // the committed workflow (index target) still resolves; cancellation is a new revision, never a removal
-    const read = readCommitted(wt.worktree)
+    const read = readCommitted(wt.worktree, {}, S)
     expect(read.state).toBe("ok")
     if (read.state === "ok") expect(read.wf.id).toBe(wf.id)
     release!()
@@ -182,14 +182,14 @@ describe("V-session-end-2 stop observers (P5b)", () => {
     const wf = putWorkflow(currentOwner(Date.now(), store.epoch), { phase: "executing", stage: "unit" })
     const review = beginExecutionActivity(host, S, "review")!
     expect(requestStop(host, S, "pause", "p", { workflowID: wf.id }).result.ok).toBe(true)
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "executing", stopIntent: { kind: "pause" } })
-    const pauseToken = readWorkflow(wt.worktree)!.stopIntent!.token
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "executing", stopIntent: { kind: "pause" } })
+    const pauseToken = readWorkflow(wt.worktree, S)!.stopIntent!.token
 
     await hook(deleted())
 
     // cancel replaced the pause (not `cancelled`), nothing released, endAdmission is false until proof
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "executing", stopIntent: { kind: "cancel" } })
-    expect(readEvents(wt.worktree, wf.id).find(e => e.type === "stop_requested" && e.data?.kind === "cancel")?.data?.replaces).toBe(pauseToken)
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "executing", stopIntent: { kind: "cancel" } })
+    expect(readEvents(wt.worktree, wf.id, S).find(e => e.type === "stop_requested" && e.data?.kind === "cancel")?.data?.replaces).toBe(pauseToken)
     expect(getOwnedSession(wt.worktree, S)).toBe(store)
     expect(ended()).toBe(false)
     expect(await endAdmission(host, S, store.epoch)).toBe(false)
@@ -197,11 +197,11 @@ describe("V-session-end-2 stop observers (P5b)", () => {
 
     review()
     expect(observeStopSettlement(host, S, store.epoch, "review").kind).toBe("settled")
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "cancelled", stopIntent: null })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "cancelled", stopIntent: null })
     // the deletion handler's cancel_settled listener ends the retained session (order: cancel_settled -> ended -> release)
     await waitFor(() => ended())
     expect(getOwnedSession(wt.worktree, S)).toBeUndefined()
-    const types = readEvents(wt.worktree, wf.id).map(e => e.type)
+    const types = readEvents(wt.worktree, wf.id, S).map(e => e.type)
     expect(types.indexOf("cancel_settled")).toBeGreaterThan(-1)
     expect(existsSync(sessionDir(wt.worktree, S))).toBe(true)
   })
@@ -212,26 +212,26 @@ describe("V-session-end-2 stop observers (P5b)", () => {
     const reservation = beginStageReservation(wt.worktree, S)
     const tree = snapshotTree()
     await hook(deleted())
-    expect(readWorkflow(wt.worktree)).toMatchObject({ id: wf.id, phase: "reviewing", stopIntent: { kind: "cancel" } })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ id: wf.id, phase: "reviewing", stopIntent: { kind: "cancel" } })
     expect(effectiveHold(wt.worktree, S)).toBe(true)
     expect(ended()).toBe(false)
     for (const [path] of tree) expect(existsSync(path)).toBe(true)
     reservation()
     observeStopSettlement(host, S, store.epoch, "stage")
     await waitFor(() => ended())
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "cancelled" })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "cancelled" })
   })
 
   test("deletion of a settled pause settles the cancel immediately and gives a retained end", async () => {
     const { hook, host, store } = await attached()
     const wf = putWorkflow(currentOwner(Date.now(), store.epoch), { phase: "executing", stage: "unit" })
     expect(requestStop(host, S, "pause", "p", { workflowID: wf.id }).result.ok).toBe(true)
-    expect(readWorkflow(wt.worktree)!.phase).toBe("paused")
+    expect(readWorkflow(wt.worktree, S)!.phase).toBe("paused")
     await hook(deleted())
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "cancelled", stopIntent: null })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "cancelled", stopIntent: null })
     expect(ended()).toBe(true)
     expect(getOwnedSession(wt.worktree, S)).toBeUndefined()
-    expect(readEvents(wt.worktree, wf.id).map(e => e.type)).toEqual(expect.arrayContaining(["pause_settled", "cancel_settled"]))
+    expect(readEvents(wt.worktree, wf.id, S).map(e => e.type)).toEqual(expect.arrayContaining(["pause_settled", "cancel_settled"]))
   })
 
   test("an unknown (unreconciled) execution keeps the fence, every file and endAdmission false", async () => {
@@ -245,7 +245,7 @@ describe("V-session-end-2 stop observers (P5b)", () => {
     host.runs.fence(claim, "unknown-exec", "termination unknown")
     const tree = snapshotTree()
     await hook(deleted())
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "executing", stopIntent: { kind: "cancel" } })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "executing", stopIntent: { kind: "cancel" } })
     expect(await endAdmission(host, S, store.epoch)).toBe(false)
     expect(ended()).toBe(false)
     expect(host.runs.status().claim).toBeDefined()
@@ -266,7 +266,7 @@ describe("V-session-end-2 stop observers (P5b)", () => {
     await hook(deleted())
     hold()
     observeStopSettlement(host, S, store.epoch, "stage")
-    expect(readWorkflow(wt.worktree)).toMatchObject({ phase: "cancelled" })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ phase: "cancelled" })
     const after = snapshotTree()
     let compared = 0
     for (const path of [...checkpointPaths, ...revisionPaths]) {
@@ -275,7 +275,7 @@ describe("V-session-end-2 stop observers (P5b)", () => {
       compared++
     }
     expect(compared).toBe(checkpointPaths.length + revisionPaths.length)
-    expect(wf.id).toBe(readWorkflow(wt.worktree)!.id)
+    expect(wf.id).toBe(readWorkflow(wt.worktree, S)!.id)
   })
 })
 
@@ -285,15 +285,15 @@ describe("V-session-end-3 duplicate and stale events", () => {
     putWorkflow(currentOwner(Date.now(), store.epoch), { phase: "planning" })
     await hook(deleted())
     const ended = readFileSync(join(sessionDir(wt.worktree, S), "session-ended.json"))
-    const index = readFileSync(workflowPath(wt.worktree))
-    const events = readFileSync(eventsPath(wt.worktree))
+    const index = readFileSync(workflowPath(wt.worktree, S))
+    const events = readFileSync(eventsPath(wt.worktree, S))
     const tree = snapshotTree()
 
     await hook(deleted())
 
     expect(readFileSync(join(sessionDir(wt.worktree, S), "session-ended.json")).equals(ended)).toBe(true)
-    expect(readFileSync(workflowPath(wt.worktree)).equals(index)).toBe(true)
-    expect(readFileSync(eventsPath(wt.worktree)).equals(events)).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, S)).equals(index)).toBe(true)
+    expect(readFileSync(eventsPath(wt.worktree, S)).equals(events)).toBe(true)
     expect(snapshotTree().size).toBe(tree.size)
   })
 
@@ -304,8 +304,8 @@ describe("V-session-end-3 duplicate and stale events", () => {
     const oldEpoch = store.epoch
     const restored = attachAdmission(host, S, { engine: "opencode" })
     expect(restored.epoch).not.toBe(oldEpoch)
-    const index = readFileSync(workflowPath(wt.worktree))
-    const events = readFileSync(eventsPath(wt.worktree))
+    const index = readFileSync(workflowPath(wt.worktree, S))
+    const events = readFileSync(eventsPath(wt.worktree, S))
     const ended = readFileSync(join(sessionDir(wt.worktree, S), "session-ended.json"))
 
     await createEventHook(deps)(deleted())
@@ -315,10 +315,10 @@ describe("V-session-end-3 duplicate and stale events", () => {
     expect(restored.metadata.held).toBe(true)
     expect(effectiveHold(wt.worktree, S)).toBe(true)
     expect(admissionEpoch(wt.worktree, S)).toBeUndefined()
-    expect(readFileSync(workflowPath(wt.worktree)).equals(index)).toBe(true)
-    expect(readFileSync(eventsPath(wt.worktree)).equals(events)).toBe(true)
+    expect(readFileSync(workflowPath(wt.worktree, S)).equals(index)).toBe(true)
+    expect(readFileSync(eventsPath(wt.worktree, S)).equals(events)).toBe(true)
     expect(readFileSync(join(sessionDir(wt.worktree, S), "session-ended.json")).equals(ended)).toBe(true)
-    expect(readEvents(wt.worktree, wf.id).filter(event => event.type === "owner_reattached")).toHaveLength(0)
+    expect(readEvents(wt.worktree, wf.id, S).filter(event => event.type === "owner_reattached")).toHaveLength(0)
     // the new epoch can still detach cleanly: it was never ended by the stale callback
     expect(await detachAdmission(host, S, restored.epoch, "retention-fixture-cleanup")).toBe(true)
   })
@@ -330,7 +330,7 @@ describe("V-session-end-3 duplicate and stale events", () => {
 
     await hook(deleted())
 
-    expect(readWorkflow(wt.worktree)).toMatchObject({ id: foreign.id, phase: "planning", owner: foreign.owner })
+    expect(readWorkflow(wt.worktree, S)).toMatchObject({ id: foreign.id, phase: "planning", owner: foreign.owner })
     expect(snapshotTree().size).toBe(tree.size)
     expect(getOwnedSession(wt.worktree, S)).toBeUndefined()
   })
@@ -372,7 +372,7 @@ describe("V-session-end-4 deleted SDK handle", () => {
     expect(admissionEpoch(wt.worktree, S)).toBeUndefined()
 
     // work resume refuses: the retained end marker (the workflow is also terminal)...
-    expect(() => resumeAdmission(host, S, readWorkflow(wt.worktree)!.lastSeq)).toThrow("session end request remains held")
+    expect(() => resumeAdmission(host, S, readWorkflow(wt.worktree, S)!.lastSeq)).toThrow("session end request remains held")
     // ...and a host without a compatible engine identity
     const incompatible = { ...host, host: { ...host.host, identity: { ...host.host.identity, engine: "codex" } } } as typeof host
     expect(() => resumeAdmission(incompatible, S)).toThrow()

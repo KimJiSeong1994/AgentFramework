@@ -90,13 +90,13 @@ describe("autoresearch productifies into seeded deep-interview", () => {
     const verdictBytes = readRecordedText(wt.worktree, ar, "verdict.json")
     const product = productifyAutoresearch(h.runtime, h.sid, ar.id, ar.lastSeq)
     if (!product.ok) throw new Error(product.text)
-    const read = readCommitted(wt.worktree)
+    const read = readCommitted(wt.worktree, {}, h.sid)
     expect(read.state === "ok" && read.wf.kind).toBe("deep-interview")
     const di = read.state === "ok" ? read.wf : undefined
     expect(di?.lineage?.predecessor).toMatchObject({ id: ar.id, kind: "autoresearch" })
     expect(diDataOf(di as never).seed?.raw).toBe(verdictBytes)
     expect(diDataOf(di as never).seed).toMatchObject({ source: "autoresearch", status: "conclusive" })
-    expect(readEvents(wt.worktree).filter(event => event.type === "created").map(event => event.data?.kind)).toEqual(["autoresearch", "deep-interview"])
+    expect(readEvents(wt.worktree, undefined, h.sid).filter(event => event.type === "created").map(event => event.data?.kind)).toEqual(["autoresearch", "deep-interview"])
 
     const result = await runDeepInterview(h.runtime, h.sid, di!.id, { async choose() { return 0 }, async readAnswer() { return undefined }, async readNote() { return undefined } }, { stopBefore: "question" })
     expect(result.status).toBe("blocked")
@@ -106,12 +106,12 @@ describe("autoresearch productifies into seeded deep-interview", () => {
   test("tampering with the verdict before productify refuses without changing the index", async () => {
     const h = harness()
     const ar = await driveToVerdict(h)
-    const before = readCommitted(wt.worktree)
+    const before = readCommitted(wt.worktree, {}, h.sid)
     const ref = ar.artifacts.find(item => item.key === "verdict.json")!
     writeFileSync(join(wt.worktree, ref.path), "{}\n")
     const refused = productifyAutoresearch(h.runtime, h.sid, ar.id, ar.lastSeq)
     expect(refused.ok).toBe(false)
-    expect(readCommitted(wt.worktree)).toEqual(before)
+    expect(readCommitted(wt.worktree, {}, h.sid)).toEqual(before)
   })
 
   test("a finished autoresearch can still productify from terminal history and does not inherit execution consent", async () => {
@@ -119,14 +119,14 @@ describe("autoresearch productifies into seeded deep-interview", () => {
     const ar = await driveToVerdict(h)
     const finished = finishAutoresearch(h.runtime, h.sid, ar.id, ar.lastSeq)
     if (!finished.ok) throw new Error(finished.text)
-    expect(readCommitted(wt.worktree).state === "ok" && (readCommitted(wt.worktree) as { wf?: { kind?: string; phase?: string } }).wf?.phase).toBe("done")
+    expect(readCommitted(wt.worktree, {}, h.sid).state === "ok" && (readCommitted(wt.worktree, {}, h.sid) as { wf?: { kind?: string; phase?: string } }).wf?.phase).toBe("done")
     const product = productifyAutoresearch(h.runtime, h.sid, ar.id, finished.wf.lastSeq)
     if (!product.ok) throw new Error(product.text)
-    const read = readCommitted(wt.worktree)
+    const read = readCommitted(wt.worktree, {}, h.sid)
     expect(read.state === "ok" && read.wf.kind).toBe("deep-interview")
-    expect(readEvents(wt.worktree).filter(event => event.type === "productify_selected")).toHaveLength(1)
-    expect(readEvents(wt.worktree).some(event => event.type === "execution_approved" || event.type === "experiment_approved")).toBe(true)
+    expect(readEvents(wt.worktree, undefined, h.sid).filter(event => event.type === "productify_selected")).toHaveLength(1)
+    expect(readEvents(wt.worktree, undefined, h.sid).some(event => event.type === "execution_approved" || event.type === "experiment_approved")).toBe(true)
     // The only approval was the RUN needed to create the research verdict; the seeded DI did not create queue tasks.
-    expect(readEvents(wt.worktree).filter(event => event.wf === (read.state === "ok" ? read.wf.id : "") && event.type.includes("approved"))).toHaveLength(0)
+    expect(readEvents(wt.worktree, undefined, h.sid).filter(event => event.wf === (read.state === "ok" ? read.wf.id : "") && event.type.includes("approved"))).toHaveLength(0)
   })
 })

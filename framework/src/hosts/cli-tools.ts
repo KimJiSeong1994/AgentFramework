@@ -461,7 +461,7 @@ function writeTarget(
     if (oldText !== undefined) {
       const current = readDescriptor(fd, MAX_READ_BYTES).toString("utf8")
       const first = current.indexOf(oldText)
-      if (first < 0 || current.indexOf(oldText, first + oldText.length) >= 0) {
+      if (first < 0 || current.indexOf(oldText, first + 1) >= 0) {
         return { ok: false, error: "Tool refused: edit text must match exactly once." }
       }
       const replacement = current.slice(0, first) + content + current.slice(first + oldText.length)
@@ -500,7 +500,7 @@ function multiEditTargets(
       catch { return { ok: false, error: `Tool refused: edit ${index + 1} target is unavailable; nothing was changed.` } }
     }
     const first = current.indexOf(edit.oldText)
-    if (first < 0 || current.indexOf(edit.oldText, first + edit.oldText.length) >= 0) {
+    if (first < 0 || current.indexOf(edit.oldText, first + 1) >= 0) {
       return { ok: false, error: `Tool refused: edit ${index + 1} (${relativePath}) text must match exactly once; nothing was changed.` }
     }
     const next = current.slice(0, first) + edit.newText + current.slice(first + edit.oldText.length)
