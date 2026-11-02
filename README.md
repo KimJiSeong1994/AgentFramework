@@ -4,7 +4,7 @@
 
 ![otter: 실행할수록 쌓이는 코딩 에이전트](artifacts/otter-hero/hero.png)
 
-**실행할수록 쌓이는 코딩 에이전트.**
+**실행할수록 쌓이는 코딩 에이전트.** [소개 영상 보기 ▶](artifacts/otter-intro-video/otter-intro-motion.mp4)
 
 - 실행 이력을 버리지 않고 로컬 지식으로 쌓아 다음 작업에 다시 씀
 - 엔진·모델과 무관하게 같은 자산으로 쌓임, 역할마다 모델을 섞어 씀
