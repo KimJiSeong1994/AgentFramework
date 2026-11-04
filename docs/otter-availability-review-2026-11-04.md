@@ -33,7 +33,7 @@
 |---|---|---|---|
 | 1 | Codex 0.165.0 미지원 → 기본 엔진 시작 불가 | `codex-profile.ts:16` | **해결** |
 | 2 | 모든 명령이 승인 필요(읽기 전용 자동 허용 제거) + README 모순 | `chat-actions.ts`, `11c9de8` | 정책 유지, README 정정 |
-| 3 | 응답당 도구 1개, 턴당 24라운드(main 3회 연장) | `cli-host.ts:59-61, 1413` | 미해결(§4 P1) |
+| 3 | 응답당 도구 1개, 턴당 24라운드(main 3회 연장) | `cli-host.ts:59-61, 1413` | 읽기 전용 묶음 실행으로 완화(§7) |
 | 4 | 입력 예산 vendor 49K·Gemma 휴리스틱, 벤더 usage 폐기 | `cli-host.ts:51-58`, `cli-transport.ts:35-42` | 미해결(§4 P1) |
 | 5 | Codex/Claude 네이티브 기능 전부 OFF(세션·캐시 연속성 없음) | `cli-transport.ts:445-462` | 설계 유지 |
 | 6 | 엔진 폴백·재시도 없음 | `cli-host.ts:263, 1314` | 미해결(§4 P1) |
@@ -85,9 +85,9 @@
 | 순위 | 항목 | 출처 | 크기 | 메모 |
 |---|---|---|---|---|
 | P0 | 사용자 설정 정리(§5) | 감사·OMX | — | 코드 밖. 사용자 확인 후 |
-| P1 | 벤더 usage 기록 → 다이제스트·`/status`·`/usage` | 감사·OMX·GJC | S | 이미 받는 값을 적기만 하면 됨(`cli-transport.ts:35-42`) |
-| P1 | 엔진 실패 분류 + "이 턴을 다른 엔진으로" 제안(조용한 교체 없음) | OMC·OMO·로드맵 3-A | M | rate_limit_event·auth·quota·fatal 분류, 채팅 턴만 |
-| P1 | 엄격 엔벨로프 안의 읽기 전용 도구 배열 순차 실행, main 기본 라운드 상향 | 감사 | M | 쓰기·명령은 계속 1개씩 승인 |
+| P1 | ~~벤더 usage 기록 → 다이제스트·`/status`·`/usage`~~ | 감사·OMX·GJC | S | **완료(§7)** |
+| P1 | ~~엔진 실패 분류 + "이 턴을 다른 엔진으로" 제안(조용한 교체 없음)~~ | OMC·OMO·로드맵 3-A | M | **완료(§7)** |
+| P1 | ~~엄격 엔벨로프 안의 읽기 전용 도구 배열 순차 실행~~ | 감사 | M | **완료(§7)**; main 기본 라운드 상향은 미적용 |
 | P1 | 도구 루프 지문 가드(동일 호출+동일 결과 3회 → 중단·진단 요구) | OMX | S | `multiedit failed 3` 류 반복 차단 |
 | P1 | 상태줄 입력 예산 사용률·절단·툴 카운터 | OMC | S | `budgetEvidence` 이미 생성 |
 | P2 | read-before-overwrite 가드 | OMO | S | 세션 read 경로 집합 |
@@ -112,3 +112,12 @@
 - otter 지시문이 developer 메시지로 2회 들어가는 원인(`instructions`·`developer_instructions` 설정으로는 제거 불가, ≈260토큰).
 - Codex 토큰 갱신(ChatGPT 로그인)이 항상 심볼릭 링크를 통해 쓰는지는 API 키 로그인 경로로만 확인했다. 링크가 일반 파일로 바뀌면 otter가 거부하고 안내한다.
 - `.agents/skills/typesafe-ai`의 설명은 외부 스킬이라 손대지 않았다(D13 WARN 잔존).
+
+## 7. 후속 반영 (2026-11-04, 브랜치 `feat/otter-p1-recommendations`)
+
+§4의 P1 세 항목을 구현했다. 모두 "사람이 결정한다"와 "메타데이터만 기록한다" 원칙을 지킨다.
+
+1. **벤더 사용량 기록**. 전송 계층이 이미 파싱하던 Codex `turn.completed`·Claude `result` 토큰 수를 `model-returned` 활동(엔진·모델·숫자만)에 실어 턴 타이밍 레코드의 모델 항목에 남기고, 세션 다이제스트가 전체·`엔진/모델`별로 합산한다. `/usage`와 `/status` 끝에 세션 누계가 보이고 `/history`가 토큰 합계를 표시한다. 로컬 모델은 보고값이 없다. `knowledge/AGENTS.md` 허용 목록에 추가했다.
+2. **엔진 실패 분류·전환 제안**. 실패한 호출에 `failureClass`(rate_limited·quota·auth·transient)를 벤더 진단문의 패턴으로만 붙인다(문구는 버림). 채팅 턴이 그 분류로 실패하면 세션 콤보 경로 중 다른 엔진의 경로를 "Retry on <engine> / <model>"로 제안한다. 선택하면 일반 `/model` 전환(대화 이어짐) 뒤 같은 메시지를 다시 보내며 notice로 남긴다. 대안 경로가 없으면 수동 전환 안내만 한다. 자동 전환은 없다.
+3. **읽기 전용 도구 묶음 실행**. 한 응답의 읽기 전용 엔벨로프(read·list·glob·grep·memory·skill·repo_search) 여러 개를 모델 재호출 없이 순서대로 실행한다(응답당 최대 8개, 초과분은 "실행되지 않음"으로 보고). 호출마다 정책·리스 검사와 라운드 회계는 그대로이고, 쓰기·명령이 섞인 응답은 종전처럼 거부한다. 도구 실행 본문을 `runToolCall`로 묶어 재사용했다.
+

@@ -2458,3 +2458,45 @@ describe("chat execution through the action gate", () => {
     expect(unused.approvals).toEqual([])
   })
 })
+
+describe("batched read-only calls", () => {
+  test("several read-only envelopes in one reply run in order from one model turn, each with its own exchange", async () => {
+    writeFileSync(join(root, "a.txt"), "alpha\n")
+    const glob = JSON.stringify({ type: "tool", name: "glob", input: { pattern: "*.txt" } })
+    const read = JSON.stringify({ type: "tool", name: "read", input: { path: "a.txt" } })
+    const subject = harness({ responses: [`${glob}\n${read}`, JSON.stringify({ type: "final", text: "done" })] })
+    expect(await (await subject.host.prepare(subject.request)).run()).toEqual({ status: "completed", text: "done" })
+    expect(subject.prompts).toHaveLength(2)
+    expect(subject.observed.before).toBe(2)
+    const second = subject.prompts[1]!
+    expect(second.indexOf(glob)).toBeGreaterThanOrEqual(0)
+    expect(second.indexOf(read)).toBeGreaterThan(second.indexOf(glob))
+    expect(second).toContain("alpha")
+    expect(second).not.toContain("not run")
+  })
+
+  test("a reply with more read-only calls than the cap runs the first eight and reports the rest as not run", async () => {
+    writeFileSync(join(root, "a.txt"), "alpha\n")
+    const read = JSON.stringify({ type: "tool", name: "read", input: { path: "a.txt" } })
+    const subject = harness({ responses: [Array.from({ length: 10 }, () => read).join("\n"), JSON.stringify({ type: "final", text: "done" })] })
+    expect(await (await subject.host.prepare(subject.request)).run()).toEqual({ status: "completed", text: "done" })
+    expect(subject.prompts).toHaveLength(2)
+    expect(subject.observed.before).toBe(8)
+    expect(subject.prompts[1]!).toContain("At most 8 read-only tool calls run per reply; 2 more calls were not run. Send fewer calls per reply.")
+  })
+
+  test("a batch that includes a write still refuses the whole reply; a failing member reports its error and the batch goes on", async () => {
+    writeFileSync(join(root, "a.txt"), "alpha\n")
+    const read = JSON.stringify({ type: "tool", name: "read", input: { path: "a.txt" } })
+    const missing = JSON.stringify({ type: "tool", name: "read", input: { path: "missing.txt" } })
+    const write = JSON.stringify({ type: "tool", name: "write", input: { path: "a.txt", content: "x" } })
+    const refused = harness({ engine: "claude", responses: [`${read}\n${write}`, JSON.stringify({ type: "final", text: "done" })] })
+    expect(await (await refused.host.prepare(refused.request)).run()).toMatchObject({ status: "failed" })
+    expect(refused.observed.before).toBe(0)
+    expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("alpha\n")
+    const partial = harness({ responses: [`${missing}\n${read}`, JSON.stringify({ type: "final", text: "done" })] })
+    expect(await (await partial.host.prepare(partial.request)).run()).toEqual({ status: "completed", text: "done" })
+    expect(partial.observed.before).toBe(2)
+    expect(partial.prompts[1]!).toContain("alpha")
+  })
+})

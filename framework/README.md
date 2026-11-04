@@ -147,6 +147,10 @@ changes; existing workflow ownership and policy checks are not bypassed.
   if the session's combo routes include another engine, offers "Retry on <engine> / <model>" for the same message. You
   choose; nothing switches on its own. A retry is an ordinary `/model` switch (conversation carried) plus the message
   resent, recorded as a notice. Workflow roles stay pinned to their engines.
+- **Batched read-only calls**: several read-only envelopes (`read`, `list`, `glob`, `grep`, `memory`, `skill`,
+  `repo_search`) in one reply run in order from that one model turn, up to 8 per reply, each with its own policy
+  check, round accounting and transcript exchange; calls past the cap are reported as not run. A write, edit,
+  multiedit, bash or model_api call must be the only envelope in its reply (a mixed reply is refused unchanged).
 - **Tool-call limit**: at 24 tool calls a chat turn asks to continue (24 more, at most 3 times) instead of failing;
   workers and workflow roles keep the hard limit.
 - **Context**: Claude/Codex chat uses a 96,000-character conversation window (vendor main input estimate 49,152

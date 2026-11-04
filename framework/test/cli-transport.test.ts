@@ -11,6 +11,7 @@ import {
   CliExecutableError, createCliTransport, findExecutable, nativeObservedUsageCanonicalByteBound, type CliEngine,
 } from "../src/hosts/cli-transport.ts"
 import { codexProfileArgv, createCodexProfile } from "../src/hosts/codex-profile.ts"
+import type { EngineFailureClass } from "../src/hosts/types.ts"
 import { ownedCodexHomePath, realCodexHome } from "../src/hosts/codex-home.ts"
 
 // The otter-owned Codex home is created under the state base; keep it out of the developer's real state directory.
@@ -1222,7 +1223,7 @@ test.each([
   const result = await createCliTransport(options("codex", { prompt })).run()
   expect(result.status).toBe("failed")
   expect(result.error).toBe("native CLI reported failure")
-  expect(result.failureClass).toBe(expected)
+  expect(result.failureClass).toBe(expected as EngineFailureClass | undefined)
   expect(JSON.stringify(result)).not.toContain("SECRET")
 })
 
