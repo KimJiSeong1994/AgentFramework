@@ -95,9 +95,9 @@ Every execution is approved by the local human, one action at a time or one plan
 
 | `chat.execute` | Chat model tools | Approval |
 | --- | --- | --- |
-| `"ask"` (default) | `read list glob grep memory` + `write edit multiedit bash model_api` | every write, edit, command and model API call |
+| `"ask"` (default) | `read list glob grep multiread memory skill` + `write edit multiedit bash model_api` | every write, edit, command and model API call |
 | `"auto-edit"` | same | commands and model API calls; file edits apply and are noted |
-| `"plan"` | `read list glob grep memory` | none (read-only; the model points to `/plan` and `!<command>`) |
+| `"plan"` | `read list glob grep multiread memory skill` | none (read-only; the model points to `/plan` and `!<command>`) |
 
 Only user configuration can grant `auto-edit`; project configuration may restrict the user's
 mode but cannot elevate `ask` or `plan`. Shell commands, including inspection commands such as
@@ -122,15 +122,19 @@ changes; existing workflow ownership and policy checks are not bypassed.
   true` hands the real terminal over after approval (editors, password prompts); its output is not captured.
 - Refused even when the human would allow: privilege escalation (`sudo`, `su`, `doas`), deleting `/` or home, force
   push, disk formatting/raw disk writes, shutdown, fork bombs. The human can still run them with `!<command>`.
-- "Always allow" saves a command rule (the first two words, e.g. `bun test`) to `chat.allow` in the user config only;
-  a project config cannot pre-approve commands. Commands that chain, pipe, redirect or substitute never match or offer a
-  rule. `/permissions` shows the mode and rules; `/permissions clear` removes them.
+- "Always allow" saves a command rule (the first two words, e.g. `bun test`) to `chat.allow` in the user config only,
+  either **in this worktree** (`{ "command": "bun test", "worktree": "/abs/repo" }`, applied only when the chat runs
+  in that worktree) or **everywhere** (`"bun test"`); a project config cannot pre-approve commands. Commands that chain,
+  pipe, redirect or substitute never match or offer a rule, and neither does inline interpreter code (`python3 -c`,
+  `node -e`, `sh -c`). `/permissions` shows the mode and rules with their scope; `/permissions clear` removes them.
 - Writes stay inside the worktree and never touch `.git/`, `.otter/`, `.gjc/` or `knowledge/raw/` (immutable wiki
   sources). Each command run is recorded as a shell card; each decision as an `action` record (tool, how it was decided,
   written paths, a command's rule prefix — never contents).
-- **Read-only commands** run without asking (still shown and recorded): `git status|diff|log|show|blame|ls-files`,
-  plain `git branch`/`git remote`, `ls`, `cat`, `head`, `tail`, `wc`, `rg`/`grep`, `pwd`, `which`, `<tool> --version`.
-  Chaining, pipes, redirection, substitution, `find -delete/-exec`, `-o/--output` and `env`/`printenv` always ask.
+- **Every command asks.** There is no read-only auto-allow list (it was removed so that only a human decision or a
+  saved user rule ever runs a command); `git status` asks like `bun test`. Routine inspection goes through `read`,
+  `list`, `glob`, `grep` and `multiread`, which need no approval. Destructive forms never match or offer a rule and
+  always ask: recursive deletes (`rm -r`), `git reset --hard`, `git clean`, `git checkout`/`git restore` of paths,
+  `git branch -D`, `git stash drop|clear`, `git push --delete`.
 - **This-turn folder grant**: the approval offers "Allow edits in `<dir>`/ for this turn" (the deepest folder holding
   every written path); later writes under it in the same turn are allowed and noted. Never for commands; not saved.
 - **`multiedit`** (gated main only): up to 20 exact-text edits across files, previewed as one diff and approved once,
@@ -366,11 +370,12 @@ and a Codex route must name a bundled Codex slug. A route equal to the main sele
 In chat, `/model combo` (or the `combo` entry at the end of the `/model` engine list) offers recommended
 templates and **Custom settings**. The GJC-inspired templates are:
 
-| Template | Planning | Execution | Architecture / review |
-| --- | --- | --- | --- |
-| `astra-fable` | Codex GPT-6 Astra | Codex GPT-6 Luna | Claude Fable |
-| `astra-fable-opus` | Claude Opus | Codex GPT-6 Luna | Claude Fable |
-| `opus-codex` | Claude Sonnet | Codex GPT-5.6 Terra | Codex GPT-6 Sol |
+| Template | Main | Planning | Execution | Architecture | Review |
+| --- | --- | --- | --- | --- | --- |
+| `astra-fable` | Codex GPT-6 Astra | Codex GPT-6 Astra | Codex GPT-5.6 Luna | Claude Fable | Claude Fable |
+| `astra-fable-opus` | Codex GPT-6 Astra | Claude Opus | Codex GPT-5.6 Luna | Claude Fable | Claude Fable |
+| `fable-opus-codex` | Claude Fable | Claude Opus | Codex GPT-5.6 Terra | Codex GPT-5.6 Sol | Claude Opus |
+| `opus-codex` | Claude Opus | Claude Sonnet | Codex GPT-5.6 Terra | Codex GPT-5.6 Sol | Codex GPT-5.6 Sol |
 
 Each template covers all routable roles; the preview shows the complete assignment. The main model stays
 at the current `/model` selection (Astra pairs with `astra-fable-opus`, Opus with `opus-codex`).
@@ -891,8 +896,22 @@ These names do not establish execution authority. Vendor account quotas still ap
 All three engines use the same conversation → canonical plan → local human decision →
 serial execution controller. Main/reviewer file tools are read-only. Otter owns the JSON
 file-tool loop; native inference runs in a separate empty scratch directory rather than
-the source worktree. Codex admission permits macOS and Linux and accepts CLI 0.159.3 or 0.163.0
-with an exact bundled model slug. The model metadata remains pinned to the 0.159.3 catalogue.
+the source worktree. Codex admission permits macOS and Linux and accepts CLI 0.159.3, 0.163.0 or 0.165.0
+with an exact bundled model slug. The model metadata remains pinned to the 0.159.3 catalogue. On 0.165.0 otter also
+passes `skills.include_instructions=false`: that release otherwise lists every skill under `~/.codex/skills` in a
+developer message on each turn (about 2.4K tokens with oh-my-codex installed, including foreign skills named like
+otter workflows), plus `include_permissions_instructions=false` (a ~1K-token permission-profile explanation that
+otter's own instructions already cover). Earlier qualified releases were not probed for the keys and do not receive them.
+
+Codex inference runs in an **otter-owned Codex home**, `$XDG_STATE_HOME/otter/codex-home` (or under
+`OTTER_STATE_HOME`), not the user's `~/.codex`: Codex sends `$CODEX_HOME/AGENTS.md` as a user message on every
+turn even with `--ignore-user-config` and `project_doc_max_bytes=0` (oh-my-codex installs a 25 KB "autonomous agent,
+never ask permission" file there, contradicting otter's approval contract), and lists `$CODEX_HOME/skills`. The owned
+home holds only an `auth.json` symlink to the real home's sign-in file (`$CODEX_HOME/auth.json` or
+`~/.codex/auth.json`); Codex writes refreshed tokens through the link, otter never reads it, and `otter auth` /
+`/login` keep using the real home. Files Codex creates there itself (`installation_id`, `skills/.system`, sqlite state)
+are left alone. Otter refuses to run when that `auth.json` has become a regular file (a credential copy) or when an
+`AGENTS.md`, `config.toml`, `hooks.json` or `rules` entry appears in the owned home; delete the entry and retry.
 An Otter-owned, hash-bound catalogue removes native patch, shell and code-mode tools, and native
 goal tools are explicitly disabled; a named permission profile restricts residual filesystem
 reads to the empty scratch workdir. The legacy `--sandbox` override is not used.
@@ -1640,7 +1659,7 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
 
 ## otter harness M0 (pin, flow core, live `/status`) — ralplan M0
 
-- **Pin:** `@opencode-ai/plugin`/`@opencode-ai/sdk` locked to `1.18.32` in both `framework/` and `.opencode/`;
+- **Pin:** `@opencode-ai/plugin`/`@opencode-ai/sdk` locked to `1.18.35` in both `framework/` and `.opencode/`;
   `scripts/otter-doctor.sh` **D12e** cross-checks `opencode --version`, both `package.json` declarations and both
   installed `node_modules` copies (WARN on any mismatch or missing source, D01 keeps its existing below-MIN WARN).
 - **Flow core** (`framework/src/flow/{machine,state,owner,status}.ts`, `framework/src/flow/runtime.ts`): the plan

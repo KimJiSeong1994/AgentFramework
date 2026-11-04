@@ -63,7 +63,7 @@ import { commandInsertion, interactiveActions, interactiveHelp, parseSkillOptCom
 import { fileComboStore, fileDefaultModelStore, validateComboRoutes, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
 import { COMBO_PRESETS, comboPresetSummary } from "./combo-presets.ts"
 import { runTerminalShell, type ShellResult } from "./operator-shell.ts"
-import { actionPaths, allowedByRules, clearAllowRules, commandRule, coveredByGrant, describeAction, grantDirectory, readAllowRules, refusedCommand, runCapturedCommand, runInteractiveCommand, saveAllowRule, type CommandResult } from "./chat-actions.ts"
+import { actionPaths, allowedByRules, clearAllowRules, commandRule, coveredByGrant, describeAction, describeAllowRule, grantDirectory, readAllowRules, refusedCommand, runCapturedCommand, runInteractiveCommand, saveAllowRule, type AllowRule, type CommandResult } from "./chat-actions.ts"
 import { createChatCheckpoints, type ChatCheckpoints } from "./chat-checkpoint.ts"
 import { closeSessionHistory, projectHasWiki, renderFacts, worktreeFacts } from "../sessions/history.ts"
 import { lintWiki, statusWiki } from "../wiki/wiki.ts"
@@ -145,7 +145,7 @@ export type InteractiveDependencies = {
   /** An approved chat `bash` action: captured (no terminal), or interactive with the released terminal. */
   runChatCommand: (action: Extract<ChatAction, { tool: "bash" }>, cwd: string, signal: AbortSignal) => Promise<CommandResult>
   /** Saved "Always allow" command rules (user config only) and saving a new one. */
-  chatAllow: { read: () => string[]; save: (rule: string) => string; clear: () => number }
+  chatAllow: { read: () => AllowRule[]; save: (rule: string, worktree?: string) => string; clear: () => number }
   /** Per-turn worktree checkpoints behind `/undo`. */
   createCheckpoints: (worktree: string, label: () => string) => ChatCheckpoints
   /** The installed Codex CLI version, for diagnostics only (undefined when unknown). */
@@ -1251,7 +1251,7 @@ export async function runInteractiveSession(
           note(`Refused (${refused}): ${action.command}. Run it yourself with !<command> if you mean it.`)
           return { how: "refused", decision: { allow: false, reason: `refused by Otter (${refused}); the user can run it with !<command>` } }
         }
-        if (allowedByRules(action.command, deps.chatAllow.read())) {
+        if (allowedByRules(action.command, deps.chatAllow.read(), signalWorktree)) {
           note(`Allowed by your rule: ${title}`)
           return { how: "rule", decision: { allow: true } }
         }
@@ -1265,7 +1265,9 @@ export async function runInteractiveSession(
       const rule = action.tool === "bash" ? commandRule(action.command) : undefined
       const folder = grantDirectory(action)
       const folderLabel = folder ? `Allow edits in ${folder === "." ? "the whole worktree" : `${folder}/`} for this turn` : undefined
-      const labels = ["Allow once", ...(rule ? [`Always allow \`${rule}\``] : []), ...(folderLabel ? [folderLabel] : []), "Deny"]
+      const hereLabel = rule && signalWorktree ? `Always allow \`${rule}\` in this worktree` : undefined
+      const everywhereLabel = rule ? `Always allow \`${rule}\` everywhere` : undefined
+      const labels = ["Allow once", ...(hereLabel ? [hereLabel] : []), ...(everywhereLabel ? [everywhereLabel] : []), ...(folderLabel ? [folderLabel] : []), "Deny"]
       note([title, ...preview.map(line => `  ${line}`)].join("\n"))
       progress.suspend()
       let picked: number | undefined
@@ -1275,8 +1277,9 @@ export async function runInteractiveSession(
         note(`Denied: ${title}`)
         return { how: "denied", decision: { allow: false, reason: picked === undefined ? "no decision (dismissed)" : "denied" } }
       }
-      if (rule && labels[picked] === `Always allow \`${rule}\``) {
-        try { note(`Saved rule \`${rule}\` to ${deps.chatAllow.save(rule)}; /permissions lists or clears rules.`) }
+      if (rule && (labels[picked] === hereLabel || labels[picked] === everywhereLabel)) {
+        const scope = labels[picked] === hereLabel ? signalWorktree : undefined
+        try { note(`Saved rule \`${rule}\`${scope ? ` (only in ${scope})` : " (everywhere)"} to ${deps.chatAllow.save(rule, scope)}; /permissions lists or clears rules.`) }
         catch (error) { note(`Rule not saved: ${boundedTerminalDiagnostic(String(error))}`) }
       }
       if (folder && labels[picked] === folderLabel) {
@@ -3528,7 +3531,7 @@ export async function runInteractiveSession(
           `Chat execution: ${mode}${mode === "ask" ? " (otter asks before each write, edit and command)" : mode === "auto-edit" ? " (file edits apply without asking; commands ask)" : " (read-only; use /plan or !<command>)"}.`,
           `Change it with "chat": { "execute": "ask" | "auto-edit" | "plan" } in ~/.config/otter/otter.jsonc; it applies to the next model selection or /new.`,
           "Model API calls require Allow once for every request, including auto-edit mode; saved command rules do not apply.",
-          rules.length ? `Always-allowed commands: ${rules.map(rule => `\`${rule}\``).join(", ")} (/permissions clear removes them).` : "No always-allowed commands.",
+          rules.length ? `Always-allowed commands: ${rules.map(describeAllowRule).join(", ")} (/permissions clear removes them).` : "No always-allowed commands.",
         ].join("\n") + "\n"))
         continue
       }

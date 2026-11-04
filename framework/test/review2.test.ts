@@ -263,8 +263,11 @@ describe("state root containment", () => {
       process.env.XDG_STATE_HOME = ""
       expect(stateBase(wt.worktree)).toMatch(/\.local\/state\/otter$/)
     } finally {
-      process.env.OTTER_STATE_HOME = saved.otter
-      process.env.XDG_STATE_HOME = saved.xdg
+      // Assigning undefined stores the string "undefined" (later tests would then write framework/undefined/otter/...).
+      for (const [name, value] of [["OTTER_STATE_HOME", saved.otter], ["XDG_STATE_HOME", saved.xdg]] as const) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
     }
   })
 })

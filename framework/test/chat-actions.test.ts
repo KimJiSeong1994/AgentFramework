@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { allowedByRules, clearAllowRules, commandRule, coveredByGrant, describeAction, grantDirectory, packageInstallFailureHint, readAllowRules, refusedCommand, runCapturedCommand, saveAllowRule } from "../src/hosts/chat-actions.ts"
+import { allowedByRules, alwaysAsk, clearAllowRules, commandRule, describeAllowRule, ruleApplies, coveredByGrant, describeAction, grantDirectory, packageInstallFailureHint, readAllowRules, refusedCommand, runCapturedCommand, saveAllowRule } from "../src/hosts/chat-actions.ts"
 
 test("pip OS permission failures recommend environment isolation without elevating or hiding the failure", () => {
   const error = "ERROR: Could not install packages due to an OSError: [Errno 1] Operation not permitted: '/protected/old-project'"
@@ -50,6 +50,45 @@ describe("always-allow rules", () => {
     }
   })
 
+  test("destructive git and recursive deletes never match or offer a rule", () => {
+    const destructive = ["rm -rf build", "rm -r build", "rm build -rf", "rm --recursive build", "git reset --hard HEAD~1",
+      "git reset --merge", "git clean -fd", "git clean -n", "git checkout .", "git checkout -- src/a.ts", "git checkout -f main",
+      "git restore .", "git restore --staged a.ts", "git restore --source=HEAD~1 a.ts", "git branch -D feature",
+      "git branch --delete --force feature", "git stash drop", "git stash clear", "git push origin --delete feature"]
+    for (const command of destructive) {
+      expect(alwaysAsk(command)).toBe(true)
+      expect(commandRule(command)).toBeUndefined()
+      expect(allowedByRules(command, ["rm", "git reset", "git clean", "git checkout", "git restore", "git branch", "git stash", "git push"])).toBe(false)
+    }
+    for (const safe of ["rm build/out.txt", "rm -f build/out.txt", "git reset", "git reset --soft HEAD~1", "git checkout -b feature",
+      "git checkout main", "git restore --help", "git branch -d merged", "git stash", "git stash list", "git push origin main"]) {
+      expect(alwaysAsk(safe)).toBe(false)
+      expect(commandRule(safe)).toBeDefined()
+    }
+  })
+
+  test("inline interpreter code never matches or offers a rule", () => {
+    for (const command of ["python3 -c 'import os'", "python -c x", "node -e 1", "bun -e 1", "sh -c ls", "bash -c 'rm x'", "perl -e 1"]) {
+      expect(alwaysAsk(command)).toBe(true)
+      expect(allowedByRules(command, ["python3", "python", "node", "bun", "sh", "bash", "perl"])).toBe(false)
+    }
+    for (const command of ["python3 -m pytest", "python3 scripts/otter-baseline.py", "node script.js", "bun test", "sh ./run.sh"]) expect(alwaysAsk(command)).toBe(false)
+  })
+
+  test("a rule scoped to a worktree covers commands only when the chat runs there", () => {
+    const scoped = { command: "python3", worktree: "/repo/a" }
+    expect(ruleApplies(scoped, "/repo/a")).toBe(true)
+    expect(ruleApplies(scoped, "/repo/b")).toBe(false)
+    expect(ruleApplies(scoped, undefined)).toBe(false)
+    expect(ruleApplies({ command: "python3" }, undefined)).toBe(true)
+    expect(allowedByRules("python3 scripts/x.py", [scoped], "/repo/a")).toBe(true)
+    expect(allowedByRules("python3 scripts/x.py", [scoped], "/repo/b")).toBe(false)
+    expect(allowedByRules("python3 scripts/x.py", [scoped])).toBe(false)
+    expect(allowedByRules("python3 scripts/x.py", ["python3"], "/repo/b")).toBe(true)
+    expect(describeAllowRule(scoped)).toBe("`python3` (only in /repo/a)")
+    expect(describeAllowRule({ command: "bun test" })).toBe("`bun test`")
+  })
+
   test("a saved rule covers matching commands only, never a chained one", () => {
     expect(allowedByRules("bun test test/foo.test.ts", ["bun test"])).toBe(true)
     expect(allowedByRules("bun run build", ["bun test"])).toBe(false)
@@ -71,18 +110,23 @@ describe("always-allow rules", () => {
     expect(saveAllowRule("bun test")).toBe(path)
     saveAllowRule("git status")
     saveAllowRule("bun test")
-    expect(readAllowRules()).toEqual(["bun test", "git status"])
+    expect(readAllowRules()).toEqual([{ command: "bun test" }, { command: "git status" }])
+    expect(saveAllowRule("python3", "/repo/a")).toBe(path)
+    saveAllowRule("python3", "/repo/a")
+    expect(readAllowRules()).toEqual([{ command: "bun test" }, { command: "git status" }, { command: "python3", worktree: "/repo/a" }])
+    expect(readFileSync(path, "utf8")).toContain('"worktree": "/repo/a"')
+    expect(() => saveAllowRule("python3", "relative/path")).toThrow()
     expect(readFileSync(path, "utf8")).toContain("// mine")
     expect(readFileSync(path, "utf8")).toContain('"execute": "ask"')
     expect(() => saveAllowRule("bun test && rm -rf x")).toThrow()
-    expect(clearAllowRules()).toBe(2)
+    expect(clearAllowRules()).toBe(3)
     expect(readAllowRules()).toEqual([])
   })
 
   test("malformed saved entries are ignored", () => {
     mkdirSync(join(home, "otter"), { recursive: true })
-    writeFileSync(join(home, "otter", "otter.jsonc"), '{ "chat": { "allow": ["git status", "rm -rf x; y", 3, "bun test"] } }')
-    expect(readAllowRules()).toEqual(["git status", "bun test"])
+    writeFileSync(join(home, "otter", "otter.jsonc"), '{ "chat": { "allow": ["git status", "rm -rf x; y", 3, "bun test", { "command": "python3", "worktree": "rel" }, { "command": "a | b", "worktree": "/x" }, { "worktree": "/x" }, { "command": "make", "worktree": "/x" }] } }')
+    expect(readAllowRules()).toEqual([{ command: "git status" }, { command: "bun test" }, { command: "make", worktree: "/x" }])
   })
 })
 

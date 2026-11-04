@@ -3,7 +3,8 @@
 //
 // Authority: only local human input, or a rule the human saved in the *user* config, allows an action. A project config
 // cannot pre-approve anything (a cloned repository must not grant itself execution), and model text never decides.
-import { readFileSync } from "node:fs"
+import { readFileSync, realpathSync } from "node:fs"
+import { isAbsolute, resolve } from "node:path"
 import { applyEdits, modify } from "jsonc-parser"
 import { parseJsonc, userConfigPath } from "../config.ts"
 import { startShell } from "../orchestration/shell.ts"
@@ -37,13 +38,38 @@ export function refusedCommand(command: string): string | undefined {
 }
 
 /**
+ * Commands that never match or offer an "Always allow" rule, so a rule saved for `rm` or `git checkout -b` cannot
+ * later run a destructive form unseen: recursive deletes, `git reset --hard/--merge`, `git clean`, `git checkout` /
+ * `git restore` of paths (`.`, `*`, `--`, `-f`, `--staged`, `--worktree`, `--source`), `git branch -D`,
+ * `git stash drop|clear` and `git push --delete`. They discard uncommitted or untracked work that `/undo` cannot
+ * restore. The human still approves each one individually.
+ */
+const ALWAYS_ASK: readonly RegExp[] = [
+  /^rm\b(?=.*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?:\s|$))/u,
+  /^git\s+reset\b.*\s--(?:hard|merge)\b/u,
+  /^git\s+clean\b/u,
+  /^git\s+(?:checkout|restore)\b.*(?:\s--(?:\s|$)|\s-f\b|\s--force\b|\s--staged\b|\s--worktree\b|\s--source\b|\s\.(?:\s|$)|\s\*(?:\s|$))/u,
+  /^git\s+branch\b.*(?:\s-D\b|\s--delete\b.*\s(?:-f|--force)\b|\s(?:-f|--force)\b.*\s--delete\b)/u,
+  /^git\s+stash\s+(?:drop|clear)\b/u,
+  /^git\s+push\b.*(?:\s--delete\b|\s-d\b)/u,
+  // Inline code handed to an interpreter (`python3 -c`, `node -e`, `sh -c`): a saved `python3` rule must not run arbitrary code unseen.
+  /^(?:python[0-9.]*|node|bun|deno|ruby|perl|php|sh|bash|zsh|dash|ksh)\b(?=.*\s-(?:c|e)(?:\s|$))/u,
+]
+
+/** Whether a command must be approved every time (no "Always allow" rule can cover it). */
+export function alwaysAsk(command: string): boolean {
+  const trimmed = command.trim()
+  return ALWAYS_ASK.some(pattern => pattern.test(trimmed))
+}
+
+/**
  * The "Always allow" rule a command offers: its first two words (`bun test`, `git status`, `npm run`), or one word for a
  * bare command. Commands that chain, pipe, redirect or substitute offer no rule, so a rule never covers a different
  * command glued onto an allowed one.
  */
 export function commandRule(command: string): string | undefined {
   const trimmed = command.trim()
-  if (!trimmed || /[;&|<>`$(){}\\\n]/u.test(trimmed)) return undefined
+  if (!trimmed || /[;&|<>`$(){}\\\n]/u.test(trimmed) || alwaysAsk(trimmed)) return undefined
   const words = trimmed.split(/\s+/u)
   if (!/^[A-Za-z0-9._/@+-]+$/u.test(words[0]!)) return undefined
   const second = words[1]
@@ -51,34 +77,73 @@ export function commandRule(command: string): string | undefined {
 }
 
 /**
- * Whether a saved rule covers this command. A rule is a word prefix (`bun test` covers `bun test foo.test.ts`; `make`
- * covers `make install`), and only for a command without chaining, pipes, redirection or substitution.
+ * A saved "Always allow" rule: a command prefix, everywhere (`"bun test"`) or only inside one worktree
+ * (`{ "command": "python3", "worktree": "/abs/repo" }`). Both forms live in the user config's `chat.allow`.
  */
-export function allowedByRules(command: string, rules: readonly string[]): boolean {
+export type AllowRule = Readonly<{ command: string; worktree?: string }>
+
+function canonicalPath(path: string): string {
+  try { return realpathSync(path) } catch { return resolve(path) }
+}
+
+function validAllowRule(value: unknown): AllowRule | undefined {
+  if (typeof value === "string") return commandRule(value) === value ? { command: value } : undefined
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const { command, worktree } = value as Record<string, unknown>
+  if (typeof command !== "string" || commandRule(command) !== command) return undefined
+  if (worktree === undefined) return { command }
+  if (typeof worktree !== "string" || !worktree || worktree.includes("\0") || !isAbsolute(worktree)) return undefined
+  return { command, worktree }
+}
+
+/** Whether a rule applies in this worktree: an unscoped rule everywhere, a scoped one only in its (canonical) worktree. */
+export function ruleApplies(rule: AllowRule, worktree: string | undefined): boolean {
+  if (rule.worktree === undefined) return true
+  return worktree !== undefined && canonicalPath(rule.worktree) === canonicalPath(worktree)
+}
+
+/** How a rule is shown: `\`python3\` (only in /abs/repo)` or `\`bun test\``. */
+export function describeAllowRule(rule: AllowRule): string {
+  return rule.worktree === undefined ? `\`${rule.command}\`` : `\`${rule.command}\` (only in ${rule.worktree})`
+}
+
+/**
+ * Whether a saved rule covers this command. A rule is a word prefix (`bun test` covers `bun test foo.test.ts`; `make`
+ * covers `make install`), and only for a command without chaining, pipes, redirection or substitution. A rule scoped
+ * to a worktree counts only when the chat runs in that worktree.
+ */
+export function allowedByRules(command: string, rules: readonly (string | AllowRule)[], worktree?: string): boolean {
   const rule = commandRule(command)
   if (!rule) return false
   const first = rule.split(" ")[0]!
-  return rules.includes(rule) || rules.includes(first)
+  return rules.some(entry => {
+    const saved = typeof entry === "string" ? { command: entry } : entry
+    return (saved.command === rule || saved.command === first) && ruleApplies(saved, worktree)
+  })
 }
 
 /** Saved rules from the user config only (`chat.allow`); a missing or broken file means no rules. */
-export function readAllowRules(path = userConfigPath()): string[] {
+export function readAllowRules(path = userConfigPath()): AllowRule[] {
   try {
     const parsed = parseJsonc<Record<string, unknown>>(readFileSync(path, "utf8"))
     const chat = parsed && typeof parsed === "object" ? parsed.chat : undefined
     const allow = chat && typeof chat === "object" && !Array.isArray(chat) ? (chat as Record<string, unknown>).allow : undefined
-    return Array.isArray(allow) ? allow.filter((rule): rule is string => typeof rule === "string" && commandRule(rule) === rule).slice(0, MAX_ALLOW_RULES) : []
+    return Array.isArray(allow) ? allow.map(validAllowRule).filter((rule): rule is AllowRule => rule !== undefined).slice(0, MAX_ALLOW_RULES) : []
   } catch { return [] }
 }
 
 const formatting = { formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" } }
 
-/** Save one rule to the user config; returns the path written. */
-export function saveAllowRule(rule: string): string {
+/** Save one rule to the user config, everywhere or only in `worktree` (absolute path); returns the path written. */
+export function saveAllowRule(rule: string, worktree?: string): string {
   if (commandRule(rule) !== rule) throw new TypeError("not a saveable command rule")
+  if (worktree !== undefined && (!worktree || !isAbsolute(worktree) || worktree.includes("\0"))) throw new TypeError("rule worktree must be an absolute path")
+  const entry: AllowRule = worktree === undefined ? { command: rule } : { command: rule, worktree }
   return rewriteUserConfig(text => {
     const rules = readAllowRules()
-    return rules.includes(rule) ? text : applyEdits(text, modify(text, ["chat", "allow"], [...rules, rule].slice(-MAX_ALLOW_RULES), formatting))
+    if (rules.some(saved => saved.command === entry.command && saved.worktree === entry.worktree)) return text
+    const serialized = [...rules, entry].slice(-MAX_ALLOW_RULES).map(saved => saved.worktree === undefined ? saved.command : saved)
+    return applyEdits(text, modify(text, ["chat", "allow"], serialized, formatting))
   })
 }
 

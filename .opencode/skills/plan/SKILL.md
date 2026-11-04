@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Plan mode - read-only investigation that yields a numbered, verifiable implementation plan
+description: Use when a request needs a read-only investigation before changes - yields a numbered, verifiable implementation plan (plan mode)
 compatibility: opencode
 ---
 

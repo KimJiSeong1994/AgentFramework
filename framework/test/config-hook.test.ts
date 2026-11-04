@@ -5,7 +5,7 @@ import { join } from "node:path"
 import type { Config } from "@opencode-ai/plugin"
 import { effectiveOutputLimit, parseModelSelection, type OtterConfig } from "../src/config.ts"
 import { AGENT_DEFS, MAIN_PROMPT, MAIN_RULE3_NO_DELEGATE, WORKER_PROMPT, mainPrompt } from "../src/agents/prompts.ts"
-import { createConfigHook, type OtterOpenCodeConfig } from "../src/hooks/config.ts"
+import { createConfigHook, OMO_TOOL_DENIES, type OtterOpenCodeConfig } from "../src/hooks/config.ts"
 import type { HookDeps } from "../src/hooks/types.ts"
 import { fakeDeps, type LogEntry } from "./helpers.ts"
 import { WORKFLOW_READ_ONLY_ROLES } from "../src/hosts/types.ts"
@@ -220,6 +220,20 @@ describe("config hook", () => {
     const c = await run({ plugin: ["oh-my-openagent@1.2.3", ["other-plugin", { a: 1 }]] })
     expect(logs.some((l) => l.msg.startsWith("WARNING") && l.msg.includes("oh-my-openagent"))).toBe(true)
     expect(c.plugin).toEqual(["oh-my-openagent@1.2.3", ["other-plugin", { a: 1 }]])
+    // OMO tools are denied on otter's agents (reviewer stays read-only; no OMO prefix cost), nowhere else.
+    for (const name of ["main", "worker", "reviewer"]) {
+      const permission = c.agent?.[name]?.permission as Record<string, unknown>
+      for (const tool of OMO_TOOL_DENIES) expect(permission[tool]).toBe("deny")
+    }
+  })
+
+  test("takes default_agent back from OMO's primary agent, keeps a user's explicit choice", async () => {
+    const taken = await run({ plugin: ["oh-my-openagent@1.2.3"], default_agent: "Sisyphus - ultraworker" } as Config)
+    expect(taken.default_agent).toBe("main")
+    const kept = await run({ plugin: ["oh-my-openagent@1.2.3"], default_agent: "my-agent" } as Config)
+    expect(kept.default_agent).toBe("my-agent")
+    const without = await run({ default_agent: "Sisyphus - ultraworker" } as Config)
+    expect(without.default_agent).toBe("Sisyphus - ultraworker")
   })
 
   test("no warning without OMO", async () => {

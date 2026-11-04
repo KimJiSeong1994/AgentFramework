@@ -55,7 +55,7 @@ for a in "$@"; do
 done
 
 OPENCODE_MIN="1.18.32"
-OPENCODE_PIN="1.18.32"
+OPENCODE_PIN="1.18.35"
 BUDGET_MAIN=1500; BUDGET_WORKER=800; BUDGET_REVIEWER=600
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/otter-doctor.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
@@ -365,7 +365,7 @@ warn = []
 expected = {
     "worker": {"bash", "edit", "glob", "grep", "read", "write"},
     "reviewer": {"glob", "grep", "read"},
-    "main": {"bash", "delegate", "edit", "glob", "grep", "memory", "read", "skill", "todowrite", "todoread", "write"},
+    "main": {"bash", "delegate", "edit", "glob", "grep", "memory", "otter_flow", "read", "skill", "todowrite", "todoread", "write"},
 }
 for a, hidden, steps in (("worker", ("task", "delegate", "todowrite", "webfetch", "skill", "memory"), 40), ("reviewer", ("task", "delegate", "todowrite", "bash", "write", "edit", "memory"), 15), ("main", ("task", "webfetch"), None)):
     d = load(a)

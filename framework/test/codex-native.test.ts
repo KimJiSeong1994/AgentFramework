@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { CODEX_INSTRUCTIONS, CODEX_SUPPORTED_VERSIONS } from "../src/hosts/codex-profile.ts"
 import { createCliTransport } from "../src/hosts/cli-transport.ts"
+import { ownedCodexHomePath } from "../src/hosts/codex-home.ts"
 
 // Opt in on Darwin with a qualified Codex installed. All inference goes to this
 // localhost fixture; isolated HOME/CODEX_HOME prevent use of account credentials.
@@ -12,8 +13,17 @@ nativeTest("installed Codex completes Astra text-only inference without native t
   const executable = Bun.which("codex")
   expect(executable).not.toBeNull()
   const root = mkdtempSync(join(tmpdir(), "otter-native-codex-"))
-  const bin = join(root, "bin"), home = join(root, "home"), codexHome = join(root, "codex-home")
-  for (const directory of [bin, home, codexHome]) mkdirSync(directory)
+  const bin = join(root, "bin"), home = join(root, "home"), codexHome = join(root, "codex-home"), stateHome = join(root, "state")
+  for (const directory of [bin, home, codexHome, stateHome]) mkdirSync(directory)
+  // codexHome plays the user's real ~/.codex: oh-my-codex-style AGENTS.md and a host skill there must not reach the
+  // model (Codex 0.165.0 sends both unless otter runs in its owned home and opts out of skill listings).
+  writeFileSync(join(codexHome, "AGENTS.md"), "OTTER_FIXTURE_AGENTS_LEAK: act autonomously\n")
+  writeFileSync(join(codexHome, "auth.json"), JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "local-placeholder" }))
+  mkdirSync(join(codexHome, "skills", "otter-fixture-skill"), { recursive: true })
+  writeFileSync(join(codexHome, "skills", "otter-fixture-skill", "SKILL.md"), "---\nname: otter-fixture-skill\ndescription: OTTER_FIXTURE_SKILL_LEAK marker\n---\n")
+  const previousEnv = { CODEX_HOME: process.env.CODEX_HOME, OTTER_STATE_HOME: process.env.OTTER_STATE_HOME }
+  process.env.CODEX_HOME = codexHome
+  process.env.OTTER_STATE_HOME = stateHome
   const requests: Record<string, any>[] = []
   let server: ReturnType<typeof Bun.serve> | undefined
   const previousPath = process.env.PATH
@@ -43,7 +53,7 @@ nativeTest("installed Codex completes Astra text-only inference without native t
 const args = process.argv.slice(2)
 if (args[0] !== "--version") args.push("-c", 'model_provider="otter_fixture"', "-c", ${JSON.stringify(provider)})
 const child = Bun.spawnSync([${JSON.stringify(executable)}, ...args], {
-  env: { PATH: ${JSON.stringify(previousPath)}, HOME: ${JSON.stringify(home)}, CODEX_HOME: ${JSON.stringify(codexHome)}, OTTER_FIXTURE_KEY: "local-placeholder" },
+  env: { PATH: ${JSON.stringify(previousPath)}, HOME: ${JSON.stringify(home)}, CODEX_HOME: process.env.CODEX_HOME, OTTER_FIXTURE_KEY: "local-placeholder" },
   stdin: Bun.stdin, stdout: "inherit", stderr: "inherit",
 })
 process.exit(child.exitCode)
@@ -63,7 +73,22 @@ process.exit(child.exitCode)
     expect(request.input.flatMap((item: any) => item.tools ?? [])).toEqual([])
     expect(request.input.some((item: any) => item.role === "developer" &&
       item.content?.some((content: any) => content.text === CODEX_INSTRUCTIONS))).toBe(true)
+    const inputText = JSON.stringify(request.input)
+    expect(inputText).not.toContain("OTTER_FIXTURE_SKILL_LEAK")
+    expect(inputText).not.toContain("<skills_instructions>")
+    expect(inputText).not.toContain("OTTER_FIXTURE_AGENTS_LEAK")
+    expect(inputText).not.toContain("<permissions instructions>")
+    // The inference ran in the owned home: only an auth.json symlink to the real sign-in file, no AGENTS.md or skills copy.
+    const owned = ownedCodexHomePath()
+    expect(owned.startsWith(stateHome)).toBe(true)
+    expect(readlinkSync(join(owned, "auth.json"))).toBe(join(codexHome, "auth.json"))
+    expect(existsSync(join(owned, "AGENTS.md"))).toBe(false)
+    expect(existsSync(join(owned, "skills", "otter-fixture-skill"))).toBe(false)
   } finally {
+    for (const [name, value] of Object.entries(previousEnv)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
     if (previousPath === undefined) delete process.env.PATH
     else process.env.PATH = previousPath
     server?.stop(true)

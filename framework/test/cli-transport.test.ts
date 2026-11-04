@@ -1,7 +1,7 @@
 import { afterEach, expect, spyOn, test } from "bun:test"
 import { createHash } from "node:crypto"
 import * as fs from "node:fs"
-import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import * as path from "node:path"
 import { delimiter, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
@@ -10,6 +10,10 @@ import {
   CliExecutableError, createCliTransport, findExecutable, nativeObservedUsageCanonicalByteBound, type CliEngine,
 } from "../src/hosts/cli-transport.ts"
 import { codexProfileArgv, createCodexProfile } from "../src/hosts/codex-profile.ts"
+import { ownedCodexHomePath, realCodexHome } from "../src/hosts/codex-home.ts"
+
+// The otter-owned Codex home is created under the state base; keep it out of the developer's real state directory.
+process.env.OTTER_STATE_HOME = mkdtempSync(join(tmpdir(), "otter-transport-state-"))
 import { HOST_INFERENCE_INSTRUCTIONS } from "../src/hosts/inference-instructions.ts"
 
 const CODEX_MODEL = "gpt-5.6-sol"
@@ -127,7 +131,7 @@ let prompt = ""
     fs.renameSync(cwd, originalPath)
     fs.mkdirSync(cwd, { mode: 0o700 })
     fs.writeFileSync(path.join(cwd, "sentinel"), "preserve replacement")
-    fs.writeFileSync(${JSON.stringify(options.marker)}, JSON.stringify({ cwd, profileRoot, originalPath, prompt, argv: rawArgs }))
+    fs.writeFileSync(${JSON.stringify(options.marker)}, JSON.stringify({ cwd, profileRoot, originalPath, prompt, argv: rawArgs, codexHome: process.env.CODEX_HOME }))
   } else if (${options.replaceCatalog === true}) {
     const catalogPath = path.join(profileRoot, ${JSON.stringify(options.profileCatalog?.name ?? "")})
     const originalCatalogPath = catalogPath + ".original"
@@ -135,7 +139,7 @@ let prompt = ""
     fs.writeFileSync(catalogPath, "preserve replacement catalog", { mode: 0o600 })
     fs.writeFileSync(${JSON.stringify(options.marker)}, JSON.stringify({ cwd, profileRoot, catalogPath, originalCatalogPath, prompt, argv: rawArgs }))
   } else {
-    fs.writeFileSync(${JSON.stringify(options.marker)}, JSON.stringify({ cwd, profileRoot, prompt, argv: rawArgs }))
+    fs.writeFileSync(${JSON.stringify(options.marker)}, JSON.stringify({ cwd, profileRoot, prompt, argv: rawArgs, codexHome: process.env.CODEX_HOME }))
   }
   ${options.descendantDelayMs === undefined ? "" : `const descendant = require("node:child_process").spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), ${options.descendantDelayMs})"], { stdio: "inherit" })\ndescendant.unref()`}
   for (const chunk of chunks) process.stdout.write(chunk)
@@ -159,13 +163,13 @@ function options(engine: CliEngine, overrides: Partial<Parameters<typeof createC
   }
 }
 
-function codexExpectedArgs(): string[] {
+function codexExpectedArgs(cliVersion?: string): string[] {
   const profile = createCodexProfile(CODEX_MODEL)
   const scratch = "/__PROFILE__/workdir"
   const catalog = `/__PROFILE__/codex-${profile.version}-catalog.json`
   return [
     "exec", "--json", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
-    "-C", scratch, "-m", CODEX_MODEL, ...codexProfileArgv(profile, scratch, catalog),
+    "-C", scratch, "-m", CODEX_MODEL, ...codexProfileArgv(profile, scratch, catalog, cliVersion),
     "-c", "features.shell_tool=false", "-c", "features.multi_agent=false", "-c", "web_search=disabled",
     "-c", "features.view_image=false", "-c", "features.sleep_tool=false", "-c", "features.apps=false",
     "-c", "features.plugins=false", "-c", "include_environment_context=false", "-c", "project_doc_max_bytes=0",
@@ -705,9 +709,9 @@ test.each([
   expect(result.error).toBeDefined()
 })
 
-test.each(["0.159.3", "0.163.0"])("Codex %s uses the owned restricted-read profile and requires completed native turn", async version => {
+test.each(["0.159.3", "0.163.0", "0.165.0"])("Codex %s uses the owned restricted-read profile and requires completed native turn", async version => {
   setProcessPlatform("darwin")
-  const expectedArgs = codexExpectedArgs()
+  const expectedArgs = codexExpectedArgs(version)
   const prompt = "codex stdin fixture"
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
@@ -726,7 +730,7 @@ test.each(["0.159.3", "0.163.0"])("Codex %s uses the owned restricted-read profi
 
   expect(result).toEqual({ status: "completed", text: "codex answer", quiescent: true })
   expect(observed.join("")).toBe("codex answer")
-  const invocation = JSON.parse(readFileSync(marker, "utf8")) as { cwd: string; profileRoot: string; prompt: string; argv: string[] }
+  const invocation = JSON.parse(readFileSync(marker, "utf8")) as { cwd: string; profileRoot: string; prompt: string; argv: string[]; codexHome?: string }
   expect(invocation.prompt).toBe(prompt)
   expect(existsSync(invocation.cwd)).toBe(false)
   expect(existsSync(invocation.profileRoot)).toBe(false)
@@ -741,6 +745,14 @@ test.each(["0.159.3", "0.163.0"])("Codex %s uses the owned restricted-read profi
   const catalogIndex = invocation.argv.findIndex(argument => argument.startsWith("model_catalog_json="))
   expect(permissionProfileIndex).toBeGreaterThanOrEqual(0)
   expect(catalogIndex).toBeGreaterThan(permissionProfileIndex)
+  expect(codexOverrides.includes("skills.include_instructions=false")).toBe(version === "0.165.0")
+  expect(codexOverrides.includes("include_permissions_instructions=false")).toBe(version === "0.165.0")
+  // Inference runs in the otter-owned Codex home (auth.json symlink only), never the user's ~/.codex.
+  const ownedHome = ownedCodexHomePath()
+  expect(invocation.codexHome).toBe(realpathSync(ownedHome))
+  expect(invocation.codexHome).not.toBe(realCodexHome())
+  expect(lstatSync(join(ownedHome, "auth.json")).isSymbolicLink()).toBe(true)
+  expect(readlinkSync(join(ownedHome, "auth.json"))).toBe(join(realCodexHome(), "auth.json"))
 })
 
 test("Codex Linux preflight verifies the pinned profile and inference rechecks the version", async () => {
@@ -858,7 +870,7 @@ test("Codex preflight checks the pinned version without inference and run rechec
   expect(existsSync(marker)).toBe(true)
 })
 
-test.each(["0.159.2", "0.163.1", "0.164.0", "0.163.0-dev"])("Codex refuses unexpected CLI version %s before launching inference", async version => {
+test.each(["0.159.2", "0.163.1", "0.164.0", "0.165.1", "0.163.0-dev"])("Codex refuses unexpected CLI version %s before launching inference", async version => {
   setProcessPlatform("darwin")
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const DOCTOR = join(import.meta.dir, "..", "..", "scripts", "otter-doctor.sh")
-const PIN = "1.18.32"
+const PIN = "1.18.35"
 let root: string
 let bin: string
 
