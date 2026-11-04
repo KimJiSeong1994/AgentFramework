@@ -197,3 +197,8 @@ test("model API approval shows the exact full prompt and is never covered by fol
   expect(grantDirectory(action)).toBeUndefined()
   expect(coveredByGrant(action, new Set(["."]))).toBe(false)
 })
+
+test("a write that overwrites an unread existing file says so in its title", () => {
+  expect(describeAction({ tool: "write", path: "a.txt", content: "x\n" }).title).toBe("Write a.txt (1 line)")
+  expect(describeAction({ tool: "write", path: "a.txt", content: "x\n", overwritesUnread: true }).title).toBe("Write a.txt (1 line) — overwrites an existing file this turn has not read")
+})

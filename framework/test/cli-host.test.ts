@@ -923,8 +923,16 @@ describe("common CLI execution host", () => {
       expect(Number.isSafeInteger(activity.durationMs)).toBe(true)
       expect(activity.durationMs!).toBeGreaterThanOrEqual(0)
     }
+    // model-started carries display-only budget facts (estimates against the role limit; tool rounds so far).
+    const modelStarts = activities.filter(activity => activity.kind === "model-started")
+    expect(modelStarts.map(activity => activity.budget?.toolCalls)).toEqual([0, 1, 2])
+    for (const activity of modelStarts) {
+      expect(activity.budget).toMatchObject({ inputLimit: expect.any(Number), roundLimit: 24 })
+      expect(activity.budget!.inputTokens).toBeGreaterThan(0)
+    }
     expect(activities.map(activity => activity.kind === "model-returned"
-      ? { kind: activity.kind, role: activity.role, execution: activity.execution, status: activity.status } : activity)).toEqual([
+      ? { kind: activity.kind, role: activity.role, execution: activity.execution, status: activity.status }
+      : activity.kind === "model-started" ? { kind: activity.kind, role: activity.role, execution: activity.execution, engine: activity.engine, model: activity.model } : activity)).toEqual([
       { kind: "model-started", role: "reviewer", execution, engine: "local", model: "fixture-model" },
       { kind: "model-returned", role: "reviewer", execution, status: "completed" },
       { kind: "tool-started", role: "reviewer", execution, taskID: subject.request.taskID, executionID: subject.request.executionID, callID: `${subject.request.executionID}:tool:1`, tool: "read" },
@@ -2364,7 +2372,7 @@ describe("chat execution through the action gate", () => {
     expect(readFileSync(join(root, "m2.ts"), "utf8")).toBe("export const c = 30\n")
     expect(run.prompts[1]).toContain("Edited 2 file(s) with 3 change(s)")
     // The second batch had one non-matching edit: nothing changed, including the edit that would have matched.
-    expect(run.prompts[2]).toContain("edit 2 (m2.ts) text must match exactly once; nothing was changed")
+    expect(run.prompts[2]).toContain("edit 2 (m2.ts) edit text was not found; nothing was changed")
     expect(readFileSync(join(root, "m1.ts"), "utf8")).toBe("const a = 10\nconst b = 20\n")
     expect(run.prompts[3]).toContain("knowledge/raw/ is immutable")
     expect(run.prompts[4]).toContain("knowledge/raw/ is immutable")

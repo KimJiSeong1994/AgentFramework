@@ -43,6 +43,30 @@ describe("scoped CLI file tools", () => {
     expect(readFileSync(join(root, "other.txt"), "utf8")).toBe("before")
   })
 
+  test("edit can target the Nth occurrence or every occurrence; ambiguous defaults and bad arguments are refused", () => {
+    writeFileSync(join(root, "repeat.txt"), "x = 1\ny = 1\nz = 1\n")
+    expect(tools.execute("edit", { path: "repeat.txt", oldText: "= 1", newText: "= 2" })).toMatchObject({ ok: false, error: expect.stringContaining("occurs 3 times") })
+    expect(tools.execute("edit", { path: "repeat.txt", oldText: "= 1", newText: "= 2", occurrence: 2 })).toMatchObject({ ok: true, text: "Edited file; replaced occurrence 2 of 3." })
+    expect(readFileSync(join(root, "repeat.txt"), "utf8")).toBe("x = 1\ny = 2\nz = 1\n")
+    expect(tools.execute("edit", { path: "repeat.txt", oldText: "= 1", newText: "= 3", occurrence: 3 })).toMatchObject({ ok: false, error: expect.stringContaining("fewer than the requested occurrence 3") })
+    expect(tools.execute("edit", { path: "repeat.txt", oldText: "= 1", newText: "= 0", replaceAll: true })).toMatchObject({ ok: true, text: "Edited file; replaced all 2 occurrences." })
+    expect(readFileSync(join(root, "repeat.txt"), "utf8")).toBe("x = 0\ny = 2\nz = 0\n")
+    const gated = createCliTools({ root, role: "main", allowed: ["read", "edit"], denied: [], actionGate: true })
+    expect(gated.execute("multiedit", { edits: [
+      { path: "repeat.txt", oldText: "= 0", newText: "= 9", replaceAll: true },
+      { path: "repeat.txt", oldText: "= 9", newText: "= 8", occurrence: 1 },
+    ] })).toMatchObject({ ok: true })
+    expect(readFileSync(join(root, "repeat.txt"), "utf8")).toBe("x = 8\ny = 2\nz = 9\n")
+    for (const bad of [
+      { path: "repeat.txt", oldText: "= 8", newText: "x", occurrence: 0 },
+      { path: "repeat.txt", oldText: "= 8", newText: "x", occurrence: 1.5 },
+      { path: "repeat.txt", oldText: "= 8", newText: "x", replaceAll: false },
+      { path: "repeat.txt", oldText: "= 8", newText: "x", occurrence: 1, replaceAll: true },
+      { path: "repeat.txt", oldText: "= 8", newText: "x", extra: 1 },
+    ]) expect(tools.validate("edit", bad)).toBe(false)
+    expect(tools.validate("edit", { path: "repeat.txt", oldText: "= 8", newText: "x", occurrence: 2 })).toBe(true)
+  })
+
   test("multiread batches bounded read-only file ranges without partial disclosure", () => {
     writeFileSync(join(root, "a.txt"), "first\nsecond\n")
     writeFileSync(join(root, "b.txt"), "third")

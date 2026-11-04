@@ -96,7 +96,7 @@ Every execution is approved by the local human, one action at a time or one plan
 | `chat.execute` | Chat model tools | Approval |
 | --- | --- | --- |
 | `"ask"` (default) | `read list glob grep multiread memory skill` + `write edit multiedit bash model_api` | every write, edit, command and model API call |
-| `"auto-edit"` | same | commands and model API calls; file edits apply and are noted |
+| `"auto-edit"` | same | commands and model API calls; file edits apply and are noted, except a `write` over an existing file the turn has not read, which asks |
 | `"plan"` | `read list glob grep multiread memory skill` | none (read-only; the model points to `/plan` and `!<command>`) |
 
 Only user configuration can grant `auto-edit`; project configuration may restrict the user's
@@ -137,8 +137,13 @@ changes; existing workflow ownership and policy checks are not bypassed.
   `git branch -D`, `git stash drop|clear`, `git push --delete`.
 - **This-turn folder grant**: the approval offers "Allow edits in `<dir>`/ for this turn" (the deepest folder holding
   every written path); later writes under it in the same turn are allowed and noted. Never for commands; not saved.
-- **`multiedit`** (gated main only): up to 20 exact-text edits across files, previewed as one diff and approved once,
-  applied only if every old text occurs exactly once (in order per file); otherwise nothing changes.
+- **`edit` matching**: the old text must occur exactly once unless the call names `"occurrence": N` (replace only the
+  Nth match) or `"replaceAll": true` (replace every match); overlapping matches are always refused. The preview shows
+  which occurrence(s) change.
+- **Read before overwrite**: a `write` to an existing file that this turn has not read is titled as such in the approval;
+  in `auto-edit` mode it asks instead of applying (other edits still apply unasked).
+- **`multiedit`** (gated main only): up to 20 edits across files (each with the same matching rules as `edit`),
+  previewed as one diff and approved once, applied only if every edit matches (in order per file); otherwise nothing changes.
 - **`/undo [list | <turn>]`**: before a turn's first effect the worktree is captured (private Git snapshot: index,
   HEAD and objects untouched; outside Git only written/edited files are backed up) and again when the turn ends. `/undo`
   restores the files the turn changed, skips files changed again afterwards and lists them; the last 10 turns are kept.
@@ -151,6 +156,8 @@ changes; existing workflow ownership and policy checks are not bypassed.
   `repo_search`) in one reply run in order from that one model turn, up to 8 per reply, each with its own policy
   check, round accounting and transcript exchange; calls past the cap are reported as not run. A write, edit,
   multiedit, bash or model_api call must be the only envelope in its reply (a mixed reply is refused unchanged).
+- **Status line budget**: in the full-screen TUI the status line shows the main model's latest input estimate against
+  its limit and the tool rounds used (`ctx 6.1k/8.2k 74% · tools 3/24`; ✂ at 90% or more). Estimates, not vendor counts.
 - **Tool-call limit**: at 24 tool calls a chat turn asks to continue (24 more, at most 3 times) instead of failing;
   workers and workflow roles keep the hard limit.
 - **Context**: Claude/Codex chat uses a 96,000-character conversation window (vendor main input estimate 49,152
@@ -289,7 +296,7 @@ semantic matching is not established. The recorded run is available in
   `$XDG_STATE_HOME/otter/<worktree-key>/digests/<sessionID>.json` (outside the worktree): turns, tool and decision
   counts, written paths, commands as rule prefixes with status/exit/duration, workflow stages, vendor-reported token
   usage (Codex `turn.completed` and Claude `result` counters, summed in total and per `engine/model`; local models
-  report none), outcome. Never message text, file contents, edit text, full command lines or output.
+  report none), failed turns grouped by category, host reason, engine failure class and engine/model (enums only), outcome. Never message text, file contents, edit text, full command lines or output.
   `/history [<count> | <session-id>]` lists or shows them; `/usage` (and the tail of `/status`) shows the running
   session's totals the same way.
 - **Project facts** (`/facts`) are deterministic aggregates of the last 50 digests: commands that keep passing,
@@ -568,6 +575,7 @@ These are Ollama's model allocations, not the computer's total free RAM or a cac
 | `/local profile default` | Inherit the Ollama server's retention setting. |
 | `/local keepalive 10m` | Set a custom duration: positive whole `s`, `m`, or `h`, up to 24 hours; also accepts `0`, `-1`, and `default`. |
 | `/local unload [model]` | Release the selected local model, or an explicitly named model, and its runtime prompt cache. |
+| `/local think on|off|default` | Let the local model reason before answering (`ollama run --think`; `local_model.think`). Off by default: direct answers are cheaper and faster; turn it on for a hard problem and off again afterwards. Applies to the next local inference. |
 
 Settings are saved in the user `otter.jsonc`; project settings take precedence. The effective value is shown after
 saving. They apply on subsequent local CLI calls, including combo roles, local wiki recall and local skill selection;

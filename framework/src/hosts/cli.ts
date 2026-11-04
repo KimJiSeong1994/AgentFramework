@@ -91,7 +91,8 @@ Settings are shared across local models and local combo routes; check smaller-co
 Old local conversation pairs are removed in batches when needed. These are estimates, not exact model tokens.
 Local model resources: /local shows loaded Ollama models and retention. /local profile memory|balanced|speed|default
 sets release-after-response, 5m idle, indefinite retention, or the server default; /local keepalive 10m sets a custom
-duration (0 releases, -1 retains). /local unload [model] frees a model and its runtime prompt cache while chat is idle.
+duration (0 releases, -1 retains). /local think on|off|default lets the local model reason before answering (Ollama --think;
+off by default). /local unload [model] frees a model and its runtime prompt cache while chat is idle.
 Settings apply to subsequent local CLI inference; installed model files and conversations are kept.
 Memory: /memory shows the engine that links requests to knowledge/wiki pages for the memory tool (default auto: the
 Claude CLI with claude-haiku-5-5, else the Codex CLI with gpt-5.6-luna; no local model server needed); /memory test

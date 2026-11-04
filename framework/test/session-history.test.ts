@@ -84,6 +84,27 @@ describe("session digest", () => {
     expect(buildSessionDigest(wt.worktree, "usage_none", 5_000).usage).toBeUndefined()
   })
 
+  test("groups failed turns by category, reason, failure class and engine/model; the record keeps enums only", () => {
+    seedSession("failures_one", store => {
+      store.append("user", { text: "a" })
+      store.append("failure", { category: "model_failed", reason: "transport", failureClass: "rate_limited", engine: "codex", model: "gpt-6-astra" })
+      store.append("user", { text: "b" })
+      store.append("failure", { category: "model_failed", reason: "transport", failureClass: "rate_limited", engine: "codex", model: "gpt-6-astra" })
+      store.append("user", { text: "c" })
+      store.append("failure", { category: "input_budget", reason: null, failureClass: null, engine: "local", model: "llama3.2" })
+      store.append("assistant", { text: "ok" })
+      expect(() => store.append("failure", { category: "model_failed", reason: "SECRET diagnostic text", failureClass: null, engine: "codex", model: "x" })).toThrow()
+      expect(() => store.append("failure", { category: "boom", reason: null, failureClass: null, engine: "codex", model: "x" })).toThrow()
+    })
+    const digest = buildSessionDigest(wt.worktree, "failures_one", 5_000)
+    expect(digest.failures).toEqual([
+      { category: "model_failed", reason: "transport", failureClass: "rate_limited", engine: "codex", model: "gpt-6-astra", count: 2 },
+      { category: "input_budget", reason: null, failureClass: null, engine: "local", model: "llama3.2", count: 1 },
+    ])
+    expect(describeDigest(digest)).toContain("3 failed turns")
+    expect(buildSessionDigest(wt.worktree, "usage_none", 5_000).failures).toBeUndefined()
+  })
+
   test("is written outside the worktree, skipped for sessions without a turn, read back newest first", () => {
     seedSession("empty_session", () => {})
     expect(writeSessionDigest(wt.worktree, "empty_session")).toBeUndefined()

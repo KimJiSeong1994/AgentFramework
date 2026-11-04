@@ -17,6 +17,8 @@ export type CliEngine = "local" | "codex" | "claude"
 export type CliTransportOptions = {
   engine: CliEngine
   localKeepAlive?: string
+  /** Local engine only: let the model reason first (`ollama run --think=true`); default false. */
+  localThink?: boolean
   model: string
   prompt: string
   deadlineAt: number
@@ -202,7 +204,8 @@ function safeOptions(options: CliTransportOptions): CliTransportOptions {
       !Number.isSafeInteger(options.deadlineAt) || options.deadlineAt < 0 || options.deadlineAt - Date.now() > MAX_EXECUTION_MS ||
       !Number.isSafeInteger(options.maxOutputBytes) || options.maxOutputBytes < 0 || options.maxOutputBytes > MAX_OUTPUT_BYTES ||
       (options.onText !== undefined && typeof options.onText !== "function") ||
-      (options.localKeepAlive !== undefined && !isLocalKeepAlive(options.localKeepAlive))) {
+      (options.localKeepAlive !== undefined && !isLocalKeepAlive(options.localKeepAlive)) ||
+      (options.localThink !== undefined && typeof options.localThink !== "boolean")) {
     throw new TypeError(SAFE_ERRORS.options)
   }
   return { ...options }
@@ -460,7 +463,7 @@ function createScratchDirectory(): OwnedScratchDirectory {
   throw new Error(SAFE_ERRORS.scratch)
 }
 
-function nativeArgv(engine: CliEngine, model: string, scratch: string, codexState?: OwnedCodexState, codexVersion?: string): string[] {
+function nativeArgv(engine: CliEngine, model: string, scratch: string, codexState?: OwnedCodexState, codexVersion?: string, localThink = false): string[] {
   if (engine === "claude") {
     return [
       "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
@@ -480,9 +483,10 @@ function nativeArgv(engine: CliEngine, model: string, scratch: string, codexStat
       "-c", "mcp_servers={}", "-",
     ]
   }
-  // Disable reasoning at generation time instead of hiding it. `--hidethinking` can discard the entire response when
-  // a reasoning model never emits a post-thinking channel, leaving a successful Ollama process with an empty answer.
-  return ["run", model, "--think=false", "--nowordwrap"]
+  // Reasoning is decided at generation time (`--think`), never hidden after the fact: `--hidethinking` can discard the
+  // entire response when a reasoning model never emits a post-thinking channel, leaving a successful process with an
+  // empty answer. Off by default; `local_model.think` (/local think on) turns it on for the next local inference.
+  return ["run", model, `--think=${localThink ? "true" : "false"}`, "--nowordwrap"]
 }
 
 function prefixByUtf8Bytes(value: string, maxBytes: number): string {
@@ -1202,7 +1206,7 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
         } else {
           scratch = createScratchDirectory()
           if (!hasOwnedScratchIdentity(scratch)) throw new Error(SAFE_ERRORS.cleanup)
-          const argv = nativeArgv(options.engine, options.model, scratch.path)
+          const argv = nativeArgv(options.engine, options.model, scratch.path, undefined, undefined, options.engine === "local" && options.localThink === true)
           if (options.engine === "local" && options.localKeepAlive !== undefined) {
             // Ollama's CLI parses Go durations: negative residency needs a unit even though config uses -1.
             argv.push("--keepalive", options.localKeepAlive === "-1" ? "-1m" : options.localKeepAlive)

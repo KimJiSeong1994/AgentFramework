@@ -88,16 +88,16 @@
 | P1 | ~~벤더 usage 기록 → 다이제스트·`/status`·`/usage`~~ | 감사·OMX·GJC | S | **완료(§7)** |
 | P1 | ~~엔진 실패 분류 + "이 턴을 다른 엔진으로" 제안(조용한 교체 없음)~~ | OMC·OMO·로드맵 3-A | M | **완료(§7)** |
 | P1 | ~~엄격 엔벨로프 안의 읽기 전용 도구 배열 순차 실행~~ | 감사 | M | **완료(§7)**; main 기본 라운드 상향은 미적용 |
-| P1 | 도구 루프 지문 가드(동일 호출+동일 결과 3회 → 중단·진단 요구) | OMX | S | `multiedit failed 3` 류 반복 차단 |
-| P1 | 상태줄 입력 예산 사용률·절단·툴 카운터 | OMC | S | `budgetEvidence` 이미 생성 |
-| P2 | read-before-overwrite 가드 | OMO | S | 세션 read 경로 집합 |
-| P2 | 턴 단위 think 토글(로컬) | OMO | S | `--think=false` 고정 해제 옵션 |
-| P2 | 엔진별 토큰 계수 + usage 보정, vendor 예산 상향 | 감사 | M | |
-| P2 | CLI 채팅 "미완료 이어가기"(열린 todo → Enter 1회 제안) | OMC | M | `loop/idle.ts` 재사용 |
-| P2 | GJC 세션 임포터(`otter-wiki.ts capture --gjc`) | GJC | M | 필드 화이트리스트 투영만 |
-| P2 | 크래시 저널·오류 지문, 세션 제목·포크 | GJC | S–M | |
-| P2 | edit에 줄 범위/occurrence 인자 또는 해시 앵커(opt-in) | 감사·OMO | M/L | edit 실패율 측정 후 결정 |
-| P2 | GitHub Actions CI(샤딩)·릴리스 요약 | 로드맵 5 | M | 여전히 없음 |
+| P1 | ~~도구 루프 지문 가드~~ | OMX | S | **이미 있음**: 공용 실행 정책의 `RepeatGuard`(`hosts/tool-policy.ts:128-171`, `guards.repeat_limit`)가 CLI 경로에도 적용됨 |
+| P1 | ~~상태줄 입력 예산 사용률·툴 카운터~~ | OMC | S | **완료(§8)** |
+| P2 | ~~read-before-overwrite 가드~~ | OMO | S | **완료(§8)** |
+| P2 | ~~로컬 think 토글~~ | OMO | S | **완료(§8)**: `/local think on|off`(세션·턴 단위 키워드 대신 설정 토글) |
+| P2 | 엔진별 토큰 계수 + usage 보정, vendor 예산 상향 | 감사 | M | 미적용(비용·품질 결정 필요; 이제 `/usage`로 실측 가능) |
+| P2 | CLI 채팅 "미완료 이어가기" | OMC | M | 해당 없음: CLI 채팅에는 todo 도구가 없음 |
+| P2 | GJC 세션 임포터 | GJC | M | 보류: 포맷이 추론치이고 표본 세션에 `token-logs`·`audit.jsonl`이 없어 스키마 확정 후 진행 |
+| P2 | 크래시 저널·오류 지문 / 세션 제목·포크 | GJC | S–M | 실패 기록은 **완료(§8)**(다이제스트 `failures`); 제목·포크는 보류 |
+| P2 | ~~edit occurrence 인자~~ | 감사·OMO | M/L | **완료(§8)**: `occurrence`·`replaceAll`; 해시 앵커는 보류 |
+| P2 | ~~GitHub Actions CI(샤딩)~~·릴리스 요약 | 로드맵 5 | M | CI **완료(§8)**; 릴리스 요약은 보류 |
 
 ## 5. 사용자 환경 변경 (사용자 승인 후 2026-11-04 적용, 백업 `*.backup-20261104-*`)
 
@@ -120,4 +120,16 @@
 1. **벤더 사용량 기록**. 전송 계층이 이미 파싱하던 Codex `turn.completed`·Claude `result` 토큰 수를 `model-returned` 활동(엔진·모델·숫자만)에 실어 턴 타이밍 레코드의 모델 항목에 남기고, 세션 다이제스트가 전체·`엔진/모델`별로 합산한다. `/usage`와 `/status` 끝에 세션 누계가 보이고 `/history`가 토큰 합계를 표시한다. 로컬 모델은 보고값이 없다. `knowledge/AGENTS.md` 허용 목록에 추가했다.
 2. **엔진 실패 분류·전환 제안**. 실패한 호출에 `failureClass`(rate_limited·quota·auth·transient)를 벤더 진단문의 패턴으로만 붙인다(문구는 버림). 채팅 턴이 그 분류로 실패하면 세션 콤보 경로 중 다른 엔진의 경로를 "Retry on <engine> / <model>"로 제안한다. 선택하면 일반 `/model` 전환(대화 이어짐) 뒤 같은 메시지를 다시 보내며 notice로 남긴다. 대안 경로가 없으면 수동 전환 안내만 한다. 자동 전환은 없다.
 3. **읽기 전용 도구 묶음 실행**. 한 응답의 읽기 전용 엔벨로프(read·list·glob·grep·memory·skill·repo_search) 여러 개를 모델 재호출 없이 순서대로 실행한다(응답당 최대 8개, 초과분은 "실행되지 않음"으로 보고). 호출마다 정책·리스 검사와 라운드 회계는 그대로이고, 쓰기·명령이 섞인 응답은 종전처럼 거부한다. 도구 실행 본문을 `runToolCall`로 묶어 재사용했다.
+
+## 8. 후속 반영 2 (2026-11-04, 브랜치 `feat/otter-p2-recommendations`)
+
+1. **로컬 think 토글**: `local_model.think`(사용자·프로젝트 설정)와 `/local think on|off|default`. 기본 off(`--think=false`). 켜면 다음 로컬 추론부터 `ollama run --think=true`.
+2. **read-before-overwrite**: 실행 중 read/multiread한 경로를 추적해, 읽지 않은 기존 파일을 덮어쓰는 `write`는 승인 제목에 표시하고 auto-edit 모드에서도 묻는다.
+3. **실패 턴 기록**: 트랜스크립트 `failure` 레코드(카테고리·사유·엔진 실패 등급·엔진/모델 열거값만)와 다이제스트 `failures` 집계, `/history`에 실패 턴 수 표시.
+4. **edit `occurrence`/`replaceAll`**: 정확 1회 일치 외에 N번째 일치만 또는 전부 치환. 겹치는 일치는 항상 거부. multiedit도 동일.
+5. **상태줄 예산 표시**: 메인 모델 호출마다 `ctx 6.1k/8.2k 74% · tools 3/24`(90% 이상이면 ✂). 추정치임을 전제.
+6. **GitHub Actions CI**: `.github/workflows/ci.yml` — 타입체크 + Ubuntu·macOS 4분할 샤딩 테스트(`scripts/test-shard.sh`). 네이티브 엔진 테스트는 비활성.
+7. **확인만**: 도구 루프 반복 가드는 공용 실행 정책에 이미 있어 CLI에도 적용됨.
+
+보류·미적용: 벤더 입력 예산 상향과 토큰 계수 보정(비용 결정 필요), GJC 세션 임포터(포맷 미확정), 세션 제목·포크, 릴리스 요약, main 기본 라운드 상향.
 

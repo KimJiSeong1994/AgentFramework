@@ -6,7 +6,7 @@ import { abovePanelRows, belowPanelRows, bodyPanelRows, ellipsize, panelInnerCol
 import { TerminalDriver } from "./terminal.ts"
 import { MIN_COLUMNS, MIN_ROWS, MIN_SIZE_LABEL } from "./capability.ts"
 import { TranscriptModel } from "./transcript-model.ts"
-import type { CliHostActivity, CliToolDisplay } from "../hosts/cli-progress.ts"
+import type { CliHostActivity, CliToolDisplay, ModelBudget } from "../hosts/cli-progress.ts"
 import type { CliProgressTask } from "../hosts/cli-progress.ts"
 import type { ExecutionRunStatus } from "../hosts/run-state.ts"
 import type { ReplayOptions, ReplayResult } from "../sessions/store.ts"
@@ -315,11 +315,15 @@ export class TuiApp implements Terminal {
     if (activity.kind === "model-started" && activity.role !== "main" && activity.engine && activity.model) {
       this.roleModel = `${activity.role} · ${activity.engine} / ${activity.model}`
     } else if (activity.kind === "model-returned" && activity.role !== "main") this.roleModel = undefined
+    // The main model's latest input estimate and tool rounds stay in the status line until the next main call.
+    if (activity.kind === "model-started" && activity.role === "main" && activity.budget) this.budget = activity.budget
     this.transcript.activity(activity, activity.kind === "tool-started" || activity.kind === "tool-finished" ? this.ordinalFor(activity.executionID, activity.callID) : undefined)
     this.draw()
   }
   /** `role · engine / model` of the workflow role whose model is running; cleared when it returns. */
   private roleModel?: string
+  /** Latest main-model input estimate against its limit and tool rounds used (display only). */
+  private budget?: ModelBudget
   taskSnapshot(tasks: readonly CliProgressTask[]): void { this.transcript.taskSnapshot(tasks); this.draw() }
   queueActivity(message: string, fields?: Record<string, unknown>): void {
     if (!fields || typeof fields.task !== "string") return
@@ -450,6 +454,7 @@ export class TuiApp implements Terminal {
       search: this.transcriptQuery,
       queued: this.queue.length,
       columns,
+      ...(this.budget ? { budget: this.budget } : {}),
       ...(!this.usable() ? { notice: `Resize terminal to at least ${MIN_SIZE_LABEL}. Cancellation remains available.` } : {}),
       ascii: this.asciiChrome,
     })

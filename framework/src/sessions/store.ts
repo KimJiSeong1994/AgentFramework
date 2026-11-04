@@ -13,7 +13,7 @@ import { validateComboRoutes } from "../hosts/default-model.ts"
 import type { ComboRoutes } from "../hosts/types.ts"
 import { validPlanningTiming } from "../telemetry/planning.ts"
 
-export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "context-window" | "model-rebind" | "shell" | "verify" | "action" | "timing"
+export type TranscriptKind = "user" | "assistant" | "canonical-plan" | "tool-start" | "tool-result" | "tool-denied" | "task-state" | "task-evidence" | "workflow-stage" | "workflow-choice" | "notice" | "carried-context" | "context-window" | "model-rebind" | "shell" | "verify" | "action" | "timing" | "failure"
 export type TranscriptRecord = { seq: number; kind: TranscriptKind; eventID: string; data: Record<string, unknown> }
 export type SessionMetadata = {
   version: 1
@@ -88,7 +88,10 @@ const MAX_EVENT_ID_BYTES = 16 * 1024
 const MAX_TOOL_TEXT_BYTES = 4096
 const noFollow = fs.constants.O_NOFOLLOW ?? 0
 const directoryOnly = fs.constants.O_DIRECTORY ?? 0
-const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice", "carried-context", "context-window", "model-rebind", "shell", "verify", "action", "timing"])
+const transcriptKinds = new Set<TranscriptKind>(["user", "assistant", "canonical-plan", "tool-start", "tool-result", "tool-denied", "task-state", "task-evidence", "workflow-stage", "workflow-choice", "notice", "carried-context", "context-window", "model-rebind", "shell", "verify", "action", "timing", "failure"])
+/** A failed chat turn: fixed category/reason/class enums and the engine/model it ran on; never diagnostic text. */
+const FAILURE_CATEGORIES = new Set(["model_failed", "empty_response", "response_budget", "input_budget"])
+const FAILURE_CLASSES = new Set(["rate_limited", "quota", "auth", "transient"])
 /** Bounds for a persisted operator shell run (see hosts/operator-shell.ts). */
 export const MAX_SHELL_LINES = 200
 export const MAX_SHELL_OUTPUT_BYTES = 64 * 1024
@@ -618,6 +621,15 @@ function validateKindData(kind: TranscriptKind, data: Record<string, unknown>): 
         lines.length > MAX_SHELL_LINES || bytes > MAX_SHELL_OUTPUT_BYTES || !Number.isSafeInteger(data.totalLines) ||
         (data.totalLines as number) < lines.length) {
       throw new TypeError("shell transcript data must be {command,status,exitCode,signal,durationMs,lines,totalLines}")
+    }
+    return
+  }
+  if (kind === "failure") {
+    if (!exactKeys(data, ["category", "reason", "failureClass", "engine", "model"]) || !FAILURE_CATEGORIES.has(data.category as string) ||
+        !(data.reason === null || (typeof data.reason === "string" && /^[a-z_]{1,32}$/u.test(data.reason))) ||
+        !(data.failureClass === null || FAILURE_CLASSES.has(data.failureClass as string)) ||
+        !boundedText(data.engine, 64) || !boundedText(data.model, 256)) {
+      throw new TypeError("failure transcript data must be {category,reason,failureClass,engine,model} with fixed enums")
     }
     return
   }

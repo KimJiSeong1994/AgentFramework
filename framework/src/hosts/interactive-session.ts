@@ -1268,7 +1268,8 @@ export async function runInteractiveSession(
           note(`Allowed by your rule: ${title}`)
           return { how: "rule", decision: { allow: true } }
         }
-      } else if (action.tool !== "model_api" && mode === "auto-edit") {
+      } else if (action.tool !== "model_api" && mode === "auto-edit" && !(action.tool === "write" && action.overwritesUnread)) {
+        // A write over an existing file the turn never read is the one edit auto-edit does not apply unasked.
         note(`${title} (auto-edit)`)
         return { how: "auto-edit", decision: { allow: true } }
       } else if (coveredByGrant(action, turnGrants)) {
@@ -4284,6 +4285,8 @@ export async function runInteractiveSession(
             const hint = error.category === "model_failed" && authMayBeRelevant ? await signInHint([turnSelection.engine]) : undefined
             const shown = hint ? `${error.diagnostic} ${hint}` : error.diagnostic
             persist("notice", { text: shown, provenance: "error" })
+            // Structured record for the digest: enums and the engine/model only, so repeated failure kinds show in /history.
+            persist("failure", { category: error.category, reason: error.reason ?? null, failureClass: error.failureClass ?? null, engine: turnSelection.engine, model: turnSelection.model })
             if (terminal.writeText) terminal.writeText({ provenance: "error", text: shown })
             else visibleWrite(`[error] ${shown}\n`)
             // An engine-side failure (rate limit, quota, sign-in, temporary error) offers to continue this message on

@@ -15,11 +15,22 @@ export type StatusInput = {
   readonly request?: { readonly frame: string; readonly elapsedSeconds: number }
   /** One live row (`<spinner> <step> · <elapsed> ⟦esc⟧`) that replaces the generic request/activity text. */
   readonly live?: string
+  /** Latest model call's input estimate against its limit and tool rounds used (`ctx 6.1k/8.2k 75% · tools 3/24`). */
+  readonly budget?: { readonly inputTokens: number; readonly inputLimit: number; readonly toolCalls: number; readonly roundLimit: number }
+}
+
+const k = (value: number): string => value >= 10_000 ? `${(value / 1000).toFixed(1)}k` : value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(value)
+
+/** `ctx 6.1k/8.2k 75%` plus `tools 3/24` once a tool ran; a ✂ marks a call at or above 90% of the input limit. */
+export function budgetSegment(budget: NonNullable<StatusInput["budget"]>): string {
+  const percent = budget.inputLimit > 0 ? Math.min(999, Math.round((budget.inputTokens / budget.inputLimit) * 100)) : 0
+  const context = `ctx ${k(budget.inputTokens)}/${k(budget.inputLimit)} ${percent}%${percent >= 90 ? " ✂" : ""}`
+  return budget.toolCalls > 0 ? `${context} · tools ${budget.toolCalls}/${budget.roundLimit}` : context
 }
 
 type Segment = { text: string; priority: number }
 
-function factSegments(facts: InteractiveViewFacts | undefined, selectionInHeader: boolean, request?: StatusInput["request"], live = false): Segment[] {
+function factSegments(facts: InteractiveViewFacts | undefined, selectionInHeader: boolean, request?: StatusInput["request"], live = false, budget?: StatusInput["budget"]): Segment[] {
   if (!facts) return []
   const safety: string[] = []
   if (facts.identity.mode === "retained-read-only") safety.push("read-only")
@@ -44,6 +55,7 @@ function factSegments(facts: InteractiveViewFacts | undefined, selectionInHeader
     segments.push({ text: `${facts.workflow.value.kind} workflow owned by another session`, priority: 60 })
   }
   if (facts.discovery === "failed") segments.push({ text: "Model list unavailable", priority: 85 })
+  if (budget) segments.push({ text: budgetSegment(budget), priority: 70 })
   if (facts.hold.state === "known" && facts.hold.value.held && facts.hold.value.reason) {
     segments.push({ text: `hold reason: ${facts.hold.value.reason}`, priority: 55 })
   }
@@ -76,7 +88,7 @@ function pack(segments: readonly Segment[], columns: number, separator: string):
 
 export function statusLines(input: StatusInput): string[] {
   const segments: Segment[] = [
-    ...factSegments(input.facts, input.selectionInHeader === true, input.request, input.live !== undefined),
+    ...factSegments(input.facts, input.selectionInHeader === true, input.request, input.live !== undefined, input.budget),
     ...(input.live !== undefined ? [{ text: input.live, priority: 90 }] : []),
     ...(input.search ? [{ text: `search: ${input.search}`, priority: 70 }] : []),
     ...(input.queued ? [{ text: `queued ${input.queued}`, priority: 75 }] : []),

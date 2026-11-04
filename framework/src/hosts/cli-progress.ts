@@ -54,9 +54,18 @@ export function validatedModelUsage(value: unknown): ModelUsage | undefined {
   return Object.keys(usage).length ? Object.freeze(usage) : undefined
 }
 
+export type ModelBudget = Readonly<{ inputTokens: number; inputLimit: number; toolCalls: number; roundLimit: number }>
+export function validatedModelBudget(value: unknown): ModelBudget | undefined {
+  if (!isRecord(value) || Object.keys(value).length !== 4) return undefined
+  const counters = ["inputTokens", "inputLimit", "toolCalls", "roundLimit"] as const
+  if (!counters.every(key => Number.isSafeInteger(value[key]) && (value[key] as number) >= 0)) return undefined
+  return Object.freeze(Object.fromEntries(counters.map(key => [key, value[key]])) as ModelBudget)
+}
+
 export type CliHostActivity =
   /** `engine`/`model`: where this role actually runs (a combo route or the main model), shown so routing is visible. */
-  | { kind: "model-started"; role: ExecutionRole; execution: number; engine?: string; model?: string }
+  /** `budget`: estimated input tokens of this call against the role's input limit, and tool calls used of the round limit. */
+  | { kind: "model-started"; role: ExecutionRole; execution: number; engine?: string; model?: string; budget?: ModelBudget }
   | { kind: "model-returned"; role: ExecutionRole; execution: number; status: "completed" | "failed" | "cancelled" | "unresolved" | "incomplete"; durationMs?: number; inputChars?: number; toolRound?: number; engine?: string; model?: string; usage?: ModelUsage }
   | { kind: "tool-started"; role: ExecutionRole; execution: number; taskID: string; executionID: string; callID: string; tool: CliToolName }
   | { kind: "tool-finished"; role: ExecutionRole; execution: number; taskID: string; executionID: string; callID: string; tool: CliToolName; outcome: "succeeded" | "failed" | "denied"; ok: boolean }
@@ -226,7 +235,8 @@ function validatedHostActivity(value: unknown): CliHostActivity | undefined {
     case "model-started": {
       const engine = value.engine === "local" || value.engine === "codex" || value.engine === "claude" ? value.engine : undefined
       const model = typeof value.model === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(value.model) ? value.model : undefined
-      return Object.freeze({ kind: "model-started", role, execution, ...(engine && model ? { engine, model } : {}) })
+      const budget = value.budget === undefined ? undefined : validatedModelBudget(value.budget)
+      return Object.freeze({ kind: "model-started", role, execution, ...(engine && model ? { engine, model } : {}), ...(budget ? { budget } : {}) })
     }
     case "model-returned":
       if (typeof value.status === "string" && MODEL_STATUSES.includes(value.status as (typeof MODEL_STATUSES)[number])) {

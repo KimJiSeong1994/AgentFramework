@@ -126,7 +126,8 @@ export function verifyCommandProblem(command: string, allow: string[]): string |
 
 export type OtterConfig = {
   /** Ollama model residency after a request; absent/null inherits the server default. */
-  local_model?: { keep_alive?: string | null; context_input_tokens?: number | null; context_trim_target_percent?: number | null }
+  /** `think`: let the local model reason before answering (Ollama `--think`); off by default (cheaper, faster turns). */
+  local_model?: { keep_alive?: string | null; context_input_tokens?: number | null; context_trim_target_percent?: number | null; think?: boolean | null }
   /** hook ids to disable, e.g. ["guard.repeat", "mode.detect"] */
   disabled_hooks: string[]
   /** prefix budgets in estimated tokens; doctor/tests assert these */
@@ -541,8 +542,9 @@ export function loadConfig(worktree: string): OtterConfig {
     if (Object.hasOwn(patch, "local_model")) {
       const local = patch.local_model
       if (!local || typeof local !== "object" || Array.isArray(local) ||
-          Object.keys(local).some(key => key !== "keep_alive" && key !== "context_input_tokens" && key !== "context_trim_target_percent") ||
+          Object.keys(local).some(key => key !== "keep_alive" && key !== "context_input_tokens" && key !== "context_trim_target_percent" && key !== "think") ||
           (local.keep_alive !== undefined && local.keep_alive !== null && !isLocalKeepAlive(local.keep_alive)) ||
+          (local.think !== undefined && local.think !== null && typeof local.think !== "boolean") ||
           (local.context_input_tokens !== undefined && local.context_input_tokens !== null &&
             (!Number.isInteger(local.context_input_tokens) || local.context_input_tokens < 4096 || local.context_input_tokens > 65536)) ||
           (local.context_trim_target_percent !== undefined && local.context_trim_target_percent !== null &&

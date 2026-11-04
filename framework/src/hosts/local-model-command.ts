@@ -6,13 +6,16 @@ import { findExecutable } from "./cli-transport.ts"
 import { NATIVE_MODEL_ID_RE } from "./types.ts"
 import { createVendorProcess } from "./vendor-process.ts"
 
-export const LOCAL_MODEL_USAGE = "Usage: /local [status | profile memory|balanced|speed|default | keepalive 0|-1|<duration>|default | unload [model]]"
+export const LOCAL_MODEL_USAGE = "Usage: /local [status | profile memory|balanced|speed|default | keepalive 0|-1|<duration>|default | think on|off|default | unload [model]]"
 const profiles = { memory: "0", balanced: "5m", speed: "-1", default: null } as const
 
 export type LocalModelStore = {
   read(worktree: string): string | null | undefined
   save(keepAlive: string | null): string
   run(argv: readonly string[], worktree: string, signal?: AbortSignal): Promise<string>
+  /** `local_model.think` (reason before answering); absent store methods report the setting as unavailable. */
+  readThink?(worktree: string): boolean | null | undefined
+  saveThink?(think: boolean | null): string
 }
 
 /** Same bounded process and environment as local inference; no shell, pull, deletion or server restart. */
@@ -51,6 +54,16 @@ export const fileLocalModelStore: LocalModelStore = {
     })))
   },
   run: runLocalModelCommand,
+  readThink: worktree => loadConfig(worktree).local_model?.think,
+  saveThink(think) {
+    return rewriteUserConfig(text => applyEdits(text, modify(text, ["local_model", "think"], think, {
+      formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" },
+    })))
+  },
+}
+
+function describeThink(value: boolean | null | undefined): string {
+  return value === true ? "on (the model reasons before answering; slower, more tokens per turn)" : "off (default; answers directly)"
 }
 
 function describe(value: string | null | undefined): string {
@@ -68,7 +81,7 @@ export async function localModelCommand(
   const action = args[0] ?? "status"
   try {
     if (action === "status" && args.length <= 1) {
-      const setting = `Local model keepalive: ${describe(store.read(worktree))}`
+      const setting = `Local model keepalive: ${describe(store.read(worktree))}\nLocal model thinking: ${store.readThink ? describeThink(store.readThink(worktree)) : "unavailable"}`
       try {
         const loaded = await store.run(["ps"], worktree, context.signal)
         return `${setting}\nLoaded Ollama models (size, processor and expiry reported by Ollama):\n${loaded || "No loaded models."}\nProfiles: memory = release after response; balanced = 5m idle; speed = keep loaded. Cache reuse is not guaranteed.`
@@ -94,6 +107,20 @@ export async function localModelCommand(
         `Effective keepalive: ${describe(effective)}`,
         ...((effective ?? null) !== keepAlive ? ["The project .otter/otter.jsonc overrides this user setting."] : []),
         "Already loaded models keep their current expiry until the next request; /local unload releases a model now.",
+      ].join("\n")
+    }
+    if (action === "think" && args.length === 2) {
+      const value = args[1]!
+      if (value !== "on" && value !== "off" && value !== "default") return LOCAL_MODEL_USAGE
+      if (!store.readThink || !store.saveThink) return "Local model thinking setting is unavailable in this session."
+      const think = value === "default" ? null : value === "on"
+      store.readThink(worktree)
+      const path = store.saveThink(think)
+      const effective = store.readThink(worktree)
+      return [
+        `Saved local model thinking ${value} to ${path}. Applies to the next local inference (Ollama --think).`,
+        `Effective thinking: ${describeThink(effective)}`,
+        ...((effective ?? null) !== think ? ["The project .otter/otter.jsonc overrides this user setting."] : []),
       ].join("\n")
     }
     if (action === "unload" && args.length <= 2) {
