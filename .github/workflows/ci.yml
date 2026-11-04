@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+        working-directory: framework
+      - run: bun run typecheck
+        working-directory: framework
+
+  test:
+    # The suite takes ~20 minutes in one process; shards run every Nth test file (scripts/test-shard.sh).
+    # Native-engine tests (OTTER_NATIVE_*_TEST) stay off: no vendor CLI or model is installed on the runner.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        shard: [1, 2, 3, 4]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+        working-directory: framework
+      - run: git config --global user.email ci@otter.local && git config --global user.name otter-ci
+      - run: scripts/test-shard.sh ${{ matrix.shard }} 4
+        env:
+          NO_COLOR: "1"
+          OTTER_NO_UPDATE_CHECK: "1"
