@@ -196,3 +196,17 @@ describe("CLI progress presenter", () => {
     }).not.toThrow()
   })
 })
+
+test("model-returned activities keep validated engine, model and usage counters and drop anything else", () => {
+  const seen: unknown[] = []
+  const progress = createCliProgressPresenter(() => {}, activity => { seen.push(activity) }, { toolLines: false })
+  progress.host({ kind: "model-returned", role: "main", execution: 1, status: "completed", engine: "codex", model: "gpt-6-astra",
+    usage: { inputTokens: 10, outputTokens: 2, reportedCostUsd: 0.001 } })
+  progress.host({ kind: "model-returned", role: "main", execution: 2, status: "completed", engine: "codex", model: "gpt-6-astra", usage: { inputTokens: 10, text: "PRIVATE" } as never })
+  progress.host({ kind: "model-returned", role: "main", execution: 3, status: "completed", engine: "other", model: "x", usage: { inputTokens: -1 } })
+  expect(seen).toEqual([
+    { kind: "model-returned", role: "main", execution: 1, status: "completed", engine: "codex", model: "gpt-6-astra", usage: { inputTokens: 10, outputTokens: 2, reportedCostUsd: 0.001 } },
+    { kind: "model-returned", role: "main", execution: 2, status: "completed", engine: "codex", model: "gpt-6-astra" },
+    { kind: "model-returned", role: "main", execution: 3, status: "completed" },
+  ])
+})

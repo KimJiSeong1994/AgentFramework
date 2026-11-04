@@ -11,7 +11,7 @@ import { assertHostAdmission } from "../hosts/required-controls.ts"
 import { beginExecutionActivity } from "../hosts/runtime.ts"
 import { adoptForeignStop, observeStopSettlement } from "../flow/runtime.ts"
 import type { ExecutionClaim } from "../hosts/run-state.ts"
-import type { ActionGate, ExecutionHandle, ExecutionOutcome, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole, ExecutionRuntime, SkillToolProvider } from "../hosts/types.ts"
+import type { ActionGate, EngineFailureClass, ExecutionHandle, ExecutionOutcome, ExecutionPolicyHandlers, ExecutionRequest, ExecutionRole, ExecutionRuntime, SkillToolProvider } from "../hosts/types.ts"
 import { finishSkillInvocation, type SkillInvocationContext } from "../skills/context.ts"
 import { getOwnedSession } from "../sessions/store.ts"
 import { DEEP_INTERVIEW_SUMMARIZE_PROMPT, RALPLAN_SUMMARIZE_PROMPT, SUMMARIZE_PROMPT, ULTRAGOAL_SUMMARIZE_PROMPT, AUTORESEARCH_SUMMARIZE_PROMPT } from "./prompts/index.ts"
@@ -125,21 +125,33 @@ const HOST_FAILURE_HINTS: Readonly<Partial<Record<HostFailureReason, string>>> =
 }
 
 /** Issued before dispatch or after settlement; the display diagnostic is fixed, not provider text. */
+/** Fixed sentences for an engine failure class; the vendor's own wording never appears. */
+export const ENGINE_FAILURE_HINTS: Readonly<Record<EngineFailureClass, string>> = {
+  rate_limited: "The engine reported a rate limit.",
+  quota: "The engine reported a usage or billing limit.",
+  auth: "The engine requires sign-in.",
+  transient: "The engine reported a temporary error.",
+}
+
 export class ModelRequestError extends Error {
   readonly category: ModelRequestFailureCategory
   readonly diagnostic: string
   /** Host failure reason when the execution failed; absent for empty or oversized completed replies. */
   readonly reason?: HostFailureReason
+  /** Engine failure class of a failed native call (rate limit, quota, sign-in, temporary), when it matched a pattern. */
+  readonly failureClass?: EngineFailureClass
 
-  constructor(category: ModelRequestFailureCategory, message: string, reason?: HostFailureReason) {
+  constructor(category: ModelRequestFailureCategory, message: string, reason?: HostFailureReason, failureClass?: EngineFailureClass) {
     super(message)
     if (!Object.hasOwn(MODEL_REQUEST_DIAGNOSTICS, category)) throw new TypeError("invalid model request failure category")
     this.name = "ModelRequestError"
     this.category = category
     const hint = reason ? HOST_FAILURE_HINTS[reason] : undefined
-    // The fixed sentence stays first (UI and transcripts key on it); the reason follows.
-    this.diagnostic = hint ? `${MODEL_REQUEST_DIAGNOSTICS[category]} Reason: ${hint}` : MODEL_REQUEST_DIAGNOSTICS[category]
+    const classHint = failureClass && Object.hasOwn(ENGINE_FAILURE_HINTS, failureClass) ? ENGINE_FAILURE_HINTS[failureClass] : undefined
+    // The fixed sentence stays first (UI and transcripts key on it); the reason and the engine's failure class follow.
+    this.diagnostic = [MODEL_REQUEST_DIAGNOSTICS[category], ...(hint ? [`Reason: ${hint}`] : []), ...(classHint ? [classHint] : [])].join(" ")
     if (reason) this.reason = reason
+    if (classHint) this.failureClass = failureClass
   }
 }
 
@@ -371,7 +383,7 @@ async function dispatch(runtime: ExecutionRuntime, input: Dispatch): Promise<Tur
     if (outcome.status !== "completed" || typeof outcome.text !== "string" || !outcome.text.trim()) {
       if (input.summary && outcome.status === "completed") throw new SummaryUnusable("summary was empty")
       if (outcome.status === "failed") {
-        throw new ModelRequestError("model_failed", `${request.label} model did not complete a response`, hostFailureReason(outcome.error))
+        throw new ModelRequestError("model_failed", `${request.label} model did not complete a response`, hostFailureReason(outcome.error), outcome.failureClass)
       }
       throw new ModelRequestError("empty_response", `${request.label} model did not complete a response`)
     }

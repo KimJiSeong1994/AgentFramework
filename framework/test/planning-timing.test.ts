@@ -117,3 +117,22 @@ test("excluding timing from display still rejects a corrupt timing record", () =
     expect(replaySession(wt.worktree, store.sessionID, { order, excludeKinds: ["timing"] }).complete).toBe(false)
   }
 })
+
+test("model timing entries carry validated vendor usage counters, engine and model; anything else is rejected", () => {
+  const base = { kind: "model-returned", role: "main", execution: 1, status: "completed", durationMs: 12, inputChars: 300, toolRound: 0 }
+  const usage = { inputTokens: 1200, outputTokens: 300, cachedInputTokens: 1000, reportedCostUsd: 0.0123 }
+  const measured = planningTiming("model", { ...base, engine: "codex", model: "gpt-6-astra", usage })!
+  expect(measured).toEqual({ category: "model", ...base, engine: "codex", model: "gpt-6-astra", usage, kind: undefined } as never)
+  expect(measured.kind).toBeUndefined()
+  expect(validPlanningTiming(measured)).toBe(true)
+  // Unknown usage keys, negative or non-integer counters, unknown engines and malformed model ids are refused.
+  expect(planningTiming("model", { ...base, usage: { inputTokens: 1, prompt: "PRIVATE" } })).toBeUndefined()
+  expect(planningTiming("model", { ...base, usage: { inputTokens: -1 } })).toBeUndefined()
+  expect(planningTiming("model", { ...base, usage: { inputTokens: 1.5 } })).toBeUndefined()
+  expect(planningTiming("model", { ...base, engine: "openai", model: "x" })).toBeUndefined()
+  expect(planningTiming("model", { ...base, engine: "codex", model: " spaced id" })).toBeUndefined()
+  // A persisted record whose usage gained a foreign key is no longer valid.
+  expect(validPlanningTiming({ ...measured, usage: { ...usage, text: "PRIVATE" } })).toBe(false)
+  // Entries without usage stay exactly as before.
+  expect(planningTiming("model", base)).toEqual({ category: "model", ...base, kind: undefined } as never)
+})

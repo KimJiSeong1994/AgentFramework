@@ -18,6 +18,7 @@ import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
 import { inputColorSupported, inputLine, renderInput, type InputPresentation } from "./cli-input.ts"
 import { AUTH_ENGINES, authStatus, describeAuth, describeAuthFailure, describeDiagnosis, diagnoseAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
 import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus, type CliToolDisplay } from "./cli-progress.ts"
+import { addUsage, describeUsage, emptyUsageTotals, type DigestUsage } from "../sessions/digest.ts"
 import { formatDuration, type WorkflowProgress } from "../tui/progress.ts"
 import { createPlanConversation, skillInstructionBudget, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation, type ConversationContextState, type ConversationContextReport } from "./plan-conversation.ts"
 import type { WorkflowEnvelope } from "../workflows/types.ts"
@@ -54,10 +55,10 @@ import { describeEngine, describeUpdateFailure, engineInfo, planEngineUpdate, ru
 import { assistantDisplayText, boundedTerminalDiagnostic, terminalSafeText } from "./terminal-text.ts"
 import { createWorkflowHost, requestWorkflowStop, type WorkflowHost } from "./workflow-session.ts"
 import { startRefusal } from "../workflows/registry.ts"
-import { ModelRequestError } from "../workflows/turn.ts"
+import { ENGINE_FAILURE_HINTS, ModelRequestError } from "../workflows/turn.ts"
 import { beginExecutionActivity } from "./runtime.ts"
 import { settled, type ExecutionRunStatus } from "./run-state.ts"
-import { EXECUTION_ROLES, LinuxAdmissionRefused, type ActionGate, type ChatAction, type ChatActionDecision, type ComboRoutes, type ExecutionRole, type ExecutionRuntime, type SkillToolProvider, type VerifyRunObservation } from "./types.ts"
+import { EXECUTION_ROLES, LinuxAdmissionRefused, type ActionGate, type ChatAction, type ChatActionDecision, type ComboRoute, type ComboRoutes, type ExecutionRole, type ExecutionRuntime, type SkillToolProvider, type VerifyRunObservation } from "./types.ts"
 import type { AskPrompt, ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
 import { commandInsertion, interactiveActions, interactiveHelp, parseSkillOptCommand, type InteractiveContext, type SkillOptCommand } from "./interactive-actions.ts"
 import { fileComboStore, fileDefaultModelStore, validateComboRoutes, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
@@ -1111,15 +1112,27 @@ export async function runInteractiveSession(
     queueProgress(message, fields)
     terminal.queueActivity?.(message, fields)
   }
+  /** Vendor-reported token counters of this session's model calls (counters only), for /usage and /status. */
+  let sessionUsage: DigestUsage = { ...emptyUsageTotals(), byModel: {} }
+  const noteUsage = (activity: CliHostActivity) => {
+    if (activity.kind !== "model-returned" || !activity.usage) return
+    addUsage(sessionUsage, activity.usage as Record<string, unknown>)
+    const key = activity.engine && activity.model ? `${activity.engine}/${activity.model}` : `role:${activity.role}`
+    addUsage(sessionUsage.byModel[key] ??= emptyUsageTotals(), activity.usage as Record<string, unknown>)
+  }
+  const describeSessionUsage = (): string => sessionUsage.calls
+    ? [`Usage this session (vendor-reported tokens; local models report none): ${describeUsage(sessionUsage)}`,
+      ...Object.entries(sessionUsage.byModel).sort(([a], [b]) => a.localeCompare(b)).map(([model, totals]) => `  ${model}: ${describeUsage(totals)}`)].join("\n")
+    : "Usage this session: no vendor-reported token counts yet (local models report none)."
   const scopedProgress = () => {
     const timings = createPlanningTimingCollector()
     let epoch: string | undefined
     let sessionID: string | undefined
     const current = () => epoch !== undefined && sessionStore?.epoch === epoch && sessionStore.sessionID === sessionID
     return {
-      bind(store: SessionStore) { epoch = store.epoch; sessionID = store.sessionID },
+      bind(store: SessionStore) { epoch = store.epoch; sessionID = store.sessionID; sessionUsage = { ...emptyUsageTotals(), byModel: {} } },
       sink: {
-        host(activity: CliHostActivity) { if (current()) { timings.model(activity); progress.host(activity) } },
+        host(activity: CliHostActivity) { if (current()) { timings.model(activity); noteUsage(activity); progress.host(activity) } },
         toolDisplay(display: CliToolDisplay) { if (current()) terminal.toolDisplay?.(display) },
         queue(message: string, fields?: Record<string, unknown>) {
           if (!current()) return
@@ -3514,7 +3527,12 @@ export async function runInteractiveSession(
         continue
       }
       if (command === "/status" && commandArgs.length === 0) {
-        terminal.write(selection.controller.status(selection.sessionID) + "\n")
+        terminal.write(selection.controller.status(selection.sessionID) + "\n" + describeSessionUsage() + "\n")
+        continue
+      }
+      if (command === "/usage") {
+        if (commandArgs.length) { terminal.write("Usage: /usage\n"); continue }
+        terminal.write(describeSessionUsage() + "\n")
         continue
       }
       // Config-only: chat execution mode and saved command rules; never dispatches a model.
@@ -4268,6 +4286,35 @@ export async function runInteractiveSession(
             persist("notice", { text: shown, provenance: "error" })
             if (terminal.writeText) terminal.writeText({ provenance: "error", text: shown })
             else visibleWrite(`[error] ${shown}\n`)
+            // An engine-side failure (rate limit, quota, sign-in, temporary error) offers to continue this message on
+            // one of the session's routes that runs on another engine. The human picks; nothing switches on its own,
+            // the conversation is carried by the ordinary /model switch, and the choice is recorded.
+            if (error.failureClass && !retainedSDKSessionID) {
+              const why = ENGINE_FAILURE_HINTS[error.failureClass].replace(/^The engine /u, "").replace(/\.$/u, "")
+              const current = `${turnSelection.engine} / ${turnSelection.model}`
+              const seen = new Set<string>()
+              const alternatives = Object.values(turnSelection.routes).filter((route): route is ComboRoute => !!route && route.engine !== turnSelection.engine)
+                .filter(route => { const key = `${route.engine}/${route.model}`; if (seen.has(key)) return false; seen.add(key); return true }).slice(0, 3)
+              if (alternatives.length) {
+                const labels = [...alternatives.map(route => `Retry on ${route.engine} / ${route.model} (conversation carried)`), `Keep ${current}; fix it and resend`]
+                let picked: number | undefined
+                progress.suspend()
+                try { picked = await chooseDecision(terminal, `${turnSelection.engine} ${why}. Continue this message on another engine?`, labels, abort.signal) }
+                finally { terminal.resume?.(); progress.resume() }
+                const choice = picked === undefined ? undefined : alternatives[picked]
+                if (choice) {
+                  terminal.write(terminalSafeText(`Retrying on ${choice.engine} / ${choice.model} after ${current} ${why} (your choice; nothing switches on its own).\n`))
+                  if (!await switchSelection(choice.engine as CliEngine, choice.model)) return signalExit(receivedSignal)
+                  if (selection.engine === choice.engine && selection.model === choice.model) {
+                    queuedChatMessage = message
+                    continue
+                  }
+                  terminal.write("The engine switch did not complete; your message is back in the composer.\n")
+                }
+              } else {
+                terminal.write(`${turnSelection.engine} ${why}. To continue on another engine, switch with /model <engine> <model> (the conversation is carried) and resend; nothing switches on its own.\n`)
+              }
+            }
             if (terminal.draftSnapshot?.().draft === "") terminal.setDraft?.(message)
             continue
           }

@@ -8,6 +8,7 @@
 import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { commandRule } from "../hosts/chat-actions.ts"
+import { MODEL_USAGE_COUNTERS, validatedModelUsage } from "../hosts/cli-progress.ts"
 import { stateRoot } from "../state/store.ts"
 import { readSessionMetadata, replaySession, type TranscriptRecord } from "./store.ts"
 
@@ -19,6 +20,33 @@ const MAX_DIGESTS_READ = 500
 const PAGE = 2000
 
 export type DigestCommand = { rule: string; status: "complete" | "error" | "cancelled" | "timeout"; exitCode: number | null; durationMs: number }
+
+/** Vendor-reported token counters summed over the session's completed model calls (counters only, never text). */
+export type DigestUsageTotals = { calls: number; inputTokens: number; outputTokens: number; cachedInputTokens: number; cacheCreationTokens: number; reportedCostUsd: number }
+export type DigestUsage = DigestUsageTotals & { byModel: Record<string, DigestUsageTotals> }
+const MAX_USAGE_MODELS = 32
+
+export function emptyUsageTotals(): DigestUsageTotals {
+  return { calls: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0, reportedCostUsd: 0 }
+}
+
+/** Add one model call's counters; `calls` counts every call that reported anything. */
+export function addUsage(totals: DigestUsageTotals, usage: Record<string, unknown>): void {
+  const valid = validatedModelUsage(usage)
+  if (!valid) return
+  totals.calls++
+  for (const key of MODEL_USAGE_COUNTERS) totals[key] += valid[key] ?? 0
+  totals.reportedCostUsd = Math.round((totals.reportedCostUsd + (valid.reportedCostUsd ?? 0)) * 1e6) / 1e6
+}
+
+/** One line of a usage summary: `12 calls · in 48.2k (cached 30.1k) · out 6.4k · ~$0.42`. */
+export function describeUsage(totals: DigestUsageTotals): string {
+  const k = (value: number) => value >= 10_000 ? `${(value / 1000).toFixed(1)}k` : String(value)
+  const parts = [`${totals.calls} call${totals.calls === 1 ? "" : "s"}`, `in ${k(totals.inputTokens)}${totals.cachedInputTokens ? ` (cached ${k(totals.cachedInputTokens)})` : ""}`, `out ${k(totals.outputTokens)}`]
+  if (totals.cacheCreationTokens) parts.push(`cache-write ${k(totals.cacheCreationTokens)}`)
+  if (totals.reportedCostUsd) parts.push("~$" + totals.reportedCostUsd.toFixed(2) + " (vendor estimate)")
+  return parts.join(" · ")
+}
 
 export type SessionDigest = {
   schemaVersion: 1
@@ -37,6 +65,8 @@ export type SessionDigest = {
   /** Commands run through chat execution or `!command`, as rule prefixes; chained/compound commands are "(compound)". */
   commands: DigestCommand[]
   workflows: Array<{ id: string; stage: string }>
+  /** Vendor-reported token counters over the session's model calls, in total and per `engine/model`; absent when none was reported. */
+  usage?: DigestUsage
   /** completed: the last turn got an answer; abandoned: the session ended on an unanswered or failed turn. */
   outcome: "completed" | "abandoned"
   /** False when the session transcript could not be read in full; the digest then covers what was read. */
@@ -73,11 +103,23 @@ export function buildSessionDigest(worktree: string, sessionID: string, endedAt 
   const files = new Set<string>()
   const commands: DigestCommand[] = []
   const workflows = new Map<string, string>()
+  const usage: DigestUsage = { ...emptyUsageTotals(), byModel: {} }
   let turns = 0
   let lastKind: string | undefined
   for (const record of records) {
     const data = record.data
     if (record.kind === "user") turns++
+    if (record.kind === "timing" && Array.isArray(data.models)) {
+      for (const model of data.models) {
+        if (!model || typeof model !== "object" || Array.isArray(model)) continue
+        const entry = model as Record<string, unknown>
+        if (!entry.usage || typeof entry.usage !== "object") continue
+        addUsage(usage, entry.usage as Record<string, unknown>)
+        const key = typeof entry.engine === "string" && typeof entry.model === "string" ? `${entry.engine}/${entry.model}` : `role:${String(entry.role)}`
+        if (!usage.byModel[key] && Object.keys(usage.byModel).length >= MAX_USAGE_MODELS) continue
+        addUsage(usage.byModel[key] ??= emptyUsageTotals(), entry.usage as Record<string, unknown>)
+      }
+    }
     if (record.kind === "user" || record.kind === "assistant") lastKind = record.kind
     if ((record.kind === "tool-result" || record.kind === "tool-denied") && typeof data.name === "string") {
       const entry = tools[data.name] ??= { succeeded: 0, failed: 0, denied: 0 }
@@ -109,6 +151,7 @@ export function buildSessionDigest(worktree: string, sessionID: string, endedAt 
     engine: metadata?.engine ?? "unknown", model: metadata?.model ?? null, routes,
     startedAt: metadata?.createdAt ?? null, endedAt, turns, tools, decisions,
     files: [...files].sort(), commands, workflows: [...workflows].map(([id, stage]) => ({ id, stage })).sort((a, b) => a.id.localeCompare(b.id)),
+    ...(usage.calls ? { usage } : {}),
     outcome: lastKind === "assistant" ? "completed" : "abandoned",
     complete,
   }
@@ -163,5 +206,6 @@ export function describeDigest(digest: SessionDigest): string {
   const runs = digest.commands.length
   const failedRuns = digest.commands.filter(command => command.status !== "complete").length
   const model = digest.model ? `${digest.engine}/${digest.model}` : digest.engine
-  return `${when} · ${model} · ${digest.turns} turn${digest.turns === 1 ? "" : "s"} · ${digest.files.length} file${digest.files.length === 1 ? "" : "s"} · ${runs} command${runs === 1 ? "" : "s"}${failedRuns ? ` (${failedRuns} failed)` : ""} · ${digest.outcome}`
+  const tokens = digest.usage ? ` · ${digest.usage.inputTokens + digest.usage.outputTokens >= 10_000 ? `${((digest.usage.inputTokens + digest.usage.outputTokens) / 1000).toFixed(1)}k` : digest.usage.inputTokens + digest.usage.outputTokens} tokens` : ""
+  return `${when} · ${model} · ${digest.turns} turn${digest.turns === 1 ? "" : "s"} · ${digest.files.length} file${digest.files.length === 1 ? "" : "s"} · ${runs} command${runs === 1 ? "" : "s"}${failedRuns ? ` (${failedRuns} failed)` : ""}${tokens} · ${digest.outcome}`
 }

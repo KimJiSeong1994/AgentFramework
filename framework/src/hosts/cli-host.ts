@@ -57,6 +57,8 @@ const MAIN_INPUT_LIMIT = 8192
 const VENDOR_MAIN_INPUT_LIMIT = 49152
 const WORKER_INPUT_LIMIT = 5120
 const MAX_TOOL_ROUNDS = 24
+/** Read-only tool calls executed from one reply (the first plus batched ones); the rest are reported as not run. */
+const MAX_READ_ONLY_BATCH = 8
 /** Chat only: how many times the human may grant another MAX_TOOL_ROUNDS when a turn reaches its limit. */
 const MAX_ROUND_EXTENSIONS = 3
 const MAX_NATIVE_RESPONSE_BYTES = 256 * 1024
@@ -66,7 +68,7 @@ const INPUT_ESTIMATE_OVERHEAD = 64
 const TRUNCATION_MARKER = "\n[older tool output truncated to fit the estimated input budget]"
 const OMITTED_HISTORY = "[earlier tool exchanges omitted to fit the estimated input budget]"
 const SCRATCH_CLEANUP_ERROR = "scratch cleanup failed"
-const RESPONSE_ENVELOPE = 'Required transport format: respond with one Otter tool envelope or {"type":"final","text":"your final answer as a JSON string"}. Output-format instructions in the task or role apply to the CONTENTS of text, not to this outer envelope. If the final answer is plan JSON or reviewer JSON, JSON-encode it inside the text string. Never return a bare plan, verdict, or prose outside the envelope.'
+const RESPONSE_ENVELOPE = 'Required transport format: respond with one Otter tool envelope or {"type":"final","text":"your final answer as a JSON string"}. Read-only tool calls (read, list, glob, grep, memory, skill, repo_search) may be batched: several such envelopes in one reply run in order and each returns its result; a write, edit, multiedit, bash or model_api call must be the only envelope in its reply. Output-format instructions in the task or role apply to the CONTENTS of text, not to this outer envelope. If the final answer is plan JSON or reviewer JSON, JSON-encode it inside the text string. Never return a bare plan, verdict, or prose outside the envelope.'
 const CODEX_PROFILE_REFUSAL = "Codex native profile preflight is unavailable or mismatched; host admission is refused."
 const SAFE_NATIVE_FAILURES: ReadonlyMap<string, { engine?: CliEngine; error: string }> = new Map([
   ["Claude CLI login required; run claude auth login", { engine: "claude", error: "Claude CLI login required; run claude auth login" }],
@@ -247,8 +249,8 @@ export type CliToolOutcomeFact = {
   exitCode?: number | null
 }
 
-/** `ignoredCalls`: further tool calls in the same reply that were not run (only the first call runs). */
-type ToolEnvelope = { type: "tool"; name: string; input: Record<string, unknown>; ignoredCalls?: number }
+/** `batch`: further read-only tool calls from the same reply, in order; the host runs up to MAX_READ_ONLY_BATCH of them. */
+type ToolEnvelope = { type: "tool"; name: string; input: Record<string, unknown>; batch?: ToolEnvelope[] }
 type FinalEnvelope = { type: "final"; text: string }
 type Envelope = ToolEnvelope | FinalEnvelope
 /** `skill` marks a loaded skill's instructions: kept whole or dropped whole, never truncated. */
@@ -451,10 +453,10 @@ function parseEnvelope(output: string, allowUnwrappedFinal = false): Envelope | 
     // Real prose around a mentioned envelope: a prose-answer role answers with the whole reply.
     if (!wrapped && allowUnwrappedFinal) return { type: "final", text: body }
     if (found.length === 1) return found[0]!.envelope
-    // Several read-only calls in one reply (models batch e.g. glob + grep): run the first, tell the model the rest did
-    // not run. Any final among them leaves it unclear whether the model meant to stop, so that fails closed.
+    // Several read-only calls in one reply (models batch e.g. glob + grep): the host runs them in order (bounded) and
+    // reports any it skipped. Any final among them leaves it unclear whether the model meant to stop, so that fails closed.
     if (found.every(({ envelope }) => envelope.type === "tool")) {
-      return { ...(found[0]!.envelope as ToolEnvelope), ignoredCalls: found.length - 1 }
+      return { ...(found[0]!.envelope as ToolEnvelope), batch: found.slice(1).map(({ envelope }) => envelope as ToolEnvelope) }
     }
     return undefined
   }
@@ -1236,6 +1238,9 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             observeActivity({
               kind: "model-returned", role: request.role, execution: activityExecution, status: modelStatus,
               durationMs: Math.max(0, Math.round(performance.now() - modelStartedAt)), inputChars: prompt.length, toolRound: turn,
+              engine: route.engine, model: route.model,
+              // Vendor-reported counters of a completed call (never text); the session's timing record and digest keep them.
+              ...(native?.status === "completed" && native.usage ? { usage: native.usage } : {}),
             })
             if (!native) {
               let reconciliation = witnessReconciliation
@@ -1272,6 +1277,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               return setFinal({
                 status: "failed",
                 error: safeNativeFailure(native.error, route.engine) ?? "CLI inference turn failed or exceeded its output bound",
+                ...(native.failureClass ? { failureClass: native.failureClass } : {}),
               })
             }
             if (Date.now() >= request.deadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed" })
@@ -1408,448 +1414,466 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               }
               return setFinal({ status: "completed", text: envelope.text })
             }
-            if (!CLI_TOOL_NAMES.includes(envelope.name as CliToolName)) return setFinal({ status: "failed", error: "unknown Otter tool refused; no fallback execution was attempted" })
-            const name = envelope.name as CliToolName
-            // Shown with this call's result so the model re-issues what it batched instead of assuming it ran.
-            const ignoredNote = envelope.ignoredCalls
-              ? `\n(Only the first tool call in a reply runs; ${envelope.ignoredCalls} more call${envelope.ignoredCalls === 1 ? " was" : "s were"} not run. Send one call per reply.)`
-              : ""
-            const callID = `${request.executionID}:tool:${toolCalls + 1}`
-            const activity = {
-              role: request.role,
-              execution: activityExecution,
-              taskID: request.taskID,
-              executionID: request.executionID,
-              callID,
-              tool: name,
-            }
-            const toolStartedAt = Date.now()
-            const startDetail = cliToolDetail(name, envelope.input)
-            observeActivity({ kind: "tool-started" as const, ...activity })
-            observeToolDisplay({ executionID: activity.executionID, callID, phase: "started", ...(startDetail ? { detail: startDetail } : {}) })
-            let terminalActivitySent = false
-            const finishTool = (outcome: "succeeded" | "failed" | "denied", ok: boolean, result?: CliToolOutput, exitCode?: number | null): void => {
-              if (terminalActivitySent) return
-              terminalActivitySent = true
-              if (outcome !== "denied") {
-                recordOutcome({ sessionID: request.supervisorSessionID, callID, tool: name, ok: outcome === "succeeded",
-                  startedAt: toolStartedAt, finishedAt: Date.now(), ...(exitCode !== undefined ? { exitCode } : {}) })
+            /**
+             * Runs one tool call of the current reply and records its exchange; "continue" means the loop goes on to the
+             * next call or model turn, an outcome ends the execution. Read-only calls batched in one reply run through
+             * this in order, each with its own policy check, lease check, round accounting and transcript exchange.
+             */
+            const runToolCall = async (envelope: ToolEnvelope, ignoredNote: string): Promise<ExecutionOutcome | "continue"> => {
+              if (!CLI_TOOL_NAMES.includes(envelope.name as CliToolName)) return setFinal({ status: "failed", error: "unknown Otter tool refused; no fallback execution was attempted" })
+              const name = envelope.name as CliToolName
+              const callID = `${request.executionID}:tool:${toolCalls + 1}`
+              const activity = {
+                role: request.role,
+                execution: activityExecution,
+                taskID: request.taskID,
+                executionID: request.executionID,
+                callID,
+                tool: name,
               }
-              const resultDetail = result === undefined ? undefined
-                : result.ok ? { resultLines: result.text.length === 0 ? 0 : result.text.split("\n").length } : { error: result.error }
-              observeActivity({ kind: "tool-finished" as const, ...activity, outcome, ok })
-              observeToolDisplay({ executionID: activity.executionID, callID, phase: "finished", durationMs: Math.max(0, Date.now() - toolStartedAt),
-                ...(resultDetail ? { detail: validatedToolDetail(resultDetail) } : {}) })
-            }
-            try { validateCliToolInput(name, envelope.input) }
-            catch (error) {
-              finishTool("failed", false)
-              if (error instanceof CliToolInputError) return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
-              return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
-            }
-            const toolCost = name === "multiread" ? (envelope.input.reads as unknown[]).length : 1
-            if (toolCalls + toolCost > roundLimit) {
-              let granted = false
-              if (turnGate?.extendRounds && extensions < MAX_ROUND_EXTENSIONS) {
-                const extendSignal = AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))])
-                try { granted = await turnGate.extendRounds(toolCalls, MAX_TOOL_ROUNDS, extendSignal) } catch { granted = false }
+              const toolStartedAt = Date.now()
+              const startDetail = cliToolDetail(name, envelope.input)
+              observeActivity({ kind: "tool-started" as const, ...activity })
+              observeToolDisplay({ executionID: activity.executionID, callID, phase: "started", ...(startDetail ? { detail: startDetail } : {}) })
+              let terminalActivitySent = false
+              const finishTool = (outcome: "succeeded" | "failed" | "denied", ok: boolean, result?: CliToolOutput, exitCode?: number | null): void => {
+                if (terminalActivitySent) return
+                terminalActivitySent = true
+                if (outcome !== "denied") {
+                  recordOutcome({ sessionID: request.supervisorSessionID, callID, tool: name, ok: outcome === "succeeded",
+                    startedAt: toolStartedAt, finishedAt: Date.now(), ...(exitCode !== undefined ? { exitCode } : {}) })
+                }
+                const resultDetail = result === undefined ? undefined
+                  : result.ok ? { resultLines: result.text.length === 0 ? 0 : result.text.split("\n").length } : { error: result.error }
+                observeActivity({ kind: "tool-finished" as const, ...activity, outcome, ok })
+                observeToolDisplay({ executionID: activity.executionID, callID, phase: "finished", durationMs: Math.max(0, Date.now() - toolStartedAt),
+                  ...(resultDetail ? { detail: validatedToolDetail(resultDetail) } : {}) })
               }
-              if (!granted || cancelled) {
-                finishTool("denied", false)
-                if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-                return setFinal({ status: "failed", error: "Otter tool round limit reached" })
+              try { validateCliToolInput(name, envelope.input) }
+              catch (error) {
+                finishTool("failed", false)
+                if (error instanceof CliToolInputError) return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
+                return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
               }
-              extensions++
-              roundLimit += MAX_TOOL_ROUNDS
-            }
-            if (cancelled) {
-              finishTool("failed", false)
-              return setFinal({ status: "cancelled", error: cancelReason })
-            }
-            let beforeLease: LeaseCheck
-            try { beforeLease = checkLease(request, fixedLease) }
-            catch (error) {
-              finishTool("failed", false)
-              throw error
-            }
-            if (beforeLease.state === "cancelled") {
-              finishTool("failed", false)
-              return setFinal({ status: "cancelled", error: "execution cancellation requested" })
-            }
-            if (name === "skill") {
-              // Host-provided, read-only: returns captured instructions as data. It is outside the role policy (the
-              // role's tools and restrictions are unchanged) and never prompts; a refusal is a tool error.
-              const skillName = envelope.input.name as string
-              // Not offered in this request: the same fail-closed path as any tool outside the role's set.
-              if (!skillProvider || !available.includes("skill")) {
-                finishTool("denied", false)
-                return setFinal({ status: "failed", error: "Otter tool denied by role policy before effects" })
+              const toolCost = name === "multiread" ? (envelope.input.reads as unknown[]).length : 1
+              if (toolCalls + toolCost > roundLimit) {
+                let granted = false
+                if (turnGate?.extendRounds && extensions < MAX_ROUND_EXTENSIONS) {
+                  const extendSignal = AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))])
+                  try { granted = await turnGate.extendRounds(toolCalls, MAX_TOOL_ROUNDS, extendSignal) } catch { granted = false }
+                }
+                if (!granted || cancelled) {
+                  finishTool("denied", false)
+                  if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+                  return setFinal({ status: "failed", error: "Otter tool round limit reached" })
+                }
+                extensions++
+                roundLimit += MAX_TOOL_ROUNDS
               }
-              const resourcePath = typeof envelope.input.path === "string" ? envelope.input.path : undefined
-              if (resourcePath !== undefined) {
-                // A file the skill bundles: only for a skill loaded in this turn, from its captured snapshot, as plain
-                // tool output (not pinned; it shrinks like any other result).
-                let resource: CliToolOutput
-                if (!loadedSkills.has(skillName)) resource = { ok: false, error: "Tool refused: load the skill first; its files are listed with its instructions." }
-                else if (!skillProvider.readResource) resource = { ok: false, error: "Tool refused: this skill's files are not available." }
+              if (cancelled) {
+                finishTool("failed", false)
+                return setFinal({ status: "cancelled", error: cancelReason })
+              }
+              let beforeLease: LeaseCheck
+              try { beforeLease = checkLease(request, fixedLease) }
+              catch (error) {
+                finishTool("failed", false)
+                throw error
+              }
+              if (beforeLease.state === "cancelled") {
+                finishTool("failed", false)
+                return setFinal({ status: "cancelled", error: "execution cancellation requested" })
+              }
+              if (name === "skill") {
+                // Host-provided, read-only: returns captured instructions as data. It is outside the role policy (the
+                // role's tools and restrictions are unchanged) and never prompts; a refusal is a tool error.
+                const skillName = envelope.input.name as string
+                // Not offered in this request: the same fail-closed path as any tool outside the role's set.
+                if (!skillProvider || !available.includes("skill")) {
+                  finishTool("denied", false)
+                  return setFinal({ status: "failed", error: "Otter tool denied by role policy before effects" })
+                }
+                const resourcePath = typeof envelope.input.path === "string" ? envelope.input.path : undefined
+                if (resourcePath !== undefined) {
+                  // A file the skill bundles: only for a skill loaded in this turn, from its captured snapshot, as plain
+                  // tool output (not pinned; it shrinks like any other result).
+                  let resource: CliToolOutput
+                  if (!loadedSkills.has(skillName)) resource = { ok: false, error: "Tool refused: load the skill first; its files are listed with its instructions." }
+                  else if (!skillProvider.readResource) resource = { ok: false, error: "Tool refused: this skill's files are not available." }
+                  else {
+                    try {
+                      const read = await skillProvider.readResource(skillName, resourcePath, AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))]))
+                      resource = read.ok ? { ok: true, text: read.text } : { ok: false, error: read.error }
+                    } catch { resource = { ok: false, error: "Tool refused: skill file could not be read." } }
+                  }
+                  if (cancelled) {
+                    finishTool("failed", false)
+                    return setFinal({ status: "cancelled", error: cancelReason })
+                  }
+                  finishTool(resource.ok ? "succeeded" : "failed", resource.ok, resource)
+                  const text = (resource.ok ? `Skill file ${skillName}/${resourcePath} (reference data):\n${resource.text}` : resource.error) + ignoredNote
+                  const fitted = fitHistory(basePrompt, [...history, { assistant: JSON.stringify({ type: "tool", name, input: envelope.input }), ok: resource.ok, result: text }], inputLimit, nativeInstructionTokens)
+                  if (!fitted) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
+                  replaceHistory(fitted)
+                  toolCalls++
+                  return "continue"
+                }
+                let output: CliToolOutput
+                if (!skillCatalog.some(skill => skill.name === skillName)) output = { ok: false, error: "Tool refused: skill is not in the Available skills list." }
+                else if (loadedSkills.has(skillName)) output = { ok: false, error: "Skill already loaded in this turn; its instructions are in an earlier tool result." }
+                else if (refusedSkills.has(skillName)) output = { ok: false, error: refusedSkills.get(skillName)! }
                 else {
                   try {
-                    const read = await skillProvider.readResource(skillName, resourcePath, AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))]))
-                    resource = read.ok ? { ok: true, text: read.text } : { ok: false, error: read.error }
-                  } catch { resource = { ok: false, error: "Tool refused: skill file could not be read." } }
+                    // Cancellation of the execution (Escape, /cancel, owner stop) aborts a slow capture too.
+                    const loaded = await skillProvider.load(skillName, AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))]))
+                    output = loaded.ok ? { ok: true, text: loaded.text } : { ok: false, error: loaded.error }
+                  } catch { output = { ok: false, error: "Tool refused: skill could not be loaded." } }
+                  if (output.ok) loadedSkills.add(skillName)
+                  else refusedSkills.set(skillName, output.error)
                 }
                 if (cancelled) {
                   finishTool("failed", false)
                   return setFinal({ status: "cancelled", error: cancelReason })
                 }
-                finishTool(resource.ok ? "succeeded" : "failed", resource.ok, resource)
-                const text = (resource.ok ? `Skill file ${skillName}/${resourcePath} (reference data):\n${resource.text}` : resource.error) + ignoredNote
-                const fitted = fitHistory(basePrompt, [...history, { assistant: JSON.stringify({ type: "tool", name, input: envelope.input }), ok: resource.ok, result: text }], inputLimit, nativeInstructionTokens)
-                if (!fitted) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
+                const canonical = JSON.stringify({ type: "tool", name, input: envelope.input })
+                let result = (output.ok
+                  ? `Skill instructions (reference for this turn; role tools, read-only limits and approval rules still apply):\n${output.text}`
+                  : output.error) + ignoredNote
+                // Instructions are useful only whole: if they would not fit beside the task and current transcript, refuse
+                // rather than let history fitting truncate them.
+                if (output.ok && estimatedTokens(renderPrompt(basePrompt, [...history, { assistant: canonical, ok: true, result }])) + nativeInstructionTokens > inputLimit) {
+                  loadedSkills.delete(skillName)
+                  output = { ok: false, error: "Tool refused: this skill's instructions do not fit in the remaining input budget for this turn." }
+                  refusedSkills.set(skillName, output.error)
+                  result = output.error + ignoredNote
+                }
+                finishTool(output.ok ? "succeeded" : "failed", output.ok, output)
+                const fitted = fitHistory(basePrompt, [...history, { assistant: canonical, ok: output.ok, result, ...(output.ok ? { skill: skillName } : {}) }], inputLimit, nativeInstructionTokens)
+                if (!fitted) return setFinal({ status: "failed", error: "skill instructions exceeded the estimated input budget" })
                 replaceHistory(fitted)
+                if (output.ok) {
+                  try { skillProvider.delivered?.(skillName) } catch { /* Display/audit only; never affects the turn. */ }
+                }
                 toolCalls++
-                continue
+                return "continue"
               }
-              let output: CliToolOutput
-              if (!skillCatalog.some(skill => skill.name === skillName)) output = { ok: false, error: "Tool refused: skill is not in the Available skills list." }
-              else if (loadedSkills.has(skillName)) output = { ok: false, error: "Skill already loaded in this turn; its instructions are in an earlier tool result." }
-              else if (refusedSkills.has(skillName)) output = { ok: false, error: refusedSkills.get(skillName)! }
-              else {
+              if (name === "multiread") {
+                if (request.skillContext !== undefined || witnessRequested || !available.includes(name) ||
+                    !request.policy.tools.allowed.includes("read") || request.policy.tools.denied.includes("read")) {
+                  finishTool("denied", false)
+                  return setFinal({ status: "failed", error: "Otter tool denied by role policy before effects" })
+                }
+                const reads = envelope.input.reads as Record<string, unknown>[]
+                // The common extension gate admitted the whole batch; every member still consumes one read.
+                const canonicalAssistant = JSON.stringify({ type: "tool", name, input: envelope.input })
+                const prospective = fitHistory(basePrompt, [...history, { assistant: canonicalAssistant, ok: true, result: "" }], inputLimit, nativeInstructionTokens)
+                if (!prospective) {
+                  finishTool("failed", false)
+                  return setFinal({ status: "failed", error: "tool call would exceed the estimated input budget; no effect was performed" })
+                }
+                const childEvents = reads.map((input, index) => ({
+                  type: "tool-before" as const, sessionID: callSession, callID: `${callID}:read:${index + 1}`, toolID: "otter:read", name: "read", input,
+                }))
+                let admitted = 0
+                let settled = 0
                 try {
-                  // Cancellation of the execution (Escape, /cancel, owner stop) aborts a slow capture too.
-                  const loaded = await skillProvider.load(skillName, AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))]))
-                  output = loaded.ok ? { ok: true, text: loaded.text } : { ok: false, error: loaded.error }
-                } catch { output = { ok: false, error: "Tool refused: skill could not be loaded." } }
-                if (output.ok) loadedSkills.add(skillName)
-                else refusedSkills.set(skillName, output.error)
+                  for (const event of childEvents) {
+                    admitted++
+                    let allow: boolean
+                    try { allow = request.handlers.beforeTool(event).allow }
+                    catch {
+                      finishTool("failed", false)
+                      return setFinal({ status: "failed", error: "Otter pre-execution tool policy failed closed" })
+                    }
+                    if (!allow) {
+                      finishTool("denied", false)
+                      return setFinal({ status: "failed", error: "Otter pre-execution tool policy denied the tool" })
+                    }
+                  }
+                  if (cancelled || checkLease(request, fixedLease).state === "cancelled") {
+                    finishTool("denied", false)
+                    return setFinal({ status: "cancelled", error: cancelReason })
+                  }
+                  assertFixedPolicy(request)
+                  let output = tools.execute(name, envelope.input)
+                  const members = output.ok ? (JSON.parse(output.text) as { results: Array<{ path: string; text: string }> }).results : []
+                  const results: Array<{ path: string; text: string }> = []
+                  let resultDenied = false
+                  for (const [index, event] of childEvents.entries()) {
+                    const member: CliToolOutput = output.ok ? { ok: true, text: members[index]!.text } : output
+                    // Match every beforeTool, including failed reads, so repeat/recovery state is released.
+                    settled++
+                    const transformed = request.handlers.toolResult({
+                      type: "tool-result", sessionID: event.sessionID, callID: event.callID, toolID: event.toolID, name: "read",
+                      ...(member.ok ? { result: member.text } : { error: member.error }),
+                    })
+                    const filtered = toolResultText(member, transformed)
+                    resultDenied ||= !filtered.ok
+                    results.push({ path: reads[index]!.path as string, text: filtered.text })
+                  }
+                  if (output.ok) {
+                    const text = JSON.stringify({ results })
+                    output = resultDenied ? { ok: false, error: "Tool refused: a read result was denied; no batch contents returned." }
+                      : Buffer.byteLength(text, "utf8") > 32 * 1024 ? { ok: false, error: "Tool refused: combined read output exceeds 32 KiB; request fewer files or narrower line ranges." }
+                        : { ok: true, text }
+                  }
+                  finishTool(output.ok ? "succeeded" : "failed", output.ok, output)
+                  if (cancelled || checkLease(request, fixedLease).state === "cancelled") return setFinal({ status: "cancelled", error: cancelReason })
+                  prospective[prospective.length - 1] = { assistant: canonicalAssistant, ok: output.ok, result: (output.ok ? output.text : output.error) + ignoredNote }
+                  const fitted = fitHistory(basePrompt, prospective, inputLimit, nativeInstructionTokens)
+                  if (!fitted) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
+                  replaceHistory(fitted)
+                  toolCalls += reads.length
+                } catch {
+                  finishTool("failed", false)
+                  if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+                  return setFinal({ status: "failed", error: "Otter multiread policy or execution failed closed" })
+                } finally {
+                  for (const event of childEvents.slice(settled, admitted)) {
+                    try {
+                      request.handlers.toolResult({ type: "tool-result", sessionID: event.sessionID, callID: event.callID, toolID: event.toolID, name: "read", error: "Batch aborted before returning file contents." })
+                    } catch { /* Continue settling the remaining independently admitted reads. */ }
+                  }
+                }
+                return "continue"
               }
-              if (cancelled) {
-                finishTool("failed", false)
-                return setFinal({ status: "cancelled", error: cancelReason })
-              }
-              const canonical = JSON.stringify({ type: "tool", name, input: envelope.input })
-              let result = (output.ok
-                ? `Skill instructions (reference for this turn; role tools, read-only limits and approval rules still apply):\n${output.text}`
-                : output.error) + ignoredNote
-              // Instructions are useful only whole: if they would not fit beside the task and current transcript, refuse
-              // rather than let history fitting truncate them.
-              if (output.ok && estimatedTokens(renderPrompt(basePrompt, [...history, { assistant: canonical, ok: true, result }])) + nativeInstructionTokens > inputLimit) {
-                loadedSkills.delete(skillName)
-                output = { ok: false, error: "Tool refused: this skill's instructions do not fit in the remaining input budget for this turn." }
-                refusedSkills.set(skillName, output.error)
-                result = output.error + ignoredNote
-              }
-              finishTool(output.ok ? "succeeded" : "failed", output.ok, output)
-              const fitted = fitHistory(basePrompt, [...history, { assistant: canonical, ok: output.ok, result, ...(output.ok ? { skill: skillName } : {}) }], inputLimit, nativeInstructionTokens)
-              if (!fitted) return setFinal({ status: "failed", error: "skill instructions exceeded the estimated input budget" })
-              replaceHistory(fitted)
-              if (output.ok) {
-                try { skillProvider.delivered?.(skillName) } catch { /* Display/audit only; never affects the turn. */ }
-              }
-              toolCalls++
-              continue
-            }
-            if (name === "multiread") {
-              if (request.skillContext !== undefined || witnessRequested || !available.includes(name) ||
-                  !request.policy.tools.allowed.includes("read") || request.policy.tools.denied.includes("read")) {
+              const event = { type: "tool-before" as const, sessionID: callSession, callID, toolID: `otter:${name}`, name, input: envelope.input }
+              const gate = request.role === "main" ? request.actionGate : undefined
+              // multiedit is a batch of edits: the role policy decides it as `edit`.
+              const policyName = name === "multiedit" ? "edit" : name
+              if (!request.policy.tools.allowed.includes(policyName) || request.policy.tools.denied.includes(policyName) || !available.includes(name) ||
+                  (request.role === "reviewer" && (name === "write" || name === "edit" || name === "multiedit")) ||
+                  (request.role === "main" && !gate && (name === "write" || name === "edit" || name === "multiedit" || name === "bash"))) {
                 finishTool("denied", false)
                 return setFinal({ status: "failed", error: "Otter tool denied by role policy before effects" })
               }
-              const reads = envelope.input.reads as Record<string, unknown>[]
-              // The common extension gate admitted the whole batch; every member still consumes one read.
+              let decision: ReturnType<ExecutionPolicyHandlers["beforeTool"]>
+              try {
+                if (request.skillContext !== undefined) {
+                  await prepareSkillToolCall(request, event, skillSignal, () => tools.validate(name, envelope.input))
+                }
+                decision = request.handlers.beforeTool(event)
+              }
+              catch {
+                finishTool("failed", false)
+                if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+                return setFinal({ status: "failed", error: "Otter pre-execution tool policy failed closed" })
+              }
+              let permit: SkillPermissionPermit | undefined
+              if (request.skillContext !== undefined && !decision.allow && decision.holdTicket) {
+                permit = await awaitSkillPermission(decision.holdTicket, { signal: skillSignal })
+                if (cancelled) {
+                  finishTool("denied", false)
+                  return setFinal({ status: "cancelled", error: cancelReason })
+                }
+              }
+              let allowed: boolean
+              try { allowed = decision.allow || permit !== undefined }
+              catch {
+                finishTool("failed", false)
+                return setFinal({ status: "failed", error: "Otter pre-execution tool policy failed closed" })
+              }
+              if (!allowed) {
+                finishTool("denied", false)
+                return setFinal({ status: "failed", error: "Otter pre-execution tool policy denied the tool" })
+              }
+              try {
+                if (request.skillContext !== undefined) await revalidateSkillToolEffect(request, event, skillSignal)
+              }
+              catch {
+                finishTool("denied", false)
+                if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+                return setFinal({ status: "failed", error: "Otter skill context changed before tool effects" })
+              }
               const canonicalAssistant = JSON.stringify({ type: "tool", name, input: envelope.input })
-              const prospective = fitHistory(basePrompt, [...history, { assistant: canonicalAssistant, ok: true, result: "" }], inputLimit, nativeInstructionTokens)
+              let prospective: TranscriptExchange[] | undefined
+              try { prospective = fitHistory(basePrompt, [...history, { assistant: canonicalAssistant, ok: true, result: "" }], inputLimit, nativeInstructionTokens) }
+              catch (error) {
+                finishTool("failed", false)
+                throw error
+              }
               if (!prospective) {
                 finishTool("failed", false)
                 return setFinal({ status: "failed", error: "tool call would exceed the estimated input budget; no effect was performed" })
               }
-              const childEvents = reads.map((input, index) => ({
-                type: "tool-before" as const, sessionID: callSession, callID: `${callID}:read:${index + 1}`, toolID: "otter:read", name: "read", input,
-              }))
-              let admitted = 0
-              let settled = 0
+              replaceHistory(prospective)
+              if (cancelled) {
+                finishTool("failed", false)
+                return setFinal({ status: "cancelled", error: cancelReason })
+              }
+              let beforeEffect: LeaseCheck
+              try { beforeEffect = checkLease(request, fixedLease) }
+              catch (error) {
+                finishTool("failed", false)
+                throw error
+              }
+              if (beforeEffect.state === "cancelled") {
+                finishTool("failed", false)
+                return setFinal({ status: "cancelled", error: "execution cancellation requested" })
+              }
+              try { assertFixedPolicy(request) }
+              catch (error) {
+                finishTool("failed", false)
+                throw error
+              }
+
+              let snapshot: Uint8Array | undefined
               try {
-                for (const event of childEvents) {
-                  admitted++
-                  let allow: boolean
-                  try { allow = request.handlers.beforeTool(event).allow }
-                  catch {
-                    finishTool("failed", false)
-                    return setFinal({ status: "failed", error: "Otter pre-execution tool policy failed closed" })
-                  }
-                  if (!allow) {
-                    finishTool("denied", false)
-                    return setFinal({ status: "failed", error: "Otter pre-execution tool policy denied the tool" })
-                  }
+                if (!(gate && ["write", "edit", "multiedit", "bash", "model_api"].includes(name))) {
+                  consumeSkillToolEffect(request, event, permit)
+                  snapshot = readSkillToolSnapshot(request, event)
                 }
-                if (cancelled || checkLease(request, fixedLease).state === "cancelled") {
+              }
+              catch {
+                finishTool("denied", false)
+                if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+                return setFinal({ status: "failed", error: "Otter skill permission was not current at effect admission" })
+              }
+              // Chat execution: the local human decides each write, edit and command right before its effect. A denial
+              // is the tool result (the turn goes on, so the model can adjust); it is never an execution failure.
+              if (gate && (name === "write" || name === "edit" || name === "multiedit" || name === "bash" || name === "model_api")) {
+                const fileOrCommandAction = () : ChatAction => name === "bash"
+                  ? { tool: "bash", command: envelope.input.command as string, interactive: envelope.input.interactive === true,
+                      timeoutMs: ((envelope.input.timeoutSeconds as number | undefined) ?? DEFAULT_BASH_TIMEOUT_SECONDS) * 1000 }
+                  : name === "write" ? { tool: "write", path: envelope.input.path as string, content: envelope.input.content as string }
+                    : name === "multiedit" ? { tool: "multiedit", edits: envelope.input.edits as Array<{ path: string; oldText: string; newText: string }> }
+                      : { tool: "edit", path: envelope.input.path as string, oldText: envelope.input.oldText as string, newText: envelope.input.newText as string }
+                const gateSignal = AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))])
+                let gated: CliToolOutput | undefined
+                let deniedByUser = false
+                let commandExit: number | null | undefined
+                let effectConsumed = false
+                let preparingApi = name === "model_api"
+                try {
+                  gateSignal.throwIfAborted()
+                  const action: ChatAction = name === "model_api"
+                    ? gate.modelApi!.prepare({ target: envelope.input.target as string, model: envelope.input.model as string,
+                        prompt: envelope.input.prompt as string, maxOutputTokens: (envelope.input.maxOutputTokens as number | undefined) ?? 1024,
+                        timeoutSeconds: (envelope.input.timeoutSeconds as number | undefined) ?? 120 })
+                    : fileOrCommandAction()
+                  preparingApi = false
+                  const decision = await gate.approve(action, gateSignal)
+                  gateSignal.throwIfAborted()
+                  const currentLease = checkLease(request, fixedLease)
+                  if (currentLease.state === "cancelled") throw new Error("execution cancellation requested")
+                  assertFixedPolicy(request)
+                  deniedByUser = !decision.allow
+                  if (!decision.allow) gated = { ok: false, error: `The user denied this action: ${decision.reason}` }
+                  else {
+                    await revalidateSkillToolEffect(request, event, gateSignal)
+                    gateSignal.throwIfAborted()
+                    assertFixedPolicy(request)
+                    if (checkLease(request, fixedLease).state === "cancelled") throw new Error("execution cancellation requested")
+                    consumeSkillToolEffect(request, event, permit)
+                    effectConsumed = true
+                    if (action.tool === "model_api") gated = await gate.modelApi!.run(action, gateSignal)
+                    else if (action.tool === "bash") {
+                      const ran = await gate.run(action, gateSignal)
+                      commandExit = ran.exitCode
+                      gated = ran.ok ? { ok: true, text: safeToolText(ran.text) } : { ok: false, error: safeToolText(ran.text) }
+                    }
+                  }
+                } catch {
+                  gated = { ok: false, error: preparingApi
+                    ? "Model API target is unavailable or invalid. Check model_api.targets in the user otter.jsonc configuration."
+                    : "The action was not performed: approval or execution was interrupted." }
+                }
+                if (cancelled) {
                   finishTool("denied", false)
                   return setFinal({ status: "cancelled", error: cancelReason })
                 }
-                assertFixedPolicy(request)
-                let output = tools.execute(name, envelope.input)
-                const members = output.ok ? (JSON.parse(output.text) as { results: Array<{ path: string; text: string }> }).results : []
-                const results: Array<{ path: string; text: string }> = []
-                let resultDenied = false
-                for (const [index, event] of childEvents.entries()) {
-                  const member: CliToolOutput = output.ok ? { ok: true, text: members[index]!.text } : output
-                  // Match every beforeTool, including failed reads, so repeat/recovery state is released.
-                  settled++
-                  const transformed = request.handlers.toolResult({
-                    type: "tool-result", sessionID: event.sessionID, callID: event.callID, toolID: event.toolID, name: "read",
-                    ...(member.ok ? { result: member.text } : { error: member.error }),
-                  })
-                  const filtered = toolResultText(member, transformed)
-                  resultDenied ||= !filtered.ok
-                  results.push({ path: reads[index]!.path as string, text: filtered.text })
+                if (gated !== undefined) {
+                  // Denial/invalid target is still a settled skill call, with no effect.
+                  // Approved calls consume only after the fresh source check above.
+                  if (!effectConsumed) {
+                    try {
+                      await revalidateSkillToolEffect(request, event, gateSignal)
+                      consumeSkillToolEffect(request, event, permit)
+                    } catch {
+                      finishTool("denied", false)
+                      if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+                      return setFinal({ status: "failed", error: "Otter skill context changed before settling the action" })
+                    }
+                  }
+                  // A command that ran and exited non-zero failed; only a human denial reads as denied.
+                  finishTool(gated.ok ? "succeeded" : deniedByUser ? "denied" : "failed", gated.ok, gated, commandExit)
+                  const gatedEvent = { type: "tool-result" as const, sessionID: callSession, callID, toolID: `otter:${name}`, name,
+                    ...(gated.ok ? { result: gated.text } : { error: gated.error }) }
+                  let gatedTransformed: ReturnType<ExecutionPolicyHandlers["toolResult"]>
+                  try { gatedTransformed = request.handlers.toolResult(gatedEvent) }
+                  catch { return setFinal({ status: "failed", error: "Otter tool-result policy failed closed" }) }
+                  const gatedResult = toolResultText(gated, gatedTransformed)
+                  history[history.length - 1] = { assistant: canonicalAssistant, ok: gatedResult.ok, result: gatedResult.text + ignoredNote }
+                  const fitted = fitHistory(basePrompt, history, inputLimit, nativeInstructionTokens)
+                  if (!fitted) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
+                  replaceHistory(fitted)
+                  toolCalls++
+                  return "continue"
                 }
-                if (output.ok) {
-                  const text = JSON.stringify({ results })
-                  output = resultDenied ? { ok: false, error: "Tool refused: a read result was denied; no batch contents returned." }
-                    : Buffer.byteLength(text, "utf8") > 32 * 1024 ? { ok: false, error: "Tool refused: combined read output exceeds 32 KiB; request fewer files or narrower line ranges." }
-                      : { ok: true, text }
-                }
-                finishTool(output.ok ? "succeeded" : "failed", output.ok, output)
-                if (cancelled || checkLease(request, fixedLease).state === "cancelled") return setFinal({ status: "cancelled", error: cancelReason })
-                prospective[prospective.length - 1] = { assistant: canonicalAssistant, ok: output.ok, result: (output.ok ? output.text : output.error) + ignoredNote }
-                const fitted = fitHistory(basePrompt, prospective, inputLimit, nativeInstructionTokens)
-                if (!fitted) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
-                replaceHistory(fitted)
-                toolCalls += reads.length
-              } catch {
+              }
+              let output: CliToolOutput
+              try {
+                output = snapshot !== undefined ? formatCliReadResult(snapshot, envelope.input)
+                  : name === "memory" ? await tools.recall(envelope.input, loadMemory(), AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))]),
+                    // Only main consumes the user-turn prefetch started by the planning conversation.
+                    request.role === "main" ? request.supervisorSessionID : undefined)
+                    : name === "repo_search" ? await tools.repoSearch(envelope.input, AbortSignal.any([
+                      toolWaitAbort.signal,
+                      AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now())),
+                    ]))
+                    : tools.execute(name, envelope.input)
+              }
+              catch {
                 finishTool("failed", false)
                 if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-                return setFinal({ status: "failed", error: "Otter multiread policy or execution failed closed" })
-              } finally {
-                for (const event of childEvents.slice(settled, admitted)) {
-                  try {
-                    request.handlers.toolResult({ type: "tool-result", sessionID: event.sessionID, callID: event.callID, toolID: event.toolID, name: "read", error: "Batch aborted before returning file contents." })
-                  } catch { /* Continue settling the remaining independently admitted reads. */ }
-                }
+                if ((name === "repo_search" || name === "memory") && Date.now() >= request.deadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed" })
+                return setFinal({ status: "failed", error: "Otter tool input or implementation failed closed" })
               }
-              continue
-            }
-            const event = { type: "tool-before" as const, sessionID: callSession, callID, toolID: `otter:${name}`, name, input: envelope.input }
-            const gate = request.role === "main" ? request.actionGate : undefined
-            // multiedit is a batch of edits: the role policy decides it as `edit`.
-            const policyName = name === "multiedit" ? "edit" : name
-            if (!request.policy.tools.allowed.includes(policyName) || request.policy.tools.denied.includes(policyName) || !available.includes(name) ||
-                (request.role === "reviewer" && (name === "write" || name === "edit" || name === "multiedit")) ||
-                (request.role === "main" && !gate && (name === "write" || name === "edit" || name === "multiedit" || name === "bash"))) {
-              finishTool("denied", false)
-              return setFinal({ status: "failed", error: "Otter tool denied by role policy before effects" })
-            }
-            let decision: ReturnType<ExecutionPolicyHandlers["beforeTool"]>
-            try {
-              if (request.skillContext !== undefined) {
-                await prepareSkillToolCall(request, event, skillSignal, () => tools.validate(name, envelope.input))
-              }
-              decision = request.handlers.beforeTool(event)
-            }
-            catch {
-              finishTool("failed", false)
-              if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-              return setFinal({ status: "failed", error: "Otter pre-execution tool policy failed closed" })
-            }
-            let permit: SkillPermissionPermit | undefined
-            if (request.skillContext !== undefined && !decision.allow && decision.holdTicket) {
-              permit = await awaitSkillPermission(decision.holdTicket, { signal: skillSignal })
-              if (cancelled) {
-                finishTool("denied", false)
+              if ((name === "repo_search" || name === "memory") && cancelled) {
+                finishTool("failed", false)
                 return setFinal({ status: "cancelled", error: cancelReason })
               }
-            }
-            let allowed: boolean
-            try { allowed = decision.allow || permit !== undefined }
-            catch {
-              finishTool("failed", false)
-              return setFinal({ status: "failed", error: "Otter pre-execution tool policy failed closed" })
-            }
-            if (!allowed) {
-              finishTool("denied", false)
-              return setFinal({ status: "failed", error: "Otter pre-execution tool policy denied the tool" })
-            }
-            try {
-              if (request.skillContext !== undefined) await revalidateSkillToolEffect(request, event, skillSignal)
-            }
-            catch {
-              finishTool("denied", false)
-              if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-              return setFinal({ status: "failed", error: "Otter skill context changed before tool effects" })
-            }
-            const canonicalAssistant = JSON.stringify({ type: "tool", name, input: envelope.input })
-            let prospective: TranscriptExchange[] | undefined
-            try { prospective = fitHistory(basePrompt, [...history, { assistant: canonicalAssistant, ok: true, result: "" }], inputLimit, nativeInstructionTokens) }
-            catch (error) {
-              finishTool("failed", false)
-              throw error
-            }
-            if (!prospective) {
-              finishTool("failed", false)
-              return setFinal({ status: "failed", error: "tool call would exceed the estimated input budget; no effect was performed" })
-            }
-            replaceHistory(prospective)
-            if (cancelled) {
-              finishTool("failed", false)
-              return setFinal({ status: "cancelled", error: cancelReason })
-            }
-            let beforeEffect: LeaseCheck
-            try { beforeEffect = checkLease(request, fixedLease) }
-            catch (error) {
-              finishTool("failed", false)
-              throw error
-            }
-            if (beforeEffect.state === "cancelled") {
-              finishTool("failed", false)
-              return setFinal({ status: "cancelled", error: "execution cancellation requested" })
-            }
-            try { assertFixedPolicy(request) }
-            catch (error) {
-              finishTool("failed", false)
-              throw error
-            }
-
-            let snapshot: Uint8Array | undefined
-            try {
-              if (!(gate && ["write", "edit", "multiedit", "bash", "model_api"].includes(name))) {
-                consumeSkillToolEffect(request, event, permit)
-                snapshot = readSkillToolSnapshot(request, event)
+              if ((name === "repo_search" || name === "memory") && Date.now() >= request.deadlineAt) {
+                finishTool("failed", false)
+                return setFinal({ status: "failed", error: "execution deadline elapsed" })
               }
-            }
-            catch {
-              finishTool("denied", false)
-              if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-              return setFinal({ status: "failed", error: "Otter skill permission was not current at effect admission" })
-            }
-            // Chat execution: the local human decides each write, edit and command right before its effect. A denial
-            // is the tool result (the turn goes on, so the model can adjust); it is never an execution failure.
-            if (gate && (name === "write" || name === "edit" || name === "multiedit" || name === "bash" || name === "model_api")) {
-              const fileOrCommandAction = () : ChatAction => name === "bash"
-                ? { tool: "bash", command: envelope.input.command as string, interactive: envelope.input.interactive === true,
-                    timeoutMs: ((envelope.input.timeoutSeconds as number | undefined) ?? DEFAULT_BASH_TIMEOUT_SECONDS) * 1000 }
-                : name === "write" ? { tool: "write", path: envelope.input.path as string, content: envelope.input.content as string }
-                  : name === "multiedit" ? { tool: "multiedit", edits: envelope.input.edits as Array<{ path: string; oldText: string; newText: string }> }
-                    : { tool: "edit", path: envelope.input.path as string, oldText: envelope.input.oldText as string, newText: envelope.input.newText as string }
-              const gateSignal = AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))])
-              let gated: CliToolOutput | undefined
-              let deniedByUser = false
-              let commandExit: number | null | undefined
-              let effectConsumed = false
-              let preparingApi = name === "model_api"
-              try {
-                gateSignal.throwIfAborted()
-                const action: ChatAction = name === "model_api"
-                  ? gate.modelApi!.prepare({ target: envelope.input.target as string, model: envelope.input.model as string,
-                      prompt: envelope.input.prompt as string, maxOutputTokens: (envelope.input.maxOutputTokens as number | undefined) ?? 1024,
-                      timeoutSeconds: (envelope.input.timeoutSeconds as number | undefined) ?? 120 })
-                  : fileOrCommandAction()
-                preparingApi = false
-                const decision = await gate.approve(action, gateSignal)
-                gateSignal.throwIfAborted()
-                const currentLease = checkLease(request, fixedLease)
-                if (currentLease.state === "cancelled") throw new Error("execution cancellation requested")
-                assertFixedPolicy(request)
-                deniedByUser = !decision.allow
-                if (!decision.allow) gated = { ok: false, error: `The user denied this action: ${decision.reason}` }
-                else {
-                  await revalidateSkillToolEffect(request, event, gateSignal)
-                  gateSignal.throwIfAborted()
-                  assertFixedPolicy(request)
-                  if (checkLease(request, fixedLease).state === "cancelled") throw new Error("execution cancellation requested")
-                  consumeSkillToolEffect(request, event, permit)
-                  effectConsumed = true
-                  if (action.tool === "model_api") gated = await gate.modelApi!.run(action, gateSignal)
-                  else if (action.tool === "bash") {
-                    const ran = await gate.run(action, gateSignal)
-                    commandExit = ran.exitCode
-                    gated = ran.ok ? { ok: true, text: safeToolText(ran.text) } : { ok: false, error: safeToolText(ran.text) }
-                  }
-                }
-              } catch {
-                gated = { ok: false, error: preparingApi
-                  ? "Model API target is unavailable or invalid. Check model_api.targets in the user otter.jsonc configuration."
-                  : "The action was not performed: approval or execution was interrupted." }
+              // This reports the tool effect itself; later result-policy failures are separate execution failures.
+              finishTool(output.ok ? "succeeded" : "failed", output.ok, output)
+              const resultEvent = {
+                type: "tool-result" as const,
+                sessionID: callSession,
+                callID,
+                toolID: `otter:${name}`,
+                name,
+                ...(output.ok ? { result: output.text } : { error: output.error }),
               }
-              if (cancelled) {
-                finishTool("denied", false)
-                return setFinal({ status: "cancelled", error: cancelReason })
-              }
-              if (gated !== undefined) {
-                // Denial/invalid target is still a settled skill call, with no effect.
-                // Approved calls consume only after the fresh source check above.
-                if (!effectConsumed) {
-                  try {
-                    await revalidateSkillToolEffect(request, event, gateSignal)
-                    consumeSkillToolEffect(request, event, permit)
-                  } catch {
-                    finishTool("denied", false)
-                    if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-                    return setFinal({ status: "failed", error: "Otter skill context changed before settling the action" })
-                  }
-                }
-                // A command that ran and exited non-zero failed; only a human denial reads as denied.
-                finishTool(gated.ok ? "succeeded" : deniedByUser ? "denied" : "failed", gated.ok, gated, commandExit)
-                const gatedEvent = { type: "tool-result" as const, sessionID: callSession, callID, toolID: `otter:${name}`, name,
-                  ...(gated.ok ? { result: gated.text } : { error: gated.error }) }
-                let gatedTransformed: ReturnType<ExecutionPolicyHandlers["toolResult"]>
-                try { gatedTransformed = request.handlers.toolResult(gatedEvent) }
-                catch { return setFinal({ status: "failed", error: "Otter tool-result policy failed closed" }) }
-                const gatedResult = toolResultText(gated, gatedTransformed)
-                history[history.length - 1] = { assistant: canonicalAssistant, ok: gatedResult.ok, result: gatedResult.text + ignoredNote }
-                const fitted = fitHistory(basePrompt, history, inputLimit, nativeInstructionTokens)
-                if (!fitted) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
-                replaceHistory(fitted)
-                toolCalls++
-                continue
-              }
+              let transformed: ReturnType<ExecutionPolicyHandlers["toolResult"]>
+              try { transformed = request.handlers.toolResult(resultEvent) }
+              catch { return setFinal({ status: "failed", error: "Otter tool-result policy failed closed" }) }
+              const result = toolResultText(output, transformed)
+              history[history.length - 1] = { assistant: canonicalAssistant, ok: result.ok, result: result.text + ignoredNote }
+              const afterTool = fitHistory(basePrompt, history, inputLimit, nativeInstructionTokens)
+              if (!afterTool) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
+              replaceHistory(afterTool)
+              toolCalls++
+              const afterEffectLease = checkLease(request, fixedLease)
+              if (afterEffectLease.state === "cancelled" || cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+              return "continue"
             }
-            let output: CliToolOutput
-            try {
-              output = snapshot !== undefined ? formatCliReadResult(snapshot, envelope.input)
-                : name === "memory" ? await tools.recall(envelope.input, loadMemory(), AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))]),
-                  // Only main consumes the user-turn prefetch started by the planning conversation.
-                  request.role === "main" ? request.supervisorSessionID : undefined)
-                  : name === "repo_search" ? await tools.repoSearch(envelope.input, AbortSignal.any([
-                    toolWaitAbort.signal,
-                    AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now())),
-                  ]))
-                  : tools.execute(name, envelope.input)
+            // Several read-only calls in one reply (glob + grep + read) run in order without another model turn; a
+            // skill-witness or skill-context execution keeps the strict one-call rule, and anything past the cap is reported.
+            const batchable = !witnessRequested && request.skillContext === undefined
+            const queued = batchable ? (envelope.batch ?? []).slice(0, MAX_READ_ONLY_BATCH - 1) : []
+            const ignored = (envelope.batch?.length ?? 0) - queued.length
+            // Shown with the last executed call's result so the model re-issues what did not run instead of assuming it ran.
+            const ignoredNote = ignored
+              ? `\n(${batchable ? `At most ${MAX_READ_ONLY_BATCH} read-only tool calls run per reply` : "Only the first tool call in a reply runs here"}; ${ignored} more call${ignored === 1 ? " was" : "s were"} not run. Send ${batchable ? "fewer calls" : "one call"} per reply.)`
+              : ""
+            const calls: ToolEnvelope[] = [envelope, ...queued]
+            for (const [index, call] of calls.entries()) {
+              const outcome = await runToolCall(call, index === calls.length - 1 ? ignoredNote : "")
+              if (outcome !== "continue") return outcome
             }
-            catch {
-              finishTool("failed", false)
-              if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
-              if ((name === "repo_search" || name === "memory") && Date.now() >= request.deadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed" })
-              return setFinal({ status: "failed", error: "Otter tool input or implementation failed closed" })
-            }
-            if ((name === "repo_search" || name === "memory") && cancelled) {
-              finishTool("failed", false)
-              return setFinal({ status: "cancelled", error: cancelReason })
-            }
-            if ((name === "repo_search" || name === "memory") && Date.now() >= request.deadlineAt) {
-              finishTool("failed", false)
-              return setFinal({ status: "failed", error: "execution deadline elapsed" })
-            }
-            // This reports the tool effect itself; later result-policy failures are separate execution failures.
-            finishTool(output.ok ? "succeeded" : "failed", output.ok, output)
-            const resultEvent = {
-              type: "tool-result" as const,
-              sessionID: callSession,
-              callID,
-              toolID: `otter:${name}`,
-              name,
-              ...(output.ok ? { result: output.text } : { error: output.error }),
-            }
-            let transformed: ReturnType<ExecutionPolicyHandlers["toolResult"]>
-            try { transformed = request.handlers.toolResult(resultEvent) }
-            catch { return setFinal({ status: "failed", error: "Otter tool-result policy failed closed" }) }
-            const result = toolResultText(output, transformed)
-            history[history.length - 1] = { assistant: canonicalAssistant, ok: result.ok, result: result.text + ignoredNote }
-            const afterTool = fitHistory(basePrompt, history, inputLimit, nativeInstructionTokens)
-            if (!afterTool) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
-            replaceHistory(afterTool)
-            toolCalls++
-            const afterEffectLease = checkLease(request, fixedLease)
-            if (afterEffectLease.state === "cancelled" || cancelled) return setFinal({ status: "cancelled", error: cancelReason })
           }
           return setFinal({ status: "failed", error: "Otter tool round limit reached" })
         } catch (error) {

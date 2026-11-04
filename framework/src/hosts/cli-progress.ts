@@ -30,10 +30,34 @@ export type CliToolDetail = {
   error?: string
 }
 
+/**
+ * Token counters a vendor CLI reported for one completed model call (Codex `turn.completed`, Claude `result`); local
+ * Ollama reports none. Counters only, never text; `reportedCostUsd` is the vendor's estimate, not a bill.
+ */
+export type ModelUsage = Readonly<{ inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; cacheCreationTokens?: number; reportedCostUsd?: number }>
+export const MODEL_USAGE_COUNTERS = ["inputTokens", "outputTokens", "cachedInputTokens", "cacheCreationTokens"] as const
+
+/** The validated usage counters of a reported value, or undefined when it is not a record of known non-negative numbers. */
+export function validatedModelUsage(value: unknown): ModelUsage | undefined {
+  if (!isRecord(value)) return undefined
+  const usage: { -readonly [K in keyof ModelUsage]: ModelUsage[K] } = {}
+  for (const key of Object.keys(value)) {
+    const counter = value[key]
+    if ((MODEL_USAGE_COUNTERS as readonly string[]).includes(key)) {
+      if (!Number.isSafeInteger(counter) || (counter as number) < 0) return undefined
+      usage[key as (typeof MODEL_USAGE_COUNTERS)[number]] = counter as number
+    } else if (key === "reportedCostUsd") {
+      if (typeof counter !== "number" || !Number.isFinite(counter) || counter < 0) return undefined
+      usage.reportedCostUsd = counter
+    } else return undefined
+  }
+  return Object.keys(usage).length ? Object.freeze(usage) : undefined
+}
+
 export type CliHostActivity =
   /** `engine`/`model`: where this role actually runs (a combo route or the main model), shown so routing is visible. */
   | { kind: "model-started"; role: ExecutionRole; execution: number; engine?: string; model?: string }
-  | { kind: "model-returned"; role: ExecutionRole; execution: number; status: "completed" | "failed" | "cancelled" | "unresolved" | "incomplete"; durationMs?: number; inputChars?: number; toolRound?: number }
+  | { kind: "model-returned"; role: ExecutionRole; execution: number; status: "completed" | "failed" | "cancelled" | "unresolved" | "incomplete"; durationMs?: number; inputChars?: number; toolRound?: number; engine?: string; model?: string; usage?: ModelUsage }
   | { kind: "tool-started"; role: ExecutionRole; execution: number; taskID: string; executionID: string; callID: string; tool: CliToolName }
   | { kind: "tool-finished"; role: ExecutionRole; execution: number; taskID: string; executionID: string; callID: string; tool: CliToolName; outcome: "succeeded" | "failed" | "denied"; ok: boolean }
 
@@ -207,7 +231,11 @@ function validatedHostActivity(value: unknown): CliHostActivity | undefined {
     case "model-returned":
       if (typeof value.status === "string" && MODEL_STATUSES.includes(value.status as (typeof MODEL_STATUSES)[number])) {
         const timing = Object.fromEntries(["durationMs", "inputChars", "toolRound"].filter(key => Number.isSafeInteger(value[key]) && (value[key] as number) >= 0).map(key => [key, value[key]]))
-        return Object.freeze({ kind: "model-returned", role, execution, status: value.status as (typeof MODEL_STATUSES)[number], ...timing })
+        const engine = value.engine === "local" || value.engine === "codex" || value.engine === "claude" ? value.engine : undefined
+        const model = typeof value.model === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(value.model) ? value.model : undefined
+        const usage = value.usage === undefined ? undefined : validatedModelUsage(value.usage)
+        return Object.freeze({ kind: "model-returned", role, execution, status: value.status as (typeof MODEL_STATUSES)[number], ...timing,
+          ...(engine && model ? { engine, model } : {}), ...(usage ? { usage } : {}) })
       }
       return
     case "tool-started":

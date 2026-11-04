@@ -1,3 +1,4 @@
+import { validatedModelUsage } from "../hosts/cli-progress.ts"
 import { EXECUTION_ROLES } from "../hosts/types.ts"
 import { AUTORESEARCH_STAGES, DEEP_INTERVIEW_STAGES, PLAN_STAGES, RALPLAN_STAGES, ULTRAGOAL_STAGES } from "../workflows/types.ts"
 
@@ -6,7 +7,11 @@ const STAGES: Readonly<Record<string, readonly string[]>> = {
   ultragoal: ULTRAGOAL_STAGES, autoresearch: AUTORESEARCH_STAGES,
 }
 const WORKFLOW_KEYS = ["turnID", "workflowID", "kind", "stage", "role", "operation", "status", "durationMs", "inputChars", "preflightMs", "summaryMs", "executionMs", "summaryCount"] as const
-const MODEL_KEYS = ["role", "execution", "status", "durationMs", "inputChars", "toolRound"] as const
+const MODEL_KEYS = ["role", "execution", "status", "durationMs", "inputChars", "toolRound", "engine", "model", "usage"] as const
+const ENGINES = new Set(["local", "codex", "claude"])
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u
+const canonical = (value: unknown): string => JSON.stringify(value, (_key, item) =>
+  item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key, (item as Record<string, unknown>)[key]])) : item)
 const count = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0
 const turnID = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u.test(value)
 export const MAX_MODEL_TIMINGS = 64
@@ -26,10 +31,14 @@ export function planningTiming(category: "workflow" | "model", value: unknown): 
         (v.models !== undefined && (!Array.isArray(v.models) || v.models.length > MAX_MODEL_TIMINGS ||
           v.models.some(model => !model || typeof model !== "object" || Array.isArray(model) || model.category !== "model" || !validPlanningTiming(model))))) return
   } else if (!count(v.execution) || v.execution < 1 || !count(v.toolRound) ||
-      !["completed", "failed", "cancelled", "unresolved", "incomplete"].includes(v.status as string)) return
+      !["completed", "failed", "cancelled", "unresolved", "incomplete"].includes(v.status as string) ||
+      (v.engine !== undefined && (typeof v.engine !== "string" || !ENGINES.has(v.engine))) ||
+      (v.model !== undefined && (typeof v.model !== "string" || !MODEL_ID.test(v.model))) ||
+      (v.usage !== undefined && validatedModelUsage(v.usage) === undefined)) return
   const keys = category === "workflow" ? WORKFLOW_KEYS : MODEL_KEYS
-  return { ...Object.fromEntries([["category", category], ...keys.map(key => [key, v[key]])]),
-    ...(category === "workflow" ? { models: v.models ?? [], droppedModelTimings: v.droppedModelTimings ?? 0 } : {}) }
+  // Vendor usage counters ride on model entries (validated numbers only); absent keys stay absent.
+  const projected = Object.fromEntries([["category", category], ...keys.filter(key => v[key] !== undefined).map(key => [key, key === "usage" ? validatedModelUsage(v[key]) : v[key]])])
+  return { ...projected, ...(category === "workflow" ? { models: v.models ?? [], droppedModelTimings: v.droppedModelTimings ?? 0 } : {}) }
 }
 
 /** One bounded collection per admitted turn; never retain queue-model activity between workflow turns. */
@@ -62,5 +71,5 @@ export function validPlanningTiming(value: Record<string, unknown>): boolean {
   if (value.category !== "workflow" && value.category !== "model") return false
   const projected = planningTiming(value.category, value)
   return projected !== undefined && Object.keys(value).length === Object.keys(projected).length &&
-    Object.keys(value).every(key => Object.hasOwn(projected, key))
+    Object.keys(value).every(key => Object.hasOwn(projected, key)) && canonical(value) === canonical(projected)
 }

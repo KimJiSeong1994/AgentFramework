@@ -6,7 +6,7 @@ import { TextDecoder } from "node:util"
 import { createHash } from "node:crypto"
 import { spawnSync } from "node:child_process"
 import { createVendorProcess, vendorProcessEnvironment, type VendorProcessHandle, type VendorProcessResult } from "./vendor-process.ts"
-import type { ExecutionCancelResult, ExecutionReconciliation } from "./types.ts"
+import type { EngineFailureClass, ExecutionCancelResult, ExecutionReconciliation } from "./types.ts"
 import { CODEX_INSTRUCTIONS, CODEX_VERSION, CODEX_SUPPORTED_VERSIONS, codexProfileArgv, createCodexProfile } from "./codex-profile.ts"
 import { isLocalKeepAlive } from "../config.ts"
 import { ensureOwnedCodexHome, OwnedCodexHomeError } from "./codex-home.ts"
@@ -31,6 +31,22 @@ export type CliTransportResult = {
   error?: string
   /** Only counters actually reported by a successful native CLI result; absent fields remain unknown. */
   usage?: CliObservedUsage
+  /** For a failed call: the failure class the vendor's bounded diagnostic matched, or absent when unknown. */
+  failureClass?: EngineFailureClass
+}
+
+/**
+ * Classifies a vendor diagnostic (an error message, a stderr tail) into an EngineFailureClass by pattern. Only the class
+ * leaves this function: the text is read once and dropped, so provider wording never reaches transcripts or the model.
+ */
+export function classifyEngineFailure(text: unknown): EngineFailureClass | undefined {
+  if (typeof text !== "string" || !text) return undefined
+  const sample = text.slice(0, 4096)
+  if (/not logged in|unauthori[sz]ed|\b401\b|authenticat|invalid api key|login required|expired token|run \/login|sign in/iu.test(sample)) return "auth"
+  if (/rate.?limit|too many requests|\b429\b|overloaded|at capacity/iu.test(sample)) return "rate_limited"
+  if (/quota|usage limit|usage cap|plan limit|insufficient (?:credit|quota|balance|funds)|billing|exceeded your|out of credits/iu.test(sample)) return "quota"
+  if (/\b5\d\d\b|time(?:d )?out|econn|enotfound|eai_again|network|socket hang up|connection (?:reset|refused|closed)|temporar|try again|unavailable|internal server error|gateway/iu.test(sample)) return "transient"
+  return undefined
 }
 
 export type CliObservedUsage = Readonly<{
@@ -132,6 +148,7 @@ type NativeProtocol = {
   readonly outputText: string
   readonly outputLimitReached: boolean
   readonly usage?: CliObservedUsage
+  readonly failureClass?: EngineFailureClass
 }
 
 type OwnedScratchDirectory = {
@@ -534,6 +551,8 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
   let lastClaudeMessageText: string | undefined
   let localDecoder: TextDecoder | undefined
   let usage: CliObservedUsage | undefined
+  let failureClass: EngineFailureClass | undefined
+  const classify = (text: unknown): void => { failureClass ??= classifyEngineFailure(text) }
 
   const outputText = (): string => {
     const blocks = outputBlockUsed > 0 ? [...outputBlocks, outputBlock.subarray(0, outputBlockUsed)] : outputBlocks
@@ -645,6 +664,7 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
     if (type === "turn.failed" || type === "error") {
       if (!codexTurnStarted) fail()
       failure ??= SAFE_ERRORS.native
+      classify(isRecord(record.error) ? record.error.message : record.message)
       terminalSeen = true
       return
     }
@@ -685,6 +705,7 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
       if (record.session_id !== claudeSessionID || !Object.hasOwn(record, "rate_limit_info") || !isRecord(record.rate_limit_info) ||
           !Object.hasOwn(record.rate_limit_info, "status") || typeof record.rate_limit_info.status !== "string" ||
           !CLAUDE_RATE_LIMIT_STATUSES.has(record.rate_limit_info.status)) fail()
+      if (record.rate_limit_info.status === "rejected") failureClass ??= "rate_limited"
       return
     }
     if (type === "stream_event") {
@@ -793,6 +814,7 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
     if (type === "result") {
       if (record.subtype === "success" && record.is_error === true && record.result === "Not logged in · Please run /login") {
         failure = SAFE_ERRORS.claudeLogin
+        failureClass = "auth"
         terminalSeen = true
         return
       }
@@ -800,6 +822,7 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
           (record.permission_denials !== undefined && (!Array.isArray(record.permission_denials) || record.permission_denials.length !== 0)) ||
           typeof record.result !== "string") {
         failure ??= Array.isArray(record.permission_denials) && record.permission_denials.length > 0 ? SAFE_ERRORS.tool : SAFE_ERRORS.native
+        if (record.is_error === true) classify(record.result)
         terminalSeen = true
         return
       }
@@ -818,6 +841,7 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
     }
     if (type === "error") {
       failure ??= SAFE_ERRORS.native
+      classify(isRecord(record.error) ? record.error.message : record.message)
       terminalSeen = true
       return
     }
@@ -900,6 +924,7 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
     get outputText(): string { return outputText() },
     get outputLimitReached(): boolean { return outputLimitReached },
     get usage(): CliObservedUsage | undefined { return usage },
+    get failureClass(): EngineFailureClass | undefined { return failureClass },
   }
 }
 
@@ -921,11 +946,14 @@ function statusFromProcess(result: VendorProcessResult, protocol: NativeProtocol
       : { status: "unresolved", text, quiescent: false }
   }
   if (protocol.outputLimitReached) return { status: "incomplete", text, quiescent: true, error: SAFE_ERRORS.outputLimit }
-  if (runFailure) return { status: "failed", text, quiescent: true, error: runFailure }
-  if (protocol.failure) return { status: "failed", text, quiescent: true, error: protocol.failure }
+  // A failed call carries the vendor's failure class when a bounded diagnostic (JSON error, stderr tail) matched one.
+  const classified = protocol.failureClass ?? classifyEngineFailure(result.stderr.text)
+  const failureClass = classified ? { failureClass: classified } : {}
+  if (runFailure) return { status: "failed", text, quiescent: true, error: runFailure, ...failureClass }
+  if (protocol.failure) return { status: "failed", text, quiescent: true, error: protocol.failure, ...failureClass }
   if (result.status === "timed-out") return { status: "failed", text, quiescent: true, error: SAFE_ERRORS.deadline }
   if (result.status === "cancelled") return { status: "cancelled", text, quiescent: true }
-  if (result.status === "failed") return { status: "failed", text, quiescent: true, error: SAFE_ERRORS.process }
+  if (result.status === "failed") return { status: "failed", text, quiescent: true, error: SAFE_ERRORS.process, ...failureClass }
   if (result.status === "incomplete" || !result.captureComplete || protocol.incomplete) {
     return { status: "incomplete", text, quiescent: true, error: SAFE_ERRORS.incomplete }
   }
