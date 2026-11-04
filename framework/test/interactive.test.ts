@@ -2480,6 +2480,27 @@ describe("interactive terminal", () => {
       })
     }
 
+    test("/usage and /status report the session's vendor-reported tokens in total and per engine/model", async () => {
+      let fired = false
+      const h = harness({ lines: ["/usage", "/status", "/quit"], beforeRead: (prompt) => {
+        if (fired || !prompt.startsWith("You>")) return
+        fired = true
+        const sink = h.calls.progressSinks.at(-1)!
+        sink.host({ kind: "model-returned", role: "main", execution: 1, status: "completed", durationMs: 5, inputChars: 10, toolRound: 0,
+          engine: "codex", model: "gpt-5-codex", usage: { inputTokens: 12000, outputTokens: 300, cachedInputTokens: 10000, reportedCostUsd: 0.0125 } })
+        sink.host({ kind: "model-returned", role: "reviewer", execution: 2, status: "completed", durationMs: 5, inputChars: 10, toolRound: 0,
+          engine: "claude", model: "fable", usage: { inputTokens: 500, outputTokens: 100 } })
+        sink.host({ kind: "model-returned", role: "worker", execution: 3, status: "failed", durationMs: 5, inputChars: 10, toolRound: 0, engine: "local", model: "llama3.2" })
+      } })
+      await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+      const text = h.calls.output.join("")
+      expect(text).toContain("Usage this session (vendor-reported tokens; local models report none): 2 calls · in 12.5k (cached 10.0k) · out 400 · ~$0.01 (vendor estimate)")
+      expect(text).toContain("  claude/fable: 1 call · in 500 · out 100")
+      expect(text).toContain("  codex/gpt-5-codex: 1 call · in 12.0k (cached 10.0k) · out 300 · ~$0.01 (vendor estimate)")
+      // /status ends with the same summary after the controller's status text.
+      expect(text).toContain("Fixture session status\nUsage this session")
+    })
+
     test("SIGCONT redraws the Keep/Resume decision for a settled pause and takes no action", async () => {
       putStopped(true)
       let fired = false

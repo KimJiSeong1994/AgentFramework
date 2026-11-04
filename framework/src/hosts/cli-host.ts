@@ -1236,6 +1236,9 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             observeActivity({
               kind: "model-returned", role: request.role, execution: activityExecution, status: modelStatus,
               durationMs: Math.max(0, Math.round(performance.now() - modelStartedAt)), inputChars: prompt.length, toolRound: turn,
+              engine: route.engine, model: route.model,
+              // Vendor-reported counters of a completed call (never text); the session's timing record and digest keep them.
+              ...(native?.status === "completed" && native.usage ? { usage: native.usage } : {}),
             })
             if (!native) {
               let reconciliation = witnessReconciliation

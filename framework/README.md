@@ -278,8 +278,11 @@ semantic matching is not established. The recorded run is available in
   status/basis, timing; a command's exit code decides its basis; denied calls never ran and are not recorded).
 - When a chat session ends or is replaced, a deterministic **session digest** is written to
   `$XDG_STATE_HOME/otter/<worktree-key>/digests/<sessionID>.json` (outside the worktree): turns, tool and decision
-  counts, written paths, commands as rule prefixes with status/exit/duration, workflow stages, outcome. Never message
-  text, file contents, edit text, full command lines or output. `/history [<count> | <session-id>]` lists or shows them.
+  counts, written paths, commands as rule prefixes with status/exit/duration, workflow stages, vendor-reported token
+  usage (Codex `turn.completed` and Claude `result` counters, summed in total and per `engine/model`; local models
+  report none), outcome. Never message text, file contents, edit text, full command lines or output.
+  `/history [<count> | <session-id>]` lists or shows them; `/usage` (and the tail of `/status`) shows the running
+  session's totals the same way.
 - **Project facts** (`/facts`) are deterministic aggregates of the last 50 digests: commands that keep passing,
   commands that keep failing, files changed in several sessions. An acting chat turn carries them as a bounded
   (600-character) reference block, labelled as data to verify, never instructions.

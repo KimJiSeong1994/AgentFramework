@@ -27,6 +27,7 @@ const all: readonly InteractiveAction[] = [
   { id: "engines", syntax: "/engines [update [codex|claude]]", summary: "codex/claude CLI versions and install method; update runs the fitting command after you confirm it", contexts: ["chat", "held", "read-only", "unselected"] },
   { id: "history", syntax: "/history [<count> | <session-id>]", summary: "recent sessions of this worktree: model, turns, files, commands and their results", contexts: ["chat", "held", "read-only", "observer"] },
   { id: "facts", syntax: "/facts", summary: "what earlier sessions showed: commands that pass, commands that keep failing, files that keep changing", contexts: ["chat", "held", "read-only", "observer"] },
+  { id: "usage", syntax: "/usage", summary: "vendor-reported tokens of this session's model calls, in total and per engine and model", contexts: ["chat", "held"] },
   { id: "wiki", syntax: "/wiki [ingest | lint]", summary: "wiki sources waiting for integration; ingest asks otter to integrate them (each edit approved), lint checks the wiki", contexts: ["chat", "held"] },
   { id: "undo", syntax: "/undo [list | <turn>]", summary: "put back the files otter changed in the last turn (or a listed one); later changes are kept", contexts: ["chat", "held"] },
   { id: "permissions", syntax: "/permissions [clear]", summary: "show the chat execution mode and your saved \"Always allow\" command rules; clear removes them", contexts: ["chat", "held", "read-only"] },

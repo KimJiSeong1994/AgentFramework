@@ -54,6 +54,36 @@ describe("session digest", () => {
     for (const forbidden of ["PRIVATE", "SECRET-OUTPUT-LINE", "secret-name", "token=abc", "src/denied.ts"]) expect(text).not.toContain(forbidden)
   })
 
+  test("sums vendor usage counters from timing records in total and per engine/model; sessions without usage have none", () => {
+    const model = (engine: string, model: string, usage: Record<string, number>) =>
+      ({ category: "model", role: "main", execution: 1, status: "completed", durationMs: 5, inputChars: 10, toolRound: 0, engine, model, usage })
+    const timing = (models: Record<string, unknown>[]) => ({
+      category: "workflow", turnID: "00000000-0000-0000-0000-000000000001", workflowID: null, kind: "plan", stage: "draft", role: "main", operation: "stage",
+      status: "completed", durationMs: 20, inputChars: 10, preflightMs: 1, summaryMs: 0, executionMs: 19, summaryCount: 0, models, droppedModelTimings: 0,
+    })
+    seedSession("usage_one", store => {
+      store.append("user", { text: "hi" })
+      store.append("timing", timing([model("codex", "gpt-6-astra", { inputTokens: 1000, outputTokens: 200, cachedInputTokens: 800 })]))
+      store.append("timing", timing([
+        model("codex", "gpt-6-astra", { inputTokens: 500, outputTokens: 100 }),
+        model("claude", "fable", { inputTokens: 2000, outputTokens: 400, cacheCreationTokens: 50, reportedCostUsd: 0.25 }),
+        { category: "model", role: "worker", execution: 2, status: "completed", durationMs: 5, inputChars: 10, toolRound: 0 },
+      ]))
+      store.append("assistant", { text: "ok" })
+    })
+    const digest = buildSessionDigest(wt.worktree, "usage_one", 5_000)
+    expect(digest.usage).toEqual({
+      calls: 3, inputTokens: 3500, outputTokens: 700, cachedInputTokens: 800, cacheCreationTokens: 50, reportedCostUsd: 0.25,
+      byModel: {
+        "codex/gpt-6-astra": { calls: 2, inputTokens: 1500, outputTokens: 300, cachedInputTokens: 800, cacheCreationTokens: 0, reportedCostUsd: 0 },
+        "claude/fable": { calls: 1, inputTokens: 2000, outputTokens: 400, cachedInputTokens: 0, cacheCreationTokens: 50, reportedCostUsd: 0.25 },
+      },
+    })
+    expect(describeDigest(digest)).toContain("4200 tokens")
+    seedSession("usage_none", store => { store.append("user", { text: "hi" }); store.append("assistant", { text: "ok" }) })
+    expect(buildSessionDigest(wt.worktree, "usage_none", 5_000).usage).toBeUndefined()
+  })
+
   test("is written outside the worktree, skipped for sessions without a turn, read back newest first", () => {
     seedSession("empty_session", () => {})
     expect(writeSessionDigest(wt.worktree, "empty_session")).toBeUndefined()

@@ -18,6 +18,7 @@ import { createCliRuntime, type CliRuntimeOptions } from "./cli-runtime.ts"
 import { inputColorSupported, inputLine, renderInput, type InputPresentation } from "./cli-input.ts"
 import { AUTH_ENGINES, authStatus, describeAuth, describeAuthFailure, describeDiagnosis, diagnoseAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
 import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus, type CliToolDisplay } from "./cli-progress.ts"
+import { addUsage, describeUsage, emptyUsageTotals, type DigestUsage } from "../sessions/digest.ts"
 import { formatDuration, type WorkflowProgress } from "../tui/progress.ts"
 import { createPlanConversation, skillInstructionBudget, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation, type ConversationContextState, type ConversationContextReport } from "./plan-conversation.ts"
 import type { WorkflowEnvelope } from "../workflows/types.ts"
@@ -1111,15 +1112,27 @@ export async function runInteractiveSession(
     queueProgress(message, fields)
     terminal.queueActivity?.(message, fields)
   }
+  /** Vendor-reported token counters of this session's model calls (counters only), for /usage and /status. */
+  let sessionUsage: DigestUsage = { ...emptyUsageTotals(), byModel: {} }
+  const noteUsage = (activity: CliHostActivity) => {
+    if (activity.kind !== "model-returned" || !activity.usage) return
+    addUsage(sessionUsage, activity.usage as Record<string, unknown>)
+    const key = activity.engine && activity.model ? `${activity.engine}/${activity.model}` : `role:${activity.role}`
+    addUsage(sessionUsage.byModel[key] ??= emptyUsageTotals(), activity.usage as Record<string, unknown>)
+  }
+  const describeSessionUsage = (): string => sessionUsage.calls
+    ? [`Usage this session (vendor-reported tokens; local models report none): ${describeUsage(sessionUsage)}`,
+      ...Object.entries(sessionUsage.byModel).sort(([a], [b]) => a.localeCompare(b)).map(([model, totals]) => `  ${model}: ${describeUsage(totals)}`)].join("\n")
+    : "Usage this session: no vendor-reported token counts yet (local models report none)."
   const scopedProgress = () => {
     const timings = createPlanningTimingCollector()
     let epoch: string | undefined
     let sessionID: string | undefined
     const current = () => epoch !== undefined && sessionStore?.epoch === epoch && sessionStore.sessionID === sessionID
     return {
-      bind(store: SessionStore) { epoch = store.epoch; sessionID = store.sessionID },
+      bind(store: SessionStore) { epoch = store.epoch; sessionID = store.sessionID; sessionUsage = { ...emptyUsageTotals(), byModel: {} } },
       sink: {
-        host(activity: CliHostActivity) { if (current()) { timings.model(activity); progress.host(activity) } },
+        host(activity: CliHostActivity) { if (current()) { timings.model(activity); noteUsage(activity); progress.host(activity) } },
         toolDisplay(display: CliToolDisplay) { if (current()) terminal.toolDisplay?.(display) },
         queue(message: string, fields?: Record<string, unknown>) {
           if (!current()) return
@@ -3514,7 +3527,12 @@ export async function runInteractiveSession(
         continue
       }
       if (command === "/status" && commandArgs.length === 0) {
-        terminal.write(selection.controller.status(selection.sessionID) + "\n")
+        terminal.write(selection.controller.status(selection.sessionID) + "\n" + describeSessionUsage() + "\n")
+        continue
+      }
+      if (command === "/usage") {
+        if (commandArgs.length) { terminal.write("Usage: /usage\n"); continue }
+        terminal.write(describeSessionUsage() + "\n")
         continue
       }
       // Config-only: chat execution mode and saved command rules; never dispatches a model.
