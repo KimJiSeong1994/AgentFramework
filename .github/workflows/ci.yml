@@ -25,10 +25,13 @@ jobs:
   test:
     # The suite takes ~20 minutes in one process; shards run every Nth test file (scripts/test-shard.sh).
     # Native-engine tests (OTTER_NATIVE_*_TEST) stay off: no vendor CLI or model is installed on the runner.
+    # Ubuntu only: on the hosted macOS runner the queue's git boundary (PATH=/usr/bin:/bin) cannot spawn git and the
+    # temp directory's realpath differs from its resolved path, so worktree/queue tests fail there for runner reasons;
+    # macOS coverage comes from the local full suite.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         shard: [1, 2, 3, 4]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -40,7 +43,7 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: framework
       - run: git config --global user.email ci@otter.local && git config --global user.name otter-ci
+      # No OTTER_* environment: tests assert the defaults (e.g. the update check's env override).
       - run: scripts/test-shard.sh ${{ matrix.shard }} 4
         env:
           NO_COLOR: "1"
-          OTTER_NO_UPDATE_CHECK: "1"
