@@ -55,10 +55,10 @@ import { describeEngine, describeUpdateFailure, engineInfo, planEngineUpdate, ru
 import { assistantDisplayText, boundedTerminalDiagnostic, terminalSafeText } from "./terminal-text.ts"
 import { createWorkflowHost, requestWorkflowStop, type WorkflowHost } from "./workflow-session.ts"
 import { startRefusal } from "../workflows/registry.ts"
-import { ModelRequestError } from "../workflows/turn.ts"
+import { ENGINE_FAILURE_HINTS, ModelRequestError } from "../workflows/turn.ts"
 import { beginExecutionActivity } from "./runtime.ts"
 import { settled, type ExecutionRunStatus } from "./run-state.ts"
-import { EXECUTION_ROLES, LinuxAdmissionRefused, type ActionGate, type ChatAction, type ChatActionDecision, type ComboRoutes, type ExecutionRole, type ExecutionRuntime, type SkillToolProvider, type VerifyRunObservation } from "./types.ts"
+import { EXECUTION_ROLES, LinuxAdmissionRefused, type ActionGate, type ChatAction, type ChatActionDecision, type ComboRoute, type ComboRoutes, type ExecutionRole, type ExecutionRuntime, type SkillToolProvider, type VerifyRunObservation } from "./types.ts"
 import type { AskPrompt, ChoicePresentation, InteractiveViewFacts, RequestObservation, SessionCandidate, TranscriptText, ViewIdentity } from "./interactive-view.ts"
 import { commandInsertion, interactiveActions, interactiveHelp, parseSkillOptCommand, type InteractiveContext, type SkillOptCommand } from "./interactive-actions.ts"
 import { fileComboStore, fileDefaultModelStore, validateComboRoutes, validModelID, type ComboLookup, type ComboStore, type DefaultModelLookup, type DefaultModelStore } from "./default-model.ts"
@@ -4286,6 +4286,35 @@ export async function runInteractiveSession(
             persist("notice", { text: shown, provenance: "error" })
             if (terminal.writeText) terminal.writeText({ provenance: "error", text: shown })
             else visibleWrite(`[error] ${shown}\n`)
+            // An engine-side failure (rate limit, quota, sign-in, temporary error) offers to continue this message on
+            // one of the session's routes that runs on another engine. The human picks; nothing switches on its own,
+            // the conversation is carried by the ordinary /model switch, and the choice is recorded.
+            if (error.failureClass && !retainedSDKSessionID) {
+              const why = ENGINE_FAILURE_HINTS[error.failureClass].replace(/^The engine /u, "").replace(/\.$/u, "")
+              const current = `${turnSelection.engine} / ${turnSelection.model}`
+              const seen = new Set<string>()
+              const alternatives = Object.values(turnSelection.routes).filter((route): route is ComboRoute => !!route && route.engine !== turnSelection.engine)
+                .filter(route => { const key = `${route.engine}/${route.model}`; if (seen.has(key)) return false; seen.add(key); return true }).slice(0, 3)
+              if (alternatives.length) {
+                const labels = [...alternatives.map(route => `Retry on ${route.engine} / ${route.model} (conversation carried)`), `Keep ${current}; fix it and resend`]
+                let picked: number | undefined
+                progress.suspend()
+                try { picked = await chooseDecision(terminal, `${turnSelection.engine} ${why}. Continue this message on another engine?`, labels, abort.signal) }
+                finally { terminal.resume?.(); progress.resume() }
+                const choice = picked === undefined ? undefined : alternatives[picked]
+                if (choice) {
+                  terminal.write(terminalSafeText(`Retrying on ${choice.engine} / ${choice.model} after ${current} ${why} (your choice; nothing switches on its own).\n`))
+                  if (!await switchSelection(choice.engine as CliEngine, choice.model)) return signalExit(receivedSignal)
+                  if (selection.engine === choice.engine && selection.model === choice.model) {
+                    queuedChatMessage = message
+                    continue
+                  }
+                  terminal.write("The engine switch did not complete; your message is back in the composer.\n")
+                }
+              } else {
+                terminal.write(`${turnSelection.engine} ${why}. To continue on another engine, switch with /model <engine> <model> (the conversation is carried) and resend; nothing switches on its own.\n`)
+              }
+            }
             if (terminal.draftSnapshot?.().draft === "") terminal.setDraft?.(message)
             continue
           }

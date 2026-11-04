@@ -172,10 +172,18 @@ export type ExecutionEvent =
   | { type: "approval"; sessionID: string; requestID: string; kind: string; payload: unknown }
   | { type: "terminal"; sessionID: string; outcome: "completed" | "failed" | "cancelled" | "unresolved" | "incomplete"; usage?: unknown }
 
+/**
+ * Why a vendor CLI call failed, when its bounded diagnostics say so: a rate limit, a usage/billing limit, a missing
+ * sign-in, or a temporary service error. Derived by pattern only; the diagnostic text itself is never kept.
+ */
+export type EngineFailureClass = "rate_limited" | "quota" | "auth" | "transient"
+
 export type ExecutionOutcome = {
   status: "completed" | "failed" | "cancelled" | "unresolved" | "incomplete"
   text?: string
   error?: string
+  /** Engine failure classification of a failed native call, when the vendor's diagnostic matched a known pattern. */
+  failureClass?: EngineFailureClass
   /** Bounded SDK error classification, never an inferred cause or unbounded error payload. */
   errorName?: string
   childMessageID?: string

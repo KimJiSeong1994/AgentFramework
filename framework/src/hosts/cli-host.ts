@@ -1275,6 +1275,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               return setFinal({
                 status: "failed",
                 error: safeNativeFailure(native.error, route.engine) ?? "CLI inference turn failed or exceeded its output bound",
+                ...(native.failureClass ? { failureClass: native.failureClass } : {}),
               })
             }
             if (Date.now() >= request.deadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed" })

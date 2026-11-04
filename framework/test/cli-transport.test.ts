@@ -7,6 +7,7 @@ import { delimiter, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import process from "node:process"
 import {
+  classifyEngineFailure,
   CliExecutableError, createCliTransport, findExecutable, nativeObservedUsageCanonicalByteBound, type CliEngine,
 } from "../src/hosts/cli-transport.ts"
 import { codexProfileArgv, createCodexProfile } from "../src/hosts/codex-profile.ts"
@@ -1200,4 +1201,71 @@ test("cloud transport never forwards local retention", async () => {
   `)
   expect((await createCliTransport(options("claude", { localKeepAlive: "5m" })).run()).status).toBe("completed")
   expect(JSON.parse(readFileSync(join(directory, "argv.json"), "utf8"))).not.toContain("--keepalive")
+})
+
+test.each([
+  ["rate limit", "Rate limit exceeded (429). SECRET", "rate_limited"],
+  ["quota", "You have exceeded your usage limit for this billing period SECRET", "quota"],
+  ["auth", "401 Unauthorized: invalid API key SECRET", "auth"],
+  ["transient", "connection reset by peer; please try again SECRET", "transient"],
+  ["unknown", "SECRET diagnostic", undefined],
+])("Codex turn.failed with a %s diagnostic yields only the failure class, never the text", async (_kind, message, expected) => {
+  setProcessPlatform("darwin")
+  const prompt = "codex class fixture"
+  const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
+  testDirectories.push(resolve(marker, ".."))
+  installFakeCli("codex", fixtureSource({
+    expectedArgs: codexExpectedArgs(), prompt, marker, sourceRoot: sourceRoot(), version: "codex-cli 0.159.3",
+    chunks: codexOutput({ type: "item.completed", item: { type: "agent_message", text: "partial" } }, { type: "turn.failed", error: { message } }),
+    profileCatalog: { name: `codex-${createCodexProfile(CODEX_MODEL).version}-catalog.json`, contents: createCodexProfile(CODEX_MODEL).catalogJson },
+  }))
+  const result = await createCliTransport(options("codex", { prompt })).run()
+  expect(result.status).toBe("failed")
+  expect(result.error).toBe("native CLI reported failure")
+  expect(result.failureClass).toBe(expected)
+  expect(JSON.stringify(result)).not.toContain("SECRET")
+})
+
+test("Claude failures carry a failure class: login, a rejected rate-limit event, a classified error result, a stderr tail", async () => {
+  const prompt = "claude class fixture"
+  const expectedArgs = [
+    "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
+    "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome", "--no-session-persistence",
+    "--system-prompt", HOST_INFERENCE_INSTRUCTIONS, "--output-format", "stream-json", "--verbose", "--model", "sonnet",
+  ]
+  const init = `${JSON.stringify({ type: "system", subtype: "init", session_id: "claude-session-fixture", tools: [], plugins: [], mcp_servers: [] })}\n`
+  const run = async (chunks: string[]) => {
+    const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
+    testDirectories.push(resolve(marker, ".."))
+    installFakeCli("claude", fixtureSource({ expectedArgs, prompt, chunks, marker, sourceRoot: sourceRoot() }))
+    return createCliTransport(options("claude", { prompt, model: "sonnet" })).run()
+  }
+  const login = await run([init, `${JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "Not logged in · Please run /login", session_id: "claude-session-fixture" })}\n`])
+  expect(login).toMatchObject({ status: "failed", error: "Claude CLI login required; run claude auth login", failureClass: "auth" })
+  const rejected = await run([init,
+    `${JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected" }, session_id: "claude-session-fixture" })}\n`,
+    `${JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "SECRET request failed", session_id: "claude-session-fixture" })}\n`])
+  expect(rejected).toMatchObject({ status: "failed", error: "native CLI reported failure", failureClass: "rate_limited" })
+  const overloaded = await run([init, `${JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "API Error: 529 overloaded_error SECRET", session_id: "claude-session-fixture" })}\n`])
+  expect(overloaded.failureClass).toBe("rate_limited")
+  const temporary = await run([init, `${JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "fetch failed: network error SECRET", session_id: "claude-session-fixture" })}\n`])
+  expect(temporary.failureClass).toBe("transient")
+  const unknown = await run([init, `${JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "SECRET only", session_id: "claude-session-fixture" })}\n`])
+  expect(unknown.failureClass).toBeUndefined()
+  for (const result of [login, rejected, overloaded, temporary, unknown]) expect(JSON.stringify(result)).not.toContain("SECRET")
+  // A process that exits non-zero with only a stderr tail is classified from that tail; the tail itself is dropped.
+  installFakeCli("claude", `process.stdin.resume(); process.stdin.on("end", () => { process.stderr.write("Error: 429 Too Many Requests SECRET\\n"); process.exit(1) })`)
+  const exited = await createCliTransport(options("claude", { prompt, model: "sonnet" })).run()
+  expect(exited).toMatchObject({ status: "failed", failureClass: "rate_limited" })
+  expect(JSON.stringify(exited)).not.toContain("SECRET")
+})
+
+test("classifyEngineFailure reads only a bounded sample and knows the four classes", () => {
+  expect(classifyEngineFailure("Error: not logged in")).toBe("auth")
+  expect(classifyEngineFailure("HTTP 429 rate limit")).toBe("rate_limited")
+  expect(classifyEngineFailure("insufficient quota")).toBe("quota")
+  expect(classifyEngineFailure("ECONNRESET")).toBe("transient")
+  expect(classifyEngineFailure("something else")).toBeUndefined()
+  expect(classifyEngineFailure(`${"x".repeat(5000)} 429`)).toBeUndefined()
+  expect(classifyEngineFailure(42)).toBeUndefined()
 })

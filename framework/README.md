@@ -142,6 +142,11 @@ changes; existing workflow ownership and policy checks are not bypassed.
 - **`/undo [list | <turn>]`**: before a turn's first effect the worktree is captured (private Git snapshot: index,
   HEAD and objects untouched; outside Git only written/edited files are backed up) and again when the turn ends. `/undo`
   restores the files the turn changed, skips files changed again afterwards and lists them; the last 10 turns are kept.
+- **Engine failure**: when a vendor CLI call fails with a rate limit, a usage/billing limit, a missing sign-in or a
+  temporary error (classified from its bounded diagnostic; the wording is never kept), the error names the class and,
+  if the session's combo routes include another engine, offers "Retry on <engine> / <model>" for the same message. You
+  choose; nothing switches on its own. A retry is an ordinary `/model` switch (conversation carried) plus the message
+  resent, recorded as a notice. Workflow roles stay pinned to their engines.
 - **Tool-call limit**: at 24 tool calls a chat turn asks to continue (24 more, at most 3 times) instead of failing;
   workers and workflow roles keep the hard limit.
 - **Context**: Claude/Codex chat uses a 96,000-character conversation window (vendor main input estimate 49,152

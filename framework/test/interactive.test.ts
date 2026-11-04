@@ -3006,6 +3006,37 @@ describe("interactive terminal", () => {
     expect(unknown.calls.output.join("")).not.toContain("run /login codex.")
   })
 
+  test("an engine-side failure offers to retry the message on a route of another engine; the choice switches and resends", async () => {
+    const h = harness({
+      lines: ["hello there", "/quit"], choose: async () => 0,
+      combo: { state: "configured", routes: { reviewer: { engine: "claude", model: "fable" }, worker: { engine: "codex", model: "gpt-6-luna" } }, sources: { reviewer: "user", worker: "user" } },
+    })
+    let turns = 0
+    h.deps.createConversation = () => ({ turn: async (text: string) => {
+      if (turns++ === 0) throw new ModelRequestError("model_failed", "fixture", "transport", "rate_limited")
+      return { text: `answered on claude: ${text}` }
+    } })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    const text = h.calls.output.join("")
+    expect(text).toContain("The engine reported a rate limit.")
+    expect(h.calls.choices.map(choice => choice.values)).toEqual([["Retry on claude / fable (conversation carried)", "Keep codex / gpt-5-codex; fix it and resend"]])
+    expect(h.calls.runtimes.map(runtime => `${runtime.engine}/${runtime.model}`)).toEqual(["codex/gpt-5-codex", "claude/fable"])
+    expect(text).toContain("Retrying on claude / fable after codex / gpt-5-codex reported a rate limit (your choice; nothing switches on its own).")
+    expect(text).toContain("answered on claude: hello there")
+    expect(turns).toBe(2)
+  })
+
+  test("an engine-side failure without another engine in the routes only explains the manual switch", async () => {
+    const h = harness({ lines: ["hello", "/quit"] })
+    h.deps.createConversation = () => ({ turn: async () => { throw new ModelRequestError("model_failed", "fixture", "transport", "quota") } })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    const text = h.calls.output.join("")
+    expect(text).toContain("The engine reported a usage or billing limit.")
+    expect(text).toContain("codex reported a usage or billing limit. To continue on another engine, switch with /model <engine> <model>")
+    expect(h.calls.choices).toEqual([])
+    expect(h.calls.runtimes).toHaveLength(1)
+  })
+
   test("a failed chat turn checks only the main engine, not signed-out unused combo routes", async () => {
     const h = harness({
       lines: ["hello", "/quit"],
