@@ -3,7 +3,7 @@ import { lstatSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, test } from "bun:test"
-import { CODEX_INSTRUCTIONS, CODEX_VERSION, CODEX_SUPPORTED_VERSIONS, codexProfileArgv, createCodexProfile } from "../src/hosts/codex-profile.ts"
+import { CODEX_INSTRUCTIONS, CODEX_PROMPT_OPT_OUT_VERSIONS, CODEX_VERSION, CODEX_SUPPORTED_VERSIONS, codexProfileArgv, createCodexProfile } from "../src/hosts/codex-profile.ts"
 
 const BUNDLED_SLUGS = [
   "gpt-6-astra",
@@ -51,8 +51,10 @@ describe("Codex 0.159.3 static text-only profile", () => {
 
   test("exports all 11 bundled model slugs with exact native-tool removals", () => {
     expect(CODEX_VERSION).toBe("0.159.3")
-    expect(CODEX_SUPPORTED_VERSIONS).toEqual(["0.159.3", "0.163.0"])
+    expect(CODEX_SUPPORTED_VERSIONS).toEqual(["0.159.3", "0.163.0", "0.165.0"])
     expect(Object.isFrozen(CODEX_SUPPORTED_VERSIONS)).toBe(true)
+    expect(CODEX_PROMPT_OPT_OUT_VERSIONS).toEqual(["0.165.0"])
+    for (const version of CODEX_PROMPT_OPT_OUT_VERSIONS) expect(CODEX_SUPPORTED_VERSIONS).toContain(version)
     expect(new Set(BUNDLED_SLUGS).size).toBe(11)
 
     for (const slug of BUNDLED_SLUGS) {
@@ -115,6 +117,16 @@ describe("Codex 0.159.3 static text-only profile", () => {
       "-c", "tools.experimental_request_user_input.enabled=false",
     ])
     expect(args).not.toContain("--sandbox")
+  })
+
+  test("opts out of host skill and permission instructions only for CLI versions qualified for the keys", () => {
+    const profile = createCodexProfile("gpt-5.6-sol")
+    const base = codexProfileArgv(profile, "/tmp/scratch", "/tmp/catalog.json")
+    expect(base).not.toContain("skills.include_instructions=false")
+    expect(base).not.toContain("include_permissions_instructions=false")
+    expect(codexProfileArgv(profile, "/tmp/scratch", "/tmp/catalog.json", "0.163.0")).toEqual(base)
+    expect(codexProfileArgv(profile, "/tmp/scratch", "/tmp/catalog.json", "0.165.0")).toEqual([...base,
+      "-c", "skills.include_instructions=false", "-c", "include_permissions_instructions=false"])
   })
 
   test("rejects relative, empty, and NUL-containing paths and inconsistent profiles", () => {

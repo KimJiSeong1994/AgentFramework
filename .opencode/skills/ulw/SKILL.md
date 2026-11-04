@@ -1,6 +1,6 @@
 ---
 name: ulw
-description: Ultrawork - split a big request into verifiable tasks, hand the whole list to the delegate tool once, report the result
+description: Use when a big request should be split into verifiable tasks handed to the delegate tool once (ultrawork), then report the result
 compatibility: opencode
 ---
 

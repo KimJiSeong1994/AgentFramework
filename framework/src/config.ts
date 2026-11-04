@@ -177,8 +177,11 @@ export type OtterConfig = {
      * Only user configuration can grant "auto-edit"; project configuration may only restrict the user's mode.
      */
     execute?: "ask" | "auto-edit" | "plan"
-    /** Command prefixes the user chose "Always allow" for. Read from the user config only; a project value is ignored. */
-    allow?: string[]
+    /**
+     * Command prefixes the user chose "Always allow" for: a string applies everywhere, `{ command, worktree }` only in
+     * that worktree (absolute path). Read from the user config only; a project value is ignored.
+     */
+    allow?: Array<string | { command: string; worktree?: string }>
   }
   models: {
     /** provider/model ids; undefined = inherit OpenCode default */
@@ -247,7 +250,8 @@ export type OtterConfig = {
     max_pages: number
     /**
      * Start recall when a user turn reaches main, in parallel with the model's first step; the first memory call of
-     * the turn consumes it. Costs one inference per main turn (also turns that never call memory). Default off.
+     * the turn consumes it. Costs one inference per main turn (also turns that never call memory). Default on
+     * (DEFAULT_CONFIG.memory.prefetch); set false to pay only per memory call.
      */
     prefetch?: boolean
   }

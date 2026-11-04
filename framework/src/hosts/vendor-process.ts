@@ -74,6 +74,8 @@ export type VendorProcessOptions = {
    * A throw or any non-undefined return fails the run and starts bounded owned-handle termination.
    */
   onStdoutChunk?: (chunk: Uint8Array) => undefined
+  /** An otter-owned Codex home for this process only (absolute); replaces CODEX_HOME in the allowlisted environment. */
+  codexHome?: string
 }
 
 export type VendorProcessOutput = {
@@ -163,6 +165,11 @@ function validateOptions(options: VendorProcessOptions): {
   } else throw invalidOptions()
 
   const env = vendorProcessEnvironment()
+  if (options.codexHome !== undefined) {
+    if (typeof options.codexHome !== "string" || !isAbsolute(options.codexHome) || options.codexHome.includes("\0") ||
+        Buffer.byteLength(options.codexHome) > MAX_SINGLE_ARGUMENT_BYTES) throw invalidOptions()
+    env.CODEX_HOME = options.codexHome
+  }
   if (!isAbsolute(executable) && !env.PATH) throw invalidOptions()
 
   return { executable, argv: copiedArgv, cwd, stdin, deadlineAt, maxCombinedOutputBytes, termToKillMs, onStdoutChunk, env }

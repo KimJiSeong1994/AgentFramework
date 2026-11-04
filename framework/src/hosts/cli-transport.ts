@@ -9,6 +9,7 @@ import { createVendorProcess, vendorProcessEnvironment, type VendorProcessHandle
 import type { ExecutionCancelResult, ExecutionReconciliation } from "./types.ts"
 import { CODEX_INSTRUCTIONS, CODEX_VERSION, CODEX_SUPPORTED_VERSIONS, codexProfileArgv, createCodexProfile } from "./codex-profile.ts"
 import { isLocalKeepAlive } from "../config.ts"
+import { ensureOwnedCodexHome, OwnedCodexHomeError } from "./codex-home.ts"
 import { HOST_INFERENCE_INSTRUCTIONS } from "./inference-instructions.ts"
 
 export type CliEngine = "local" | "codex" | "claude"
@@ -107,6 +108,7 @@ const SAFE_ERRORS = {
   profile: "Codex native profile verification failed",
   identity: "native runtime identity verification failed",
   profileState: "Codex private profile state verification failed",
+  codexHome: "otter-owned Codex home unavailable: <state>/otter/codex-home/auth.json must be a symlink to the Codex sign-in file (delete a regular file there and retry)",
   outputLimit: "output byte limit reached",
   callback: "output callback failed",
   cleanup: "scratch cleanup failed",
@@ -441,7 +443,7 @@ function createScratchDirectory(): OwnedScratchDirectory {
   throw new Error(SAFE_ERRORS.scratch)
 }
 
-function nativeArgv(engine: CliEngine, model: string, scratch: string, codexState?: OwnedCodexState): string[] {
+function nativeArgv(engine: CliEngine, model: string, scratch: string, codexState?: OwnedCodexState, codexVersion?: string): string[] {
   if (engine === "claude") {
     return [
       "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
@@ -454,7 +456,7 @@ function nativeArgv(engine: CliEngine, model: string, scratch: string, codexStat
     return [
       "exec", "--json", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
       "-C", scratch, "-m", model,
-      ...codexProfileArgv(codexState.profile, scratch, codexState.catalog.path),
+      ...codexProfileArgv(codexState.profile, scratch, codexState.catalog.path, codexVersion),
       "-c", "features.shell_tool=false", "-c", "features.multi_agent=false", "-c", "web_search=disabled",
       "-c", "features.view_image=false", "-c", "features.sleep_tool=false", "-c", "features.apps=false",
       "-c", "features.plugins=false", "-c", "include_environment_context=false", "-c", "project_doc_max_bytes=0",
@@ -980,7 +982,7 @@ function nativeExecutableDigest(executable: string): string {
 }
 
 /**
- * The installed Codex CLI version (`0.163.0`), for diagnostics only: undefined when codex is missing, slow or reports
+ * The installed Codex CLI version (`0.165.0`), for diagnostics only: undefined when codex is missing, slow or reports
  * something else. Admission never relies on this; the owned version probe decides compatibility.
  */
 export function installedCodexVersion(): string | undefined {
@@ -1012,6 +1014,8 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
   let observedIdentity: CliNativeIdentity | undefined
   let activeProcessKind: "probe" | "inference" | undefined
   let stopReason: "output-limit" | undefined
+  /** The Codex CLI version the owned probe accepted for this run; version-gated config keys depend on it. */
+  let probedCodexVersion: string | undefined
 
   const cleanupScratch = (): boolean => {
     if (!scratch) return true
@@ -1126,6 +1130,7 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
           finalResult = { status: probe.quiescent ? "failed" : "unresolved", text: "", quiescent: probe.quiescent, error: probe.error ?? (observedIdentity ? SAFE_ERRORS.identity : SAFE_ERRORS.profile) }
           return finalResult
         }
+        if (options.engine === "codex") probedCodexVersion = probe.version
       }
       if (observedIdentity) {
         try {
@@ -1147,12 +1152,16 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
           codexState = state
           scratch = state.root
           const cwd = state.workdir.path
-          const argv = nativeArgv(options.engine, options.model, cwd, state)
+          const argv = nativeArgv(options.engine, options.model, cwd, state, probedCodexVersion)
+          let codexHome: string
+          try { codexHome = ensureOwnedCodexHome().path }
+          catch (error) { throw new Error(error instanceof OwnedCodexHomeError ? SAFE_ERRORS.codexHome : SAFE_ERRORS.scratch) }
           protocol = createNativeProtocol(options, stopAtOutputLimit)
           processHandle = createVendorProcess({
             executable,
             argv,
             cwd,
+            codexHome,
             stdin: options.prompt,
             deadlineAt: options.deadlineAt,
             maxCombinedOutputBytes: MAX_CAPTURE_BYTES,

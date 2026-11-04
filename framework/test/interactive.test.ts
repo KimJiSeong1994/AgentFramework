@@ -142,7 +142,7 @@ function harness(options: HarnessOptions = {}) {
     shellRuns: Array<{ command: string; cwd: string; sigintHandlers: number }>
     gates: Array<ActionGate | undefined>
     chatRuns: Array<{ command: string; interactive: boolean; cwd: string }>
-    allowRules: string[]
+    allowRules: Array<string | { command: string; worktree?: string }>
     choices: Array<{ title: string; values: readonly string[]; presentation?: ChoicePresentation }>
     actionContexts: string[]
     drafts: string[]
@@ -272,8 +272,8 @@ function harness(options: HarnessOptions = {}) {
       return { ok: true, text: "exit 0\nfixture output", exitCode: 0, signal: null, durationMs: 5, status: "complete", lines: ["fixture output"] }
     },
     chatAllow: {
-      read: () => [...calls.allowRules],
-      save: rule => { calls.allowRules.push(rule); return "/fixture/otter.jsonc" },
+      read: () => calls.allowRules.map(rule => typeof rule === "string" ? { command: rule } : rule),
+      save: (rule, worktree) => { calls.allowRules.push(worktree === undefined ? rule : { command: rule, worktree }); return "/fixture/otter.jsonc" },
       clear: () => { const count = calls.allowRules.length; calls.allowRules.length = 0; return count },
     },
     sessionClosed: (worktree, sessionID) => { calls.closedSessions.push(sessionID); return options.closedLine },
@@ -2036,7 +2036,7 @@ describe("interactive terminal", () => {
     expect(results).toEqual([{ ok: true, text: "exit 0\nfixture output", exitCode: 0 }])
     const asked = h.calls.choices.map(choice => choice.title)
     expect(asked).toEqual(["Allow otter to run: bun test test/foo.test.ts?", "Allow otter to edit a.ts (-1 / +1)?"])
-    expect(h.calls.choices[0]!.values).toEqual(["Allow once", "Always allow `bun test`", "Deny"])
+    expect(h.calls.choices[0]!.values).toEqual(["Allow once", "Always allow `bun test` in this worktree", "Always allow `bun test` everywhere", "Deny"])
     const out = h.calls.output.join("")
     expect(out).toContain("  - x = 1\n  + x = 2")
     expect(out).toContain("Denied: Edit a.ts")
@@ -2059,12 +2059,13 @@ describe("interactive terminal", () => {
       },
     })
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
-    expect(h.calls.allowRules).toEqual(["bun test"])
+    // Choice 1 = "in this worktree": the rule is scoped to the chat's worktree and covers the next matching command here.
+    expect(h.calls.allowRules).toEqual([{ command: "bun test", worktree: expect.any(String) }])
     expect(decisions.slice(0, 2)).toEqual([{ allow: true }, { allow: true }])
     // A chained command offers no rule (Allow once / Deny only) and is asked; choice 1 = Deny there.
     expect(decisions[2]).toEqual({ allow: false, reason: "denied" })
     expect(decisions[3]).toEqual({ allow: false, reason: "refused by Otter (privilege escalation); the user can run it with !<command>" })
-    expect(h.calls.choices.map(choice => choice.values)).toEqual([["Allow once", "Always allow `bun test`", "Deny"], ["Allow once", "Deny"]])
+    expect(h.calls.choices.map(choice => choice.values)).toEqual([["Allow once", "Always allow `bun test` in this worktree", "Always allow `bun test` everywhere", "Deny"], ["Allow once", "Deny"]])
     expect(h.calls.output.join("")).toContain("Allowed by your rule: Run: bun test b.test.ts")
   })
 
@@ -2263,7 +2264,7 @@ describe("interactive terminal", () => {
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
     expect(decisions).toEqual([{ allow: false, reason: "no decision (dismissed)" }])
     const out = h.calls.output.join("")
-    expect(out).toContain("  1) Allow once\n  2) Always allow `make`\n  3) Deny")
+    expect(out).toContain("  1) Allow once\n  2) Always allow `make` in this worktree\n  3) Always allow `make` everywhere\n  4) Deny")
     expect(out).toContain("Chat execution: ask (otter asks before each write, edit and command).")
     expect(out).toContain("Always-allowed commands: `git status`")
     expect(out).toContain("Removed 1 saved command rule(s).")
@@ -2592,7 +2593,7 @@ describe("interactive terminal", () => {
     expect(h.calls.turnBindings).toMatchObject([{ engine: "claude", model: "opus", text: "hello" }])
     const out = h.calls.output.join("")
     expect(out).toContain("Combo route unavailable: planner, worker -> codex / gpt-6-luna. For this session planner, worker use claude / opus instead.")
-    expect(out).toContain("Codex CLI 0.150.0 is not a version otter supports (supported: 0.159.3, 0.163.0); run /engines update codex, or install one with npm install -g @openai/codex@0.163.0.")
+    expect(out).toContain("Codex CLI 0.150.0 is not a version otter supports (supported: 0.159.3, 0.163.0, 0.165.0); run /engines update codex, or install one with npm install -g @openai/codex@0.165.0.")
     expect(out).toContain("/model combo apply restores the routes")
     expect(out).not.toContain("Cannot start")
   })
@@ -2668,7 +2669,7 @@ describe("interactive terminal", () => {
     h.deps.codexVersion = () => undefined
     h.deps.admitRuntime = async () => { throw AdmissionRefusal.hostIncompatible() }
     await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-6-luna" }, h.deps)
-    expect(h.calls.output.join("")).toContain("Cannot start codex / gpt-6-luna. The Codex CLI was not found or did not report a version (supported: 0.159.3, 0.163.0); run /engines update codex, or install one with npm install -g @openai/codex@0.163.0.")
+    expect(h.calls.output.join("")).toContain("Cannot start codex / gpt-6-luna. The Codex CLI was not found or did not report a version (supported: 0.159.3, 0.163.0, 0.165.0); run /engines update codex, or install one with npm install -g @openai/codex@0.165.0.")
     expect(h.calls.sessionIDs).toEqual([])
   })
 

@@ -36,6 +36,17 @@ export function vendoredEvoServer(): string {
   return join(here, "..", "..", "vendor", "evoontology", "evoontology", "runtime", "mcp_server.py")
 }
 const OMO_PREFIX = "oh-my-openagent"
+/**
+ * Tools oh-my-openagent registers for every agent (4.19.4 names plus upstream 5.x families). OMO's config hook runs
+ * before otter's when it is a global plugin, so its tools would land in otter's main/worker/reviewer prefix (~1.2K tokens)
+ * and break the reviewer's read-only contract (interactive_bash, call_omo_agent). Otter denies them on its own agents;
+ * the plugin list itself is never edited.
+ */
+export const OMO_TOOL_DENIES: readonly string[] = Object.freeze([
+  "background_output", "background_cancel", "call_omo_agent", "interactive_bash", "look_at", "session_list", "session_read",
+  "session_search", "session_info", "session_id", "skill_mcp", "hashline_edit", "lsp_*", "codegraph_*", "ast_grep*", "goal_*",
+  "team_*", "monitor_*",
+])
 
 function pluginName(entry: string | [string, unknown]): string {
   return typeof entry === "string" ? entry : entry[0]
@@ -55,9 +66,10 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
 
     // OMO also owns config.agent wholesale; the two plugins would fight over it. Warn, never remove.
     const plugins = (config.plugin ?? []).map(pluginName)
-    if (plugins.some((p) => p.startsWith(OMO_PREFIX))) {
+    const omoLoaded = plugins.some((p) => p.startsWith(OMO_PREFIX))
+    if (omoLoaded) {
       deps.log(
-        `WARNING: ${OMO_PREFIX} is loaded alongside otter. Both overwrite config.agent; disable one of them.`,
+        `WARNING: ${OMO_PREFIX} is loaded alongside otter. Both overwrite config.agent; disable one of them. Otter denies OMO tools on its own agents and keeps default_agent=main.`,
         { plugins },
       )
     }
@@ -88,6 +100,7 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
       const denies: Record<string, unknown> = Object.fromEntries(denied_tools.map((t) => [t, "deny" as const]))
       // evo-semantic MCP tools: only browse/resolve, only for the analyst (rules are evaluated last-match-wins)
       if (name === "data-analyst") for (const t of EVO_TOOLS_ALLOWED) denies[t] = "allow"
+      if (omoLoaded) for (const t of OMO_TOOL_DENIES) denies[t] = "deny"
       injected.permission = { ...injected.permission, "evo-semantic_*": "deny", ...denies, skill: skillPerm } as AgentConfig["permission"]
       const user = config.agent[name]
       if (user) merged.push(name)
@@ -184,7 +197,9 @@ export function createConfigHook(deps: HookDeps): NonNullable<Hooks["config"]> {
     }
     recordInjectedCommands(deps, injectedNames)
 
-    // (c)-(e) runtime defaults; user config wins where already set.
+    // (c)-(e) runtime defaults; user config wins where already set. OMO's hook assigns its own primary agent
+    // unconditionally before otter runs; in an otter project that is a plugin default, not the user's choice.
+    if (omoLoaded && typeof config.default_agent === "string" && /sisyphus/iu.test(config.default_agent)) config.default_agent = "main"
     config.default_agent ??= "main"
     config.compaction = { auto: true, prune: true, ...config.compaction }
     config.subagent_depth ??= 1

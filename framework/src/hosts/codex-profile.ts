@@ -13,7 +13,14 @@ const bundledModels = catalog as {
 export const CODEX_VERSION = "0.159.3"
 // Catalog provenance stays fixed; CLI releases are admitted only after qualifying
 // this profile's instructions, native-tool removal, and execution protocol.
-export const CODEX_SUPPORTED_VERSIONS = Object.freeze(["0.159.3", "0.163.0"] as const)
+export const CODEX_SUPPORTED_VERSIONS = Object.freeze(["0.159.3", "0.163.0", "0.165.0"] as const)
+// Codex 0.165.0 adds two developer messages on each turn regardless of the catalog's include_* flags: every SKILL.md
+// under $CODEX_HOME/skills (plus bundled system skills; ~2.4K tokens with oh-my-codex installed, advertising foreign
+// "ralplan"/"deep-interview" skills to the model) and a permission-profile explanation (~1K tokens that otter's own
+// instructions already cover). The config keys below remove both (qualified with `codex debug prompt-input` and a
+// wire capture on 0.165.0). Older qualified releases were not probed for the keys, so they are emitted only for the
+// versions listed here.
+export const CODEX_PROMPT_OPT_OUT_VERSIONS = Object.freeze(["0.165.0"] as const)
 export const CODEX_INSTRUCTIONS = HOST_INFERENCE_INSTRUCTIONS
 
 export type CodexProfile = Readonly<{
@@ -114,10 +121,11 @@ function tomlBasicString(value: string): string {
   return `${escaped}"`
 }
 
-export function codexProfileArgv(profile: CodexProfile, scratchWorkdir: string, catalogPath: string): string[] {
+export function codexProfileArgv(profile: CodexProfile, scratchWorkdir: string, catalogPath: string, cliVersion?: string): string[] {
   assertCodexProfile(profile)
   assertAbsolutePath(scratchWorkdir, "scratchWorkdir")
   assertAbsolutePath(catalogPath, "catalogPath")
+  const promptOptOut = cliVersion !== undefined && (CODEX_PROMPT_OPT_OUT_VERSIONS as readonly string[]).includes(cliVersion)
 
   return [
     "-c", 'default_permissions="otter_text_only"',
@@ -126,5 +134,6 @@ export function codexProfileArgv(profile: CodexProfile, scratchWorkdir: string, 
     "-c", "features.code_mode=false",
     "-c", "features.goals=false",
     "-c", "tools.experimental_request_user_input.enabled=false",
+    ...(promptOptOut ? ["-c", "skills.include_instructions=false", "-c", "include_permissions_instructions=false"] : []),
   ]
 }
