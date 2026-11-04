@@ -128,7 +128,7 @@
 3. **실패 턴 기록**: 트랜스크립트 `failure` 레코드(카테고리·사유·엔진 실패 등급·엔진/모델 열거값만)와 다이제스트 `failures` 집계, `/history`에 실패 턴 수 표시.
 4. **edit `occurrence`/`replaceAll`**: 정확 1회 일치 외에 N번째 일치만 또는 전부 치환. 겹치는 일치는 항상 거부. multiedit도 동일.
 5. **상태줄 예산 표시**: 메인 모델 호출마다 `ctx 6.1k/8.2k 74% · tools 3/24`(90% 이상이면 ✂). 추정치임을 전제.
-6. **GitHub Actions CI**: `.github/workflows/ci.yml` — 타입체크 + Ubuntu·macOS 4분할 샤딩 테스트(`scripts/test-shard.sh`). 네이티브 엔진 테스트는 비활성.
+6. **GitHub Actions CI**: `.github/workflows/ci.yml` — 타입체크 + Ubuntu 4분할 샤딩 테스트(`scripts/test-shard.sh`, PR #100). 첫 실행에서 호스티드 macOS 러너는 git 경계(`PATH=/usr/bin:/bin`)에서 git을 못 띄우고 임시 디렉터리 realpath가 달라 worktree·queue 테스트가 러너 사정으로 실패해 macOS는 제외했다(로컬 전체 스위트가 macOS를 담당). 네이티브 엔진 테스트는 비활성.
 7. **확인만**: 도구 루프 반복 가드는 공용 실행 정책에 이미 있어 CLI에도 적용됨.
 
 보류·미적용: 벤더 입력 예산 상향과 토큰 계수 보정(비용 결정 필요), GJC 세션 임포터(포맷 미확정), 세션 제목·포크, 릴리스 요약, main 기본 라운드 상향.
