@@ -24,7 +24,9 @@ and Seatbelt qualification results are a separate review scope, not proof that t
 is safe for untrusted workloads. The common terminal uses installed vendor CLIs, not
 provider SDK adapters for its primary inference. The optional `model_api` chat tool makes a separate, explicitly approved HTTP request. Earlier macOS Seatbelt experiments do not qualify this runtime.
 Linux verifier admission requires its own platform qualification.
-Core changes still require regression tests and type checking. Native containment claims
+Core changes still require regression tests and type checking; GitHub Actions (`.github/workflows/ci.yml`) runs the
+typecheck and the suite in four shards on Ubuntu for every pull request (`scripts/test-shard.sh`; the hosted macOS runner
+cannot run the git-boundary and worktree tests, so macOS coverage stays local). Native containment claims
 additionally require the corresponding platform qualification, not just passing unit tests.
 
 The plugin and OpenCode imported-plan CLI assemble execution through `getOpenCodeRuntime`;
