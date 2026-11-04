@@ -39,6 +39,22 @@ describe("local model command", () => {
     expect(f.calls).toEqual([])
   })
 
+  test("think on|off|default persists local_model.think and status reports it; stores without it say so", async () => {
+    const f = fixture()
+    let think: boolean | null | undefined = undefined
+    const thinkWrites: Array<boolean | null> = []
+    const store: LocalModelStore = { ...f.store, readThink: () => think, saveThink: value => { thinkWrites.push(value); think = value; return "/user/otter.jsonc" } }
+    expect(await localModelCommand(["think", "on"], "/project", { allowUnload: false }, store)).toContain("Effective thinking: on")
+    expect(await localModelCommand(["think", "off"], "/project", { allowUnload: false }, store)).toContain("Effective thinking: off")
+    expect(await localModelCommand(["think", "default"], "/project", { allowUnload: false }, store)).toContain("Effective thinking: off (default")
+    expect(thinkWrites).toEqual([true, false, null])
+    expect(await localModelCommand(["think", "maybe"], "/project", { allowUnload: false }, store)).toContain("Usage:")
+    think = true
+    expect(await localModelCommand([], "/project", { allowUnload: false }, store)).toContain("Local model thinking: on")
+    expect(await localModelCommand(["think", "on"], "/project", { allowUnload: false }, f.store)).toContain("unavailable")
+    expect(f.writes).toEqual([])
+  })
+
   test("invalid syntax never writes or runs a process", async () => {
     const f = fixture()
     for (const args of [["keepalive", "25h"], ["keepalive", "1m;rm"], ["keepalive", "NaN"], ["profile", "toString"], ["profile", "speed", "extra"], ["status", "extra"], ["unload", "--all"]]) {

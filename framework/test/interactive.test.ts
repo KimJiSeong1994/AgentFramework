@@ -2045,6 +2045,24 @@ describe("interactive terminal", () => {
     expect(shell?.data).toMatchObject({ command: "bun test test/foo.test.ts", status: "complete", lines: ["fixture output"] })
   })
 
+  test("auto-edit applies edits unasked except a write over an existing file the turn has not read", async () => {
+    const decisions: Array<{ allow: boolean; reason?: string }> = []
+    const h = harness({
+      chatExecute: "auto-edit", lines: ["go", "/quit"], choose: async () => 0,
+      onGate: async gate => {
+        const signal = new AbortController().signal
+        decisions.push(await gate.approve({ tool: "write", path: "fresh.txt", content: "new\n" }, signal))
+        decisions.push(await gate.approve({ tool: "edit", path: "a.txt", oldText: "a", newText: "b" }, signal))
+        decisions.push(await gate.approve({ tool: "write", path: "a.txt", content: "x\n", overwritesUnread: true }, signal))
+      },
+    })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    expect(decisions).toEqual([{ allow: true }, { allow: true }, { allow: true }])
+    // Only the unread overwrite asked (choice 0 = Allow once); the title explains why.
+    expect(h.calls.choices.map(choice => choice.values)).toEqual([["Allow once", "Allow edits in the whole worktree for this turn", "Deny"]])
+    expect(h.calls.output.join("")).toContain("Write a.txt (1 line) — overwrites an existing file this turn has not read")
+  })
+
   test("chat execution: Always allow saves the rule and the next matching command runs without asking; refused commands never ask", async () => {
     const decisions: Array<{ allow: boolean; reason?: string }> = []
     const h = harness({
@@ -3024,6 +3042,15 @@ describe("interactive terminal", () => {
     expect(text).toContain("Retrying on claude / fable after codex / gpt-5-codex reported a rate limit (your choice; nothing switches on its own).")
     expect(text).toContain("answered on claude: hello there")
     expect(turns).toBe(2)
+  })
+
+  test("a failed turn leaves a structured failure record with enums only", async () => {
+    const h = harness({ lines: ["hello", "/quit"] })
+    h.deps.createConversation = () => ({ turn: async () => { throw new ModelRequestError("model_failed", "fixture SECRET", "transport", "transient") } })
+    await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
+    const records = replaySession(wt.worktree, h.calls.boundSessions[0]!, { kind: "failure" }).records
+    expect(records.map(record => record.data)).toEqual([{ category: "model_failed", reason: "transport", failureClass: "transient", engine: "codex", model: "gpt-5-codex" }])
+    expect(JSON.stringify(records)).not.toContain("SECRET")
   })
 
   test("an engine-side failure without another engine in the routes only explains the manual switch", async () => {

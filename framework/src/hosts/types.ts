@@ -105,7 +105,8 @@ export type ExecutionRequest = {
 /** One effect the chat model asks for; shown to the human before anything happens. */
 export type ChatAction =
   | ModelApiAction
-  | Readonly<{ tool: "write"; path: string; content: string }>
+  /** `overwritesUnread`: the file exists and this turn has not read it; auto-edit then asks instead of applying. */
+  | Readonly<{ tool: "write"; path: string; content: string; overwritesUnread?: boolean }>
   | Readonly<{ tool: "edit"; path: string; oldText: string; newText: string }>
   /** Several exact-text edits, possibly across files, approved together and applied all-or-nothing. */
   | Readonly<{ tool: "multiedit"; edits: ReadonlyArray<Readonly<{ path: string; oldText: string; newText: string }>> }>

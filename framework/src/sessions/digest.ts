@@ -67,6 +67,8 @@ export type SessionDigest = {
   workflows: Array<{ id: string; stage: string }>
   /** Vendor-reported token counters over the session's model calls, in total and per `engine/model`; absent when none was reported. */
   usage?: DigestUsage
+  /** Failed chat turns grouped by category, host reason, engine failure class and engine/model (fixed enums only). */
+  failures?: Array<{ category: string; reason: string | null; failureClass: string | null; engine: string; model: string; count: number }>
   /** completed: the last turn got an answer; abandoned: the session ended on an unanswered or failed turn. */
   outcome: "completed" | "abandoned"
   /** False when the session transcript could not be read in full; the digest then covers what was read. */
@@ -104,11 +106,20 @@ export function buildSessionDigest(worktree: string, sessionID: string, endedAt 
   const commands: DigestCommand[] = []
   const workflows = new Map<string, string>()
   const usage: DigestUsage = { ...emptyUsageTotals(), byModel: {} }
+  const failures = new Map<string, NonNullable<SessionDigest["failures"]>[number]>()
   let turns = 0
   let lastKind: string | undefined
   for (const record of records) {
     const data = record.data
     if (record.kind === "user") turns++
+    if (record.kind === "failure" && typeof data.category === "string" && typeof data.engine === "string" && typeof data.model === "string" && failures.size < MAX_WORKFLOWS) {
+      const reason = typeof data.reason === "string" ? data.reason : null
+      const failureClass = typeof data.failureClass === "string" ? data.failureClass : null
+      const key = [data.category, reason, failureClass, data.engine, data.model].join("|")
+      const entry = failures.get(key) ?? { category: data.category, reason, failureClass, engine: data.engine, model: data.model, count: 0 }
+      entry.count++
+      failures.set(key, entry)
+    }
     if (record.kind === "timing" && Array.isArray(data.models)) {
       for (const model of data.models) {
         if (!model || typeof model !== "object" || Array.isArray(model)) continue
@@ -152,6 +163,7 @@ export function buildSessionDigest(worktree: string, sessionID: string, endedAt 
     startedAt: metadata?.createdAt ?? null, endedAt, turns, tools, decisions,
     files: [...files].sort(), commands, workflows: [...workflows].map(([id, stage]) => ({ id, stage })).sort((a, b) => a.id.localeCompare(b.id)),
     ...(usage.calls ? { usage } : {}),
+    ...(failures.size ? { failures: [...failures.values()].sort((a, b) => b.count - a.count || a.category.localeCompare(b.category)) } : {}),
     outcome: lastKind === "assistant" ? "completed" : "abandoned",
     complete,
   }
@@ -206,6 +218,8 @@ export function describeDigest(digest: SessionDigest): string {
   const runs = digest.commands.length
   const failedRuns = digest.commands.filter(command => command.status !== "complete").length
   const model = digest.model ? `${digest.engine}/${digest.model}` : digest.engine
+  const failed = digest.failures ? digest.failures.reduce((total, item) => total + item.count, 0) : 0
+  const failedTurns = failed ? ` · ${failed} failed turn${failed === 1 ? "" : "s"}` : ""
   const tokens = digest.usage ? ` · ${digest.usage.inputTokens + digest.usage.outputTokens >= 10_000 ? `${((digest.usage.inputTokens + digest.usage.outputTokens) / 1000).toFixed(1)}k` : digest.usage.inputTokens + digest.usage.outputTokens} tokens` : ""
-  return `${when} · ${model} · ${digest.turns} turn${digest.turns === 1 ? "" : "s"} · ${digest.files.length} file${digest.files.length === 1 ? "" : "s"} · ${runs} command${runs === 1 ? "" : "s"}${failedRuns ? ` (${failedRuns} failed)` : ""}${tokens} · ${digest.outcome}`
+  return `${when} · ${model} · ${digest.turns} turn${digest.turns === 1 ? "" : "s"} · ${digest.files.length} file${digest.files.length === 1 ? "" : "s"} · ${runs} command${runs === 1 ? "" : "s"}${failedRuns ? ` (${failedRuns} failed)` : ""}${failedTurns}${tokens} · ${digest.outcome}`
 }

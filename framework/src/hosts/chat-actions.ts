@@ -205,7 +205,7 @@ export function describeAction(action: ChatAction, maxLines = 40): { title: stri
   }
   if (action.tool === "write") {
     const lines = action.content.replace(/\n$/u, "").split("\n")
-    return { title: `Write ${action.path} (${lines.length} line${lines.length === 1 ? "" : "s"})`, preview: clip(lines.map(line => `+ ${line}`)) }
+    return { title: `Write ${action.path} (${lines.length} line${lines.length === 1 ? "" : "s"})${action.overwritesUnread ? " — overwrites an existing file this turn has not read" : ""}`, preview: clip(lines.map(line => `+ ${line}`)) }
   }
   if (action.tool === "multiedit") {
     const files = [...new Set(action.edits.map(edit => edit.path))]

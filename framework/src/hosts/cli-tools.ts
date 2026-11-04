@@ -155,15 +155,11 @@ export function validateCliToolInput(name: string, input: unknown): asserts inpu
       if (!hasExactKeys(input, ["path", "content"]) || !path(input.path) || !boundedString(input.content, MAX_WRITE_BYTES)) throw new CliToolInputError()
       return
     case "edit":
-      if (!hasExactKeys(input, ["path", "oldText", "newText"]) || !path(input.path) ||
-          !boundedString(input.oldText, MAX_WRITE_BYTES) || input.oldText.length === 0 ||
-          !boundedString(input.newText, MAX_WRITE_BYTES)) throw new CliToolInputError()
+      if (!validEditInput(input)) throw new CliToolInputError()
       return
     case "multiedit":
       if (!hasExactKeys(input, ["edits"]) || !Array.isArray(input.edits) || input.edits.length === 0 || input.edits.length > MAX_MULTIEDIT_EDITS ||
-          !input.edits.every(edit => typeof edit === "object" && edit !== null && !Array.isArray(edit) &&
-            hasExactKeys(edit as Record<string, unknown>, ["path", "oldText", "newText"]) && path(edit.path) &&
-            boundedString(edit.oldText, MAX_WRITE_BYTES) && (edit.oldText as string).length > 0 && boundedString(edit.newText, MAX_WRITE_BYTES))) {
+          !input.edits.every(edit => typeof edit === "object" && edit !== null && !Array.isArray(edit) && validEditInput(edit as Record<string, unknown>))) {
         throw new CliToolInputError()
       }
       return
@@ -185,6 +181,55 @@ export function validateCliToolInput(name: string, input: unknown): asserts inpu
     default:
       throw new CliToolInputError()
   }
+}
+
+/** How an edit's oldText is matched: exactly once (default), the Nth occurrence, or every occurrence. */
+export type EditMatch = Readonly<{ occurrence?: number; replaceAll?: boolean }>
+const MAX_EDIT_OCCURRENCE = 10_000
+
+/** `{path, oldText, newText}` plus at most one of `occurrence` (integer ≥ 1) or `replaceAll: true`. */
+function validEditInput(input: Record<string, unknown>): boolean {
+  const keys = Object.keys(input)
+  const extra = keys.filter(key => key !== "path" && key !== "oldText" && key !== "newText")
+  if (!["path", "oldText", "newText"].every(key => Object.hasOwn(input, key)) || extra.length > 1) return false
+  if (extra[0] === "occurrence" && !(Number.isSafeInteger(input.occurrence) && (input.occurrence as number) >= 1 && (input.occurrence as number) <= MAX_EDIT_OCCURRENCE)) return false
+  if (extra[0] === "replaceAll" && input.replaceAll !== true) return false
+  if (extra.length === 1 && extra[0] !== "occurrence" && extra[0] !== "replaceAll") return false
+  const path = (value: unknown): value is string => typeof value === "string" && value.length > 0 && boundedString(value, 2048)
+  return path(input.path) && boundedString(input.oldText, MAX_WRITE_BYTES) && (input.oldText as string).length > 0 && boundedString(input.newText, MAX_WRITE_BYTES)
+}
+
+/** Offsets of every occurrence of `needle` in `text`, including overlapping ones, in order. */
+function occurrencesOf(text: string, needle: string): number[] {
+  const found: number[] = []
+  for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + 1)) found.push(at)
+  return found
+}
+
+/**
+ * Applies one edit to `current`: the single occurrence by default, the requested occurrence, or all occurrences.
+ * Returns the new text and a description, or the refusal reason; nothing is written here.
+ */
+function applyEdit(current: string, oldText: string, newText: string, match: EditMatch): { ok: true; text: string; note: string } | { ok: false; error: string } {
+  const offsets = occurrencesOf(current, oldText)
+  if (offsets.length === 0) return { ok: false, error: "edit text was not found" }
+  // Overlapping matches ("aa" in "aaa") make every selection ambiguous; a longer old text disambiguates.
+  if (offsets.some((at, index) => index > 0 && at < offsets[index - 1]! + oldText.length)) return { ok: false, error: "edit text overlaps itself; use a longer old text" }
+  if (match.replaceAll) {
+    return { ok: true, text: current.split(oldText).join(newText), note: `replaced all ${offsets.length} occurrence${offsets.length === 1 ? "" : "s"}` }
+  }
+  if (match.occurrence !== undefined) {
+    if (match.occurrence > offsets.length) return { ok: false, error: `edit text occurs ${offsets.length} time${offsets.length === 1 ? "" : "s"}, fewer than the requested occurrence ${match.occurrence}` }
+    const at = offsets[match.occurrence - 1]!
+    return { ok: true, text: current.slice(0, at) + newText + current.slice(at + oldText.length), note: `replaced occurrence ${match.occurrence} of ${offsets.length}` }
+  }
+  if (offsets.length > 1) return { ok: false, error: `edit text occurs ${offsets.length} times; pass "occurrence": N for one of them or "replaceAll": true for every one` }
+  const at = offsets[0]!
+  return { ok: true, text: current.slice(0, at) + newText + current.slice(at + oldText.length), note: "the exact old text occurred once" }
+}
+
+function editMatch(input: Record<string, unknown>): EditMatch {
+  return { ...(typeof input.occurrence === "number" ? { occurrence: input.occurrence } : {}), ...(input.replaceAll === true ? { replaceAll: true } : {}) }
 }
 
 function normalizeToolPath(input: string): string {
@@ -428,6 +473,7 @@ function writeTarget(
   identity: RootIdentity,
   content: string,
   oldText?: string,
+  match: EditMatch = {},
   beforeEffect?: () => void,
 ): CliToolOutput {
   if (!relativePath) return publicFailure(new Error("path"))
@@ -460,14 +506,11 @@ function writeTarget(
     if (stat.size > MAX_READ_BYTES) throw new Error("size")
     if (oldText !== undefined) {
       const current = readDescriptor(fd, MAX_READ_BYTES).toString("utf8")
-      const first = current.indexOf(oldText)
-      if (first < 0 || current.indexOf(oldText, first + 1) >= 0) {
-        return { ok: false, error: "Tool refused: edit text must match exactly once." }
-      }
-      const replacement = current.slice(0, first) + content + current.slice(first + oldText.length)
-      if (Buffer.byteLength(replacement, "utf8") > MAX_READ_BYTES) throw new Error("size")
-      writeAll(fd, replacement, beforeEffect)
-      return { ok: true, text: "Edited file; the exact old text occurred once." }
+      const applied = applyEdit(current, oldText, content, match)
+      if (!applied.ok) return { ok: false, error: `Tool refused: ${applied.error}.` }
+      if (Buffer.byteLength(applied.text, "utf8") > MAX_READ_BYTES) throw new Error("size")
+      writeAll(fd, applied.text, beforeEffect)
+      return { ok: true, text: `Edited file; ${applied.note}.` }
     }
     writeAll(fd, content, creating ? undefined : beforeEffect)
     return { ok: true, text: `${creating ? "Created" : "Wrote"} file (${Buffer.byteLength(content, "utf8")} bytes).` }
@@ -484,7 +527,7 @@ function writeTarget(
  */
 function multiEditTargets(
   root: string,
-  edits: ReadonlyArray<{ path: string; oldText: string; newText: string }>,
+  edits: ReadonlyArray<{ path: string; oldText: string; newText: string; occurrence?: number; replaceAll?: boolean }>,
   identity: RootIdentity,
   beforeEffect?: () => void,
 ): CliToolOutput {
@@ -499,11 +542,9 @@ function multiEditTargets(
       try { current = readTarget(root, relativePath, identity, MAX_READ_BYTES).toString("utf8") }
       catch { return { ok: false, error: `Tool refused: edit ${index + 1} target is unavailable; nothing was changed.` } }
     }
-    const first = current.indexOf(edit.oldText)
-    if (first < 0 || current.indexOf(edit.oldText, first + 1) >= 0) {
-      return { ok: false, error: `Tool refused: edit ${index + 1} (${relativePath}) text must match exactly once; nothing was changed.` }
-    }
-    const next = current.slice(0, first) + edit.newText + current.slice(first + edit.oldText.length)
+    const applied = applyEdit(current, edit.oldText, edit.newText, editMatch(edit as unknown as Record<string, unknown>))
+    if (!applied.ok) return { ok: false, error: `Tool refused: edit ${index + 1} (${relativePath}) ${applied.error}; nothing was changed.` }
+    const next = applied.text
     if (Buffer.byteLength(next, "utf8") > MAX_READ_BYTES) return publicFailure(new Error("size"))
     planned.set(relativePath, next)
   }
@@ -904,8 +945,8 @@ function executeFileTool(
     case "model_api": return { ok: false, error: "Tool refused: model API calls run through the host approval gate." }
     case "bash": return { ok: false, error: "Tool refused: commands run through the host approval gate." }
     case "multiedit": return multiEditTargets(root, input.edits as Array<{ path: string; oldText: string; newText: string }>, identity, beforeEffect)
-    case "write": return writeTarget(root, normalizeToolPath(input.path as string), identity, input.content as string, undefined, beforeEffect)
-    case "edit": return writeTarget(root, normalizeToolPath(input.path as string), identity, input.newText as string, input.oldText as string, beforeEffect)
+    case "write": return writeTarget(root, normalizeToolPath(input.path as string), identity, input.content as string, undefined, {}, beforeEffect)
+    case "edit": return writeTarget(root, normalizeToolPath(input.path as string), identity, input.newText as string, input.oldText as string, editMatch(input), beforeEffect)
     case "repo_search": return { ok: false, error: "Tool refused: repo_search is asynchronous and host-provided." }
   }
 }

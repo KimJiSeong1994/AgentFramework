@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { statusLines } from "../src/tui/status-view.ts"
+import { budgetSegment, statusLines } from "../src/tui/status-view.ts"
 import { displayWidth } from "../src/tui/render.ts"
 import { selectionLabel, type InteractiveViewFacts } from "../src/hosts/interactive-view.ts"
 
@@ -95,5 +95,15 @@ describe("live status row", () => {
     expect(rows).not.toContain("Model request running")
     expect(rows).not.toContain("Otter · working")
     expect(rows).toContain("safety[")
+  })
+})
+
+describe("budget segment", () => {
+  test("shows input use against the limit, tool rounds once a tool ran, and a scissors mark near the limit", () => {
+    expect(budgetSegment({ inputTokens: 6100, inputLimit: 8192, toolCalls: 0, roundLimit: 24 })).toBe("ctx 6.1k/8.2k 74%")
+    expect(budgetSegment({ inputTokens: 7500, inputLimit: 8192, toolCalls: 3, roundLimit: 24 })).toBe("ctx 7.5k/8.2k 92% ✂ · tools 3/24")
+    expect(budgetSegment({ inputTokens: 900, inputLimit: 49152, toolCalls: 25, roundLimit: 48 })).toBe("ctx 900/49.2k 2% · tools 25/48")
+    const rows = statusLines({ facts, selectionInHeader: true, activity: "working", queued: 0, columns: 200, budget: { inputTokens: 6100, inputLimit: 8192, toolCalls: 2, roundLimit: 24 } })
+    expect(rows.join("\n")).toContain("ctx 6.1k/8.2k 74% · tools 2/24")
   })
 })

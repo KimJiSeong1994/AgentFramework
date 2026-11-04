@@ -1189,6 +1189,15 @@ test("local retention is snapshotted into Ollama argv and omitted by default", a
   }
 })
 
+test("local thinking is snapshotted into Ollama argv and off by default", async () => {
+  installFakeCli("local", `process.stdout.write(JSON.stringify(process.argv.slice(2)))`)
+  for (const think of [undefined, false, true]) {
+    const result = await createCliTransport(options("local", { localThink: think })).run()
+    expect(JSON.parse(result.text)).toEqual(["run", "test-model:tag", `--think=${think === true ? "true" : "false"}`, "--nowordwrap"])
+  }
+  expect(() => createCliTransport(options("local", { localThink: "yes" as never }))).toThrow()
+})
+
 test("invalid local retention is rejected before executable lookup", () => {
   for (const value of [null, 5, "25h", "-2", "5m --verbose", "1.5h"]) {
     expect(() => createCliTransport(options("local", { localKeepAlive: value as never }))).toThrow("invalid CLI transport options")
