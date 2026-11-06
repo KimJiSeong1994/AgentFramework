@@ -4,7 +4,7 @@
 
 ![otter: a coding agent that builds knowledge with every run](artifacts/otter-hero/hero.png)
 
-**A coding agent that builds knowledge with every run.**
+**A coding agent that builds knowledge with every run.** [Watch the intro video ▶](artifacts/otter-intro-video/otter-intro-motion.mp4)
 
 - Keeps execution history as local knowledge and reuses it in future tasks
 - Builds a shared knowledge base across engines and models, with different models for different roles

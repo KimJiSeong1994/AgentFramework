@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>otter intro motion</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --bg0: #08122a; --bg1: #0f2148; --bg2: #16305f;
+    --fg: #f4f7fb; --dim: #a9b8d3; --mut: #6f80a3;
+    --mint: #7fd6a4; --blue: #8fc3f5; --coral: #f2876b; --amber: #ffcc70; --violet: #b9a7ff;
+    --card: rgba(11, 24, 50, .86); --line: rgba(143, 195, 245, .16);
+    --sans: "Pretendard Variable", Pretendard, "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+    --mono: "JetBrains Mono", Menlo, "SF Mono", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1920px; height: 1080px; overflow: hidden; background: var(--bg0); }
+  body { font-family: var(--sans); color: var(--fg); letter-spacing: -.01em; -webkit-font-smoothing: antialiased; }
+  #stage { position: relative; width: 1920px; height: 1080px; overflow: hidden;
+    background: radial-gradient(1200px 800px at 50% 30%, var(--bg2) 0%, var(--bg1) 45%, var(--bg0) 100%); }
+  .glow { position: absolute; width: 1100px; height: 1100px; border-radius: 50%; filter: blur(140px); opacity: .55; pointer-events: none; }
+  .glow.a { left: -200px; top: -500px; background: radial-gradient(circle, rgba(60,110,220,.55), transparent 60%); }
+  .glow.b { right: -300px; bottom: -600px; background: radial-gradient(circle, rgba(127,214,164,.28), transparent 60%); }
+  .dots { position: absolute; inset: 0; opacity: .16;
+    background-image: linear-gradient(rgba(170,200,255,.25) 1px, transparent 1px), linear-gradient(90deg, rgba(170,200,255,.25) 1px, transparent 1px);
+    background-size: 72px 72px; mask-image: radial-gradient(900px 600px at 50% 40%, #000 20%, transparent 100%); }
+  .beam { position: absolute; left: 50%; top: -420px; width: 1500px; height: 1100px; transform: translateX(-50%);
+    background: radial-gradient(ellipse at 50% 0%, rgba(143,195,245,.22), rgba(143,195,245,.06) 40%, transparent 68%); pointer-events: none; }
+  .horizon { position: absolute; left: 0; right: 0; bottom: -200px; height: 420px;
+    background: radial-gradient(ellipse 60% 100% at 50% 100%, rgba(127,214,164,.16), transparent 70%); }
+  .noise { position: absolute; inset: 0; opacity: .07; mix-blend-mode: overlay; pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .6 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+  .vignette { position: absolute; inset: 0; background: radial-gradient(1400px 900px at 50% 50%, transparent 55%, rgba(4,9,22,.75) 100%); }
+  #prog { position: absolute; left: 50%; bottom: 34px; transform: translateX(-50%); display: flex; gap: 8px; align-items: center; }
+  #prog i { display: block; width: 8px; height: 8px; border-radius: 4px; background: rgba(255,255,255,.18); transition: none; }
+  #prog i.on { width: 28px; background: var(--mint); box-shadow: 0 0 14px rgba(127,214,164,.6); }
+  #prog i.done { background: rgba(127,214,164,.45); }
+
+  .scene { position: absolute; inset: 0; opacity: 0; }
+
+  /* ---- shared typographic pieces ---- */
+  .eyebrow { position: absolute; left: 50%; transform: translateX(-50%); top: 104px;
+    display: inline-flex; align-items: center; gap: 10px; padding: 9px 18px 9px 14px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.22); background: linear-gradient(180deg, rgba(255,255,255,.1), rgba(255,255,255,.04));
+    box-shadow: 0 8px 24px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.12);
+    font: 600 21px/1 var(--sans); color: var(--dim); letter-spacing: 0; white-space: nowrap; }
+  .eyebrow i { width: 10px; height: 10px; border-radius: 3px; background: var(--mint); box-shadow: 0 0 12px currentColor; }
+  .head { position: absolute; left: 0; right: 0; top: 160px; text-align: center;
+    font-size: 58px; font-weight: 800; line-height: 1.26; letter-spacing: -.035em; text-shadow: 0 4px 40px rgba(20,50,120,.6); }
+  .head em { font-style: normal; }
+  .head em.mint { text-shadow: 0 0 36px rgba(127,214,164,.45); } .head em.blue { text-shadow: 0 0 36px rgba(143,195,245,.5); } .head em.coral { text-shadow: 0 0 36px rgba(242,135,107,.45); }
+  .mint { color: var(--mint); } .blue { color: var(--blue); } .coral { color: var(--coral); } .amber { color: var(--amber); } .violet { color: var(--violet); }
+  .wrapper { position: absolute; left: 0; right: 0; top: 335px; bottom: 0; transform-origin: 50% 0; }
+  .tilt { transform: perspective(2600px) rotateX(5deg); }
+
+  /* wordmark */
+  .wordmark { display: inline-flex; align-items: center; gap: 22px; }
+  .wordmark img { width: 92px; height: 92px; border-radius: 50%; box-shadow: 0 10px 30px rgba(0,0,0,.4), 0 0 0 3px rgba(255,255,255,.14), 0 0 0 8px rgba(127,214,164,.18), 0 0 60px rgba(127,214,164,.35); }
+  .wordmark b { font-size: 84px; font-weight: 800; letter-spacing: -.045em; line-height: 1; text-shadow: 0 6px 40px rgba(20,50,120,.7); }
+  .spot { position: absolute; left: 50%; width: 1100px; height: 600px; transform: translateX(-50%); border-radius: 50%; filter: blur(60px);
+    background: radial-gradient(ellipse, rgba(143,195,245,.22), rgba(127,214,164,.08) 45%, transparent 70%); pointer-events: none; }
+  .wordmark b span { color: var(--mint); }
+
+  /* card = UI mockup window */
+  .card, .panel { background: linear-gradient(var(--card), var(--card)) padding-box, linear-gradient(180deg, rgba(255,255,255,.26), rgba(143,195,245,.1) 40%, rgba(255,255,255,.04)) border-box;
+    border: 1px solid transparent; border-radius: 22px;
+    box-shadow: 0 50px 100px -10px rgba(0,0,0,.6), 0 0 0 1px rgba(0,0,0,.25), 0 0 140px -30px rgba(143,195,245,.35), inset 0 1px 0 rgba(255,255,255,.08); }
+  .card { position: absolute; overflow: hidden; }
+  .card::after { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 160px; pointer-events: none;
+    background: linear-gradient(180deg, rgba(255,255,255,.05), transparent); }
+  .bar { position: relative; z-index: 1; height: 50px; display: flex; align-items: center; gap: 8px; padding: 0 20px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.025);
+    font: 500 16px var(--mono); color: var(--mut); }
+  .bar i { width: 12px; height: 12px; border-radius: 50%; background: #3b4a6b; }
+  .bar i:nth-child(1){background:#ff5f57}.bar i:nth-child(2){background:#febc2e}.bar i:nth-child(3){background:#28c840}
+  .bar span { margin-left: 12px; }
+  .mono { font-family: var(--mono); }
+  .prompt { font: 500 30px/1.4 var(--sans); color: var(--fg); white-space: pre; letter-spacing: -.01em; }
+  .prompt .ps { color: var(--mint); font-family: var(--mono); }
+  .cursor { display: inline-block; width: 3px; height: 1.05em; background: var(--mint); vertical-align: -0.15em; margin-left: 2px; }
+  .chip { display: inline-flex; align-items: center; gap: 9px; padding: 9px 16px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.18); background: linear-gradient(180deg, rgba(255,255,255,.1), rgba(255,255,255,.04));
+    box-shadow: 0 6px 18px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.1); font: 600 19px/1 var(--sans); color: var(--fg); white-space: nowrap; }
+  .chip.mono { font: 600 18px/1 var(--mono); }
+  .chip .d { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 10px currentColor; }
+  .chip.sel { border-color: var(--mint); background: linear-gradient(180deg, rgba(127,214,164,.26), rgba(127,214,164,.12)); box-shadow: 0 0 0 4px rgba(127,214,164,.18), 0 0 30px rgba(127,214,164,.35); }
+  .chip.ghost { color: var(--dim); }
+  .lbl { font: 600 18px/1 var(--sans); color: var(--mut); letter-spacing: 0; }
+  .note { position: absolute; left: 0; right: 0; text-align: center; font: 500 22px/1.4 var(--sans); color: var(--dim); }
+  .note code { font-family: var(--mono); color: var(--fg); background: rgba(255,255,255,.08); padding: 3px 9px; border-radius: 8px; font-size: 20px; }
+  .hide { opacity: 0; }
+
+  /* ---- S0 hook ---- */
+  #s0 .wm { position: absolute; left: 50%; top: 250px; transform: translateX(-50%); }
+  #s0 .head { top: 400px; font-size: 76px; letter-spacing: -.04em; }
+  #s0 .sub { position: absolute; left: 0; right: 0; top: 520px; text-align: center; font: 500 26px/1.5 var(--sans); color: var(--dim); }
+  #s0 .term { left: 410px; top: 620px; width: 1100px; height: 250px; }
+  #s0 .term .body { padding: 34px 38px 0; display: flex; align-items: center; }
+  #s0 .send { margin-left: auto; width: 54px; height: 54px; border-radius: 14px; display: grid; place-items: center; flex: none;
+    background: linear-gradient(180deg, #9be3b9, #6cc995); color: #0b1a2c; font: 700 24px var(--mono); box-shadow: 0 8px 24px rgba(127,214,164,.35), inset 0 1px 0 rgba(255,255,255,.5); }
+  #s0 .term .foot { position: absolute; left: 0; right: 0; bottom: 0; height: 64px; display: flex; align-items: center; gap: 12px; padding: 0 30px;
+    border-top: 1px solid var(--line); font: 500 16px var(--mono); color: var(--mut); }
+  #s0 .term .foot .r { margin-left: auto; }
+
+  /* ---- S1 history ---- */
+  #s1 .col { position: absolute; top: 20px; width: 440px; }
+  #s1 .col .t { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+  #s1 .col .t .lbl { color: var(--dim); }
+  #s1 .colA { left: 190px; } #s1 .colB { left: 740px; } #s1 .colC { left: 1290px; }
+  #s1 .panel { position: relative; width: 440px; height: 420px; padding: 24px; overflow: hidden; }
+  .bubble { max-width: 330px; padding: 14px 18px; border-radius: 18px; font: 500 19px/1.45 var(--sans); margin-bottom: 14px; }
+  .bubble.u { margin-left: auto; background: rgba(143,195,245,.22); border-top-right-radius: 6px; }
+  .bubble.o { background: rgba(255,255,255,.08); border-top-left-radius: 6px; color: var(--dim); }
+  .bubble .bars { display: grid; gap: 7px; margin-top: 2px; }
+  .bubble .bars i { display: block; height: 9px; border-radius: 5px; background: rgba(255,255,255,.14); }
+  .row { display: flex; align-items: center; gap: 12px; height: 48px; padding: 0 14px; border-radius: 12px; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.05);
+    margin-bottom: 10px; font: 500 17px var(--mono); color: var(--dim); }
+  .row .k { color: var(--blue); width: 56px; } .row .f { color: var(--fg); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .ok { color: var(--mint); } .row .no { color: var(--coral); }
+  .wcard { position: relative; padding: 16px 18px; border-radius: 14px; background: linear-gradient(180deg, rgba(127,214,164,.14), rgba(127,214,164,.05)); border: 1px solid rgba(127,214,164,.4); box-shadow: 0 10px 30px -10px rgba(127,214,164,.35);
+    margin-bottom: 12px; font: 500 17px/1.3 var(--mono); color: var(--fg); }
+  .wcard small { display: block; font: 500 14px var(--sans); color: var(--mut); margin-top: 6px; letter-spacing: 0; }
+  .wcard .tag { position: absolute; right: 12px; top: 12px; font: 600 12px var(--sans); color: var(--mint); border: 1px solid rgba(127,214,164,.5); padding: 3px 8px; border-radius: 999px; }
+  #s1 .count { position: absolute; left: 0; right: 0; bottom: 18px; text-align: center; font: 600 17px var(--mono); color: var(--mint); }
+  #s1 .gone { position: absolute; inset: 0; display: grid; place-items: center; font: 700 26px var(--sans); color: var(--mut); background: rgba(8,18,42,.6); backdrop-filter: blur(2px); }
+  #s1 svg.links { position: absolute; left: 0; top: 0; width: 1920px; height: 745px; overflow: visible; }
+  #s1 .pills { position: absolute; left: 0; right: 0; top: 565px; display: flex; justify-content: center; gap: 14px; }
+  #s1 .note { top: 635px; }
+
+  /* ---- S2 engines ---- */
+  #s2 .eng { position: absolute; left: 220px; top: 10px; width: 700px; height: 560px; }
+  #s2 .eng .chip { position: absolute; left: 0; width: 200px; font-size: 21px; padding: 13px 20px; }
+  #s2 .eng svg { position: absolute; left: 0; top: 0; width: 700px; height: 560px; overflow: visible; }
+  #s2 .hub { position: absolute; left: 430px; top: 212px; width: 150px; height: 70px; border-radius: 16px; display: grid; place-items: center;
+    background: linear-gradient(180deg, rgba(127,214,164,.26), rgba(127,214,164,.1)); border: 1.5px solid var(--mint); font: 700 20px var(--sans); color: #d8f5e4; box-shadow: 0 0 60px rgba(127,214,164,.4), inset 0 1px 0 rgba(255,255,255,.25); }
+  #s2 .hub::before { content: ""; position: absolute; inset: -14px; border-radius: 26px; border: 1px solid rgba(127,214,164,.3); }
+  #s2 .blocks { position: absolute; left: 610px; top: 120px; width: 90px; height: 260px; }
+  #s2 .blocks i { position: absolute; left: 0; width: 80px; height: 48px; border-radius: 10px; background: linear-gradient(180deg, rgba(127,214,164,.34), rgba(127,214,164,.12)); border: 1.5px solid var(--mint); box-shadow: 0 10px 24px -8px rgba(127,214,164,.5), inset 0 1px 0 rgba(255,255,255,.3); }
+  #s2 .blocks i:nth-child(1){bottom:0} #s2 .blocks i:nth-child(2){bottom:58px} #s2 .blocks i:nth-child(3){bottom:116px} #s2 .blocks i:nth-child(4){bottom:174px}
+  #s2 .eng .cap { position: absolute; left: 430px; top: 300px; width: 150px; text-align: center; font: 500 16px var(--sans); color: var(--mut); }
+  #s2 .combo { left: 1010px; top: 0; width: 700px; height: 560px; }
+  #s2 .combo .cmd { padding: 26px 30px 10px; font: 500 22px var(--mono); }
+  #s2 .combo .cmd .ps { color: var(--mint); } #s2 .combo .cmd .arg { color: var(--blue); }
+  #s2 .combo .rows { padding: 10px 30px; display: grid; gap: 12px; }
+  #s2 .combo .r { display: flex; align-items: center; gap: 16px; height: 68px; padding: 0 18px; border-radius: 14px; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.05); }
+  #s2 .combo .r .role { width: 150px; font: 600 20px var(--sans); color: var(--dim); }
+  #s2 .combo .r .role small { display: block; font: 500 13px var(--sans); color: var(--mut); margin-top: 2px; }
+  #s2 .combo .r .arrow { color: var(--mut); font-family: var(--mono); }
+  #s2 .combo .r .chip { font-size: 19px; }
+  #s2 .combo .foot { position: absolute; left: 30px; right: 30px; bottom: 22px; font: 500 16px/1.5 var(--sans); color: var(--mut); }
+
+  /* ---- S3 skills ---- */
+  #s3 .tui { left: 340px; top: 10px; width: 1240px; height: 470px; }
+  #s3 .tui .body { padding: 26px 34px; }
+  #s3 .line { font: 500 24px/1.45 var(--sans); color: var(--fg); white-space: pre; }
+  #s3 .line .ps { color: var(--mint); font-family: var(--mono); }
+  #s3 .route { margin-top: 22px; padding: 22px 24px; border-radius: 16px; background: linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.03)); border: 1px solid var(--line); }
+  #s3 .route .q { font: 600 20px var(--sans); color: var(--dim); margin-bottom: 16px; }
+  #s3 .route .chips { display: flex; gap: 12px; }
+  #s3 .reply { margin-top: 22px; }
+  #s3 .skills { display: inline-flex; align-items: center; gap: 10px; font: 600 18px var(--mono); color: var(--coral);
+    border: 1.5px solid rgba(242,135,107,.6); background: rgba(242,135,107,.12); padding: 8px 14px; border-radius: 999px; }
+  #s3 .skills i { width: 8px; height: 8px; border-radius: 50%; background: var(--coral); }
+  #s3 .bars { display: grid; gap: 12px; margin-top: 18px; }
+  #s3 .bars i { display: block; height: 14px; border-radius: 7px; background: rgba(255,255,255,.12); }
+  #s3 .rule { position: absolute; right: 34px; bottom: 24px; font: 500 16px var(--mono); color: var(--mut); }
+  #s3 .note { top: 530px; }
+
+  /* ---- S4 approval ---- */
+  #s4 .diff { left: 170px; top: 0; width: 760px; height: 450px; }
+  #s4 .diff pre { margin: 0; padding: 22px 28px; font: 500 20px/1.65 var(--mono); color: var(--dim); }
+  #s4 .diff .add { color: var(--mint); background: rgba(127,214,164,.1); display: block; margin: 0 -28px; padding: 0 28px; }
+  #s4 .diff .del { color: var(--coral); background: rgba(242,135,107,.1); display: block; margin: 0 -28px; padding: 0 28px; }
+  #s4 .diff .ctx { display: block; }
+  #s4 .ask { position: absolute; left: 0; right: 0; bottom: 0; height: 92px; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 14px; padding: 0 28px;
+    font: 600 20px var(--sans); color: var(--dim); background: rgba(255,255,255,.03); }
+  #s4 .ask .chip { font-size: 18px; }
+  #s4 .ask .done { margin-left: auto; color: var(--mint); font: 600 18px var(--mono); }
+  #s4 .flow { left: 990px; top: 0; width: 760px; height: 450px; }
+  #s4 .flow .lbl2 { padding: 22px 30px 4px; font: 600 18px var(--sans); color: var(--mut); }
+  #s4 .flow .steps { position: relative; padding: 16px 30px; display: grid; gap: 18px; }
+  #s4 .flow .step { display: flex; align-items: center; gap: 16px; height: 74px; padding: 0 20px; border-radius: 16px; background: rgba(255,255,255,.05); border: 1px solid transparent; }
+  #s4 .flow .step .n { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: rgba(255,255,255,.08); font: 700 16px var(--mono); color: var(--dim); }
+  #s4 .flow .step .c { font: 600 22px var(--mono); color: var(--fg); }
+  #s4 .flow .step .c small { font: 500 16px var(--sans); color: var(--mut); margin-left: 12px; }
+  #s4 .flow .step.on { border-color: rgba(127,214,164,.5); background: linear-gradient(180deg, rgba(127,214,164,.14), rgba(127,214,164,.05)); box-shadow: 0 0 30px -10px rgba(127,214,164,.5); }
+  #s4 .flow .step.on .n { background: var(--mint); color: #0b1a2c; }
+  #s4 .flow .choice { display: flex; gap: 12px; padding: 4px 30px; }
+  #s4 .note { top: 500px; }
+
+  /* ---- S5 outro ---- */
+  #s5 .wm { position: absolute; left: 50%; top: 290px; transform: translateX(-50%); }
+  #s5 .head { top: 430px; font-size: 64px; }
+  #s5 .install { position: absolute; left: 50%; top: 600px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 16px;
+    padding: 20px 30px; border-radius: 16px; background: linear-gradient(180deg, rgba(255,255,255,.1), rgba(255,255,255,.04)); border: 1px solid rgba(255,255,255,.2);
+    box-shadow: 0 20px 60px rgba(0,0,0,.4), 0 0 80px -20px rgba(127,214,164,.35), inset 0 1px 0 rgba(255,255,255,.12); font: 500 22px var(--mono); color: var(--fg); white-space: nowrap; }
+  #s5 .install b { color: var(--mint); font-weight: 600; }
+  #s5 .gh { position: absolute; left: 0; right: 0; top: 700px; text-align: center; font: 500 22px var(--mono); color: var(--mut); }
+  #s5 .pillars { position: absolute; left: 0; right: 0; top: 790px; display: flex; justify-content: center; gap: 14px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="glow a" id="glowA"></div><div class="glow b" id="glowB"></div>
+  <div class="beam"></div><div class="horizon"></div><div class="dots"></div><div class="noise"></div><div class="vignette"></div>
+
+  <!-- S0: hook -->
+  <section class="scene" id="s0">
+    <div class="spot" style="top:60px"></div>
+    <div class="wm"><div class="wordmark"><img src="otter-avatar.png" alt=""><b>otter<span>.</span></b></div></div>
+    <h1 class="head">실행할수록 <em class="mint">쌓이는</em> 코딩 에이전트</h1>
+    <p class="sub">대화는 사라져도 실행 이력은 남아, 다음 작업의 지식이 됩니다</p>
+    <div class="card term">
+      <div class="bar"><i></i><i></i><i></i><span>my-project — otter</span></div>
+      <div class="body"><div class="prompt"><span class="ps">› </span><span id="typ0"></span><span class="cursor" id="cur0"></span></div><div class="send">↵</div></div>
+      <div class="foot"><span>main → codex / astra</span><span>·</span><span>skills: auto</span><span class="r">Enter 전송 · /plan 계획 · /model 전환</span></div>
+    </div>
+  </section>
+
+  <!-- S1: history becomes asset -->
+  <section class="scene" id="s1">
+    <div class="eyebrow"><i></i>실행 이력이 자산이 된다</div>
+    <h1 class="head">대화는 사라져도<br><em class="mint">실행 이력</em>은 다음 작업의 컨텍스트가 돼요</h1>
+    <div class="wrapper tilt">
+      <svg class="links" id="s1links">
+        <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#7fd6a4"/></marker></defs>
+        <path id="l1" d="M 640 240 C 690 240, 690 240, 730 240" stroke="#7fd6a4" stroke-width="3" fill="none" stroke-dasharray="8 8" marker-end="url(#arr)"/>
+        <path id="l2" d="M 1190 240 C 1240 240, 1240 240, 1280 240" stroke="#7fd6a4" stroke-width="3" fill="none" stroke-dasharray="8 8" marker-end="url(#arr)"/>
+        <path id="l3" d="M 1510 482 C 1510 522, 1430 522, 1200 522 L 520 522 C 430 522, 410 520, 410 484" stroke="#7fd6a4" stroke-width="3" fill="none" stroke-dasharray="8 8" marker-end="url(#arr)" opacity=".85"/>
+      </svg>
+      <div class="col colA">
+        <div class="t"><span class="lbl">대화</span></div>
+        <div class="panel">
+          <div class="bubble u" id="b1">결제 재시도 로직이 테스트에서 깨져요. 원인 찾아서 고쳐 줘.</div>
+          <div class="bubble o" id="b2">`src/pay.ts`의 재시도 간격 계산을 확인해 볼게요.<div class="bars"><i style="width:80%"></i><i style="width:55%"></i></div></div>
+          <div class="bubble u" id="b3">테스트 다시 돌려 줘</div>
+          <div class="gone" id="gone">세션 종료 · 대화는 사라짐</div>
+        </div>
+      </div>
+      <div class="col colB">
+        <div class="t"><span class="lbl">실행 이력</span><span class="lbl" style="color:var(--mut);text-transform:none;font-weight:500">· 메타데이터만 저장</span></div>
+        <div class="panel">
+          <div class="row" id="r1"><span class="k">read</span><span class="f">src/pay.ts</span><span class="ok">✓</span></div>
+          <div class="row" id="r2"><span class="k">bash</span><span class="f">bun test pay</span><span class="no">exit 1</span></div>
+          <div class="row" id="r3"><span class="k">edit</span><span class="f">src/pay.ts  +6 −2</span><span class="ok">승인</span></div>
+          <div class="row" id="r4"><span class="k">bash</span><span class="f">bun test pay</span><span class="ok">exit 0</span></div>
+          <div class="row" id="r5"><span class="k">skill</span><span class="f">llm-wiki</span><span class="ok">✓</span></div>
+          <div class="count" id="cnt1">tool-outcomes · append-only</div>
+        </div>
+      </div>
+      <div class="col colC">
+        <div class="t"><span class="lbl mono">knowledge/</span><span class="lbl" style="color:var(--mut);text-transform:none;font-weight:500">· 종료 시 자동 캡처</span></div>
+        <div class="panel">
+          <div class="wcard" id="w1">raw/session-digests/…<span class="tag">digest</span><small>반복 통과·실패 명령, 자주 바뀐 파일</small></div>
+          <div class="wcard" id="w2">wiki/concepts/payment-retry.md<span class="tag">concept</span><small>출처: 세션 다이제스트 2건</small></div>
+          <div class="wcard" id="w3">wiki/reports/project-facts.md<span class="tag">report</span><small>다음 대화의 참고 자료</small></div>
+          <div class="count" id="cnt2">sources 5 · compiled 5 · problems 0</div>
+        </div>
+      </div>
+      <div class="pills" id="s1pills">
+        <span class="chip mono">/history</span><span class="chip mono">/facts</span><span class="chip mono">memory</span><span class="chip mono">--resume</span><span class="chip mono">/sessions</span>
+      </div>
+      <p class="note" id="s1note">쌓인 이력은 <code>memory</code> 도구로 다시 꺼내 쓰고, 지난 작업은 <code>--resume</code>으로 이어 갑니다</p>
+    </div>
+  </section>
+
+  <!-- S2: engine-agnostic + combos -->
+  <section class="scene" id="s2">
+    <div class="eyebrow"><i style="background:var(--blue)"></i>엔진 무관 · 멀티 모델 콤보</div>
+    <h1 class="head">Ollama · Codex · Claude, 어떤 엔진을 써도<br>기록은 <em class="blue">하나</em>로 쌓여요</h1>
+    <div class="wrapper tilt">
+      <div class="eng">
+        <svg>
+          <path id="e1" d="M 200 70 C 330 70, 330 247, 430 247" stroke="#8fc3f5" stroke-width="3.5" fill="none"/>
+          <path id="e2" d="M 200 247 L 430 247" stroke="#ffcc70" stroke-width="3.5" fill="none"/>
+          <path id="e3" d="M 200 424 C 330 424, 330 247, 430 247" stroke="#b9a7ff" stroke-width="3.5" fill="none"/>
+        </svg>
+        <span class="chip" id="c1" style="top:46px"><span class="d" style="background:var(--blue)"></span>Ollama · local</span>
+        <span class="chip" id="c2" style="top:223px"><span class="d" style="background:var(--amber)"></span>Codex CLI</span>
+        <span class="chip" id="c3" style="top:400px"><span class="d" style="background:var(--violet)"></span>Claude CLI</span>
+        <div class="hub" id="hub">실행 이력</div>
+        <div class="cap" id="cap">같은 형식 · 같은 자산</div>
+        <div class="blocks"><i id="k1"></i><i id="k2"></i><i id="k3"></i><i id="k4"></i></div>
+      </div>
+      <div class="card combo" id="combo">
+        <div class="bar"><i></i><i></i><i></i><span>/model combo</span></div>
+        <div class="cmd"><span class="ps">› </span>/model combo <span class="arg">astra-fable</span></div>
+        <div class="rows">
+          <div class="r" id="m1"><span class="role">Planner<small>계획</small></span><span class="arrow">→</span><span class="chip"><span class="d" style="background:var(--amber)"></span>Codex · Astra</span></div>
+          <div class="r" id="m2"><span class="role">Executor<small>실행</small></span><span class="arrow">→</span><span class="chip"><span class="d" style="background:var(--amber)"></span>Codex · Luna</span></div>
+          <div class="r" id="m3"><span class="role">Architect<small>설계</small></span><span class="arrow">→</span><span class="chip"><span class="d" style="background:var(--violet)"></span>Claude · Fable</span></div>
+          <div class="r" id="m4"><span class="role">Critic<small>리뷰</small></span><span class="arrow">→</span><span class="chip"><span class="d" style="background:var(--violet)"></span>Claude · Fable</span></div>
+        </div>
+        <div class="foot" id="cfoot">역할마다 잘하는 모델을 씁니다. 일반 대화는 메인 모델, 콤보는 워크플로 역할에 쓰이고 실행 중인 모델이 화면에 표시됩니다. 대화 중 <span class="mono">/model</span>로 바로 전환.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- S3: auto skills + intent routing -->
+  <section class="scene" id="s3">
+    <div class="eyebrow"><i style="background:var(--coral)"></i>자동 스킬 · 의도 라우팅</div>
+    <h1 class="head">알아서 돕되,<br><em class="coral">멋대로 하지 않아요</em></h1>
+    <div class="wrapper tilt">
+      <div class="card tui">
+        <div class="bar"><i></i><i></i><i></i><span>my-project — otter</span></div>
+        <div class="body">
+          <div class="line"><span class="ps">› </span><span id="typ3"></span><span class="cursor" id="cur3"></span></div>
+          <div class="route" id="route">
+            <div class="q">요청이 모호합니다. 어떻게 진행할까요? <span style="color:var(--mut);font-weight:500">(워크플로는 자동으로 시작하지 않습니다)</span></div>
+            <div class="chips">
+              <span class="chip" id="q1">Continue in chat</span>
+              <span class="chip" id="q2">Start deep-interview</span>
+              <span class="chip ghost" id="q3">Start ralplan</span>
+              <span class="chip ghost" id="q4">Cancel</span>
+            </div>
+          </div>
+          <div class="reply" id="reply">
+            <span class="skills"><i></i>Skills used: llm-wiki</span>
+            <div class="bars"><i style="width:78%"></i><i style="width:92%"></i><i style="width:61%"></i></div>
+          </div>
+        </div>
+        <div class="rule" id="rule">force: 접두사 · /skills auto off 로 끄기</div>
+      </div>
+      <p class="note" id="s3note">맥락에 맞는 스킬을 스스로 불러 쓰고, 무엇을 썼는지 항상 표시합니다</p>
+    </div>
+  </section>
+
+  <!-- S4: human approval -->
+  <section class="scene" id="s4">
+    <div class="eyebrow"><i></i>직접 실행 · 안전장치</div>
+    <h1 class="head">모든 실행은 <em class="mint">사람이 승인</em>해요<br><span style="font-size:44px;font-weight:600;color:var(--dim)">한 동작씩, 또는 계획 단위로</span></h1>
+    <div class="wrapper tilt">
+      <div class="card diff" id="diff">
+        <div class="bar"><i></i><i></i><i></i><span>edit · src/pay.ts</span></div>
+<pre><span class="ctx">  async function retry(fn, attempt = 0) {</span><span class="del">-   const wait = 200 * attempt</span><span class="add">+   const wait = Math.min(200 * 2 ** attempt, 5_000)</span><span class="add">+   if (attempt >= MAX_ATTEMPTS) throw new RetryError()</span><span class="ctx">    await sleep(wait)</span><span class="ctx">    return fn().catch(() => retry(fn, attempt + 1))</span><span class="ctx">  }</span></pre>
+        <div class="ask"><span>이 수정을 적용할까요?</span><span class="chip" id="ok">승인 (y)</span><span class="chip ghost">거부 (n)</span><span class="done" id="done">✓ 적용됨 · /undo 가능</span></div>
+      </div>
+      <div class="card flow" id="flow">
+        <div class="bar"><i></i><i></i><i></i><span>plan → approve → worktree</span></div>
+        <div class="lbl2">계획 단위 실행</div>
+        <div class="steps">
+          <div class="step" id="p1"><span class="n">1</span><span class="c">/plan<small>계획 작성</small></span></div>
+          <div class="step" id="p2"><span class="n">2</span><span class="c">/approve<small>사람이 승인 · 자동 승인 없음</small></span></div>
+          <div class="step" id="p3"><span class="n">3</span><span class="c">wf-3f2a<small>별도 작업 트리에서 실행</small></span></div>
+        </div>
+        <div class="choice" id="choice"><span class="chip">Apply</span><span class="chip ghost">Keep</span><span class="chip ghost">Discard</span></div>
+      </div>
+      <p class="note" id="s4note">읽기 전용 명령은 묻지 않고, <code>sudo</code>·강제 푸시는 항상 거부합니다</p>
+    </div>
+  </section>
+
+  <!-- S5: outro -->
+  <section class="scene" id="s5">
+    <div class="spot" style="top:120px"></div>
+    <div class="wm"><div class="wordmark"><img src="otter-avatar.png" alt=""><b>otter<span>.</span></b></div></div>
+    <h1 class="head">실행할수록 <em class="mint">쌓이는</em> 코딩 에이전트</h1>
+    <div class="install" id="inst"><b>$</b> curl -fsSL https://raw.githubusercontent.com/KimJiSeong1994/AgentFramework/master/install.sh | bash</div>
+    <p class="gh" id="gh">github.com/KimJiSeong1994/AgentFramework · MIT</p>
+    <div class="pillars" id="pillars">
+      <span class="chip"><span class="d" style="background:var(--mint)"></span>이력 → 지식 위키</span>
+      <span class="chip"><span class="d" style="background:var(--blue)"></span>엔진 무관 · 멀티 모델 콤보</span>
+      <span class="chip"><span class="d" style="background:var(--coral)"></span>자동 스킬 · 의도 라우팅</span>
+    </div>
+  </section>
+  <div id="prog"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------------------------
+// Deterministic timeline: every motion is a paused Web Animation; window.seek(t) scrubs them all.
+// ---------------------------------------------------------------------------------------------
+const $ = id => document.getElementById(id);
+const EASE = 'cubic-bezier(.2,.75,.2,1)';
+const anims = [], dyn = [];
+function A(el, kf, start, dur, { easing = EASE, fill = 'both' } = {}) {
+  const a = el.animate(kf, { delay: start * 1000, duration: Math.max(1, dur * 1000), fill, easing });
+  a.pause(); anims.push(a); return a;
+}
+// entrance: fades + moves in. keeps its final state (fill both)
+function IN(el, start, { dur = .6, y = 26, x = 0, s = 1 } = {}) {
+  return A(el, [{ opacity: 0, transform: `translate(${x}px,${y}px) scale(${s})` }, { opacity: 1, transform: 'translate(0,0) scale(1)' }], start, dur);
+}
+// exit: forwards only, so it never overrides an entrance before it begins
+function OUT(el, start, { dur = .45, y = -18, x = 0, s = 1 } = {}) {
+  return A(el, [{ opacity: 1, transform: 'translate(0,0) scale(1)' }, { opacity: 0, transform: `translate(${x}px,${y}px) scale(${s})` }], start, dur, { fill: 'forwards' });
+}
+// scene: fade in at [start, start+.5], fade out at [end-.45, end]
+const SCENES = [];
+function SCENE(el, start, end) {
+  SCENES.push([start, end]);
+  A(el, [{ opacity: 0, transform: 'scale(1.02)' }, { opacity: 1, transform: 'scale(1)' }], Math.max(0, start - .3), .55);
+  A(el, [{ opacity: 1, transform: 'scale(1)' }, { opacity: 0, transform: 'scale(.985)' }], end - .45, .45, { fill: 'forwards' });
+  // slow drift: mockups rise ~14px over the scene so held frames never look frozen
+  const w = el.querySelector('.wrapper');
+  if (w) A(w, [{ transform: 'perspective(2600px) rotateX(5deg) translateY(10px)' }, { transform: 'perspective(2600px) rotateX(5deg) translateY(-10px)' }], start, end - start, { easing: 'linear' });
+}
+dyn.push(t => {
+  const dots = document.querySelectorAll('#prog i');
+  SCENES.forEach(([a, b], i) => { const d = dots[i]; if (!d) return; d.classList.toggle('on', t >= a - .3 && t < b - .3); d.classList.toggle('done', t >= b - .3); });
+  $('prog').style.opacity = t < .4 || t > window.DURATION - .5 ? 0 : 1;
+});
+function DRAW(path, start, dur) {
+  const L = path.getTotalLength();
+  path.style.strokeDasharray = path.getAttribute('stroke-dasharray') ? path.getAttribute('stroke-dasharray') : `${L}`;
+  if (path.getAttribute('stroke-dasharray')) { // dashed line: reveal with a clip via opacity + a mask-free trick: animate a second dasharray
+    path.style.strokeDasharray = `${L}`; path.dataset.dashed = '1';
+  }
+  path.style.strokeDashoffset = L;
+  A(path, [{ strokeDashoffset: L, opacity: 1 }, { strokeDashoffset: 0, opacity: 1 }], start, dur, { easing: 'cubic-bezier(.4,0,.2,1)' });
+  A(path, [{ opacity: 0 }, { opacity: 1 }], start, .05);
+}
+function TYPE(id, curId, text, start, cps = 16, hold = 99) {
+  const el = $(id), cur = $(curId);
+  dyn.push(t => {
+    const n = Math.max(0, Math.floor((t - start) * cps));
+    el.textContent = text.slice(0, n);
+    const done = n >= text.length;
+    cur.style.opacity = (t < start - 1.5) ? 0 : (done && t > start + text.length / cps + hold) ? 0 : (Math.floor(t * 2.4) % 2 ? 0.15 : 1);
+  });
+}
+function CLASS(el, cls, start, end = 1e9) { dyn.push(t => el.classList.toggle(cls, t >= start && t < end)); }
+
+// ---- background drift (slow, continuous) ----
+A($('glowA'), [{ transform: 'translate(0,0)' }, { transform: 'translate(120px,60px)' }, { transform: 'translate(0,0)' }], 0, 36, { easing: 'ease-in-out' });
+A($('glowB'), [{ transform: 'translate(0,0)' }, { transform: 'translate(-90px,-80px)' }, { transform: 'translate(0,0)' }], 0, 36, { easing: 'ease-in-out' });
+
+// ---- S0 hook  0 – 4.8 ----
+{
+  const t0 = 0, t1 = 5.8; SCENE($('s0'), t0, t1);
+  const wm = document.querySelector('#s0 .wm');
+  A(wm, [{ opacity: 0, transform: 'translateX(-50%) translateY(20px) scale(.92)' }, { opacity: 1, transform: 'translateX(-50%) translateY(0) scale(1)' }], .15, .7);
+  IN(document.querySelector('#s0 .head'), .45, { dur: .7, y: 30 });
+  IN(document.querySelector('#s0 .sub'), .7, { dur: .6, y: 20 });
+  IN(document.querySelector('#s0 .term'), .95, { dur: .7, y: 40, s: .97 });
+  TYPE('typ0', 'cur0', '결제 재시도 로직이 테스트에서 깨져요. 원인 찾아서 고쳐 줘.', 1.7, 13);
+}
+
+// ---- S1 history 4.8 – 10.6 ----
+{
+  const t0 = 5.8, t1 = 13.2; SCENE($('s1'), t0, t1);
+  A(document.querySelector('#s1 .eyebrow'), [{ opacity: 0, transform: 'translateX(-50%) translateY(14px)' }, { opacity: 1, transform: 'translateX(-50%) translateY(0)' }], t0 + .1, .5);
+  IN(document.querySelector('#s1 .head'), t0 + .2, { dur: .7, y: 26 });
+  IN(document.querySelector('#s1 .colA'), t0 + .5, { dur: .6, y: 30 });
+  IN($('b1'), t0 + .7, { dur: .4, y: 12 }); IN($('b2'), t0 + .95, { dur: .4, y: 12 }); IN($('b3'), t0 + 1.2, { dur: .4, y: 12 });
+  // conversation ends: bubbles dissolve, overlay states it
+  A($('gone'), [{ opacity: 0 }, { opacity: 1 }], t0 + 2.9, .5);
+  OUT($('b1'), t0 + 3.0, { dur: .6, y: -30 }); OUT($('b2'), t0 + 3.1, { dur: .6, y: -30 }); OUT($('b3'), t0 + 3.2, { dur: .6, y: -30 });
+  // history rows
+  IN(document.querySelector('#s1 .colB'), t0 + 1.0, { dur: .6, y: 30 });
+  DRAW($('l1'), t0 + 1.2, .5);
+  ['r1', 'r2', 'r3', 'r4', 'r5'].forEach((id, i) => IN($(id), t0 + 1.4 + i * .28, { dur: .4, x: -20, y: 0 }));
+  A($('cnt1'), [{ opacity: 0 }, { opacity: 1 }], t0 + 2.9, .4);
+  // wiki capture
+  IN(document.querySelector('#s1 .colC'), t0 + 2.4, { dur: .6, y: 30 });
+  DRAW($('l2'), t0 + 2.7, .5);
+  ['w1', 'w2', 'w3'].forEach((id, i) => IN($(id), t0 + 3.0 + i * .35, { dur: .5, y: 18, s: .96 }));
+  A($('cnt2'), [{ opacity: 0 }, { opacity: 1 }], t0 + 4.1, .4);
+  // loop back: next conversation reads the wiki
+  DRAW($('l3'), t0 + 4.2, 1.0);
+  IN($('s1pills'), t0 + 4.3, { dur: .6, y: 16 });
+  IN($('s1note'), t0 + 4.6, { dur: .6, y: 14 });
+}
+
+// ---- S2 engines 10.6 – 15.6 ----
+{
+  const t0 = 13.2, t1 = 19.6; SCENE($('s2'), t0, t1);
+  A(document.querySelector('#s2 .eyebrow'), [{ opacity: 0, transform: 'translateX(-50%) translateY(14px)' }, { opacity: 1, transform: 'translateX(-50%) translateY(0)' }], t0 + .1, .5);
+  IN(document.querySelector('#s2 .head'), t0 + .2, { dur: .7, y: 26 });
+  ['c1', 'c2', 'c3'].forEach((id, i) => IN($(id), t0 + .5 + i * .15, { dur: .5, x: -24, y: 0 }));
+  IN($('hub'), t0 + .8, { dur: .5, s: .9, y: 0 });
+  ['e1', 'e2', 'e3'].forEach((id, i) => DRAW($(id), t0 + .95 + i * .12, .7));
+  IN($('cap'), t0 + 1.7, { dur: .4, y: 8 });
+  ['k1', 'k2', 'k3', 'k4'].forEach((id, i) => IN($(id), t0 + 1.8 + i * .22, { dur: .45, y: -40 }));
+  IN($('combo'), t0 + 1.4, { dur: .7, y: 40, s: .97 });
+  ['m1', 'm2', 'm3', 'm4'].forEach((id, i) => IN($(id), t0 + 2.2 + i * .28, { dur: .5, x: 30, y: 0 }));
+  IN($('cfoot'), t0 + 3.5, { dur: .5, y: 10 });
+}
+
+// ---- S3 skills 15.6 – 20.4 ----
+{
+  const t0 = 19.6, t1 = 25.6; SCENE($('s3'), t0, t1);
+  A(document.querySelector('#s3 .eyebrow'), [{ opacity: 0, transform: 'translateX(-50%) translateY(14px)' }, { opacity: 1, transform: 'translateX(-50%) translateY(0)' }], t0 + .1, .5);
+  IN(document.querySelector('#s3 .head'), t0 + .2, { dur: .7, y: 26 });
+  IN(document.querySelector('#s3 .tui'), t0 + .5, { dur: .7, y: 40, s: .97 });
+  TYPE('typ3', 'cur3', '인증 쪽 구조를 전체적으로 손봐 줘', t0 + .9, 18, 0.2);
+  IN($('route'), t0 + 2.0, { dur: .5, y: 14 });
+  ['q1', 'q2', 'q3', 'q4'].forEach((id, i) => IN($(id), t0 + 2.2 + i * .12, { dur: .4, y: 10, s: .9 }));
+  CLASS($('q1'), 'sel', t0 + 3.0);
+  IN($('reply'), t0 + 3.3, { dur: .5, y: 14 });
+  IN($('rule'), t0 + 3.6, { dur: .4, y: 6 });
+  IN($('s3note'), t0 + 3.5, { dur: .6, y: 14 });
+}
+
+// ---- S4 approval 20.4 – 24.6 ----
+{
+  const t0 = 25.6, t1 = 31.0; SCENE($('s4'), t0, t1);
+  A(document.querySelector('#s4 .eyebrow'), [{ opacity: 0, transform: 'translateX(-50%) translateY(14px)' }, { opacity: 1, transform: 'translateX(-50%) translateY(0)' }], t0 + .1, .5);
+  IN(document.querySelector('#s4 .head'), t0 + .2, { dur: .7, y: 26 });
+  IN($('diff'), t0 + .5, { dur: .7, y: 40, s: .97 });
+  IN($('flow'), t0 + .7, { dur: .7, y: 40, s: .97 });
+  CLASS($('ok'), 'sel', t0 + 1.7);
+  A($('done'), [{ opacity: 0, transform: 'translateX(10px)' }, { opacity: 1, transform: 'translateX(0)' }], t0 + 2.2, .4);
+  CLASS($('p1'), 'on', t0 + 1.2); CLASS($('p2'), 'on', t0 + 1.9); CLASS($('p3'), 'on', t0 + 2.6);
+  IN($('choice'), t0 + 3.1, { dur: .5, y: 12 });
+  IN($('s4note'), t0 + 2.6, { dur: .6, y: 14 });
+}
+
+// ---- S5 outro 24.6 – 29.0 ----
+{
+  const t0 = 31.0, t1 = 36.0; SCENE($('s5'), t0, t1);
+  const wm = document.querySelector('#s5 .wm');
+  A(wm, [{ opacity: 0, transform: 'translateX(-50%) translateY(20px) scale(.92)' }, { opacity: 1, transform: 'translateX(-50%) translateY(0) scale(1)' }], t0 + .15, .7);
+  IN(document.querySelector('#s5 .head'), t0 + .4, { dur: .7, y: 28 });
+  A($('inst'), [{ opacity: 0, transform: 'translateX(-50%) translateY(24px)' }, { opacity: 1, transform: 'translateX(-50%) translateY(0)' }], t0 + .8, .6);
+  IN($('gh'), t0 + 1.1, { dur: .5, y: 12 });
+  IN($('pillars'), t0 + 1.4, { dur: .6, y: 16 });
+}
+
+window.DURATION = 36.0;
+window.seek = t => { for (const a of anims) a.currentTime = t * 1000; for (const f of dyn) f(t); return t; };
+window.seek(0);
+</script>
+</body>
+</html>
