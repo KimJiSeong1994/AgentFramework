@@ -2,6 +2,7 @@
 // (memory recall, intent-offer ranking, the routing eval). The engine follows `memory.engine`: by default a tool-free
 // Claude or Codex CLI run through the hardened Otter CLI transport (`auto`: claude, then codex, whichever is on PATH);
 // `jev` (the local OpenJev server) and `local` (Ollama) only when configured. Answers are data, never instructions.
+import type { ClaudeGateway } from "../config.ts"
 import { z } from "zod"
 import { cliExecutableAvailable, createCliTransport, type CliTransportHandle, type CliTransportOptions } from "../hosts/cli-transport.ts"
 import { containsSecret } from "../security/secrets.ts"
@@ -63,6 +64,8 @@ export type JudgeRequest = {
   /** Native model for claude/codex/local; unused by jev. */
   model?: string
   localKeepAlive?: string
+  /** claude only: the user's `claude_gateway` route; a judge call must not bypass it. */
+  claudeGateway?: ClaudeGateway
   /** OpenJev root endpoint; only for jev. */
   endpoint?: string
   /** Classifier name shown to a CLI model, and the OpenJev question key. */
@@ -110,6 +113,7 @@ async function judgeCli(request: JudgeRequest & { engine: "claude" | "codex" | "
     transport = (request.transport ?? createCliTransport)({
       engine: request.engine, model: request.model, prompt, deadlineAt: request.deadlineAt, maxOutputBytes: MAX_CLI_OUTPUT_BYTES,
       ...(request.engine === "local" && request.localKeepAlive != null ? { localKeepAlive: request.localKeepAlive } : {}),
+      ...(request.engine === "claude" && request.claudeGateway ? { claudeGateway: request.claudeGateway } : {}),
     })
   } catch { return { ok: false, reason: "unavailable" } }
   const cancel = () => { void transport.requestCancel(request.cancelReason, Date.now() + 2000).catch(() => {}) }

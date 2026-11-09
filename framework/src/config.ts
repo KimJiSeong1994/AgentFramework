@@ -17,6 +17,25 @@ export function isLocalKeepAlive(value: unknown): value is string {
   return Number.isSafeInteger(seconds) && seconds <= 24 * 60 * 60
 }
 
+/** BigValue AI Gateway route for the claude engine (user config only). See ClaudeGateway in OtterConfig. */
+export type ClaudeGateway = { url: string; experiment_id: string; key_file: string; data_class?: string | null; pin_model?: string | null }
+
+// Values land in a JSON settings argument, a shell-quoted apiKeyHelper ('<key_file>') and newline-separated headers:
+// narrow charsets keep each one inert there.
+export function isClaudeGateway(value: unknown): value is ClaudeGateway {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const g = value as Record<string, unknown>
+  const id = /^[A-Za-z0-9_.:-]{1,128}$/
+  return Object.keys(g).every(key => ["url", "experiment_id", "key_file", "data_class", "pin_model"].includes(key)) &&
+    // The key travels to `url`: TLS unless the gateway is on this machine.
+    typeof g.url === "string" && g.url.length <= 2048 &&
+    /^(?:https:\/\/[A-Za-z0-9.-]+|http:\/\/(?:127\.0\.0\.1|localhost))(?::[0-9]{1,5})?(?:\/[A-Za-z0-9._~\/-]*)?$/.test(g.url) &&
+    typeof g.experiment_id === "string" && id.test(g.experiment_id) &&
+    typeof g.key_file === "string" && /^\/[A-Za-z0-9._\/@+-]{1,1023}$/.test(g.key_file) &&
+    (g.data_class == null || g.data_class === "public" || g.data_class === "internal" || g.data_class === "confidential") &&
+    (g.pin_model == null || (typeof g.pin_model === "string" && id.test(g.pin_model)))
+}
+
 /** Otter's estimated local input budget; does not change the model server's context window. */
 export function localContextInputTokens(config: Pick<OtterConfig, "local_model">): number {
   return config.local_model?.context_input_tokens ?? 8192
@@ -128,6 +147,13 @@ export type OtterConfig = {
   /** Ollama model residency after a request; absent/null inherits the server default. */
   /** `think`: let the local model reason before answering (Ollama `--think`); off by default (cheaper, faster turns). */
   local_model?: { keep_alive?: string | null; context_input_tokens?: number | null; context_trim_target_percent?: number | null; think?: boolean | null }
+  /**
+   * Send claude-engine calls through the BigValue AI Gateway (PII masking, audit, budget). User config only; absent/null
+   * = direct. The key is read from `key_file` by the CLI (apiKeyHelper), never put in otter's or the CLI's environment.
+   * No `data_class` = the gateway treats calls as confidential and answers with its local model; set "public" only
+   * where the work may leave the network. `pin_model` fixes the gateway model (e.g. "claude-sonnet").
+   */
+  claude_gateway?: ClaudeGateway | null
   /** hook ids to disable, e.g. ["guard.repeat", "mode.detect"] */
   disabled_hooks: string[]
   /** prefix budgets in estimated tokens; doctor/tests assert these */
@@ -451,7 +477,7 @@ export function projectConfigPath(worktree: string): string {
   return join(worktree, ".otter", "otter.jsonc")
 }
 
-export type ConfigErrorKind = "unreadable" | "not-a-file" | "invalid-jsonc" | "invalid-verifier-selector" | "invalid-chat-intent" | "invalid-chat-worktree" | "invalid-chat-execute" | "invalid-local-model"
+export type ConfigErrorKind = "unreadable" | "not-a-file" | "invalid-jsonc" | "invalid-verifier-selector" | "invalid-chat-intent" | "invalid-chat-worktree" | "invalid-chat-execute" | "invalid-local-model" | "invalid-claude-gateway" | "project-claude-gateway"
 
 /** Effective `chat.intent`: an absent key means the default, "offer". */
 export function chatIntentMode(config: { chat: { intent?: "offer" | "off" } }): "offer" | "off" {
@@ -551,6 +577,11 @@ export function loadConfig(worktree: string): OtterConfig {
             (!Number.isInteger(local.context_trim_target_percent) || local.context_trim_target_percent < 50 || local.context_trim_target_percent > 85))) {
         throw new ConfigError(p, "invalid-local-model")
       }
+    }
+    if (Object.hasOwn(patch, "claude_gateway")) {
+      // Where Claude traffic goes and which local file is sent as its credential: a repository never chooses these.
+      if (source === "project") throw new ConfigError(p, "project-claude-gateway")
+      if (patch.claude_gateway !== null && !isClaudeGateway(patch.claude_gateway)) throw new ConfigError(p, "invalid-claude-gateway")
     }
     const authorizedMode = chatExecuteMode(cfg)
     cfg = deepMerge(cfg, patch)

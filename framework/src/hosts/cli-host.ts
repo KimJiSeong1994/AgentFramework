@@ -287,6 +287,7 @@ export type CliHostOptions = {
   /** Trusted originating-project settings; execution cwd may be an isolated worktree without project config.
    * Input budget reloads per execution, retention per inference. Omission uses local model defaults. */
   loadLocalModel?: () => OtterConfig["local_model"]
+  loadClaudeGateway?: () => OtterConfig["claude_gateway"]
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -709,6 +710,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
   const transportFactory = injectedTransportFactory ?? createCliTransport
   const loadMemory = options.loadMemory ?? (() => DEFAULT_CONFIG.memory)
   const loadLocalModel = options.loadLocalModel ?? (() => DEFAULT_CONFIG.local_model)
+  const loadClaudeGateway = options.loadClaudeGateway ?? (() => undefined)
   const currentHandles = new Map<string, { reconcile: () => Promise<ExecutionReconciliation> }>()
   const preflightTransports = new Set<CliTransportHandle>()
   const identity = Object.freeze({ engine: options.engine, profile: "legacy-unowned", controlProfile: CONTROL_PROFILE })
@@ -1125,6 +1127,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               const transportOptions: CliTransportOptions = {
                 engine: route.engine,
                 ...(route.engine === "local" ? { localKeepAlive: loadLocalModel()?.keep_alive ?? undefined, localThink: loadLocalModel()?.think === true } : {}),
+                ...(route.engine === "claude" ? (gateway => gateway ? { claudeGateway: gateway } : {})(loadClaudeGateway()) : {}),
                 model: route.model,
                 prompt,
                 deadlineAt: nativeDeadlineAt,

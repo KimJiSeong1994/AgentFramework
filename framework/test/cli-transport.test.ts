@@ -8,7 +8,7 @@ import { tmpdir } from "node:os"
 import process from "node:process"
 import {
   classifyEngineFailure,
-  CliExecutableError, createCliTransport, findExecutable, nativeObservedUsageCanonicalByteBound, type CliEngine,
+  claudeSettings, CliExecutableError, createCliTransport, findExecutable, nativeObservedUsageCanonicalByteBound, type CliEngine,
 } from "../src/hosts/cli-transport.ts"
 import { codexProfileArgv, createCodexProfile } from "../src/hosts/codex-profile.ts"
 import type { EngineFailureClass } from "../src/hosts/types.ts"
@@ -516,6 +516,31 @@ test("Claude uses the verified stdin launch and emits assistant text once before
   expect(invocation.prompt).toBe(prompt)
   expect(invocation.cwd).not.toBe(sourceRoot())
   expect(existsSync(invocation.cwd)).toBe(false)
+})
+
+test("Claude routes through the configured AI gateway without putting the key in argv or environment", async () => {
+  const gateway = { url: "http://127.0.0.1:18081/anthropic", experiment_id: "otter-local", key_file: "/home/u/.config/otter/gateway_key" }
+  const settings = JSON.parse(claudeSettings(gateway))
+  expect(settings).toEqual({
+    disableAllHooks: true, apiKeyHelper: "cat '/home/u/.config/otter/gateway_key'",
+    env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:18081/anthropic", ANTHROPIC_CUSTOM_HEADERS: "x-bv-experiment-id: otter-local" },
+  })   // no data class unless configured: the gateway then keeps the call on its local model
+  expect(JSON.parse(claudeSettings({ ...gateway, data_class: "public", pin_model: "claude-sonnet" })).env.ANTHROPIC_CUSTOM_HEADERS)
+    .toBe("x-bv-experiment-id: otter-local\nx-bv-data-class: public\nx-bv-pin-model: claude-sonnet")
+
+  const expectedArgs = [
+    "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
+    "--setting-sources", "", "--settings", claudeSettings(gateway), "--disable-slash-commands", "--no-chrome",
+    "--no-session-persistence", "--system-prompt", HOST_INFERENCE_INSTRUCTIONS, "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
+  ]
+  const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
+  testDirectories.push(resolve(marker, ".."))
+  installFakeCli("claude", fixtureSource({ expectedArgs, prompt: "fixture prompt", chunks: claudeOutput("answer"), marker, sourceRoot: sourceRoot() }))
+  expect(await createCliTransport(options("claude", { claudeGateway: gateway })).run())
+    .toEqual({ status: "completed", text: "answer", quiescent: true })
+
+  expect(() => createCliTransport(options("codex", { claudeGateway: gateway }))).toThrow(TypeError)
+  expect(() => createCliTransport(options("claude", { claudeGateway: { ...gateway, key_file: "/tmp/x'; rm -rf ~" } }))).toThrow(TypeError)
 })
 
 test("Claude permits only the observed safe-mode builtin plugin names", async () => {

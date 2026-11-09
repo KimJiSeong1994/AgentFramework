@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process"
 import { createVendorProcess, vendorProcessEnvironment, type VendorProcessHandle, type VendorProcessResult } from "./vendor-process.ts"
 import type { EngineFailureClass, ExecutionCancelResult, ExecutionReconciliation } from "./types.ts"
 import { CODEX_INSTRUCTIONS, CODEX_VERSION, CODEX_SUPPORTED_VERSIONS, codexProfileArgv, createCodexProfile } from "./codex-profile.ts"
-import { isLocalKeepAlive } from "../config.ts"
+import { isClaudeGateway, isLocalKeepAlive, type ClaudeGateway } from "../config.ts"
 import { ensureOwnedCodexHome, OwnedCodexHomeError } from "./codex-home.ts"
 import { HOST_INFERENCE_INSTRUCTIONS } from "./inference-instructions.ts"
 
@@ -19,6 +19,8 @@ export type CliTransportOptions = {
   localKeepAlive?: string
   /** Local engine only: let the model reason first (`ollama run --think=true`); default false. */
   localThink?: boolean
+  /** Claude engine only: route through the BigValue AI Gateway (config `claude_gateway`). */
+  claudeGateway?: ClaudeGateway
   model: string
   prompt: string
   deadlineAt: number
@@ -205,7 +207,8 @@ function safeOptions(options: CliTransportOptions): CliTransportOptions {
       !Number.isSafeInteger(options.maxOutputBytes) || options.maxOutputBytes < 0 || options.maxOutputBytes > MAX_OUTPUT_BYTES ||
       (options.onText !== undefined && typeof options.onText !== "function") ||
       (options.localKeepAlive !== undefined && !isLocalKeepAlive(options.localKeepAlive)) ||
-      (options.localThink !== undefined && typeof options.localThink !== "boolean")) {
+      (options.localThink !== undefined && typeof options.localThink !== "boolean") ||
+      (options.claudeGateway !== undefined && (options.engine !== "claude" || !isClaudeGateway(options.claudeGateway)))) {
     throw new TypeError(SAFE_ERRORS.options)
   }
   return { ...options }
@@ -463,11 +466,27 @@ function createScratchDirectory(): OwnedScratchDirectory {
   throw new Error(SAFE_ERRORS.scratch)
 }
 
-function nativeArgv(engine: CliEngine, model: string, scratch: string, codexState?: OwnedCodexState, codexVersion?: string, localThink = false): string[] {
+/**
+ * Claude CLI flag settings. With a gateway, the CLI itself reads the key file (apiKeyHelper) and gets the base URL and
+ * gateway headers from settings `env`: nothing credential-bearing passes through otter's or the CLI's process environment.
+ */
+export function claudeSettings(gateway?: ClaudeGateway): string {
+  if (!gateway) return '{"disableAllHooks":true}'
+  const headers = [`x-bv-experiment-id: ${gateway.experiment_id}`,
+    ...(gateway.data_class ? [`x-bv-data-class: ${gateway.data_class}`] : []),
+    ...(gateway.pin_model ? [`x-bv-pin-model: ${gateway.pin_model}`] : [])]
+  return JSON.stringify({
+    disableAllHooks: true,
+    apiKeyHelper: `cat '${gateway.key_file}'`,
+    env: { ANTHROPIC_BASE_URL: gateway.url, ANTHROPIC_CUSTOM_HEADERS: headers.join("\n") },
+  })
+}
+
+function nativeArgv(engine: CliEngine, model: string, scratch: string, codexState?: OwnedCodexState, codexVersion?: string, localThink = false, claudeGateway?: ClaudeGateway): string[] {
   if (engine === "claude") {
     return [
       "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
-      "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands",
+      "--setting-sources", "", "--settings", claudeSettings(claudeGateway), "--disable-slash-commands",
       "--no-chrome", "--no-session-persistence", "--system-prompt", HOST_INFERENCE_INSTRUCTIONS, "--output-format", "stream-json", "--verbose", "--model", model,
     ]
   }
@@ -1206,7 +1225,7 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
         } else {
           scratch = createScratchDirectory()
           if (!hasOwnedScratchIdentity(scratch)) throw new Error(SAFE_ERRORS.cleanup)
-          const argv = nativeArgv(options.engine, options.model, scratch.path, undefined, undefined, options.engine === "local" && options.localThink === true)
+          const argv = nativeArgv(options.engine, options.model, scratch.path, undefined, undefined, options.engine === "local" && options.localThink === true, options.claudeGateway)
           if (options.engine === "local" && options.localKeepAlive !== undefined) {
             // Ollama's CLI parses Go durations: negative residency needs a unit even though config uses -1.
             argv.push("--keepalive", options.localKeepAlive === "-1" ? "-1m" : options.localKeepAlive)
@@ -1340,7 +1359,7 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
       if (runCalled || cancelledBeforeRun || !probe.compatible || !probe.version || !probe.quiescent) return undefined
       try { if (nativeExecutableDigest(executable) !== executableSha256) return undefined } catch { return undefined }
       const profileSha256 = engine === "codex" ? probe.nativePolicyHash : createHash("sha256")
-        .update(JSON.stringify({ schema: "claude-native-no-tools.v1", argv: nativeArgv(engine, options.model, "/__SCRATCH__") }), "utf8").digest("hex")
+        .update(JSON.stringify({ schema: "claude-native-no-tools.v1", argv: nativeArgv(engine, options.model, "/__SCRATCH__", undefined, undefined, false, options.claudeGateway) }), "utf8").digest("hex")
       if (!profileSha256) return undefined
       const identity: CliNativeIdentity = Object.freeze({
         engine, requestedModel: options.model,
