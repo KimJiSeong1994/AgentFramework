@@ -68,6 +68,7 @@ export function createCliRuntime(options: CliRuntimeOptions): ExecutionRuntime {
       runs,
       loadMemory: () => currentMemoryConfig(worktree),
       loadLocalModel: () => loadConfig(worktree).local_model,
+      loadClaudeGateway: () => loadConfig(worktree).claude_gateway,
       // Every executed CLI tool joins the shared tool-outcome history the wiki captures (the OpenCode hook did this alone).
       recordOutcome: outcome => { recordCliToolOutcome(worktree, outcome) },
       ...(options.progress ? { observeActivity: options.progress.host } : {}),

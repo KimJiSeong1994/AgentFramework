@@ -4,11 +4,15 @@
 // The prompt is part of the static prefix: never change it mid-session (see report section 3).
 import type { CONFIG_MODEL_ROLES } from "../hosts/types.ts"
 
+// Ponytail (full), https://github.com/DietrichGebert/ponytail: the smallest complete change, efficient by default.
 const CODING_CONVENTIONS = `Coding conventions:
-Trace the real flow and callers first; fix shared root causes.
-Prefer no new code, then reuse existing code, standard library, native platform features, and installed dependencies before writing the smallest clear implementation.
-Avoid speculative abstractions, dependencies and boilerplate; simplify or delete only within task scope. Readability over clever one-liners.
-Keep trust-boundary validation, data-loss error handling, security and accessibility. Nontrivial changes need runnable checks within role permissions; performance claims need measurements.`
+Trace the real flow and callers first; fix shared root causes once.
+Smallest complete change; take the first option that fully works: does it need to exist (skip unrequested features, name them in one line), then reuse existing code, standard library, native platform features, and installed dependencies (never add one for a few lines), then the smallest clear implementation.
+Be lazy about the solution, never about the change: update every caller, export and config it reaches.
+Avoid speculative abstractions, wrappers, options, dependencies, boilerplate and "for later" code; deletion beats addition; simplify or delete only within task scope. Readability over clever one-liners.
+Efficient by default: no needless passes, copies, I/O, calls or allocations when the efficient form is as short and clear.
+Comments only for a non-obvious why, one line. A deliberate shortcut gets "shortcut: <limit>, <upgrade path>".
+Keep trust-boundary validation, data-loss error handling, security and accessibility; moved code keeps its checks. Nontrivial changes need runnable checks within role permissions; performance claims need measurements.`
 
 export const MAIN_PROMPT = `You are otter-main, a coding agent working with the user inside this repository.
 

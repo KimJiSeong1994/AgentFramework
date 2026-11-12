@@ -8,7 +8,7 @@ import { realpathSync } from "node:fs"
 import { FdTree, type FdStat } from "../skills/fd-tree.ts"
 import { join } from "node:path"
 import { z } from "zod"
-import { loadConfig, type OtterConfig } from "../config.ts"
+import { loadConfig, type ClaudeGateway, type OtterConfig } from "../config.ts"
 import { createCodexProfile } from "../hosts/codex-profile.ts"
 import { cliExecutableAvailable, type CliTransportHandle, type CliTransportOptions } from "../hosts/cli-transport.ts"
 import { NATIVE_MODEL_ID_RE } from "../hosts/types.ts"
@@ -230,8 +230,9 @@ export async function recallMemory(
   if (cached) scoreCache.delete(key)
   if (inFlight) return { status: "unavailable", reason: "busy" }
   let localKeepAlive: string | null | undefined
-  if (config.engine === "local") {
-    try { localKeepAlive = loadConfig(worktree).local_model?.keep_alive }
+  let claudeGateway: ClaudeGateway | null | undefined
+  if (config.engine === "local" || config.engine === "claude") {
+    try { const loaded = loadConfig(worktree); localKeepAlive = loaded.local_model?.keep_alive; claudeGateway = loaded.claude_gateway }
     catch { return { status: "unavailable", reason: "invalid_config" } }
   }
   inFlight = true
@@ -245,7 +246,8 @@ export async function recallMemory(
     const started = performance.now()
     const classified = await judgeChoice({
       engine: config.engine, ...(config.model ? { model: config.model } : {}), endpoint: config.endpoint,
-      ...(localKeepAlive != null ? { localKeepAlive } : {}),
+      ...(config.engine === "local" && localKeepAlive != null ? { localKeepAlive } : {}),
+      ...(config.engine === "claude" && claudeGateway ? { claudeGateway } : {}),
       role: "Otter project memory", question: QUESTION, instructions: INSTRUCTIONS, text, criteria,
       signal: controller.signal, deadlineAt, cancelReason: "memory recall cancelled", ...(options.transport ? { transport: options.transport } : {}),
     })

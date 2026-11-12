@@ -46,14 +46,21 @@ establish general shell-workload containment.
 
 ## Default coding conventions
 
-Main, worker and reviewer share compact [Ponytail-inspired](https://github.com/DietrichGebert/ponytail)
-guidance: trace the real flow and callers, fix root causes, then prefer no new code,
-existing code, the standard library, native platform features and installed dependencies
-before writing the smallest clear implementation. Avoid speculative abstractions,
-dependencies and boilerplate; prefer readable code over clever one-liners.
+Main, worker and reviewer share compact guidance based on
+[Ponytail](https://github.com/DietrichGebert/ponytail) at its default `full` level:
+trace the real flow and callers, fix root causes once, then take the first option that
+fully works: no new code, existing code, the standard library, native platform features,
+installed dependencies (never a new one for a few lines), and only then the smallest
+clear implementation. The solution is lazy, the change is complete: every caller,
+export and config it reaches is updated. Avoid speculative abstractions, wrappers,
+options and "for later" code; deletion beats addition; prefer readable code over clever
+one-liners. Code is efficient by default (no needless passes, copies, I/O, calls or
+allocations when the efficient form is as short and clear). Comments explain only a
+non-obvious why; a deliberate shortcut is marked `shortcut: <limit>, <upgrade path>`.
 Simplification stays within task scope and never removes necessary validation,
-data-loss handling, security or accessibility. Nontrivial changes need runnable checks
-within the role's existing permissions; performance claims need measurements.
+data-loss handling, security or accessibility; moved code keeps its checks. Nontrivial
+changes need runnable checks within the role's existing permissions; performance claims
+need measurements.
 
 These are default prompt instructions, not a new enforcement hook or a performance
 guarantee. Existing worker verification and read-only reviewer rules remain unchanged.
@@ -360,6 +367,32 @@ Otter delegates sign-in to each vendor CLI and never reads, stores, forwards or 
   `otter auth` / `otter login`.
 - “The model request failed after execution stopped” reports a failed model turn, not a failed login command.
   Known transport causes are shown using fixed, secret-free explanations; unknown vendor errors remain redacted.
+
+### Claude through the BigValue AI Gateway (`claude_gateway`)
+
+Chat and combo calls on the `claude` engine can go through the BigValue AI Gateway (PII masking before any external
+send, per-request audit record, key budget). Set it in the **user** config (`~/.config/otter/otter.jsonc`); a project
+`.otter/otter.jsonc` that sets `claude_gateway` (even `null`) is refused, so a repository cannot redirect Claude
+traffic, choose the key file or switch the gateway off.
+
+```jsonc
+{ "claude_gateway": {
+    "url": "http://127.0.0.1:18081/anthropic",          // gateway Anthropic route
+    "experiment_id": "otter-local",                      // the key's experiment
+    "key_file": "/home/me/.config/otter/gateway_key",    // absolute path; the key is issued with --profile coding
+    // "data_class": "public",                           // omit = confidential: the gateway answers with its local model
+    // "pin_model": "claude-sonnet"                      // omit = gateway difficulty routing (sonnet / opus)
+} }
+```
+
+- The key never enters otter's or the CLI's environment: the CLI reads `key_file` itself (`apiKeyHelper` in its
+  `--settings`), and the base URL and gateway headers travel in the same settings `env`. The gateway settings are part
+  of the claude native profile hash, so a run receipt shows which route served it.
+- Without `data_class` every call stays on the gateway's local model. `public` lets masked calls reach Claude; the
+  gateway's rules do not detect API keys or other secrets in files, so use it only where the work may leave the network.
+- The model chosen in `/model` is replaced by the gateway's routing unless `pin_model` is set.
+- Not routed: the `codex` engine (the gateway does not yet accept Codex's streaming Responses requests), `local`, and
+  skill optimization (`skillopt`) runs. Sign-in admission checks are unchanged.
 
 ### Role combo
 

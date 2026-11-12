@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { localContextTrimTargetPercent, localContextInputTokens, isLocalKeepAlive, chatExecuteMode, chatIntentMode, chatWorktreeMode, ConfigError, DEFAULT_CONFIG, loadConfig, parseJsonc, projectConfigPath, userConfigPath } from "../src/config.ts"
+import { localContextTrimTargetPercent, localContextInputTokens, isClaudeGateway, isLocalKeepAlive, chatExecuteMode, chatIntentMode, chatWorktreeMode, ConfigError, DEFAULT_CONFIG, loadConfig, parseJsonc, projectConfigPath, userConfigPath } from "../src/config.ts"
 
 let root: string
 let worktree: string
@@ -236,5 +236,30 @@ describe("local context trim target", () => {
       put(projectConfigPath(worktree), JSON.stringify({ local_model: { context_trim_target_percent } }))
       refused(projectConfigPath(worktree), "invalid-local-model")
     }
+  })
+})
+
+
+describe("claude gateway", () => {
+  const gateway = { url: "http://127.0.0.1:18081/anthropic", experiment_id: "otter-local", key_file: "/home/u/.config/otter/gateway_key" }
+  test("is off by default and set only from user config", () => {
+    expect(loadConfig(worktree).claude_gateway).toBeUndefined()
+    put(userConfigPath(), JSON.stringify({ claude_gateway: { ...gateway, data_class: "public" } }))
+    expect(loadConfig(worktree).claude_gateway).toEqual({ ...gateway, data_class: "public" })
+    // A repository may neither redirect Claude traffic / pick the key file nor switch the user's gateway off.
+    for (const claude_gateway of [gateway, null]) {
+      put(projectConfigPath(worktree), JSON.stringify({ claude_gateway }))
+      refused(projectConfigPath(worktree), "project-claude-gateway")
+    }
+  })
+  test("rejects values that are not inert in settings JSON, a shell-quoted key path or header lines", () => {
+    expect(isClaudeGateway(gateway)).toBe(true)
+    for (const bad of [[], { ...gateway, extra: 1 }, { ...gateway, url: "file:///etc/passwd" }, { ...gateway, url: "http://h/a b" },
+      { ...gateway, key_file: "relative/key" }, { ...gateway, key_file: "/k'; id #" }, { ...gateway, experiment_id: "a\nx-bv-data-class: public" },
+      { ...gateway, data_class: "secret" }, { ...gateway, pin_model: "m m" }]) {
+      expect(isClaudeGateway(bad)).toBe(false)
+    }
+    put(userConfigPath(), JSON.stringify({ claude_gateway: { ...gateway, key_file: "key" } }))
+    refused(userConfigPath(), "invalid-claude-gateway")
   })
 })

@@ -536,9 +536,33 @@ describe("otter chat automatic skill selector", () => {
     expect((await run()).reason).toBe("invalid_config")
     expect(calls).toHaveLength(2)
     deps.config.memory = { ...DEFAULT_CONFIG.memory, engine: "claude", model: "haiku" }
+    // Unreadable config hides whether a claude_gateway is set: claude refuses too rather than going direct.
+    expect((await run()).reason).toBe("invalid_config")
+    expect(calls).toHaveLength(2)
+    writeFileSync(path, '{"local_model":{"keep_alive":"10m"}}')
     await run()
     expect(calls).toHaveLength(3)
     expect(calls.at(-1)).not.toHaveProperty("localKeepAlive")
+  })
+
+  test("a claude judge call takes the user's claude_gateway route instead of going direct", async () => {
+    const gateway = { url: "http://127.0.0.1:18081/anthropic", experiment_id: "otter-local", key_file: "/home/u/gateway_key" }
+    const previous = process.env.XDG_CONFIG_HOME
+    const configHome = mkdtempSync(join(tmpdir(), "otter-gateway-config-"))
+    mkdirSync(join(configHome, "otter"))
+    writeFileSync(join(configHome, "otter", "otter.jsonc"), JSON.stringify({ claude_gateway: gateway }))
+    process.env.XDG_CONFIG_HOME = configHome
+    const calls: Parameters<JudgeTransportFactory>[0][] = []
+    deps.config.memory = { ...DEFAULT_CONFIG.memory, engine: "claude", model: "haiku" }
+    try {
+      await selector({ transport: options => { calls.push(options); return cli(options) } })
+        .select({ sessionID: "s1", messageID: "m0", text: "plan this", mode: "offer", candidates: candidates(["plan"]) })
+    } finally {
+      if (previous === undefined) delete process.env.XDG_CONFIG_HOME
+      else process.env.XDG_CONFIG_HOME = previous
+      rmSync(configHome, { recursive: true, force: true })
+    }
+    expect(calls.map(call => call.claudeGateway)).toEqual([gateway])
   })
 
   test("prefilter ranks lexically, keeps small catalogs whole and falls back for unmatched requests", () => {
