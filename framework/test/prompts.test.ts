@@ -18,11 +18,15 @@ describe("prompt content", () => {
   test.each(["main", "worker", "reviewer"] as const)("%s includes minimal-code guidance without sacrificing safeguards", (name) => {
     const prompt = AGENT_DEFS[name].prompt!
     expect(prompt.split("Coding conventions:")).toHaveLength(2)
-    expect(prompt).toContain("Trace the real flow and callers first; fix shared root causes.")
+    expect(prompt).toContain("Trace the real flow and callers first; fix shared root causes once.")
+    expect(prompt).toContain("does it need to exist")
     expect(prompt).toContain("reuse existing code, standard library, native platform features, and installed dependencies")
-    expect(prompt).toContain("simplify or delete only within task scope")
+    expect(prompt).toContain("never about the change: update every caller")
+    expect(prompt).toContain("deletion beats addition; simplify or delete only within task scope")
     expect(prompt).toContain("Readability over clever one-liners")
-    expect(prompt).toContain("Keep trust-boundary validation, data-loss error handling, security and accessibility.")
+    expect(prompt).toContain("Efficient by default")
+    expect(prompt).toContain('"shortcut: <limit>, <upgrade path>"')
+    expect(prompt).toContain("Keep trust-boundary validation, data-loss error handling, security and accessibility; moved code keeps its checks.")
     expect(prompt).toContain("runnable checks within role permissions; performance claims need measurements")
   })
 
