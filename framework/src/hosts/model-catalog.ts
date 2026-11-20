@@ -4,6 +4,8 @@ import { delimiter, resolve } from "node:path"
 import codexMetadata from "./codex-models-0.159.3.json"
 import { CODEX_VERSION, createCodexProfile } from "./codex-profile.ts"
 import { createVendorProcess, type VendorProcessHandle } from "./vendor-process.ts"
+import { listServedModels, localServerOf } from "./local-server.ts"
+import { loadConfig } from "../config.ts"
 
 export type ModelCatalog = {
   models: Array<{ id: string; label: string }>
@@ -103,6 +105,14 @@ function modelCatalog(models: Array<{ id: string; label: string }>, notice: stri
 
 async function discoverLocalModels(worktree: string, signal?: AbortSignal): Promise<ModelCatalog> {
   if (signal?.aborted) return modelCatalog([], LOCAL_CANCELLED_NOTICE)
+  let server: ReturnType<typeof localServerOf> = { kind: "ollama" }
+  try { server = localServerOf(loadConfig(worktree).local_model) } catch { /* Unreadable config: keep the Ollama default. */ }
+  if (server.kind === "sglang") {
+    const served = await listServedModels(server.endpoint, signal)
+    if (signal?.aborted) return modelCatalog([], LOCAL_CANCELLED_NOTICE)
+    if (!served) return modelCatalog([], `The local SGLang server at ${server.endpoint} is not reachable; start it with scripts/sglang-server.sh. Explicit model IDs are accepted.`)
+    return modelCatalog(served.map(id => ({ id, label: id })), `Models served by SGLang at ${server.endpoint} (local_model.server = "sglang").`)
+  }
 
   let handle: VendorProcessHandle
   try {

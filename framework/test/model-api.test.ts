@@ -44,6 +44,15 @@ describe("model API target preparation", () => {
     expect(() => prepareModelApiAction({ ...input, target: "other" }, configPath)).toThrow("not configured")
   })
 
+  test("the default local target follows local_model.server: SGLang's OpenAI endpoint when selected", () => {
+    writeFileSync(configPath, JSON.stringify({ local_model: { server: "sglang" } }))
+    expect(prepareModelApiAction(input, configPath)).toMatchObject({ url: "http://127.0.0.1:30000/v1/chat/completions", protocol: "openai-compatible" })
+    writeFileSync(configPath, JSON.stringify({ local_model: { server: "sglang", endpoint: "http://127.0.0.1:31000" } }))
+    expect(prepareModelApiAction(input, configPath).url).toBe("http://127.0.0.1:31000/v1/chat/completions")
+    writeFileSync(configPath, JSON.stringify({ local_model: { server: "ollama" } }))
+    expect(prepareModelApiAction(input, configPath)).toMatchObject({ url: "http://127.0.0.1:11434/api/chat", protocol: "ollama" })
+  })
+
   test.each(["{invalid", "null", "[]", '{"model_api":null}', '{"model_api":{"targets":[]}}',
     '{"model_api":{"targets":{"local":null}}}', '{"model_api":{"targets":{"local":{"protocol":"ollama"}}}}',
     '{"model_api":{"targets":{"local":{"url":"https://example.test/api","protocol":"unknown"}}}}'])
