@@ -13,6 +13,12 @@ otter의 `local` 엔진은 기본으로 Ollama CLI(`ollama run`)를 쓴다. `loc
 | 기동 | `scripts/sglang-server.sh start` 또는 로그인 시 자동(`install-agent`, `~/Library/LaunchAgents/com.otter.sglang.plist`) |
 | 로그 | `~/.local/state/otter/sglang.log` |
 
+## Ollama 정리 (2026-11-20)
+
+Ollama 모델은 모두 지웠고(Qwen3.6·gemma4 26B/31B·Qwen3-VL·Qwen2.5-VL·Llama 3.2·gpt-oss) Ollama 앱·CLI·`~/.ollama`·launchd 항목(`com.ollama.ollama`, `com.local-coding-agent.ollama-env`)과 `OLLAMA_*` launchd 환경 변수도 제거했다. 로컬 서빙은 SGLang 하나이며 모델은 Qwen3.8-27B뿐이다(`scripts/sglang-models.tsv`). OpenCode는 `sglang` 프로바이더만 남겼고 `model`·`small_model` 모두 `sglang/qwen3.8-27b`다. doctor D07은 Ollama가 없으면 건너뛰고, D08은 `sglang/*` 모델이 서버의 `/v1/models`에 있는지 본다.
+
+다른 모델을 쓰려면 MLX 빌드를 레지스트리에 한 줄 추가하고 `scripts/sglang-server.sh switch <이름>`을 실행한다(서버 하나에 모델 하나, 다른 포트는 `SGLANG_PORT`).
+
 ## 설치 (재현용)
 
 ```sh

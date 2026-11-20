@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Local SGLang server (MLX backend on Apple Silicon) for otter's `local` engine (`local_model.server: "sglang"`).
 #
-#   scripts/sglang-server.sh start [model]   start in the background (default model: mlx-community/Qwen3.8-27B-4bit)
+#   scripts/sglang-server.sh start [model]   start in the background (default model: qwen3.8-27b)
 #   scripts/sglang-server.sh run [model]     run in the foreground (used by the launchd agent)
 #   scripts/sglang-server.sh stop | status | logs
-#   scripts/sglang-server.sh install-agent   start at login via ~/Library/LaunchAgents/com.otter.sglang.plist
+#   scripts/sglang-server.sh install-agent [model]   start at login via a launchd agent for this port
+#   scripts/sglang-server.sh switch <model>  serve another model on this port (reinstalls the agent)
+#   scripts/sglang-server.sh models          list scripts/sglang-models.tsv and which models are downloaded
 #   scripts/sglang-server.sh remove-agent
+#
+# [model] is a served name from scripts/sglang-models.tsv (qwen3.8-27b, gemma4-31b, llama3.2-3b, ...) or a
+# Hugging Face MLX repo / local path. One model per server; run a second one with SGLANG_PORT=30001.
 #
 # Binds 127.0.0.1 only; otter refuses non-loopback local endpoints. Environment overrides:
 #   SGLANG_HOME (default ~/.local/share/sglang: venv/ and the sglang/ source checkout)
@@ -20,14 +25,28 @@ set -euo pipefail
 
 SGLANG_HOME="${SGLANG_HOME:-$HOME/.local/share/sglang}"
 PY="$SGLANG_HOME/venv/bin/python"
-MODEL="${2:-${SGLANG_MODEL:-mlx-community/Qwen3.8-27B-4bit}}"
-NAME="${SGLANG_SERVED_NAME:-qwen3.8-27b}"
+REGISTRY="$(cd "$(dirname "$0")" && pwd)/sglang-models.tsv"
 PORT="${SGLANG_PORT:-30000}"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/otter"
-LOG="$STATE/sglang.log"
-PIDFILE="$STATE/sglang.pid"
-PLIST="$HOME/Library/LaunchAgents/com.otter.sglang.plist"
+# Port 30000 keeps the original file names and agent label; other ports get their own.
+SUFFIX=""; [ "$PORT" = "30000" ] || SUFFIX="-$PORT"
+LOG="$STATE/sglang$SUFFIX.log"
+PIDFILE="$STATE/sglang$SUFFIX.pid"
+LABEL="com.otter.sglang${SUFFIX:+.$PORT}"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 mkdir -p "$STATE"
+
+# Resolve a registry name to its repo; a repo or path is used as given with its last component as the name.
+resolve() {
+  local want="$1" name repo
+  while IFS=$'\t' read -r name repo _; do
+    case "$name" in ''|'#'*) continue ;; esac
+    if [ "$name" = "$want" ] || [ "$repo" = "$want" ]; then echo "$name $repo"; return 0; fi
+  done <"$REGISTRY"
+  local base="${want##*/}"; echo "$(echo "$base" | tr '[:upper:]' '[:lower:]') $want"
+}
+read -r NAME MODEL <<<"$(resolve "${2:-${SGLANG_MODEL:-qwen3.8-27b}}")"
+NAME="${SGLANG_SERVED_NAME:-$NAME}"
 
 running_pid() {
   [ -f "$PIDFILE" ] || return 1
@@ -88,18 +107,32 @@ case "${1:-status}" in
     echo "started pid $(cat "$PIDFILE"); loading $MODEL (log: $LOG)"
     wait_ready ;;
   stop)
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
     if pid="$(running_pid)"; then kill "$pid"; for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done; kill -9 "$pid" 2>/dev/null || true; fi
     rm -f "$PIDFILE"; pkill -f "sglang.launch_server.*--port $PORT" 2>/dev/null || true; echo "stopped" ;;
   status)
     if curl -fsS -m 2 "http://127.0.0.1:$PORT/v1/models" 2>/dev/null; then echo; else echo "not reachable on 127.0.0.1:$PORT"; exit 1; fi ;;
   logs) tail -n 50 "$LOG" ;;
+  models)
+    printf "%-16s %-44s %-10s %s\n" NAME REPO LOCAL REPLACES
+    while IFS=$'\t' read -r name repo replaces; do
+      case "$name" in ''|'#'*) continue ;; esac
+      dir="$HOME/.cache/huggingface/hub/models--${repo//\//--}"
+      have=no; [ -d "$dir/snapshots" ] && ls "$dir"/snapshots/*/*.safetensors >/dev/null 2>&1 && have=yes
+      printf "%-16s %-44s %-10s %s\n" "$name" "$repo" "$have" "$replaces"
+    done <"$REGISTRY"
+    echo "serving on $PORT: $(curl -fsS -m 2 "http://127.0.0.1:$PORT/v1/models" 2>/dev/null | "$PY" -c 'import json,sys; print(", ".join(m["id"] for m in json.load(sys.stdin)["data"]))' 2>/dev/null || echo none)" ;;
+  switch)
+    [ -n "${2:-}" ] || { echo "usage: $0 switch <model>" >&2; exit 2; }
+    "$0" stop >/dev/null
+    exec "$0" install-agent "$2" ;;
   install-agent)
     mkdir -p "$(dirname "$PLIST")"
     cat >"$PLIST" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.otter.sglang</string>
+  <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key><array><string>$(cd "$(dirname "$0")" && pwd)/sglang-server.sh</string><string>run</string><string>$MODEL</string></array>
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
@@ -113,13 +146,13 @@ case "${1:-status}" in
   <key>StandardErrorPath</key><string>$LOG</string>
 </dict></plist>
 PL
-    launchctl bootout "gui/$(id -u)/com.otter.sglang" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$PLIST"
     echo "installed $PLIST (starts at login; restarts on crash)"
     for _ in $(seq 1 300); do curl -fsS -m 2 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 && { echo "SGLang ready on http://127.0.0.1:$PORT"; exit 0; }; sleep 2; done
     echo "agent installed; still loading (see $LOG)" ;;
   remove-agent)
-    launchctl bootout "gui/$(id -u)/com.otter.sglang" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
     rm -f "$PLIST"; echo "removed $PLIST" ;;
   *) sed -n '2,13p' "$0"; exit 2 ;;
 esac

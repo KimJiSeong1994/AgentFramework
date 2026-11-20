@@ -12,8 +12,8 @@
 #   D01 opencode binary + version        D05 effective config (opencode debug config from repo root):
 #   D02 bun present                          D05a agents main/worker/reviewer, D05b permission.task=deny, D05c plugin list / OMO
 #   D03 framework/ installed             D06 prompt prefix budget per agent (main 1500 / worker 800 / reviewer 600 est. tokens)
-#   D04 .opencode/plugins/otter.ts         D07 Ollama server env (scripts/ollama-env.sh show)
-#                                        D08 configured model present in `ollama ls`
+#   D04 .opencode/plugins/otter.ts         D07 Ollama server env (scripts/ollama-env.sh show; skipped without Ollama)
+#                                        D08 configured model present in `ollama ls`, or served by SGLang (sglang/*)
 #   D09 stage-2 wiring: /stop command in effective config, effective tools of worker/reviewer/main (opencode debug
 #       agent: task/delegate/todowrite hidden, steps set), delegate tool schema <= 400 est. tokens
 #   D12a otter_flow tool schema <= 300 est. tokens and only visible on main; D12b M1 command set: effective config
@@ -289,7 +289,9 @@ fi
 
 # ---------------------------------------------------------------- D07 Ollama server env
 ENVSH="$ROOT/scripts/ollama-env.sh"
-if [ -x "$ENVSH" ] || [ -f "$ENVSH" ]; then
+if ! command -v ollama >/dev/null 2>&1; then
+  report SKIP D07 ollama-env "Ollama is not installed (local serving via SGLang)" "" ""
+elif [ -x "$ENVSH" ] || [ -f "$ENVSH" ]; then
   with_timeout 30 bash "$ENVSH" show > "$TMP/env.txt" 2>&1 </dev/null
   lc_ctx="$(grep -E '^\s*OLLAMA_CONTEXT_LENGTH\s' "$TMP/env.txt" | awk '{print $2}' | head -1)"
   lc_np="$(grep -E '^\s*OLLAMA_NUM_PARALLEL\s' "$TMP/env.txt" | awk '{print $2}' | head -1)"
@@ -312,7 +314,20 @@ else
 fi
 
 # ---------------------------------------------------------------- D08 model presence
-if command -v ollama >/dev/null 2>&1; then
+if [ "$CFG_OK" = 1 ]; then d8_main="$(val "$TMP/summary.txt" model)"
+else python3 "$TMP/cfg.py" jsonc "$HOME/.config/opencode/opencode.jsonc" > "$TMP/jsonc.txt" 2>/dev/null; d8_main="$(val "$TMP/jsonc.txt" model)"; fi
+if [ "${d8_main#sglang/}" != "$d8_main" ]; then
+  # SGLang-served model (local_model.server = "sglang"): the loopback server must list it in /v1/models.
+  d8_port="${SGLANG_PORT:-30000}"
+  served="$(curl -fsS -m 3 "http://127.0.0.1:$d8_port/v1/models" 2>/dev/null | python3 -c 'import json,sys; print(" ".join(m["id"] for m in json.load(sys.stdin)["data"]))' 2>/dev/null)"
+  if [ -z "$served" ]; then
+    report FAIL D08 model-present "SGLang not reachable on 127.0.0.1:$d8_port" "${d8_main#sglang/} served" "scripts/sglang-server.sh start"
+  elif printf ' %s ' $served | grep -q " ${d8_main#sglang/} "; then
+    report PASS D08 model-present "main=$d8_main served by SGLang ($served)" "configured model served"
+  else
+    report FAIL D08 model-present "SGLang serves [$served], not ${d8_main#sglang/}" "configured model served" "scripts/sglang-server.sh switch ${d8_main#sglang/}"
+  fi
+elif command -v ollama >/dev/null 2>&1; then
   if [ "$CFG_OK" = 1 ]; then
     main_model="$(val "$TMP/summary.txt" model)"; small_model="$(val "$TMP/summary.txt" small_model)"
   else
