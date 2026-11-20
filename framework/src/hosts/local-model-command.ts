@@ -17,6 +17,8 @@ export type LocalModelStore = {
   /** `local_model.think` (reason before answering); absent store methods report the setting as unavailable. */
   readThink?(worktree: string): boolean | null | undefined
   saveThink?(think: boolean | null): string
+  /** The local server choice (`local_model.server`/`endpoint`); a store without it means Ollama. */
+  readServer?(worktree: string): ReturnType<typeof localServerOf>
 }
 
 /** Same bounded process and environment as local inference; no shell, pull, deletion or server restart. */
@@ -56,6 +58,7 @@ export const fileLocalModelStore: LocalModelStore = {
   },
   run: runLocalModelCommand,
   readThink: worktree => loadConfig(worktree).local_model?.think,
+  readServer: worktree => localServerOf(loadConfig(worktree).local_model),
   saveThink(think) {
     return rewriteUserConfig(text => applyEdits(text, modify(text, ["local_model", "think"], think, {
       formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" },
@@ -83,7 +86,7 @@ export async function localModelCommand(
   try {
     if (action === "status" && args.length <= 1) {
       let server: ReturnType<typeof localServerOf> = { kind: "ollama" }
-      try { server = localServerOf(loadConfig(worktree).local_model) } catch { /* keep Ollama */ }
+      try { server = store.readServer?.(worktree) ?? server } catch { /* keep Ollama */ }
       if (server.kind === "sglang") {
         const served = await listServedModels(server.endpoint, context.signal)
         return [`Local model server: SGLang at ${server.endpoint} (local_model.server = "sglang").`,

@@ -710,6 +710,12 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
   const transportFactory = injectedTransportFactory ?? createCliTransport
   const loadMemory = options.loadMemory ?? (() => DEFAULT_CONFIG.memory)
   const loadLocalModel = options.loadLocalModel ?? (() => DEFAULT_CONFIG.local_model)
+  /** Local-engine transport options from the current config: retention, thinking and the SGLang server when selected. */
+  const localTransportOptions = (): Pick<CliTransportOptions, "localKeepAlive" | "localThink" | "localServer"> => {
+    const local = loadLocalModel()
+    const server = localServerOf(local)
+    return { ...(local?.keep_alive ? { localKeepAlive: local.keep_alive } : {}), localThink: local?.think === true, ...(server.kind === "sglang" ? { localServer: server } : {}) }
+  }
   const currentHandles = new Map<string, { reconcile: () => Promise<ExecutionReconciliation> }>()
   const preflightTransports = new Set<CliTransportHandle>()
   const identity = Object.freeze({ engine: options.engine, profile: "legacy-unowned", controlProfile: CONTROL_PROFILE })
@@ -810,12 +816,15 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
         if (pendingProbesClear) {
           try {
             // Construction is inert. Codex additionally performs an owned version-only probe.
+            // Admission builds the same local transport as inference: with the SGLang server selected, no Ollama
+            // executable is required.
             candidate = transportFactory({
               engine: target.engine,
               model: target.model,
               prompt: "",
               deadlineAt: Date.now() + 5000,
               maxOutputBytes: 0,
+              ...(target.engine === "local" ? localTransportOptions() : {}),
             })
             if (isCodex) {
               if (typeof candidate.preflight !== "function" || !targetProfile) {
@@ -1125,11 +1134,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             try {
               const transportOptions: CliTransportOptions = {
                 engine: route.engine,
-                ...(route.engine === "local" ? (() => {
-                  const local = loadLocalModel()
-                  const server = localServerOf(local)
-                  return { localKeepAlive: local?.keep_alive ?? undefined, localThink: local?.think === true, ...(server.kind === "sglang" ? { localServer: server } : {}) }
-                })() : {}),
+                ...(route.engine === "local" ? localTransportOptions() : {}),
                 model: route.model,
                 prompt,
                 deadlineAt: nativeDeadlineAt,

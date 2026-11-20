@@ -6,6 +6,9 @@ import process from "node:process"
 import { createCodexProfile } from "../src/hosts/codex-profile.ts"
 import { discoverModels } from "../src/hosts/model-catalog.ts"
 
+// Local discovery reads local_model.server from the user config; keep the developer's own ~/.config/otter out of it.
+process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "otter-catalog-config-"))
+
 const directories: string[] = []
 const restoreEnvironment: Array<() => void> = []
 
@@ -199,3 +202,21 @@ test("Claude options are explicitly labeled native aliases rather than entitleme
   expect(catalog.notice).toContain("native Claude CLI aliases")
   expect(catalog.notice).toContain("not a fetched account-availability list")
 })
+
+test("local discovery lists the SGLang server's models when local_model.server is sglang", async () => {
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ data: [{ id: "qwen3.8-27b" }] }) })
+  const worktree = mkdtempSync(join(tmpdir(), "otter-catalog-sglang-"))
+  try {
+    const { mkdirSync } = await import("node:fs")
+    mkdirSync(join(worktree, ".otter"))
+    writeFileSync(join(worktree, ".otter", "otter.jsonc"), JSON.stringify({ local_model: { server: "sglang", endpoint: `http://127.0.0.1:${server.port}` } }))
+    const catalog = await discoverModels("local", worktree)
+    expect(catalog.models).toEqual([{ id: "qwen3.8-27b", label: "qwen3.8-27b" }])
+    expect(catalog.notice).toContain("SGLang")
+    server.stop(true)
+    const down = await discoverModels("local", worktree)
+    expect(down.models).toEqual([])
+    expect(down.notice).toContain("scripts/sglang-server.sh")
+  } finally { server.stop(true); rmSync(worktree, { recursive: true, force: true }) }
+})
+
