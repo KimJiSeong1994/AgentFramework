@@ -193,6 +193,8 @@ describe("local model retention", () => {
   test("accepts the SGLang local server with a loopback endpoint", () => {
     put(projectConfigPath(worktree), '{"local_model":{"server":"sglang","endpoint":"http://127.0.0.1:31000"}}')
     expect(loadConfig(worktree).local_model).toMatchObject({ server: "sglang", endpoint: "http://127.0.0.1:31000" })
+    put(projectConfigPath(worktree), '{"local_model":{"server":"mlx"}}')
+    expect(loadConfig(worktree).local_model?.server).toBe("mlx")
     put(projectConfigPath(worktree), '{"local_model":{"server":"ollama"}}')
     expect(loadConfig(worktree).local_model?.server).toBe("ollama")
   })

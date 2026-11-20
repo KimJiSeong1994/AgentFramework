@@ -20,8 +20,8 @@ export type CliTransportOptions = {
   localKeepAlive?: string
   /** Local engine only: let the model reason first (`ollama run --think=true`, SGLang `enable_thinking`); default false. */
   localThink?: boolean
-  /** Local engine only: serve through an OpenAI-compatible SGLang server at this loopback endpoint instead of the Ollama CLI. */
-  localServer?: { kind: "sglang"; endpoint: string }
+  /** Local engine only: serve through an OpenAI-compatible server (SGLang or otter's MLX server) at this loopback endpoint. */
+  localServer?: { kind: "sglang" | "mlx"; endpoint: string }
   model: string
   prompt: string
   deadlineAt: number
@@ -209,7 +209,7 @@ function safeOptions(options: CliTransportOptions): CliTransportOptions {
       (options.onText !== undefined && typeof options.onText !== "function") ||
       (options.localKeepAlive !== undefined && !isLocalKeepAlive(options.localKeepAlive)) ||
       (options.localThink !== undefined && typeof options.localThink !== "boolean") ||
-      (options.localServer !== undefined && (options.engine !== "local" || options.localServer.kind !== "sglang" ||
+      (options.localServer !== undefined && (options.engine !== "local" || (options.localServer.kind !== "sglang" && options.localServer.kind !== "mlx") ||
         loopbackEndpoint(options.localServer.endpoint) !== options.localServer.endpoint))) {
     throw new TypeError(SAFE_ERRORS.options)
   }
@@ -1035,7 +1035,7 @@ export function installedCodexVersion(): string | undefined {
 /** Creates an inert, single-use native CLI transport backed by an owned process group. */
 export function createCliTransport(rawOptions: CliTransportOptions): CliTransportHandle {
   const options = safeOptions(rawOptions)
-  // `local_model.server: "sglang"`: inference goes to the loopback SGLang server; no Ollama executable is needed.
+  // `local_model.server: "sglang" | "mlx"`: inference goes to the loopback HTTP server; no Ollama executable is needed.
   if (options.localServer) return createSglangTransport(options, options.localServer.endpoint)
   const executable = findExecutable(options.engine)
   let codexProfile: CodexProfile | undefined

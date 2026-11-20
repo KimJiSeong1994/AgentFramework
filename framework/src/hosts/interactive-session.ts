@@ -19,7 +19,7 @@ import { inputColorSupported, inputLine, renderInput, type InputPresentation } f
 import { AUTH_ENGINES, authStatus, describeAuth, describeAuthFailure, describeDiagnosis, diagnoseAuth, loginArgv, loginHint, logoutArgv, runVendorAuth, type AuthEngine, type AuthRun, type AuthState, type LoginMethod } from "./engine-auth.ts"
 import { createCliProgressPresenter, type CliHostActivity, type CliProgressTask, type CliTaskStatus, type CliToolDisplay } from "./cli-progress.ts"
 import { addUsage, describeUsage, emptyUsageTotals, type DigestUsage } from "../sessions/digest.ts"
-import { localServerOf } from "./local-server.ts"
+import { localServerLabel, localServerOf, localServerScript } from "./local-server.ts"
 import { formatDuration, type WorkflowProgress } from "../tui/progress.ts"
 import { createPlanConversation, skillInstructionBudget, type ConversationMessage, type ConversationTurn, type SkillConversationInvocation, type ConversationContextState, type ConversationContextReport } from "./plan-conversation.ts"
 import type { WorkflowEnvelope } from "../workflows/types.ts"
@@ -1122,7 +1122,7 @@ export async function runInteractiveSession(
     addUsage(sessionUsage.byModel[key] ??= emptyUsageTotals(), activity.usage as Record<string, unknown>)
   }
   const describeSessionUsage = (): string => sessionUsage.calls
-    ? [`Usage this session (reported tokens; SGLang reports them, the Ollama CLI does not): ${describeUsage(sessionUsage)}`,
+    ? [`Usage this session (reported tokens; local HTTP servers report them, the Ollama CLI does not): ${describeUsage(sessionUsage)}`,
       ...Object.entries(sessionUsage.byModel).sort(([a], [b]) => a.localeCompare(b)).map(([model, totals]) => `  ${model}: ${describeUsage(totals)}`)].join("\n")
     : "Usage this session: no reported token counts yet (the Ollama CLI reports none)."
   const scopedProgress = () => {
@@ -1718,13 +1718,13 @@ export async function runInteractiveSession(
       const auth = await signInHint(targets)
       return auth ?? (targets.includes("codex") ? codexCompatibilityHint() : undefined)
     }
-    /** What the local engine needs: the SGLang server when local_model.server is "sglang", otherwise the Ollama CLI. */
+    /** What the local engine needs: its HTTP server when local_model.server is "sglang" or "mlx", otherwise the Ollama CLI. */
     const localServerHint = (): string => {
       let server: ReturnType<typeof localServerOf> = { kind: "ollama" }
       try { server = localServerOf(loadConfig(worktree).local_model) } catch { /* default */ }
-      return server.kind === "sglang"
-        ? `The local engine uses the SGLang server at ${server.endpoint}; check it with scripts/sglang-server.sh status (start or switch models with that script).`
-        : "The local engine runs the Ollama CLI; install Ollama, or set local_model.server to \"sglang\" for a loopback SGLang server."
+      return server.kind !== "ollama"
+        ? `The local engine uses the ${localServerLabel(server.kind)} at ${server.endpoint}; check it with ${localServerScript(server.kind)} status.`
+        : "The local engine runs the Ollama CLI; install Ollama, or set local_model.server to \"mlx\" or \"sglang\" for a loopback HTTP server."
     }
     /** What is wrong with Codex and how to fix it: the installed version against the qualified ones. */
     const codexCompatibilityHint = (): string => {
@@ -1788,11 +1788,11 @@ export async function runInteractiveSession(
         if (rest.length) { write(authUsage); return undefined }
         const states = await Promise.all(AUTH_ENGINES.map(engine => deps.auth.status(engine, worktree)))
         write(["Engine sign-in (checked with each vendor CLI; otter stores no credentials):", ...states.map(state => `  ${describeAuth(state)}`),
-          "  local: no sign-in (Ollama CLI or the loopback SGLang server on this machine)"].join("\n"))
+          "  local: no sign-in (Ollama CLI or a loopback MLX/SGLang server on this machine)"].join("\n"))
         return undefined
       }
       if (rest.length > (command === "/login" ? 2 : 1) || (rest[0] !== undefined && !(AUTH_ENGINES as readonly string[]).includes(rest[0]))) {
-        write(rest[0] === "local" ? "The local engine (Ollama or SGLang on this machine) needs no sign-in." : authUsage)
+        write(rest[0] === "local" ? "The local engine (Ollama, MLX or SGLang on this machine) needs no sign-in." : authUsage)
         return undefined
       }
       let engine = rest[0] as AuthEngine | undefined

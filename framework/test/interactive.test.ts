@@ -2512,7 +2512,7 @@ describe("interactive terminal", () => {
       } })
       await launchInteractive({ worktree: wt.worktree, engine: "codex", model: "gpt-5-codex" }, h.deps)
       const text = h.calls.output.join("")
-      expect(text).toContain("Usage this session (reported tokens; SGLang reports them, the Ollama CLI does not): 2 calls · in 12.5k (cached 10.0k) · out 400 · ~$0.01 (vendor estimate)")
+      expect(text).toContain("Usage this session (reported tokens; local HTTP servers report them, the Ollama CLI does not): 2 calls · in 12.5k (cached 10.0k) · out 400 · ~$0.01 (vendor estimate)")
       expect(text).toContain("  claude/fable: 1 call · in 500 · out 100")
       expect(text).toContain("  codex/gpt-5-codex: 1 call · in 12.0k (cached 10.0k) · out 300 · ~$0.01 (vendor estimate)")
       // /status ends with the same summary after the controller's status text.
@@ -2984,7 +2984,7 @@ describe("interactive terminal", () => {
     const h = harness({ lines: ["/login local", "/login codex console", "/login gemini", "/login codex", "1", "/quit"] })
     expect(await launchInteractive({ worktree: wt.worktree }, h.deps)).toEqual({ code: 0 })
     const output = h.calls.output.join("")
-    expect(output).toContain("The local engine (Ollama or SGLang on this machine) needs no sign-in.")
+    expect(output).toContain("The local engine (Ollama, MLX or SGLang on this machine) needs no sign-in.")
     expect(output).toContain("codex sign-in methods: browser, device, api-key.")
     expect(output).toContain("Usage: /auth [diagnose] · /login [codex|claude]")
     expect(h.calls.authRuns).toEqual([{ engine: "codex", argv: ["login"] }])

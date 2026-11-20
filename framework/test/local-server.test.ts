@@ -42,6 +42,8 @@ describe("local server selection", () => {
     expect(localServerOf(undefined)).toEqual({ kind: "ollama" })
     expect(localServerOf({ server: "sglang" })).toEqual({ kind: "sglang", endpoint: "http://127.0.0.1:30000" })
     expect(localServerOf({ server: "sglang", endpoint: "http://127.0.0.1:31000" })).toEqual({ kind: "sglang", endpoint: "http://127.0.0.1:31000" })
+    expect(localServerOf({ server: "mlx" })).toEqual({ kind: "mlx", endpoint: "http://127.0.0.1:30000" })
+    expect(localServerOf({ server: "vllm" })).toEqual({ kind: "ollama" })
   })
 
   test("a non-loopback endpoint is refused before any request", () => {

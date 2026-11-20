@@ -5,7 +5,7 @@ import { rewriteUserConfig } from "./default-model.ts"
 import { findExecutable } from "./cli-transport.ts"
 import { NATIVE_MODEL_ID_RE } from "./types.ts"
 import { createVendorProcess } from "./vendor-process.ts"
-import { listServedModels, localServerOf } from "./local-server.ts"
+import { listServedModels, localServerLabel, localServerOf, localServerScript } from "./local-server.ts"
 
 export const LOCAL_MODEL_USAGE = "Usage: /local [status | profile memory|balanced|speed|default | keepalive 0|-1|<duration>|default | think on|off|default | unload [model]]"
 const profiles = { memory: "0", balanced: "5m", speed: "-1", default: null } as const
@@ -87,12 +87,12 @@ export async function localModelCommand(
     if (action === "status" && args.length <= 1) {
       let server: ReturnType<typeof localServerOf> = { kind: "ollama" }
       try { server = store.readServer?.(worktree) ?? server } catch { /* keep Ollama */ }
-      if (server.kind === "sglang") {
+      if (server.kind !== "ollama") {
         const served = await listServedModels(server.endpoint, context.signal)
-        return [`Local model server: SGLang at ${server.endpoint} (local_model.server = "sglang").`,
-          served ? `Served models: ${served.join(", ") || "none"}` : "Status unavailable: the SGLang server is not reachable; start it with scripts/sglang-server.sh.",
+        return [`Local model server: ${localServerLabel(server.kind)} at ${server.endpoint} (local_model.server = "${server.kind}").`,
+          served ? `Served models: ${served.join(", ") || "none"}` : `Status unavailable: the server is not reachable; start it with ${localServerScript(server.kind)}.`,
           `Local model thinking: ${store.readThink ? describeThink(store.readThink(worktree)) : "unavailable"}`,
-          "Keepalive and unload apply to Ollama only; SGLang keeps its model loaded while the server runs."].join("\n")
+          `Keepalive and unload apply to Ollama only; the ${localServerLabel(server.kind)} keeps its model loaded while it runs.`].join("\n")
       }
       const setting = `Local model keepalive: ${describe(store.read(worktree))}\nLocal model thinking: ${store.readThink ? describeThink(store.readThink(worktree)) : "unavailable"}`
       try {

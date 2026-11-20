@@ -1,8 +1,18 @@
-# 로컬 서빙 엔진: Ollama → SGLang (2026-11-20)
+# 로컬 서빙 엔진: Ollama → SGLang → MLX 서버 (2026-11-20)
 
 otter의 `local` 엔진은 기본으로 Ollama CLI(`ollama run`)를 쓴다. `local_model.server: "sglang"`이면 같은 엔진이 루프백의 SGLang 서버(OpenAI 호환 `/v1/chat/completions`, 스트리밍)로 추론한다. Ollama 경로는 그대로 남아 있어 설정 한 줄로 되돌릴 수 있다.
 
-## 구성
+## 현재 구성: otter MLX 서버 (`local_model.server: "mlx"`)
+
+SGLang의 Metal 백엔드는 Qwen3.8 같은 하이브리드 모델의 접두 캐시를 지원하지 않아, otter가 매 호출 보내는 약 1.7k의 동일한 앞부분을 매번 다시 처리했다(호출당 약 15초). `scripts/mlx-server.py`는 `mlx_lm` 위의 얇은 OpenAI 호환 서버로, 256토큰 절대 위치 경계마다 모델 상태를 저장해 두고 가장 긴 일치 지점부터 이어 계산한다.
+
+- **답은 캐시에 의존하지 않는다**: 프리필을 항상 절대 위치 기준 256토큰 단위로 끊고 탐욕(argmax) 디코딩을 하므로, 저장 상태에서 이어 계산해도 처음부터 계산한 것과 같은 연산을 한다. `--no-prefix-cache`로 같은 답을 캐시 없이 낼 수 있다.
+- **검증**: ① otter 실제 채팅 프롬프트에 넣은 고정 과제 12개에서 SGLang·MLX(캐시 없음)·MLX(캐시)의 답 36개가 글자까지 동일(성공 10/12, 실패 2개도 동일). ② otter 실사용 세션의 실제 요청 7건을 캐시 서버에서 기록해 캐시 없는 서버로 재전송, 7/7 동일. ③ SGLang→MLX 엔진 교체로 긴 대화에서 띄어쓰기 수준의 표현 차이가 1건 관찰됨(엔진 수치 차이; 캐시와 무관).
+- **속도**: 고정 과제 223초 → 56초(두 번째부터 과제당 17~18초 → 3~4초). otter 세션(읽기·수정·테스트) 181초 → 55초.
+- **한계**: 한 번에 요청 하나(1인 사용), 저장 상태 메모리 상한 8GB(`MLX_PREFIX_CACHE_GB`), 탐욕 디코딩 고정.
+- **운영**: `scripts/mlx-server.sh start|stop|status|logs|install-agent` (launchd `com.otter.mlx`, 127.0.0.1:30000). 되돌리기: `"server": "sglang"`과 `scripts/sglang-server.sh install-agent`(SGLang 설치는 남아 있다).
+
+## (이전) SGLang 구성
 
 | 항목 | 값 |
 |---|---|
