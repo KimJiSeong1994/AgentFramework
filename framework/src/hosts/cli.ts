@@ -65,7 +65,8 @@ shows the mode and saved rules.
 Bare 'otter' and 'otter chat' start Otter's interactive terminal in the current Git worktree
 (any other folder is used as is; approved plans then ask before running in place),
 or in the canonical worktree selected by --worktree. Choose an engine from the menu, or
-specify --engine. Enter a native model ID or supply --model; local selects the Ollama CLI,
+specify --engine. Enter a native model ID or supply --model; local selects the Ollama CLI (or the loopback SGLang server
+when local_model.server is "sglang"),
 not OpenCode. The model picker lists bounded native choices when available; explicit IDs are
 also accepted. In chat, /model shows the current selection and picker, /model <engine> <native-id>
 switches directly, and /help lists local commands. A switch requires no active workflow, valid

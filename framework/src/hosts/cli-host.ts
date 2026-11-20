@@ -1,3 +1,4 @@
+import { localServerOf } from "./local-server.ts"
 import { join } from "node:path"
 import { statSync } from "node:fs"
 import { createHash } from "node:crypto"
@@ -1124,7 +1125,11 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             try {
               const transportOptions: CliTransportOptions = {
                 engine: route.engine,
-                ...(route.engine === "local" ? { localKeepAlive: loadLocalModel()?.keep_alive ?? undefined, localThink: loadLocalModel()?.think === true } : {}),
+                ...(route.engine === "local" ? (() => {
+                  const local = loadLocalModel()
+                  const server = localServerOf(local)
+                  return { localKeepAlive: local?.keep_alive ?? undefined, localThink: local?.think === true, ...(server.kind === "sglang" ? { localServer: server } : {}) }
+                })() : {}),
                 model: route.model,
                 prompt,
                 deadlineAt: nativeDeadlineAt,

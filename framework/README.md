@@ -577,6 +577,7 @@ These are Ollama's model allocations, not the computer's total free RAM or a cac
 | `/local profile default` | Inherit the Ollama server's retention setting. |
 | `/local keepalive 10m` | Set a custom duration: positive whole `s`, `m`, or `h`, up to 24 hours; also accepts `0`, `-1`, and `default`. |
 | `/local unload [model]` | Release the selected local model, or an explicitly named model, and its runtime prompt cache. |
+| `"local_model": { "server": "sglang" }` | Serve the `local` engine through a loopback SGLang server (OpenAI-compatible `/v1/chat/completions`, default `http://127.0.0.1:30000`, `endpoint` overrides) instead of the Ollama CLI; the model list comes from `/v1/models`. Start it with `scripts/sglang-server.sh start` (or `install-agent` for login start). See `docs/otter-sglang-local-server.md`. |
 | `/local think on|off|default` | Let the local model reason before answering (`ollama run --think`; `local_model.think`). Off by default: direct answers are cheaper and faster; turn it on for a hard problem and off again afterwards. Applies to the next local inference. |
 
 Settings are saved in the user `otter.jsonc`; project settings take precedence. The effective value is shown after

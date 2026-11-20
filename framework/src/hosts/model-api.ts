@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs"
 import { parseJsonc, userConfigPath } from "../config.ts"
+import { localServerOf } from "./local-server.ts"
 
 export type ModelApiInput = {
   target: string
@@ -66,7 +67,11 @@ export function prepareModelApiAction(input: ModelApiInput, configPath = userCon
       if (name === input.target) selected = parsed
     }
   }
-  if (!selected && input.target === "local") selected = { url: "http://127.0.0.1:11434/api/chat", protocol: "ollama" }
+  if (!selected && input.target === "local") {
+    // The default "local" target follows the user's local server choice: SGLang's OpenAI endpoint or Ollama's chat API.
+    const server = localServerOf(record(config.local_model) ? config.local_model as { server?: string; endpoint?: string } : undefined)
+    selected = server.kind === "sglang" ? { url: `${server.endpoint}/v1/chat/completions`, protocol: "openai-compatible" } : { url: "http://127.0.0.1:11434/api/chat", protocol: "ollama" }
+  }
   if (!selected) throw new Error("Model API target is not configured in the user otter.jsonc.")
   return Object.freeze({ tool: "model_api", target: input.target, model: input.model, prompt: input.prompt,
     maxOutputTokens: input.maxOutputTokens, timeoutSeconds: input.timeoutSeconds, ...selected })

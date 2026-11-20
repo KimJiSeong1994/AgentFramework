@@ -190,8 +190,15 @@ describe("local model retention", () => {
     expect(loadConfig(worktree).local_model?.keep_alive).toBeNull()
     expect(DEFAULT_CONFIG.local_model).toBeUndefined()
   })
+  test("accepts the SGLang local server with a loopback endpoint", () => {
+    put(projectConfigPath(worktree), '{"local_model":{"server":"sglang","endpoint":"http://127.0.0.1:31000"}}')
+    expect(loadConfig(worktree).local_model).toMatchObject({ server: "sglang", endpoint: "http://127.0.0.1:31000" })
+    put(projectConfigPath(worktree), '{"local_model":{"server":"ollama"}}')
+    expect(loadConfig(worktree).local_model?.server).toBe("ollama")
+  })
   test("rejects malformed sections and unknown settings", () => {
-    for (const local_model of [null, [], "5m", { keep_alive: 5 }, { keep_alive: "25h" }, { context: 1000 }]) {
+    for (const local_model of [null, [], "5m", { keep_alive: 5 }, { keep_alive: "25h" }, { context: 1000 },
+      { server: "vllm" }, { endpoint: "http://10.0.0.5:30000" }, { endpoint: "http://u:p@127.0.0.1:30000" }, { think: "yes" }]) {
       put(projectConfigPath(worktree), JSON.stringify({ local_model }))
       refused(projectConfigPath(worktree), "invalid-local-model")
     }
