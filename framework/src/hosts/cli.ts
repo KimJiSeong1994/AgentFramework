@@ -891,12 +891,12 @@ async function authCli(argv: readonly string[]): Promise<number> {
   if (command === "auth" && (engineArg === undefined || engineArg === "status") && methodArg === undefined) {
     const states = await Promise.all(AUTH_ENGINES.map(engine => authStatus(engine, cwd)))
     for (const state of states) console.log(describeAuth(state).replace(/\/login (\w+)/u, "otter login $1"))
-    console.log("local: no sign-in (Ollama on this machine)")
+    console.log("local: no sign-in (Ollama CLI or the loopback SGLang server on this machine)")
     return states.every(state => state.state === "signed-in") ? 0 : 1
   }
   if ((command !== "login" && command !== "logout") || extra.length || !(AUTH_ENGINES as readonly string[]).includes(engineArg ?? "") ||
       (command === "logout" && methodArg !== undefined)) {
-    console.error(engineArg === "local" ? "The local engine (Ollama) needs no sign-in." : usage)
+    console.error(engineArg === "local" ? "The local engine (Ollama or SGLang on this machine) needs no sign-in." : usage)
     return 2
   }
   const engine = engineArg as AuthEngine

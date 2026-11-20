@@ -607,6 +607,29 @@ describe("common CLI execution host", () => {
     expect(subject.transportCalls[0]?.localKeepAlive).toBeUndefined()
   })
 
+  test("with local_model.server sglang, preflight and inference both build the SGLang transport (no Ollama needed)", async () => {
+    mkdirSync(join(root, ".otter"))
+    writeFileSync(join(root, ".otter", "otter.jsonc"), '{"local_model":{"server":"sglang","endpoint":"http://127.0.0.1:30999","think":true}}')
+    const subject = harness({ responses: [JSON.stringify({ type: "final", text: "done" })] })
+    const preflight = await subject.host.preflight(subject.host.identity.profile)
+    expect(preflight.compatible).toBe(true)
+    expect(subject.transportCalls[0]).toMatchObject({ engine: "local", localServer: { kind: "sglang", endpoint: "http://127.0.0.1:30999" }, localThink: true })
+    expect((await (await subject.host.prepare(subject.request)).run()).status).toBe("completed")
+    expect(subject.transportCalls[1]).toMatchObject({ localServer: { kind: "sglang", endpoint: "http://127.0.0.1:30999" } })
+  })
+
+  test("the real local transport admits an SGLang selection without an Ollama executable on PATH", async () => {
+    mkdirSync(join(root, ".otter"), { recursive: true })
+    writeFileSync(join(root, ".otter", "otter.jsonc"), '{"local_model":{"server":"sglang"}}')
+    const previousPath = process.env.PATH
+    process.env.PATH = "/usr/bin:/bin"
+    try {
+      const subject = harness({ useRealTransport: true })
+      const preflight = await subject.host.preflight(subject.host.identity.profile)
+      expect(preflight).toMatchObject({ compatible: true, problems: [] })
+    } finally { process.env.PATH = previousPath }
+  })
+
   test("preflight uses the injected transport factory without running inference", async () => {
     const subject = harness({ responses: [JSON.stringify({ type: "final", text: "still available" })] })
     const preflight = await subject.host.preflight(subject.host.identity.profile)
