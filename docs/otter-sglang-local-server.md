@@ -10,6 +10,7 @@ SGLang의 Metal 백엔드는 Qwen3.8 같은 하이브리드 모델의 접두 캐
 - **검증**: ① otter 실제 채팅 프롬프트에 넣은 고정 과제 12개에서 SGLang·MLX(캐시 없음)·MLX(캐시)의 답 36개가 글자까지 동일(성공 10/12, 실패 2개도 동일). ② otter 실사용 세션의 실제 요청 7건을 캐시 서버에서 기록해 캐시 없는 서버로 재전송, 7/7 동일. ③ SGLang→MLX 엔진 교체로 긴 대화에서 띄어쓰기 수준의 표현 차이가 1건 관찰됨(엔진 수치 차이; 캐시와 무관).
 - **속도**: 고정 과제 223초 → 56초(두 번째부터 과제당 17~18초 → 3~4초). otter 세션(읽기·수정·테스트) 181초 → 55초.
 - **한계**: 한 번에 요청 하나(1인 사용), 저장 상태 메모리 상한 8GB(`MLX_PREFIX_CACHE_GB`), 탐욕 디코딩 고정.
+- **도구 호출(OpenAI `tools`, 2026-11-20 추가)**: 도구 목록은 모델 자체 채팅 템플릿으로 넣고, 모델이 내는 `<tool_call><function=…><parameter=…>` 출력을 `tool_calls`(`finish_reason: "tool_calls"`)로 돌려준다. 인자 값은 도구 JSON 스키마의 타입으로 맞춘다(문자열은 그대로). 이전 턴의 `tool_calls`(인자 JSON 문자열)와 `tool` 결과도 템플릿으로 되먹인다. `tool_choice: "none"`은 도구를 숨기고, `"required"`나 특정 함수 지정은 강제하지 않는다(제약 디코딩 없음). 형식이 깨진 호출은 버리지 않고 본문 텍스트로 돌려준다. 도구가 없는 요청(otter)은 경로가 그대로라 답이 바뀌지 않는다. 확인 결과: 기록해 둔 otter 실제 요청 7건을 다시 보내 7/7 동일, OpenCode `opencode run`이 Read→Edit 도구로 버그 수정 완료(118초).
 - **운영**: `scripts/mlx-server.sh start|stop|status|logs|install-agent` (launchd `com.otter.mlx`, 127.0.0.1:30000). 되돌리기: `"server": "sglang"`과 `scripts/sglang-server.sh install-agent`(SGLang 설치는 남아 있다).
 
 ## (이전) SGLang 구성
