@@ -37,6 +37,17 @@ scripts/sglang-server.sh install-agent
 - 기본 `model_api` 대상 `local`도 SGLang의 OpenAI 엔드포인트를 따른다.
 - 되돌리기: `"server": "ollama"`(또는 키 삭제).
 
+## 검증 (2026-11-20, M4 Pro 64GB)
+
+| 항목 | 결과 |
+|---|---|
+| 서버 기동 | 약 10초(가중치는 MLX가 지연 로딩), KV 풀 65,536토큰 |
+| 단순 응답(사고 off) | 약 1.1초, 출력 10토큰 |
+| 단순 응답(사고 on) | 약 4.9초, 추론 블록은 `reasoning_content`로 분리돼 답에 섞이지 않음 |
+| otter 읽기 전용 턴(`read` 1회 + 답) | 약 37초: 호출당 입력 약 1,900토큰에 17~19초(프리필이 병목) |
+
+Qwen3.8은 선형 어텐션 48층 + 전체 어텐션 16층의 하이브리드(`Qwen3_5ForConditionalGeneration`)다. 현재 SGLang `main`의 Metal 백엔드에서 띄우려면 `--mamba-radix-cache-strategy no_buffer --disable-overlap-schedule --disable-radix-cache`가 필요하며, `scripts/sglang-server.sh`가 모델 설정을 보고 자동으로 붙인다. 접두 캐시가 꺼져 매 호출이 전체 프롬프트를 다시 프리필하므로 긴 대화일수록 느려진다. SGLang이 MLX 하이브리드 접두 캐시를 고치면(`MlxAuxiliaryStateComponent.host_only_checkpoint` 오류) `--disable-radix-cache`를 빼는 것이 첫 개선 지점이다.
+
 ## 경계
 
 - 프롬프트는 루프백 밖으로 나가지 않는다(엔드포인트 검증). 도구 호출을 요청하지 않으며, 서버가 `tool_calls`를 보내면 네이티브 도구 활동으로 거부한다.

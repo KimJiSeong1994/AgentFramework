@@ -12,6 +12,10 @@
 #   SGLANG_MODEL, SGLANG_SERVED_NAME (default qwen3.8-27b), SGLANG_PORT (default 30000), SGLANG_CONTEXT (optional)
 #   SGLANG_MAX_TOTAL_TOKENS (KV pool size, default 65536; without it SGLang sizes the pool to about half of RAM)
 #   SGLANG_REASONING_PARSER (default auto: split <think> into reasoning_content so answers stay clean)
+#   SGLANG_EXTRA_ARGS (extra launch flags). Hybrid linear-attention models (Qwen3.8) automatically get
+#   --mamba-radix-cache-strategy no_buffer --disable-overlap-schedule (the Metal backend has no Mamba state
+#   snapshots; no_buffer requires the plain schedule) plus --disable-radix-cache (the MLX prefix-match path
+#   crashes on hybrid models in SGLang main as of 2026-11-20: MlxAuxiliaryStateComponent.host_only_checkpoint).
 set -euo pipefail
 
 SGLANG_HOME="${SGLANG_HOME:-$HOME/.local/share/sglang}"
@@ -35,6 +39,28 @@ serve() {
   [ -x "$PY" ] || { echo "SGLang venv not found at $SGLANG_HOME/venv (see docs/otter-sglang-local-server.md)" >&2; exit 1; }
   local extra=()
   [ -n "${SGLANG_CONTEXT:-}" ] && extra+=(--context-length "$SGLANG_CONTEXT")
+  # Model shape from the cached config.json (no download): hybrid linear attention, multimodal.
+  local shape
+  shape="$("$PY" - "$MODEL" <<'PYEOF' 2>/dev/null || true
+import json, os, sys
+model = sys.argv[1]
+path = os.path.join(model, "config.json") if os.path.isdir(model) else None
+if path is None:
+    from huggingface_hub import try_to_load_from_cache
+    path = try_to_load_from_cache(model, "config.json")
+if not isinstance(path, str):
+    sys.exit(0)
+config = json.load(open(path))
+text = config.get("text_config", config)
+out = []
+if "linear_attention" in (text.get("layer_types") or []):
+    out.append("hybrid")
+print(" ".join(out))
+PYEOF
+)"
+  case " $shape " in *" hybrid "*) extra+=(--mamba-radix-cache-strategy no_buffer --disable-overlap-schedule --disable-radix-cache) ;; esac
+  # shellcheck disable=SC2206
+  [ -n "${SGLANG_EXTRA_ARGS:-}" ] && extra+=(${SGLANG_EXTRA_ARGS})
   SGLANG_USE_MLX=1 exec "$PY" -m sglang.launch_server \
     --model-path "$MODEL" --served-model-name "$NAME" \
     --host 127.0.0.1 --port "$PORT" \
