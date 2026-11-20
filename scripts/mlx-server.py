@@ -12,6 +12,13 @@ decoding is greedy (argmax). `--no-prefix-cache` serves the same answers without
 
 Endpoints: GET /v1/models, POST /v1/chat/completions (stream or not; usage with prompt_tokens_details.cached_tokens;
 reasoning before </think> goes to reasoning_content when chat_template_kwargs.enable_thinking is true).
+
+Tool calling (OpenAI `tools`): the tools are rendered by the model's own chat template, and the model's
+`<tool_call><function=NAME><parameter=P>VALUE</parameter></function></tool_call>` output (or a JSON body inside
+<tool_call>) is returned as `tool_calls` with finish_reason "tool_calls". Parameter values are typed by the tool's JSON
+schema. Earlier assistant `tool_calls` (arguments as a JSON string) and `tool` results are fed back through the
+template. `tool_choice: "none"` hides the tools; "required" or a named function is not enforced (no constrained
+decoding). Text without a tool call is returned unchanged, so tools never alter a plain answer.
 Binds 127.0.0.1 only. One request at a time (single-user; requests queue on a lock).
 """
 from __future__ import annotations
@@ -20,9 +27,11 @@ import argparse
 import copy
 import hashlib
 import json
+import re
 import sys
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -79,6 +88,123 @@ class ReasoningSplitter:
     def flush(self) -> tuple[str, str]:
         rest, self.buffer = self.buffer, ""
         return (rest.replace("<think>", ""), "") if self.thinking else ("", rest)
+
+
+TOOL_OPEN, TOOL_CLOSE = "<tool_call>", "</tool_call>"
+
+
+def normalize_messages(messages: list[dict]) -> list[dict]:
+    """OpenAI chat messages in the shape the chat template expects: text parts joined, tool-call arguments as dicts."""
+    out = []
+    for message in messages:
+        message = dict(message)
+        if isinstance(message.get("content"), list):
+            message["content"] = "".join(part.get("text", "") for part in message["content"] if isinstance(part, dict))
+        if message.get("tool_calls"):
+            calls = []
+            for call in message["tool_calls"]:
+                function = dict(call.get("function") or call)
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments) if arguments.strip() else {}
+                    except ValueError:
+                        arguments = {"arguments": arguments}
+                function["arguments"] = arguments if isinstance(arguments, dict) else {"arguments": arguments}
+                calls.append({**call, "function": function})
+            message["tool_calls"] = calls
+        out.append(message)
+    return out
+
+
+def _parameter_types(tools: list[dict] | None, name: str) -> dict:
+    for tool in tools or []:
+        function = tool.get("function") or tool
+        if function.get("name") == name:
+            return ((function.get("parameters") or {}).get("properties")) or {}
+    return {}
+
+
+def _typed_value(raw: str, schema: dict | None):
+    """A parameter's text as its schema type: strings stay verbatim, other types are parsed as JSON when they parse."""
+    kinds = (schema or {}).get("type")
+    kinds = set(kinds) if isinstance(kinds, list) else {kinds}
+    if not schema or "string" in kinds or kinds == {None}:
+        return raw
+    try:
+        return json.loads(raw)
+    except ValueError:
+        lowered = raw.strip().lower()
+        return {"true": True, "false": False, "null": None}.get(lowered, raw)
+
+
+def parse_tool_calls(text: str, tools: list[dict] | None) -> list[dict]:
+    """Tool calls in the model's output, as OpenAI tool_calls entries (arguments as a JSON string)."""
+    calls = []
+    for block in re.findall(r"<tool_call>(.*?)(?:</tool_call>|$)", text, re.S):
+        body = block.strip()
+        name, arguments = None, None
+        function = re.search(r"<function=([^>\n]+)>(.*?)(?:</function>|$)", body, re.S)
+        if function:
+            name = function.group(1).strip()
+            types = _parameter_types(tools, name)
+            arguments = {}
+            for match in re.finditer(r"<parameter=([^>\n]+)>(.*?)(?:</parameter>|(?=<parameter=)|$)", function.group(2), re.S):
+                key, raw = match.group(1).strip(), match.group(2)
+                raw = raw[1:] if raw.startswith("\n") else raw
+                raw = raw[:-1] if raw.endswith("\n") else raw
+                arguments[key] = _typed_value(raw, types.get(key))
+        elif body.startswith("{"):
+            try:
+                parsed = json.loads(body)
+                name, arguments = parsed.get("name"), parsed.get("arguments", parsed.get("parameters", {}))
+            except (ValueError, AttributeError):
+                pass
+        if name:
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    arguments = {"arguments": arguments}
+            if not isinstance(arguments, dict):
+                arguments = {"arguments": arguments}
+            calls.append({"id": f"call_{uuid.uuid4().hex[:24]}", "type": "function",
+                          "function": {"name": name, "arguments": json.dumps(arguments or {}, ensure_ascii=False)}})
+    return calls
+
+
+class ToolCallStream:
+    """Passes answer text through until a <tool_call> starts, then collects the rest for parse_tool_calls. Holds back a
+    possibly split "<tool_call>" and trailing whitespace, so whitespace before a call is dropped and a plain answer is
+    returned byte for byte."""
+
+    def __init__(self, enabled: bool):
+        self.enabled, self.pending, self.calls_text = enabled, "", None
+
+    def feed(self, text: str) -> str:
+        if not self.enabled:
+            return text
+        if self.calls_text is not None:
+            self.calls_text += text
+            return ""
+        self.pending += text
+        start = self.pending.find(TOOL_OPEN)
+        if start >= 0:
+            emit, self.calls_text, self.pending = self.pending[:start].rstrip(), self.pending[start:], ""
+            return emit
+        hold = next((n for n in range(min(len(TOOL_OPEN) - 1, len(self.pending)), 0, -1)
+                     if TOOL_OPEN.startswith(self.pending[-n:])), 0)
+        cut = len(self.pending[:len(self.pending) - hold].rstrip())
+        emit, self.pending = self.pending[:cut], self.pending[cut:]
+        return emit
+
+    def finish(self, tools: list[dict] | None) -> tuple[str, list[dict]]:
+        """(remaining answer text, tool calls). A malformed call is returned as text, never dropped."""
+        if self.calls_text is None:
+            rest, self.pending = self.pending, ""
+            return rest, []
+        calls = parse_tool_calls(self.calls_text, tools)
+        return ("", calls) if calls else (self.calls_text, [])
 
 
 class Engine:
@@ -177,13 +303,13 @@ def make_handler(engine: Engine, default_max_tokens: int, log_path: str | None =
             try:
                 length = int(self.headers.get("content-length", "0"))
                 request = json.loads(self.rfile.read(length) or b"{}")
-                messages = request["messages"]
-                for message in messages:
-                    if isinstance(message.get("content"), list):
-                        message["content"] = "".join(part.get("text", "") for part in message["content"] if isinstance(part, dict))
+                messages = normalize_messages(request["messages"])
+                tools = request.get("tools") or None
+                if tools is not None and (not isinstance(tools, list) or request.get("tool_choice") == "none"):
+                    tools = None
                 kwargs = request.get("chat_template_kwargs") or {}
                 thinking = bool(kwargs.get("enable_thinking", False))
-                tokens = list(engine.tokenizer.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=thinking))
+                tokens = list(engine.tokenizer.apply_chat_template(messages, tools=tools, add_generation_prompt=True, enable_thinking=thinking))
                 max_tokens = int(request.get("max_tokens") or default_max_tokens)
             except Exception as error:  # malformed request
                 return self._json(400, {"error": {"message": f"invalid request: {type(error).__name__}"}})
@@ -207,6 +333,7 @@ def make_handler(engine: Engine, default_max_tokens: int, log_path: str | None =
                 detok = engine.tokenizer.detokenizer
                 detok.reset()
                 splitter = ReasoningSplitter(thinking)
+                tool_stream = ToolCallStream(tools is not None)
                 answer, reasoning, produced, cached, finish = [], [], 0, 0, "stop"
                 if stream:
                     self.send_response(200)
@@ -221,6 +348,7 @@ def make_handler(engine: Engine, default_max_tokens: int, log_path: str | None =
                     produced += 1
                     detok.add_token(item)
                     think, text = splitter.feed(detok.last_segment)
+                    text = tool_stream.feed(text)
                     if think:
                         reasoning.append(think)
                         if stream: chunk({"reasoning_content": think})
@@ -234,7 +362,9 @@ def make_handler(engine: Engine, default_max_tokens: int, log_path: str | None =
                 detok.finalize()
                 think, text = splitter.feed(detok.last_segment)
                 more_think, more_text = splitter.flush()
-                think, text = think + more_think, text + more_text
+                text = tool_stream.feed(text + more_text)
+                tail, calls = tool_stream.finish(tools)
+                think, text = think + more_think, text + tail
                 if think:
                     reasoning.append(think)
                     if stream: chunk({"reasoning_content": think})
@@ -243,9 +373,15 @@ def make_handler(engine: Engine, default_max_tokens: int, log_path: str | None =
                     if stream: chunk({"content": text})
                 usage = {"prompt_tokens": len(tokens), "completion_tokens": produced, "total_tokens": len(tokens) + produced,
                          "prompt_tokens_details": {"cached_tokens": cached}}
-                if log_path and stream:
+                if calls:
+                    finish = "tool_calls"
+                    if stream:
+                        for index, call in enumerate(calls):
+                            chunk({"tool_calls": [{"index": index, **call}]})
+                if log_path:  # verification only: the exact request and answer, for replay against --no-prefix-cache
                     with open(log_path, "a") as handle:
-                        handle.write(json.dumps({"request": request, "answer": "".join(answer), "cached": cached}, ensure_ascii=False) + "\n")
+                        handle.write(json.dumps({"request": request, "answer": "".join(answer), "tool_calls": [c["function"] for c in calls],
+                                                 "cached": cached}, ensure_ascii=False) + "\n")
                 if stream:
                     chunk({}, finish)
                     if include_usage:
@@ -255,10 +391,9 @@ def make_handler(engine: Engine, default_max_tokens: int, log_path: str | None =
                     except (BrokenPipeError, ConnectionResetError):
                         pass
                     return
-                if log_path:  # verification only: the exact request and answer, for replay against --no-prefix-cache
-                    with open(log_path, "a") as handle:
-                        handle.write(json.dumps({"request": request, "answer": "".join(answer), "cached": cached}, ensure_ascii=False) + "\n")
-                message = {"role": "assistant", "content": "".join(answer)}
+                message = {"role": "assistant", "content": "".join(answer) or (None if calls else "")}
+                if calls:
+                    message["tool_calls"] = calls
                 if reasoning:
                     message["reasoning_content"] = "".join(reasoning)
                 self._json(200, {"id": rid, "object": "chat.completion", "created": created, "model": engine.served_name,
