@@ -128,8 +128,8 @@ export function verifyCommandProblem(command: string, allow: string[]): string |
 export type OtterConfig = {
   /** Ollama model residency after a request; absent/null inherits the server default. */
   /** `think`: let the local model reason before answering (Ollama `--think`); off by default (cheaper, faster turns). */
-  /** `server`: "ollama" (default; the Ollama CLI) or "sglang" (OpenAI-compatible HTTP at `endpoint`, loopback only). */
-  local_model?: { keep_alive?: string | null; context_input_tokens?: number | null; context_trim_target_percent?: number | null; think?: boolean | null; server?: "ollama" | "sglang" | null; endpoint?: string | null }
+  /** `server`: "ollama" (default; the Ollama CLI), "sglang" or "mlx" (OpenAI-compatible HTTP at `endpoint`, loopback only). */
+  local_model?: { keep_alive?: string | null; context_input_tokens?: number | null; context_trim_target_percent?: number | null; think?: boolean | null; server?: "ollama" | "sglang" | "mlx" | null; endpoint?: string | null }
   /** hook ids to disable, e.g. ["guard.repeat", "mode.detect"] */
   disabled_hooks: string[]
   /** prefix budgets in estimated tokens; doctor/tests assert these */
@@ -545,7 +545,7 @@ export function loadConfig(worktree: string): OtterConfig {
       const local = patch.local_model
       if (!local || typeof local !== "object" || Array.isArray(local) ||
           Object.keys(local).some(key => !["keep_alive", "context_input_tokens", "context_trim_target_percent", "think", "server", "endpoint"].includes(key)) ||
-          (local.server !== undefined && local.server !== null && local.server !== "ollama" && local.server !== "sglang") ||
+          (local.server !== undefined && local.server !== null && local.server !== "ollama" && local.server !== "sglang" && local.server !== "mlx") ||
           (local.endpoint !== undefined && local.endpoint !== null && loopbackEndpoint(local.endpoint) === undefined) ||
           (local.keep_alive !== undefined && local.keep_alive !== null && !isLocalKeepAlive(local.keep_alive)) ||
           (local.think !== undefined && local.think !== null && typeof local.think !== "boolean") ||

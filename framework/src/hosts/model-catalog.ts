@@ -4,7 +4,7 @@ import { delimiter, resolve } from "node:path"
 import codexMetadata from "./codex-models-0.159.3.json"
 import { CODEX_VERSION, createCodexProfile } from "./codex-profile.ts"
 import { createVendorProcess, type VendorProcessHandle } from "./vendor-process.ts"
-import { listServedModels, localServerOf } from "./local-server.ts"
+import { listServedModels, localServerLabel, localServerOf, localServerScript } from "./local-server.ts"
 import { loadConfig } from "../config.ts"
 
 export type ModelCatalog = {
@@ -107,11 +107,11 @@ async function discoverLocalModels(worktree: string, signal?: AbortSignal): Prom
   if (signal?.aborted) return modelCatalog([], LOCAL_CANCELLED_NOTICE)
   let server: ReturnType<typeof localServerOf> = { kind: "ollama" }
   try { server = localServerOf(loadConfig(worktree).local_model) } catch { /* Unreadable config: keep the Ollama default. */ }
-  if (server.kind === "sglang") {
+  if (server.kind !== "ollama") {
     const served = await listServedModels(server.endpoint, signal)
     if (signal?.aborted) return modelCatalog([], LOCAL_CANCELLED_NOTICE)
-    if (!served) return modelCatalog([], `The local SGLang server at ${server.endpoint} is not reachable; start it with scripts/sglang-server.sh. Explicit model IDs are accepted.`)
-    return modelCatalog(served.map(id => ({ id, label: id })), `Models served by SGLang at ${server.endpoint} (local_model.server = "sglang").`)
+    if (!served) return modelCatalog([], `The local ${localServerLabel(server.kind)} at ${server.endpoint} is not reachable; start it with ${localServerScript(server.kind)}. Explicit model IDs are accepted.`)
+    return modelCatalog(served.map(id => ({ id, label: id })), `Models served by ${localServerLabel(server.kind)} at ${server.endpoint} (local_model.server = "${server.kind}").`)
   }
 
   let handle: VendorProcessHandle

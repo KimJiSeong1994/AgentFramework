@@ -714,7 +714,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
   const localTransportOptions = (): Pick<CliTransportOptions, "localKeepAlive" | "localThink" | "localServer"> => {
     const local = loadLocalModel()
     const server = localServerOf(local)
-    return { ...(local?.keep_alive ? { localKeepAlive: local.keep_alive } : {}), localThink: local?.think === true, ...(server.kind === "sglang" ? { localServer: server } : {}) }
+    return { ...(local?.keep_alive ? { localKeepAlive: local.keep_alive } : {}), localThink: local?.think === true, ...(server.kind !== "ollama" ? { localServer: server } : {}) }
   }
   const currentHandles = new Map<string, { reconcile: () => Promise<ExecutionReconciliation> }>()
   const preflightTransports = new Set<CliTransportHandle>()

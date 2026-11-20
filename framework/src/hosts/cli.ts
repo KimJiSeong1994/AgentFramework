@@ -65,8 +65,8 @@ shows the mode and saved rules.
 Bare 'otter' and 'otter chat' start Otter's interactive terminal in the current Git worktree
 (any other folder is used as is; approved plans then ask before running in place),
 or in the canonical worktree selected by --worktree. Choose an engine from the menu, or
-specify --engine. Enter a native model ID or supply --model; local selects the Ollama CLI (or the loopback SGLang server
-when local_model.server is "sglang"),
+specify --engine. Enter a native model ID or supply --model; local selects the Ollama CLI (or the loopback MLX/SGLang server
+when local_model.server is "mlx" or "sglang"),
 not OpenCode. The model picker lists bounded native choices when available; explicit IDs are
 also accepted. In chat, /model shows the current selection and picker, /model <engine> <native-id>
 switches directly, and /help lists local commands. A switch requires no active workflow, valid
@@ -891,12 +891,12 @@ async function authCli(argv: readonly string[]): Promise<number> {
   if (command === "auth" && (engineArg === undefined || engineArg === "status") && methodArg === undefined) {
     const states = await Promise.all(AUTH_ENGINES.map(engine => authStatus(engine, cwd)))
     for (const state of states) console.log(describeAuth(state).replace(/\/login (\w+)/u, "otter login $1"))
-    console.log("local: no sign-in (Ollama CLI or the loopback SGLang server on this machine)")
+    console.log("local: no sign-in (Ollama CLI or a loopback MLX/SGLang server on this machine)")
     return states.every(state => state.state === "signed-in") ? 0 : 1
   }
   if ((command !== "login" && command !== "logout") || extra.length || !(AUTH_ENGINES as readonly string[]).includes(engineArg ?? "") ||
       (command === "logout" && methodArg !== undefined)) {
-    console.error(engineArg === "local" ? "The local engine (Ollama or SGLang on this machine) needs no sign-in." : usage)
+    console.error(engineArg === "local" ? "The local engine (Ollama, MLX or SGLang on this machine) needs no sign-in." : usage)
     return 2
   }
   const engine = engineArg as AuthEngine

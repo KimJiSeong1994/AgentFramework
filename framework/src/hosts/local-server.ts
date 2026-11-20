@@ -1,15 +1,21 @@
-// Local model serving through an OpenAI-compatible HTTP server (SGLang) instead of the Ollama CLI.
+// Local model serving through an OpenAI-compatible HTTP server (SGLang or otter's MLX server) instead of the Ollama CLI.
 //
-// `local_model.server: "sglang"` routes the `local` engine's inference to `<endpoint>/v1/chat/completions` with
+// `local_model.server: "sglang"` or `"mlx"` routes the `local` engine's inference to `<endpoint>/v1/chat/completions` with
 // streaming. The endpoint must be loopback http (127.0.0.1, ::1 or localhost): otter never sends local-engine prompts
-// off the machine. The server is started by the operator (scripts/sglang-server.sh); otter only talks to it. The
+// off the machine. The server is started by the operator (scripts/sglang-server.sh or scripts/mlx-server.sh); otter only talks to it. The
 // transport mirrors the CLI transport's contract: one-shot run, bounded output, deadline, cancel, quiescent result,
 // vendor-reported usage counters and a failure class, never the server's diagnostic text.
 import type { CliObservedUsage, CliTransportHandle, CliTransportOptions, CliTransportResult } from "./cli-transport.ts"
 import { classifyEngineFailure } from "./cli-transport.ts"
 import type { EngineFailureClass, ExecutionCancelResult, ExecutionReconciliation } from "./types.ts"
 
-export type LocalServerKind = "ollama" | "sglang"
+export type LocalServerKind = "ollama" | "sglang" | "mlx"
+/** An OpenAI-compatible loopback server for the local engine. */
+export type HttpLocalServer = { kind: "sglang" | "mlx"; endpoint: string }
+
+/** How a server is named to the user, and the script that starts it. */
+export function localServerLabel(kind: HttpLocalServer["kind"]): string { return kind === "mlx" ? "MLX server" : "SGLang" }
+export function localServerScript(kind: HttpLocalServer["kind"]): string { return kind === "mlx" ? "scripts/mlx-server.sh" : "scripts/sglang-server.sh" }
 export const DEFAULT_SGLANG_ENDPOINT = "http://127.0.0.1:30000"
 const MAX_STREAM_BYTES = 16 * 1024 * 1024
 const MAX_LINE_BYTES = 1024 * 1024
@@ -24,14 +30,14 @@ export function loopbackEndpoint(value: unknown): string | undefined {
   return url.href.replace(/\/+$/u, "")
 }
 
-/** The local server otter uses for the `local` engine: Ollama's CLI unless the config selects SGLang. */
-export function localServerOf(local: { server?: string | null; endpoint?: string | null } | undefined): { kind: "ollama" } | { kind: "sglang"; endpoint: string } {
-  if (local?.server !== "sglang") return { kind: "ollama" }
-  return { kind: "sglang", endpoint: loopbackEndpoint(local.endpoint ?? DEFAULT_SGLANG_ENDPOINT) ?? DEFAULT_SGLANG_ENDPOINT }
+/** The local server otter uses for the `local` engine: Ollama's CLI unless the config selects SGLang or the MLX server. */
+export function localServerOf(local: { server?: string | null; endpoint?: string | null } | undefined): { kind: "ollama" } | HttpLocalServer {
+  if (local?.server !== "sglang" && local?.server !== "mlx") return { kind: "ollama" }
+  return { kind: local.server, endpoint: loopbackEndpoint(local.endpoint ?? DEFAULT_SGLANG_ENDPOINT) ?? DEFAULT_SGLANG_ENDPOINT }
 }
 
 const SAFE = {
-  unreachable: "local SGLang server is not reachable; start it with scripts/sglang-server.sh",
+  unreachable: "local model server is not reachable; start it with scripts/mlx-server.sh or scripts/sglang-server.sh",
   native: "native CLI reported failure",
   malformed: "invalid native CLI output",
   incomplete: "native CLI result incomplete",
@@ -67,7 +73,7 @@ export async function listServedModels(endpoint: string, signal?: AbortSignal, t
   } catch { return undefined }
 }
 
-/** A one-shot streaming chat completion against the local SGLang server, shaped like a CLI transport. */
+/** A one-shot streaming chat completion against the local OpenAI-compatible server, shaped like a CLI transport. */
 export function createSglangTransport(options: CliTransportOptions, endpoint: string): CliTransportHandle {
   const controller = new AbortController()
   let runCalled = false
