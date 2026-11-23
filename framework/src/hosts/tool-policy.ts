@@ -42,6 +42,14 @@ const SYSTEM: Record<ExecutionRole, string> = {
   simplifier: "You are Otter's simplifier. Identify the smallest complete solution and remove unnecessary proposed complexity without weakening requirements. Inspect only with read, list, glob, and grep. Never modify files, execute commands, approve work, or delegate.",
 }
 
+/**
+ * Tool-result trimming for the Claude/Codex CLI engines. `guards.read_max_*` defaults (200 lines / 20 KB / 2,500 tokens)
+ * were sized for a small local context; a vendor model given 200 lines of a file answers from a fragment. The host's
+ * 32 KiB per-result cap still applies before this.
+ */
+export const VENDOR_TRIM = Object.freeze({ read_max_lines: 2000, read_max_bytes: 32 * 1024, read_max_tokens: 12_000 })
+const isVendorEngine = (providerID: string | undefined): boolean => providerID === "codex" || providerID === "claude"
+
 export type ExecutionPolicyOptions = {
   directory?: string
   worktree?: string
@@ -178,7 +186,7 @@ export function createExecutionPolicy(config: Readonly<OtterConfig>, options: Ex
           let hinted = false
           if (!config.disabled_hooks.includes("guard.trim")) {
             if (config.guards.relativize_paths && PATH_TOOLS.has(event.name)) text = relativizePaths(text, [options.directory ?? "", options.worktree ?? "", request.cwd])
-            const trimmedResult = trimToolOutput(event.name, text, config.guards)
+            const trimmedResult = trimToolOutput(event.name, text, isVendorEngine(policy.model?.providerID) ? VENDOR_TRIM : config.guards)
             text = trimmedResult.output
             trimmed = trimmedResult.trimmed
           }

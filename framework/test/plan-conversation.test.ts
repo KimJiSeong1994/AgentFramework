@@ -613,7 +613,7 @@ describe("local conversation context", () => {
     const cloud = fixture({ engine: "claude" })
     await createPlanConversation(cloud.runtime, "cloud-context").turn("가".repeat(10000))
     expect(cloud.requests).toHaveLength(1)
-    expect(planConversationChars("claude", 4096)).toBe(96000)
+    expect(planConversationChars("claude", 4096)).toBe(200000)
   })
 })
 

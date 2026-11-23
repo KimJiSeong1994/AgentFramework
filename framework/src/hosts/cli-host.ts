@@ -1,5 +1,5 @@
 import { localServerOf } from "./local-server.ts"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import { statSync } from "node:fs"
 import { createHash } from "node:crypto"
 import {
@@ -57,9 +57,18 @@ const MAIN_INPUT_LIMIT = 8192
  * VENDOR_PLAN_CONVERSATION_CHARS), loaded skills, their files and tool results. Still an Otter estimate, far under the
  * vendors' own context.
  */
-const VENDOR_MAIN_INPUT_LIMIT = 49152
+const VENDOR_MAIN_INPUT_LIMIT = 160_000
 const WORKER_INPUT_LIMIT = 5120
+/** Claude/Codex worker, reviewer and data roles: the 5,120-token local budget cannot hold a task plus the files it names. */
+const VENDOR_WORKER_INPUT_LIMIT = 49152
 const MAX_TOOL_ROUNDS = 24
+/** Claude/Codex turns: reading a codebase and then changing it takes more than 24 calls; the human extension still applies on top. */
+const VENDOR_MAX_TOOL_ROUNDS = 96
+/**
+ * Claude/Codex turns: all model output of one user message (every tool envelope plus the answer). `max_output` tokens x 4
+ * (32 KiB for main) is a local-model budget; a few file edits used it up before the answer.
+ */
+const VENDOR_TURN_OUTPUT_BYTES = 1024 * 1024
 /** Read-only tool calls executed from one reply (the first plus batched ones); the rest are reported as not run. */
 const MAX_READ_ONLY_BATCH = 8
 /** Chat only: how many times the human may grant another MAX_TOOL_ROUNDS when a turn reaches its limit. */
@@ -288,6 +297,8 @@ export type CliHostOptions = {
   /** Trusted originating-project settings; execution cwd may be an isolated worktree without project config.
    * Input budget reloads per execution, retention per inference. Omission uses local model defaults. */
   loadLocalModel?: () => OtterConfig["local_model"]
+  /** Reasoning effort for Claude/Codex inference, read per inference (`chat.effort`). Omission leaves the vendor default. */
+  loadEffort?: () => CliTransportOptions["effort"]
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -553,7 +564,7 @@ function droppedSkills(before: readonly TranscriptExchange[], after: readonly Tr
 
 /** Workflow read-only roles carry plan/spec context, so they use the main limit (B1); every legacy role keeps its limit. */
 export function roleInputLimit(role: ExecutionRole, engine: CliEngine = "local", localInputTokens = MAIN_INPUT_LIMIT): number {
-  if (role !== "main" && !isWorkflowReadOnlyRole(role)) return engine === "local" ? Math.min(WORKER_INPUT_LIMIT, localInputTokens) : WORKER_INPUT_LIMIT
+  if (role !== "main" && !isWorkflowReadOnlyRole(role)) return engine === "local" ? Math.min(WORKER_INPUT_LIMIT, localInputTokens) : VENDOR_WORKER_INPUT_LIMIT
   return engine === "local" ? localInputTokens : VENDOR_MAIN_INPUT_LIMIT
 }
 
@@ -573,7 +584,25 @@ function offeredSkillTool(request: ExecutionRequest): { provider: SkillToolProvi
   return { provider, catalog: Object.freeze(catalog) }
 }
 
-function buildBasePrompt(request: ExecutionRequest, available: readonly CliToolName[], catalog: SkillToolProvider["catalog"] = [], inputLimit = roleInputLimit(request.role)): string {
+/**
+ * Claude/Codex main turns only. The vendor CLI's own agent prompt is replaced by otter's protocol text, which says how to
+ * call tools but nothing about finishing work or answer depth; recorded sessions stopped after a few reads and answered
+ * in a line. The local engine's prompt is unchanged.
+ */
+function vendorWorkingStyle(request: ExecutionRequest, available: ReadonlySet<CliToolName>): string {
+  const canChange = available.has("write") || available.has("edit")
+  return [
+    "Working style:",
+    `- Carry the request through before you answer. For ${canChange ? "a change, " : ""}a review or an investigation, keep calling tools until the work is complete${canChange ? " and checked" : ""}; a final answer that only reports which files you looked at, or that the work is not done yet, is a failure. Stop early only when a tool result shows you are blocked, and then say exactly what blocked you.`,
+    "- Find things out with the tools instead of asking the user or answering from memory. Read the files a claim depends on (whole files or large ranges, several per reply) and cite them as path:line.",
+    "- Think the problem through before the final answer: check your conclusion against what the tools returned, consider what you have not looked at yet, and look at it when it could change the answer.",
+    "- Match the answer to the question, in the user's language. A review, design, analysis or explanation gets a complete, structured Markdown answer with the evidence and reasoning; a simple question gets a short one. Keep the final text under 40,000 characters.",
+    "- Tool results are not kept for the user's next message; only the conversation text is. Put the paths, findings and decisions that later work will need into your final answer.",
+    `Environment: date ${new Date().toISOString().slice(0, 10)}; platform ${process.platform}; worktree directory "${basename(request.cwd)}" (tool paths are relative to it).`,
+  ].join("\n")
+}
+
+function buildBasePrompt(request: ExecutionRequest, available: readonly CliToolName[], catalog: SkillToolProvider["catalog"] = [], inputLimit = roleInputLimit(request.role), engine: CliEngine = "local"): string {
   const allow = new Set(available)
   const toolLines = CLI_TOOL_NAMES.filter(name => (name !== "skill" || allow.has(name)) && (name !== "repo_search" || allow.has(name)) && (name !== "multiread" || allow.has(name)) && (name !== "model_api" || allow.has(name))).map(name =>
     `- ${name}: ${allow.has(name) ? "allowed" : "denied"}; exact input schema ${TOOL_SCHEMAS[name]}`,
@@ -607,6 +636,7 @@ function buildBasePrompt(request: ExecutionRequest, available: readonly CliToolN
     "File-tool bounds: reads refuse files over 1 MiB; each returned tool result is capped at 32 KiB. Glob and grep inspect at most 10,000 entries and 16 directory levels, honor .gitignore, and skip protected/common ignored or credential directories; grep is literal and case-sensitive. Writes/edit require a policy-authorized writable role and verified existing parent directory; edit changes only a unique exact oldText match.",
     "Role-specific system instructions:",
     roleInstructions,
+    ...(request.role === "main" && engine !== "local" ? [vendorWorkingStyle(request, allow)] : []),
     "Execution title (preserve this constraint):",
     request.title,
     "User task (preserve all content and constraints):",
@@ -715,6 +745,11 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
     const local = loadLocalModel()
     const server = localServerOf(local)
     return { ...(local?.keep_alive ? { localKeepAlive: local.keep_alive } : {}), localThink: local?.think === true, ...(server.kind !== "ollama" ? { localServer: server } : {}) }
+  }
+  const vendorTransportOptions = (): Pick<CliTransportOptions, "effort"> => {
+    let effort: CliTransportOptions["effort"]
+    try { effort = options.loadEffort?.() } catch { effort = undefined }
+    return effort ? { effort } : {}
   }
   const currentHandles = new Map<string, { reconcile: () => Promise<ExecutionReconciliation> }>()
   const preflightTransports = new Set<CliTransportHandle>()
@@ -1002,7 +1037,8 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
           if (nativeWitnessRequested && injectedTransportFactory !== undefined) {
             return setFinal({ status: "failed", error: "skill loader witness transport override refused" })
           }
-          const effectiveOutputLimit = witnessRequested ? Math.min(outputLimit, 32 * 1024) : outputLimit
+          const vendorRoute = route.engine === "codex" || route.engine === "claude"
+          const effectiveOutputLimit = witnessRequested ? Math.min(outputLimit, 32 * 1024) : vendorRoute ? Math.max(outputLimit, VENDOR_TURN_OUTPUT_BYTES) : outputLimit
           const nativeDeadlineAt = witnessRequested ? Math.min(request.deadlineAt, Date.now() + 120_000) : request.deadlineAt
           let offered = offeredSkillTool(request)
           let repoSearchProvider: ((input: { query: string; limit?: number }, signal?: AbortSignal) => Promise<string>) | undefined
@@ -1034,19 +1070,19 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
           const nativeInstructionTokens = route.engine === "claude" ? estimateTokens(HOST_INFERENCE_INSTRUCTIONS)
             : request.policy.nativeContext ? estimateTokens(request.policy.nativeContext.instructions) : 0
           let available = witnessRequested ? Object.freeze([] as CliToolName[]) : tools.available
-          let basePrompt = buildBasePrompt(request, available, offered?.catalog, inputLimit)
+          let basePrompt = buildBasePrompt(request, available, offered?.catalog, inputLimit, route.engine)
           // Skills are optional: when the catalog would push the prompt over the limit, this turn runs without them
           // rather than failing a turn that fits on its own.
           const listed = offered
           if (offered && estimatedTokens(basePrompt) + nativeInstructionTokens > inputLimit) {
             offered = undefined
             available = Object.freeze(available.filter(name => name !== "skill"))
-            basePrompt = buildBasePrompt(request, available, [], inputLimit)
+            basePrompt = buildBasePrompt(request, available, [], inputLimit, route.engine)
           }
           // Batching is optional: keep a previously admissible task even when its extra schema would overflow.
           if (available.includes("multiread") && estimatedTokens(renderPrompt(basePrompt, [])) + nativeInstructionTokens > inputLimit) {
             available = Object.freeze(available.filter(name => name !== "multiread"))
-            basePrompt = buildBasePrompt(request, available, offered?.catalog, inputLimit)
+            basePrompt = buildBasePrompt(request, available, offered?.catalog, inputLimit, route.engine)
           }
           if (listed) {
             try { listed.provider.offered?.(offered ? listed.catalog.map(skill => skill.name) : [], offered === undefined) } catch { /* Telemetry only. */ }
@@ -1108,7 +1144,8 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
 
           // Chat with a human present may grant more rounds when the limit is reached; everything else stops at the limit.
           const turnGate = request.role === "main" ? request.actionGate : undefined
-          let roundLimit = MAX_TOOL_ROUNDS
+          const roundStep = vendorRoute ? VENDOR_MAX_TOOL_ROUNDS : MAX_TOOL_ROUNDS
+          let roundLimit = roundStep
           let extensions = 0
           for (turn = 0; turn < roundLimit + 1; turn++) {
             if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
@@ -1134,7 +1171,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             try {
               const transportOptions: CliTransportOptions = {
                 engine: route.engine,
-                ...(route.engine === "local" ? localTransportOptions() : {}),
+                ...(route.engine === "local" ? localTransportOptions() : vendorTransportOptions()),
                 model: route.model,
                 prompt,
                 deadlineAt: nativeDeadlineAt,
@@ -1482,7 +1519,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                 let granted = false
                 if (turnGate?.extendRounds && extensions < MAX_ROUND_EXTENSIONS) {
                   const extendSignal = AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))])
-                  try { granted = await turnGate.extendRounds(toolCalls, MAX_TOOL_ROUNDS, extendSignal) } catch { granted = false }
+                  try { granted = await turnGate.extendRounds(toolCalls, roundStep, extendSignal) } catch { granted = false }
                 }
                 if (!granted || cancelled) {
                   finishTool("denied", false)
@@ -1490,7 +1527,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                   return setFinal({ status: "failed", error: "Otter tool round limit reached" })
                 }
                 extensions++
-                roundLimit += MAX_TOOL_ROUNDS
+                roundLimit += roundStep
               }
               if (cancelled) {
                 finishTool("failed", false)

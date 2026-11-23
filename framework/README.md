@@ -91,6 +91,19 @@ otter chat --engine codex --model gpt-5.6-sol
 otter chat --engine claude --model sonnet
 ```
 
+### Reasoning effort (`chat.effort`)
+
+Otter starts the Claude and Codex CLIs without your own CLI settings, so their effort setting
+(`model_reasoning_effort`, `effortLevel`) does not apply. `chat.effort` sets it instead:
+`"low"`, `"medium"`, `"high"` (default), `"xhigh"` or `"max"`. Codex receives it as
+`model_reasoning_effort` (lowered to the highest level the model lists) with `model_verbosity="medium"`;
+Claude receives `--effort`. Higher levels answer more slowly and use more of your plan's quota.
+The local engine ignores it.
+
+Claude and Codex turns also get larger budgets than the local engine: 160,000 estimated input tokens
+for the chat model (49,152 for workers and reviewers), tool results up to 2,000 lines, 96 tool calls
+per message before the extension prompt, and final answers up to 48,000 characters.
+
 ### Chat execution (`chat.execute`)
 
 Every execution is approved by the local human, one action at a time or one plan at a time.

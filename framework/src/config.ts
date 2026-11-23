@@ -173,6 +173,12 @@ export type OtterConfig = {
      */
     worktree?: "plan" | "off"
     /**
+     * Reasoning effort for Claude/Codex inference. Unset means "high" (see `chatEffort`). Otter launches the vendor CLIs
+     * without the user's own CLI settings, so without this the vendor default applies (Codex gpt-6-astra: "low").
+     * The local engine ignores it (`local_model.think` is its switch).
+     */
+    effort?: VendorEffort
+    /**
      * What the chat model may do itself. Unset means "ask" (see `chatExecuteMode`): it may edit/write files in the
      * worktree and run commands, each only after a local human approval; "auto-edit" applies file edits without asking
      * (commands still ask); "plan" keeps it read-only (execution only through /plan). Unset in DEFAULT_CONFIG for the
@@ -453,7 +459,16 @@ export function projectConfigPath(worktree: string): string {
   return join(worktree, ".otter", "otter.jsonc")
 }
 
-export type ConfigErrorKind = "unreadable" | "not-a-file" | "invalid-jsonc" | "invalid-verifier-selector" | "invalid-chat-intent" | "invalid-chat-worktree" | "invalid-chat-execute" | "invalid-local-model"
+export type ConfigErrorKind = "unreadable" | "not-a-file" | "invalid-jsonc" | "invalid-verifier-selector" | "invalid-chat-intent" | "invalid-chat-worktree" | "invalid-chat-execute" | "invalid-chat-effort" | "invalid-local-model"
+
+export const VENDOR_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const
+export type VendorEffort = typeof VENDOR_EFFORTS[number]
+export const DEFAULT_VENDOR_EFFORT: VendorEffort = "high"
+
+/** Effective `chat.effort`: an absent key means the default, "high". */
+export function chatEffort(config: { chat: { effort?: VendorEffort } }): VendorEffort {
+  return (VENDOR_EFFORTS as readonly unknown[]).includes(config.chat.effort) ? config.chat.effort! : DEFAULT_VENDOR_EFFORT
+}
 
 /** Effective `chat.intent`: an absent key means the default, "offer". */
 export function chatIntentMode(config: { chat: { intent?: "offer" | "off" } }): "offer" | "off" {
@@ -536,6 +551,10 @@ export function loadConfig(worktree: string): OtterConfig {
     if (Object.hasOwn(patch, "chat") && patch.chat && typeof patch.chat === "object" && !Array.isArray(patch.chat) &&
         Object.hasOwn(patch.chat, "worktree") && patch.chat.worktree !== "plan" && patch.chat.worktree !== "off") {
       throw new ConfigError(p, "invalid-chat-worktree")
+    }
+    if (Object.hasOwn(patch, "chat") && patch.chat && typeof patch.chat === "object" && !Array.isArray(patch.chat) &&
+        Object.hasOwn(patch.chat, "effort") && !(VENDOR_EFFORTS as readonly unknown[]).includes(patch.chat.effort)) {
+      throw new ConfigError(p, "invalid-chat-effort")
     }
     if (Object.hasOwn(patch, "chat") && patch.chat && typeof patch.chat === "object" && !Array.isArray(patch.chat) &&
         Object.hasOwn(patch.chat, "execute") && patch.chat.execute !== "ask" && patch.chat.execute !== "auto-edit" && patch.chat.execute !== "plan") {

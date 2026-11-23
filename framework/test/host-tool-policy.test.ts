@@ -265,6 +265,15 @@ describe("host-neutral execution tool policy", () => {
     expect(hinted).toMatchObject({ trimmed: false, hinted: true })
   })
 
+  test("Claude/Codex roles keep up to 2,000 lines of a tool result; other models keep guards.read_max_lines", () => {
+    const body = Array.from({ length: 500 }, (_, index) => `line ${index}`).join("\n")
+    const event = { type: "tool-result" as const, sessionID: "vendor", callID: "read", toolID: "t", name: "read", result: body }
+    for (const [models, trimmed] of [[{ worker: "codex/gpt-6-astra" }, false], [{ worker: "claude/opus" }, false], [{ worker: "ollama/gemma" }, true], [{}, true]] as const) {
+      const p = createExecutionPolicy(config({ models: models as OtterConfig["models"] }))
+      expect(p.handlers(request(p)).toolResult(event)).toMatchObject({ trimmed })
+    }
+  })
+
   test("resets active mode failures only after a successful result for that session", () => {
     const worktree = mkdtempSync(join(tmpdir(), "policy-state-"))
     try {
