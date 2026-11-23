@@ -638,7 +638,7 @@ function validateKindData(kind: TranscriptKind, data: Record<string, unknown>): 
     // writes and a command's rule prefix. Never file contents, edit text or a full command line (the session-digest
     // allow-list in knowledge/AGENTS.md).
     const paths = data.paths
-    if (!(exactKeys(data, ["tool", "decision", "paths"]) || exactKeys(data, ["tool", "decision", "paths", "rule"])) || !["write", "edit", "multiedit", "bash", "model_api"].includes(data.tool as string) ||
+    if (!(exactKeys(data, ["tool", "decision", "paths"]) || exactKeys(data, ["tool", "decision", "paths", "rule"])) || !["write", "edit", "multiedit", "bash", "model_api", "web_search"].includes(data.tool as string) ||
         !["asked", "rule", "read-only", "auto-edit", "grant", "denied", "refused"].includes(data.decision as string) ||
         !Array.isArray(paths) || paths.length > 64 || !paths.every(path => boundedString(path, 1024)) ||
         (data.rule !== undefined && !boundedString(data.rule, 256))) {

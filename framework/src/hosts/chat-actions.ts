@@ -156,7 +156,7 @@ export function clearAllowRules(): number {
 
 /** Worktree-relative paths an action writes (empty for commands). */
 export function actionPaths(action: ChatAction): string[] {
-  if (action.tool === "bash" || action.tool === "model_api") return []
+  if (action.tool === "bash" || action.tool === "model_api" || action.tool === "web_search") return []
   if (action.tool === "multiedit") return [...new Set(action.edits.map(edit => edit.path))]
   return [action.path]
 }
@@ -195,6 +195,13 @@ export function describeAction(action: ChatAction, maxLines = 40): { title: stri
         `Output limit ${action.maxOutputTokens} tokens; time limit ${action.timeoutSeconds}s. Remote calls may incur charges.`,
         ...(action.apiKeyEnv ? [`Credential: environment variable ${action.apiKeyEnv} (value hidden).`] : []),
         "Exact prompt sent:", ...action.prompt.split("\n")],
+    }
+  }
+  if (action.tool === "web_search") {
+    return {
+      title: `Search the web through ${action.engine} / ${action.model}`,
+      preview: ["The query below leaves this machine: it is sent to the vendor's web search. A separate search-only process runs it;",
+        "it sees nothing of this repository. Uses your plan's quota.", "Exact query sent:", ...action.query.split("\n")],
     }
   }
   if (action.tool === "bash") {

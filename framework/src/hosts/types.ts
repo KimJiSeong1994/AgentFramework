@@ -1,4 +1,5 @@
 import type { ModelApiAction, ModelApiInput } from "./model-api.ts"
+import type { WebSearchAction, WebSearchInput } from "./web-search.ts"
 import type { OtterConfig, ModelSelection } from "../config.ts"
 import type { CheckRun } from "../data/check.ts"
 import type { SkillTaskFactInput, SkillVerificationFactInput } from "../telemetry/skills.ts"
@@ -105,6 +106,7 @@ export type ExecutionRequest = {
 /** One effect the chat model asks for; shown to the human before anything happens. */
 export type ChatAction =
   | ModelApiAction
+  | WebSearchAction
   /** `overwritesUnread`: the file exists and this turn has not read it; auto-edit then asks instead of applying. */
   | Readonly<{ tool: "write"; path: string; content: string; overwritesUnread?: boolean }>
   | Readonly<{ tool: "edit"; path: string; oldText: string; newText: string }>
@@ -126,6 +128,11 @@ export type ActionGate = Readonly<{
   modelApi?: Readonly<{
     prepare(input: ModelApiInput): ModelApiAction
     run(action: ModelApiAction, signal: AbortSignal): Promise<{ ok: true; text: string } | { ok: false; error: string }>
+  }>
+  /** Optional host-owned web search: one approved query runs in a separate search-only vendor process. */
+  webSearch?: Readonly<{
+    prepare(input: WebSearchInput): WebSearchAction
+    run(action: WebSearchAction, signal: AbortSignal): Promise<{ ok: true; text: string } | { ok: false; error: string }>
   }>
   /** The turn used its tool rounds: the human decides whether it may use `rounds` more. Without this the turn fails. */
   extendRounds?(used: number, rounds: number, signal: AbortSignal): Promise<boolean>
