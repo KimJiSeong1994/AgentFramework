@@ -44,7 +44,7 @@ export type BudgetEvidence = {
   /** Main and read-only workflow roles on the local (Ollama) engine. */
   mainLimit: 8192
   /** Main and read-only workflow roles on the Claude/Codex CLIs, whose models take far larger inputs. */
-  vendorMainLimit: 49152
+  vendorMainLimit: 160000
   workerLimit: 5120
 }
 export type HostIdentity = {
@@ -190,6 +190,8 @@ export type ExecutionOutcome = {
   childMessageID?: string
   outputLimitReached?: boolean
   usage?: unknown
+  /** CLI host, Claude/Codex main turns: which tools ran in this execution (names and targets, no contents). */
+  work?: string
 }
 
 export type ExecutionCancelResult = {

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { localContextTrimTargetPercent, localContextInputTokens, isLocalKeepAlive, chatExecuteMode, chatIntentMode, chatWorktreeMode, ConfigError, DEFAULT_CONFIG, loadConfig, parseJsonc, projectConfigPath, userConfigPath } from "../src/config.ts"
+import { localContextTrimTargetPercent, localContextInputTokens, isLocalKeepAlive, chatEffort, chatExecuteMode, chatIntentMode, chatWorktreeMode, ConfigError, DEFAULT_CONFIG, loadConfig, parseJsonc, projectConfigPath, userConfigPath } from "../src/config.ts"
 
 let root: string
 let worktree: string
@@ -51,6 +51,19 @@ describe("chat.worktree", () => {
     refused(projectConfigPath(worktree), "invalid-chat-worktree")
     expect(DEFAULT_CONFIG.chat).toEqual({})
     expect(DEFAULT_CONFIG.delegate.worktree).toBe(false)
+  })
+})
+
+describe("chat.effort", () => {
+  test("absent means high; listed levels are accepted; any other value is refused at load", () => {
+    expect(chatEffort(loadConfig(worktree))).toBe("high")
+    for (const effort of ["low", "medium", "high", "xhigh", "max"] as const) {
+      put(userConfigPath(), JSON.stringify({ chat: { effort } }))
+      expect(chatEffort(loadConfig(worktree))).toBe(effort)
+    }
+    put(projectConfigPath(worktree), '{"chat":{"effort":"ultra"}}')
+    refused(projectConfigPath(worktree), "invalid-chat-effort")
+    expect(DEFAULT_CONFIG.chat).toEqual({})
   })
 })
 

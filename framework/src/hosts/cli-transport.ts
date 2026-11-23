@@ -22,6 +22,11 @@ export type CliTransportOptions = {
   localThink?: boolean
   /** Local engine only: serve through an OpenAI-compatible server (SGLang or otter's MLX server) at this loopback endpoint. */
   localServer?: { kind: "sglang" | "mlx"; endpoint: string }
+  /**
+   * Claude/Codex only: reasoning effort for this inference. Otter starts the vendor CLI without the user's CLI settings,
+   * so an omitted value means the vendor's own default (Codex gpt-6-astra: "low"; Claude headless: "medium").
+   */
+  effort?: "low" | "medium" | "high" | "xhigh" | "max"
   model: string
   prompt: string
   deadlineAt: number
@@ -209,6 +214,7 @@ function safeOptions(options: CliTransportOptions): CliTransportOptions {
       (options.onText !== undefined && typeof options.onText !== "function") ||
       (options.localKeepAlive !== undefined && !isLocalKeepAlive(options.localKeepAlive)) ||
       (options.localThink !== undefined && typeof options.localThink !== "boolean") ||
+      (options.effort !== undefined && (options.engine === "local" || !VENDOR_EFFORT_ORDER.includes(options.effort))) ||
       (options.localServer !== undefined && (options.engine !== "local" || (options.localServer.kind !== "sglang" && options.localServer.kind !== "mlx") ||
         loopbackEndpoint(options.localServer.endpoint) !== options.localServer.endpoint))) {
     throw new TypeError(SAFE_ERRORS.options)
@@ -468,16 +474,36 @@ function createScratchDirectory(): OwnedScratchDirectory {
   throw new Error(SAFE_ERRORS.scratch)
 }
 
-function nativeArgv(engine: CliEngine, model: string, scratch: string, codexState?: OwnedCodexState, codexVersion?: string, localThink = false): string[] {
+const VENDOR_EFFORT_ORDER: readonly string[] = ["low", "medium", "high", "xhigh", "max"]
+
+/**
+ * The requested effort, lowered to the highest level this Codex model lists (Codex accepts an unknown effort string
+ * silently, so the catalog is the check). Undefined when the catalog lists none of otter's levels.
+ */
+function codexEffort(catalogJson: string, effort: string): string | undefined {
+  let supported: string[] = []
+  try {
+    const levels = (JSON.parse(catalogJson) as { models?: Array<{ supported_reasoning_levels?: Array<{ effort?: unknown }> }> }).models?.[0]?.supported_reasoning_levels
+    if (Array.isArray(levels)) supported = levels.flatMap(level => typeof level?.effort === "string" ? [level.effort] : [])
+  } catch { return undefined }
+  for (let index = VENDOR_EFFORT_ORDER.indexOf(effort); index >= 0; index--) {
+    if (supported.includes(VENDOR_EFFORT_ORDER[index]!)) return VENDOR_EFFORT_ORDER[index]
+  }
+  return undefined
+}
+
+function nativeArgv(engine: CliEngine, model: string, scratch: string, codexState?: OwnedCodexState, codexVersion?: string, localThink = false, effort?: string): string[] {
   if (engine === "claude") {
     return [
       "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
       "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands",
       "--no-chrome", "--no-session-persistence", "--system-prompt", HOST_INFERENCE_INSTRUCTIONS, "--output-format", "stream-json", "--verbose", "--model", model,
+      ...(effort ? ["--effort", effort] : []),
     ]
   }
   if (engine === "codex") {
     if (!codexState || !verifyOwnedCodexState(codexState)) throw new Error(SAFE_ERRORS.profile)
+    const resolvedCodexEffort = effort ? codexEffort(codexState.profile.catalogJson, effort) : undefined
     return [
       "exec", "--json", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
       "-C", scratch, "-m", model,
@@ -485,7 +511,10 @@ function nativeArgv(engine: CliEngine, model: string, scratch: string, codexStat
       "-c", "features.shell_tool=false", "-c", "features.multi_agent=false", "-c", "web_search=disabled",
       "-c", "features.view_image=false", "-c", "features.sleep_tool=false", "-c", "features.apps=false",
       "-c", "features.plugins=false", "-c", "include_environment_context=false", "-c", "project_doc_max_bytes=0",
-      "-c", "mcp_servers={}", "-",
+      "-c", "mcp_servers={}",
+      // With an effort chosen, the answer text also leaves the catalog's "low" verbosity for the vendor's middle setting.
+      ...(resolvedCodexEffort ? ["-c", `model_reasoning_effort="${resolvedCodexEffort}"`, "-c", 'model_verbosity="medium"'] : []),
+      "-",
     ]
   }
   // Reasoning is decided at generation time (`--think`), never hidden after the fact: `--hidethinking` can discard the
@@ -1191,7 +1220,7 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
           codexState = state
           scratch = state.root
           const cwd = state.workdir.path
-          const argv = nativeArgv(options.engine, options.model, cwd, state, probedCodexVersion)
+          const argv = nativeArgv(options.engine, options.model, cwd, state, probedCodexVersion, false, options.effort)
           let codexHome: string
           try { codexHome = ensureOwnedCodexHome().path }
           catch (error) { throw new Error(error instanceof OwnedCodexHomeError ? SAFE_ERRORS.codexHome : SAFE_ERRORS.scratch) }
@@ -1213,7 +1242,7 @@ export function createCliTransport(rawOptions: CliTransportOptions): CliTranspor
         } else {
           scratch = createScratchDirectory()
           if (!hasOwnedScratchIdentity(scratch)) throw new Error(SAFE_ERRORS.cleanup)
-          const argv = nativeArgv(options.engine, options.model, scratch.path, undefined, undefined, options.engine === "local" && options.localThink === true)
+          const argv = nativeArgv(options.engine, options.model, scratch.path, undefined, undefined, options.engine === "local" && options.localThink === true, options.engine === "claude" ? options.effort : undefined)
           if (options.engine === "local" && options.localKeepAlive !== undefined) {
             // Ollama's CLI parses Go durations: negative residency needs a unit even though config uses -1.
             argv.push("--keepalive", options.localKeepAlive === "-1" ? "-1m" : options.localKeepAlive)

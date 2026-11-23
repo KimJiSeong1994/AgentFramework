@@ -132,8 +132,8 @@ export function validateCliToolInput(name: string, input: unknown): asserts inpu
       if (!hasExactKeys(input, ["pattern"]) || !boundedString(input.pattern, 1024) || input.pattern.length === 0) throw new CliToolInputError()
       return
     case "grep":
-      if (!hasExactKeys(input, ["pattern"], ["path"]) || !boundedString(input.pattern, 1024) || input.pattern.length === 0 ||
-          (input.path !== undefined && !path(input.path))) throw new CliToolInputError()
+      if (!hasExactKeys(input, ["pattern"], ["path", "ignoreCase"]) || !boundedString(input.pattern, 1024) || input.pattern.length === 0 ||
+          (input.path !== undefined && !path(input.path)) || (input.ignoreCase !== undefined && typeof input.ignoreCase !== "boolean")) throw new CliToolInputError()
       return
     case "memory":
       if (!hasExactKeys(input, ["query"]) || typeof input.query !== "string" || input.query.includes("\0") ||
@@ -811,13 +811,22 @@ function globTool(root: string, pattern: string, identity: RootIdentity): CliToo
   }
 }
 
+/** Literal line match; `ignoreCase` compares lower-cased text. Patterns stay literal: a model-supplied regex could stall the host. */
+function lineMatcher(pattern: string, ignoreCase: boolean): (line: string) => boolean {
+  if (!ignoreCase) return line => line.includes(pattern)
+  const needle = pattern.toLowerCase()
+  return line => line.toLowerCase().includes(needle)
+}
+
 function grepTool(
   root: string,
   pattern: string,
   inputPath: string,
   identity: RootIdentity,
   beforeEffect?: () => void,
+  ignoreCase = false,
 ): CliToolOutput {
+  const matchesLine = lineMatcher(pattern, ignoreCase)
   try {
     const startedAt = performance.now()
     const relativePath = inputPath ? normalizeToolPath(inputPath) : ""
@@ -861,7 +870,7 @@ function grepTool(
       const text = contents.toString("utf8")
       const lines = text.split(/\r?\n/)
       for (let index = 0; index < lines.length && matches.length < MAX_RESULTS; index++) {
-        if (lines[index]!.includes(pattern)) matches.push({ path: file.path, line: index + 1, text: lines[index]!.slice(0, 1000) })
+        if (matchesLine(lines[index]!)) matches.push({ path: file.path, line: index + 1, text: lines[index]!.slice(0, 1000) })
       }
       if (matches.length >= MAX_RESULTS) {
         partial = true
@@ -884,7 +893,9 @@ function grepSingleFile(
   pattern: string,
   identity: RootIdentity,
   beforeEffect?: () => void,
+  ignoreCase = false,
 ): CliToolOutput {
+  const matchesLine = lineMatcher(pattern, ignoreCase)
   try {
     const target = resolve(root, relativePath)
     if (ignoredTarget(root, target, false, identity)) return { ok: false, error: "Tool refused: ignored file is unavailable." }
@@ -901,7 +912,7 @@ function grepSingleFile(
     const lines = contents.toString("utf8").split(/\r?\n/)
     const matches: Array<{ path: string; line: number; text: string }> = []
     for (let index = 0; index < lines.length && matches.length < MAX_RESULTS; index++) {
-      if (lines[index]!.includes(pattern)) matches.push({ path: relativePath, line: index + 1, text: lines[index]!.slice(0, 1000) })
+      if (matchesLine(lines[index]!)) matches.push({ path: relativePath, line: index + 1, text: lines[index]!.slice(0, 1000) })
     }
     return { ok: true, text: safeOutput(JSON.stringify(matches), matches.length >= MAX_RESULTS) }
   } catch (error) {
@@ -936,8 +947,8 @@ function executeFileTool(
         isFile = stat.isFile()
         isDirectory = stat.isDirectory()
       } finally { closeSync(fd) }
-      if (isFile) return grepSingleFile(root, relativePath, input.pattern as string, identity, beforeEffect)
-      if (isDirectory) return grepTool(root, input.pattern as string, relativePath, identity, beforeEffect)
+      if (isFile) return grepSingleFile(root, relativePath, input.pattern as string, identity, beforeEffect, input.ignoreCase === true)
+      if (isDirectory) return grepTool(root, input.pattern as string, relativePath, identity, beforeEffect, input.ignoreCase === true)
       return publicFailure(new Error("type"))
     }
     case "memory": return { ok: false, error: "Tool refused: memory recall is asynchronous." }

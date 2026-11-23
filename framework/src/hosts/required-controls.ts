@@ -43,7 +43,7 @@ function validBudgetEvidence(value: unknown): boolean {
     output: "reactive",
     vendorContext: "unobserved",
     mainLimit: 8192,
-    vendorMainLimit: 49152,
+    vendorMainLimit: 160000,
     workerLimit: 5120,
   } as const
   try {

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import { consumeCliSkillLoaderCompletion, SKILL_CATALOG_LIMIT, SKILL_DROPPED_RESULT, roleInputLimit, createCliHost, fitHistory, type CliToolOutcomeFact } from "../src/hosts/cli-host.ts"
 import { assertHostAdmission } from "../src/hosts/required-controls.ts"
 import { createCliTransport, type CliNativeIdentity, type CliTransportHandle, type CliTransportOptions } from "../src/hosts/cli-transport.ts"
@@ -42,6 +42,7 @@ const ALL_TOOLS = ["read", "list", "glob", "grep", "write", "edit"]
 const OWNER = "test-owner"
 const EXECUTION = "test-execution"
 const WORKER_INPUT_LIMIT = 5120
+const VENDOR_WORKER_INPUT_LIMIT = 49152
 const HISTORY_TRUNCATION_MARKER = "\n[older tool output truncated to fit the estimated input budget]"
 const WITNESS_MODEL = "gpt-5.6-sol"
 const WITNESS_SKILL_TEXT = "---\nname: llm-wiki\ndescription: Use project wiki guidance\nallowed-tools: [read]\n---\nUse the captured wiki instructions exactly.\r\n"
@@ -1210,7 +1211,11 @@ describe("common CLI execution host", () => {
         const outcome = await (await subject.host.prepare(subject.request)).run()
         expect(subject.observed.before).toBe(0)
         expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("current\n")
-        if (engine !== "local") expect(outcome).toMatchObject({ status: "failed" })
+        // Claude/Codex: the unusable reply goes back to the model as a failed exchange; nothing ran, and the turn goes on.
+        if (engine !== "local") {
+          expect(outcome).toMatchObject({ status: "completed", text: "done" })
+          expect(subject.prompts[1]!).toContain("Nothing was executed.")
+        }
       }
     }
     // A broken final answer that quotes a call is repaired to text or refused; the quoted call never runs.
@@ -1242,7 +1247,7 @@ describe("common CLI execution host", () => {
     expect(await (await closed.host.prepare(closed.request)).run()).toEqual({ status: "completed", text: "ok" })
     // A pure wrapper around a read-only call is still a call for main.
     const wrapped = harness({ engine: "claude", role: "main", responses: ['<invoke_tool>{"type":"tool","name":"read","input":{"path":"README.md"}}</invoke_tool>', JSON.stringify({ type: "final", text: "done" })] })
-    expect(await (await wrapped.host.prepare(wrapped.request)).run()).toEqual({ status: "completed", text: "done" })
+    expect(await (await wrapped.host.prepare(wrapped.request)).run()).toEqual({ status: "completed", text: "done", work: "- read README.md" })
     expect(wrapped.observed.before).toBe(1)
   })
 
@@ -1263,13 +1268,40 @@ describe("common CLI execution host", () => {
       '{"type":"read","input":{"path":"README.md"},"extra":1}',
       'Done: {"type":"final","text":"a"} or {"type":"final","text":"b"}',
       '{"type":"tool","name":"read","name":"write","input":{"path":"README.md"}}']) {
-      const subject = harness({ engine: "claude", responses: [response] })
+      // Claude/Codex: an unreadable reply is returned to the model up to three times before the turn fails closed; a
+      // readable call the role may not make (bash here) is still refused at once.
+      const subject = harness({ engine: "claude", responses: [response, response, response, response] })
       const handle = await subject.host.prepare(subject.request)
       expect(await handle.run()).toMatchObject({ status: "failed" })
       expect(subject.observed.before).toBe(0)
       expect(existsSync(join(root, "unsafe"))).toBe(false)
-      expect(subject.prompts).toHaveLength(1)
+      expect([1, 4]).toContain(subject.prompts.length)
+      // The local engine keeps the single-attempt behaviour (prose is its answer, so only the strict cases apply).
+      if (response.startsWith("{")) {
+        const local = harness({ engine: "local", responses: [response] })
+        await (await local.host.prepare(local.request)).run()
+        expect(local.observed.before).toBe(0)
+        expect(local.prompts).toHaveLength(1)
+      }
     }
+  })
+
+  test("Claude/Codex recover from an unreadable reply, an unknown tool and invalid tool input within one turn", async () => {
+    writeFileSync(join(root, "README.md"), "fixture\n")
+    const subject = harness({ engine: "codex", role: "main", responses: [
+      '{"type":"tool","name":"read","input":{"path":',
+      JSON.stringify({ type: "tool", name: "search_web", input: { q: "x" } }),
+      JSON.stringify({ type: "tool", name: "read", input: { path: "README.md", limit: 5 } }),
+      JSON.stringify({ type: "tool", name: "read", input: { path: "README.md" }, note: "README is the fixture; answer next" }),
+      '{"type":"final","text":"done"}"}',
+    ] })
+    expect(await (await subject.host.prepare(subject.request)).run()).toEqual({ status: "completed", text: "done", work: "- read README.md" })
+    expect(subject.prompts[1]!).toContain("Otter could not read this reply as one envelope.")
+    expect(subject.prompts[2]!).toContain("Unknown tool.")
+    expect(subject.prompts[3]!).toContain("Invalid input for read.")
+    // The note outlives the reply that carried it; the stray closing characters after the final are not part of the answer.
+    expect(subject.prompts[4]!).toContain("- README is the fixture; answer next")
+    expect(subject.observed.before).toBe(1)
   })
 
   test("local engines accept unwrapped stage/report text without treating short or unknown tool syntax as a call", async () => {
@@ -1484,7 +1516,16 @@ describe("common CLI execution host", () => {
     writeFileSync(path, '{"local_model":{"context_input_tokens":4096}}')
     const cloud = harness({ engine: "claude", role: "main", taskText, responses: [JSON.stringify({ type: "final", text: "done" })] })
     expect((await (await cloud.host.prepare(cloud.request)).run()).status).toBe("completed")
-    expect(cloud.prompts[0]).toContain("Input estimate limit: 49152")
+    expect(cloud.prompts[0]).toContain("Input estimate limit: 160000")
+    // The working-style block is for Claude/Codex main turns only: the local prompt and vendor workers are unchanged.
+    expect(cloud.prompts[0]).toContain("Working style:")
+    expect(cloud.prompts[0]).toContain(`worktree directory "${basename(cloud.request.cwd)}"`)
+    const local = harness({ role: "main", responses: [JSON.stringify({ type: "final", text: "done" })] })
+    expect((await (await local.host.prepare(local.request)).run()).status).toBe("completed")
+    expect(local.prompts[0]).not.toContain("Working style:")
+    const worker = harness({ engine: "claude", responses: [JSON.stringify({ type: "final", text: "done" })] })
+    expect((await (await worker.host.prepare(worker.request)).run()).status).toBe("completed")
+    expect(worker.prompts[0]).not.toContain("Working style:")
   })
 
   test("local budget is fixed for an execution even when config changes between tool turns", async () => {
@@ -1504,11 +1545,11 @@ describe("common CLI execution host", () => {
       expect(roleInputLimit(role)).toBe(8192)
       expect(roleInputLimit(role, "local", 4096)).toBe(4096)
       expect(roleInputLimit(role, "local", 65536)).toBe(65536)
-      expect(roleInputLimit(role, "claude", 4096)).toBe(49152)
+      expect(roleInputLimit(role, "claude", 4096)).toBe(160000)
     }
     expect(roleInputLimit("worker", "local", 4096)).toBe(4096)
     expect(roleInputLimit("worker", "local", 65536)).toBe(5120)
-    expect(roleInputLimit("worker", "codex", 4096)).toBe(5120)
+    expect(roleInputLimit("worker", "codex", 4096)).toBe(49152)
   })
 
   test("input estimate rejects an oversized mandatory task without native dispatch", async () => {
@@ -1521,13 +1562,15 @@ describe("common CLI execution host", () => {
   test("carried CJK plan skills are omitted whole against the full worker and native input budget", async () => {
     for (const engine of ["local", "codex", "claude"] as const) {
       const subject = harness({ engine, responses: [JSON.stringify({ type: "final", text: "done" })] })
-      subject.request.planSkills = [{ name: "korean", instructions: "한".repeat(6000) }]
+      // Vendor workers get the larger vendor worker budget, so the carried skill must be larger to be omitted.
+      const limit = engine === "local" ? WORKER_INPUT_LIMIT : VENDOR_WORKER_INPUT_LIMIT
+      subject.request.planSkills = [{ name: "korean", instructions: "한".repeat(engine === "local" ? 6000 : 80_000) }]
       expect(await (await subject.host.prepare(subject.request)).run()).toMatchObject({ status: "completed" })
       const prompt = subject.prompts.at(-1)!
       expect(prompt).toContain(subject.request.text)
       expect(prompt).not.toContain("한")
       expect(prompt).toContain(SKILL_DROPPED_RESULT)
-      expect(estimatedTokens(prompt) + estimateTokens(engine === "claude" ? HOST_INFERENCE_INSTRUCTIONS : subject.request.policy.nativeContext?.instructions ?? "")).toBeLessThanOrEqual(WORKER_INPUT_LIMIT)
+      expect(estimatedTokens(prompt) + estimateTokens(engine === "claude" ? HOST_INFERENCE_INSTRUCTIONS : subject.request.policy.nativeContext?.instructions ?? "")).toBeLessThanOrEqual(limit)
     }
   })
 
@@ -1777,13 +1820,14 @@ describe("route-aware common CLI host", () => {
       expect((await probe.dispatch("worker", "")).status).toBe("completed")
       const base = probe.transports.find(transport => transport.prompt.length > 0)!.prompt
       const externalTokens = workerEngine === "local" ? 0 : estimateTokens(HOST_INFERENCE_INSTRUCTIONS)
-      const available = WORKER_INPUT_LIMIT - estimatedTokens(base) - externalTokens
+      const workerLimit = workerEngine === "local" ? WORKER_INPUT_LIMIT : VENDOR_WORKER_INPUT_LIMIT
+      const available = workerLimit - estimatedTokens(base) - externalTokens
       expect(available).toBeGreaterThan(32)
       const fitting = routed(options)
       expect((await fitting.dispatch("worker", "x".repeat((available - 8) * 4))).status).toBe("completed")
       const inference = fitting.transports.find(transport => transport.prompt.length > 0)!
       expect(inference.engine).toBe(workerEngine)
-      expect(estimatedTokens(inference.prompt) + externalTokens).toBeLessThanOrEqual(WORKER_INPUT_LIMIT)
+      expect(estimatedTokens(inference.prompt) + externalTokens).toBeLessThanOrEqual(workerLimit)
       expect(inference.prompt).not.toContain(HOST_INFERENCE_INSTRUCTIONS)
 
       const overflowing = routed(options)
@@ -2522,7 +2566,9 @@ describe("batched read-only calls", () => {
     const missing = JSON.stringify({ type: "tool", name: "read", input: { path: "missing.txt" } })
     const write = JSON.stringify({ type: "tool", name: "write", input: { path: "a.txt", content: "x" } })
     const refused = harness({ engine: "claude", responses: [`${read}\n${write}`, JSON.stringify({ type: "final", text: "done" })] })
-    expect(await (await refused.host.prepare(refused.request)).run()).toMatchObject({ status: "failed" })
+    // Claude/Codex: the mixed reply is returned to the model unexecuted and the turn continues.
+    expect(await (await refused.host.prepare(refused.request)).run()).toMatchObject({ status: "completed", text: "done" })
+    expect(refused.prompts[1]!).toContain("Nothing was executed.")
     expect(refused.observed.before).toBe(0)
     expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("alpha\n")
     const partial = harness({ responses: [`${missing}\n${read}`, JSON.stringify({ type: "final", text: "done" })] })

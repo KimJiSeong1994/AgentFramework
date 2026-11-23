@@ -165,7 +165,7 @@ function options(engine: CliEngine, overrides: Partial<Parameters<typeof createC
   }
 }
 
-function codexExpectedArgs(cliVersion?: string): string[] {
+function codexExpectedArgs(cliVersion?: string, effort?: string): string[] {
   const profile = createCodexProfile(CODEX_MODEL)
   const scratch = "/__PROFILE__/workdir"
   const catalog = `/__PROFILE__/codex-${profile.version}-catalog.json`
@@ -175,7 +175,9 @@ function codexExpectedArgs(cliVersion?: string): string[] {
     "-c", "features.shell_tool=false", "-c", "features.multi_agent=false", "-c", "web_search=disabled",
     "-c", "features.view_image=false", "-c", "features.sleep_tool=false", "-c", "features.apps=false",
     "-c", "features.plugins=false", "-c", "include_environment_context=false", "-c", "project_doc_max_bytes=0",
-    "-c", "mcp_servers={}", "-",
+    "-c", "mcp_servers={}",
+    ...(effort ? ["-c", `model_reasoning_effort="${effort}"`, "-c", 'model_verbosity="medium"'] : []),
+    "-",
   ]
 }
 
@@ -228,16 +230,17 @@ function thinkingTokensEvent(overrides: Record<string, unknown> = {}): Record<st
   }
 }
 
-async function runClaudeFixture(chunks: string[]) {
+async function runClaudeFixture(chunks: string[], effort?: "low" | "medium" | "high" | "xhigh" | "max") {
   const expectedArgs = [
     "-p", "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-prompts", "none",
     "--setting-sources", "", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome",
     "--no-session-persistence", "--system-prompt", HOST_INFERENCE_INSTRUCTIONS, "--output-format", "stream-json", "--verbose", "--model", "test-model:tag",
+    ...(effort ? ["--effort", effort] : []),
   ]
   const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
   testDirectories.push(resolve(marker, ".."))
   installFakeCli("claude", fixtureSource({ expectedArgs, prompt: "fixture prompt", chunks, marker, sourceRoot: sourceRoot() }))
-  return createCliTransport(options("claude")).run()
+  return createCliTransport(options("claude", effort ? { effort } : {})).run()
 }
 
 function codexOutput(item: Record<string, unknown>, terminal: Record<string, unknown> = { type: "turn.completed", usage: {} }): string[] {
@@ -709,6 +712,29 @@ test.each([
   expect(result.status).not.toBe("completed")
   expect(result.quiescent).toBe(true)
   expect(result.error).toBeDefined()
+})
+
+test("a chosen effort reaches the Claude argv as --effort; the local engine refuses one", async () => {
+  expect((await runClaudeFixture(claudeOutput("effort answer"), "high")).text).toBe("effort answer")
+  expect(() => createCliTransport(options("local", { effort: "high" }))).toThrow()
+  expect(() => createCliTransport(options("claude", { effort: "ultra" as "max" }))).toThrow()
+})
+
+test("a chosen effort reaches the Codex argv as reasoning effort plus medium verbosity", async () => {
+  setProcessPlatform("darwin")
+  const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
+  testDirectories.push(resolve(marker, ".."))
+  installFakeCli("codex", fixtureSource({
+    expectedArgs: codexExpectedArgs("0.165.0", "xhigh"),
+    prompt: "fixture prompt",
+    chunks: codexOutput({ type: "item.completed", item: { id: "item_1", type: "agent_message", text: "codex effort answer" } }),
+    marker,
+    sourceRoot: sourceRoot(),
+    version: "codex-cli 0.165.0",
+    invocationMarker: join(resolve(marker, ".."), "codex-invocations.jsonl"),
+    profileCatalog: { name: `codex-${createCodexProfile(CODEX_MODEL).version}-catalog.json`, contents: createCodexProfile(CODEX_MODEL).catalogJson },
+  }))
+  expect(await createCliTransport(options("codex", { effort: "xhigh" })).run()).toMatchObject({ status: "completed", text: "codex effort answer" })
 })
 
 test.each(["0.159.3", "0.163.0", "0.165.0"])("Codex %s uses the owned restricted-read profile and requires completed native turn", async version => {

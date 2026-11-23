@@ -17,9 +17,19 @@ export const MAX_PLAN_CONVERSATION_CHARS = 24_000
  * Conversation window for a Claude/Codex chat model. It stays inside the host's vendor main-input estimate
  * (cli-host VENDOR_MAIN_INPUT_LIMIT tokens at ~4 characters per token) with room for tools and skills.
  */
-export const VENDOR_PLAN_CONVERSATION_CHARS = 96_000
+export const VENDOR_PLAN_CONVERSATION_CHARS = 200_000
 export const MAX_PLAN_CONVERSATION_TURNS = 24
 export const PLAN_RESPONSE_RESERVE_CHARS = 8_000
+/** A Claude/Codex answer may be a full review or design; 8,000 characters turned thorough answers into errors. */
+export const VENDOR_PLAN_RESPONSE_RESERVE_CHARS = 48_000
+
+/** Heads the host's record of a turn's tool calls, appended to that turn's answer in the model-facing conversation only. */
+export const WORK_RECORD_HEADING = "[Otter host record of the tool calls behind this answer; their results are not kept, re-read what you need]"
+
+/** The longest final answer (and the room kept for it in the conversation window) for a chat model on `engine`. */
+export function planResponseReserveChars(engine: string | undefined): number {
+  return engine === "codex" || engine === "claude" ? VENDOR_PLAN_RESPONSE_RESERVE_CHARS : PLAN_RESPONSE_RESERVE_CHARS
+}
 
 /** The conversation window for a chat model on `engine`. */
 export function planConversationChars(engine: string | undefined, localInputTokens = 8192): number {
@@ -86,11 +96,11 @@ export function skillInstructionBudget(verifyAllow: unknown, message = "", engin
   const prompt = PLAN_CHAT_PROMPT.text.length > PLAN_MAIN_PROMPT.text.length ? PLAN_CHAT_PROMPT : PLAN_MAIN_PROMPT
   const base = `${promptPrefix(prompt, verifyAllow, "")}${JSON.stringify([{ role: "user", text: message }])}`
   // Room for the project-facts block a turn may carry, so an admitted skill still fits.
-  return Math.max(0, planConversationChars(engine, inputTokens) - PLAN_RESPONSE_RESERVE_CHARS - base.length - FACTS_PROMPT_CHARS - 1)
+  return Math.max(0, planConversationChars(engine, inputTokens) - planResponseReserveChars(engine) - base.length - FACTS_PROMPT_CHARS - 1)
 }
 
-function fitsConversationBudget(requestText: string, limit: number): boolean {
-  return requestText.length + PLAN_RESPONSE_RESERVE_CHARS <= limit
+function fitsConversationBudget(requestText: string, limit: number, reserve = PLAN_RESPONSE_RESERVE_CHARS): boolean {
+  return requestText.length + reserve <= limit
 }
 
 function selectWindow(
@@ -100,8 +110,9 @@ function selectWindow(
   limit = MAX_PLAN_CONVERSATION_CHARS,
   tokenLimit?: number,
   trimTargetPercent = 70,
+  reserve = PLAN_RESPONSE_RESERVE_CHARS,
 ): { messages: ConversationMessage[]; requestText: string } | undefined {
-  const fits = (text: string) => fitsConversationBudget(text, limit) && (tokenLimit === undefined || estimateTokens(text) <= tokenLimit)
+  const fits = (text: string) => fitsConversationBudget(text, limit, reserve) && (tokenLimit === undefined || estimateTokens(text) <= tokenLimit)
   let messages = [pending]
   let requestText = `${prefix}${JSON.stringify(messages)}`
   if (!fits(requestText)) return undefined
@@ -121,7 +132,7 @@ function selectWindow(
     // Prune in batches to keep the retained prefix stable for several subsequent turns.
     const pendingRequest = `${prefix}${JSON.stringify([pending])}`
     const tokenTarget = Math.max(estimateTokens(pendingRequest), Math.floor(tokenLimit * trimTargetPercent / 100))
-    const charTarget = Math.max(pendingRequest.length, Math.floor((limit - PLAN_RESPONSE_RESERVE_CHARS) * trimTargetPercent / 100))
+    const charTarget = Math.max(pendingRequest.length, Math.floor((limit - reserve) * trimTargetPercent / 100))
     while (messages.length > 1 && (messages.length > 33 || estimateTokens(requestText) > tokenTarget || requestText.length > charTarget)) {
       messages = messages.slice(2)
       requestText = `${prefix}${JSON.stringify(messages)}`
@@ -158,7 +169,7 @@ export function createPlanConversation(
   let busy = false
   let droppedPairs = 0
   const engine = runtime.host.identity.engine
-  const currentInputTokens = () => engine === "local" ? localContextInputTokens(loadConfig(runtime.worktree)) : engine === "claude" || engine === "codex" ? 49152 : 8192
+  const currentInputTokens = () => engine === "local" ? localContextInputTokens(loadConfig(runtime.worktree)) : engine === "claude" || engine === "codex" ? 160_000 : 8192
 
   function contextState(): ConversationContextState {
     return { messages: history.map(message => ({ ...message })), pinnedNote }
@@ -192,6 +203,7 @@ export function createPlanConversation(
       const inputTokens = currentInputTokens()
       const trimTargetPercent = engine === "local" ? localContextTrimTargetPercent(loadConfig(runtime.worktree)) : 70
       const limit = planConversationChars(engine, inputTokens)
+      const reserve = planResponseReserveChars(engine)
       const tokenLimit = engine === "local" ? Math.max(512, inputTokens - 3072) : undefined
       if (typeof text !== "string" || !text.trim()) throw new TypeError("conversation message is empty or invalid")
       if (text.length > limit) throw new ModelRequestError("input_budget", "conversation message is too large")
@@ -202,7 +214,7 @@ export function createPlanConversation(
       // Read-only mode never carries a gate, whatever the caller passes.
       const gate = mainPrompt === PLAN_CHAT_PROMPT ? actionGate : undefined
       const facts = turnFacts(runtime, mainPrompt)
-      let window = selectWindow(history, pending, promptPrefix(mainPrompt, runtime.config.delegate.verify_allow, undefined, facts, pinnedNote), limit, tokenLimit, trimTargetPercent)
+      let window = selectWindow(history, pending, promptPrefix(mainPrompt, runtime.config.delegate.verify_allow, undefined, facts, pinnedNote), limit, tokenLimit, trimTargetPercent, reserve)
       if (!window) throw new ModelRequestError("input_budget", "conversation message is too large for the reserved context budget")
       const workflow = activeWorkflow(runtime.worktree, sessionID)
       if (workflow?.sessionID === sessionID) {
@@ -229,11 +241,11 @@ export function createPlanConversation(
         let audit: Readonly<Record<string, string>> | undefined
         const result = await runWorkflowTurn(runtime, binding, {
           title, text: window.requestText, label: "planning", cancelCause: "planning conversation cancelled",
-          budget: { maxChars: limit, reserveChars: PLAN_RESPONSE_RESERVE_CHARS },
+          budget: { maxChars: limit, reserveChars: reserve },
           bind(request) {
             const bound = skill ? bindSkillInvocation(skill.prepared, request, runtime.policy, skill.terminal) : undefined
             if (!bound) return { handlers: runtime.policy.handlers(request), ...(skillTool && skillTool.catalog.length ? { skillTool } : {}), ...(gate ? { actionGate: gate } : {}) }
-            window = selectWindow(history, pending, promptPrefix(mainPrompt, runtime.config.delegate.verify_allow, bound.instructions, facts, pinnedNote), limit, tokenLimit, trimTargetPercent)
+            window = selectWindow(history, pending, promptPrefix(mainPrompt, runtime.config.delegate.verify_allow, bound.instructions, facts, pinnedNote), limit, tokenLimit, trimTargetPercent, reserve)
             if (!window) { finishSkillInvocation(bound.context); throw new ModelRequestError("input_budget", "skill instructions exceed the reserved conversation context budget") }
             audit = skillInvocationAudit(bound.context)
             return { handlers: bound.handlers, skillContext: bound.context, text: window.requestText, ...(gate ? { actionGate: gate } : {}) }
@@ -242,12 +254,13 @@ export function createPlanConversation(
         if (result.status === "diagnostic") throw new Error(`planning conversation superseded: ${result.reason}`)
         if (result.status === "stuck") throw new ModelRequestError("input_budget", result.reason)
         if (!result.text.trim()) throw new ModelRequestError("empty_response", "planning conversation model returned only whitespace")
-        const next: ConversationMessage[] = [...window.messages, { role: "assistant", text: result.text }]
+        // The next message's model sees which tools this turn ran (names and targets); the user-visible answer is unchanged.
+        const remembered = result.work ? `${result.text}\n\n${WORK_RECORD_HEADING}\n${result.work}` : result.text
+        const next: ConversationMessage[] = [...window.messages, { role: "assistant", text: remembered }]
         // JSON escaping can make a completed response larger than its raw character reserve.
         // Keep checkpointable whole pairs; the full result remains in the returned turn/transcript.
-        if (engine === "local") {
-          while (next.length > 48 || JSON.stringify(next).length > 196608) next.splice(0, 2)
-        }
+        // Every engine: the session store refuses a carried context over these bounds (vendor windows now reach them too).
+        while (next.length > 48 || JSON.stringify(next).length > 196608) next.splice(0, 2)
         droppedPairs += Math.max(0, (history.length + 2 - next.length) / 2)
         history.splice(0, history.length, ...next)
         const plan = extractPlan(result.text)

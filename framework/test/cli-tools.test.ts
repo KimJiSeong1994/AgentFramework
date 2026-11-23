@@ -173,6 +173,11 @@ describe("scoped CLI file tools", () => {
     expect(text(tools.execute("glob", { pattern: "src/**/*.ts" }))).toContain("src/example.ts")
     expect(text(tools.execute("grep", { pattern: "needle", path: "src" }))).toContain('"line":1')
     expect(text(tools.execute("grep", { pattern: "needle", path: "src/example.ts" }))).toContain("needle")
+    // Matching is case-sensitive unless ignoreCase is set, for a directory and for one file.
+    expect(text(tools.execute("grep", { pattern: "NEEDLE", path: "src" }))).toBe("[]")
+    expect(text(tools.execute("grep", { pattern: "NEEDLE", path: "src", ignoreCase: true }))).toContain('"line":1')
+    expect(text(tools.execute("grep", { pattern: "NEEDLE", path: "src/example.ts", ignoreCase: true }))).toContain("needle")
+    expect(() => tools.execute("grep", { pattern: "needle", ignoreCase: "yes" })).toThrow()
   })
 
   test("directory names stay on the retained descriptor when a target is replaced immediately after open", () => {
