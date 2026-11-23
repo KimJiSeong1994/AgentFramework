@@ -190,6 +190,8 @@ export type ExecutionOutcome = {
   childMessageID?: string
   outputLimitReached?: boolean
   usage?: unknown
+  /** CLI host, Claude/Codex main turns: which tools ran in this execution (names and targets, no contents). */
+  work?: string
 }
 
 export type ExecutionCancelResult = {

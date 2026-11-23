@@ -55,7 +55,7 @@ export type TurnRequest = {
 }
 
 export type TurnResult =
-  | { status: "completed"; text: string }
+  | { status: "completed"; text: string; work?: string }
   /** Binding went stale (owner/hold/revision/stop). Nothing was committed; `lateText` is diagnostic only. */
   | { status: "diagnostic"; reason: string; lateText?: string }
   /** Visible stuck: the bounded input could not be made to fit. The engine decides how to record it. */
@@ -391,7 +391,7 @@ async function dispatch(runtime: ExecutionRuntime, input: Dispatch): Promise<Tur
       if (input.summary) throw new SummaryUnusable("summary exceeds the reserved response budget")
       throw new ModelRequestError("response_budget", `${request.label} response exceeds the reserved conversation response budget`)
     }
-    return { status: "completed", text: outcome.text }
+    return { status: "completed", text: outcome.text, ...(typeof outcome.work === "string" && outcome.work ? { work: outcome.work } : {}) }
   } catch (error) {
     if (registered) {
       // Never abandon a live owned handle or promote an unknown process into safe recovery.

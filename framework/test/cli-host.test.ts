@@ -1211,7 +1211,11 @@ describe("common CLI execution host", () => {
         const outcome = await (await subject.host.prepare(subject.request)).run()
         expect(subject.observed.before).toBe(0)
         expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("current\n")
-        if (engine !== "local") expect(outcome).toMatchObject({ status: "failed" })
+        // Claude/Codex: the unusable reply goes back to the model as a failed exchange; nothing ran, and the turn goes on.
+        if (engine !== "local") {
+          expect(outcome).toMatchObject({ status: "completed", text: "done" })
+          expect(subject.prompts[1]!).toContain("Nothing was executed.")
+        }
       }
     }
     // A broken final answer that quotes a call is repaired to text or refused; the quoted call never runs.
@@ -1243,7 +1247,7 @@ describe("common CLI execution host", () => {
     expect(await (await closed.host.prepare(closed.request)).run()).toEqual({ status: "completed", text: "ok" })
     // A pure wrapper around a read-only call is still a call for main.
     const wrapped = harness({ engine: "claude", role: "main", responses: ['<invoke_tool>{"type":"tool","name":"read","input":{"path":"README.md"}}</invoke_tool>', JSON.stringify({ type: "final", text: "done" })] })
-    expect(await (await wrapped.host.prepare(wrapped.request)).run()).toEqual({ status: "completed", text: "done" })
+    expect(await (await wrapped.host.prepare(wrapped.request)).run()).toEqual({ status: "completed", text: "done", work: "- read README.md" })
     expect(wrapped.observed.before).toBe(1)
   })
 
@@ -1264,13 +1268,40 @@ describe("common CLI execution host", () => {
       '{"type":"read","input":{"path":"README.md"},"extra":1}',
       'Done: {"type":"final","text":"a"} or {"type":"final","text":"b"}',
       '{"type":"tool","name":"read","name":"write","input":{"path":"README.md"}}']) {
-      const subject = harness({ engine: "claude", responses: [response] })
+      // Claude/Codex: an unreadable reply is returned to the model up to three times before the turn fails closed; a
+      // readable call the role may not make (bash here) is still refused at once.
+      const subject = harness({ engine: "claude", responses: [response, response, response, response] })
       const handle = await subject.host.prepare(subject.request)
       expect(await handle.run()).toMatchObject({ status: "failed" })
       expect(subject.observed.before).toBe(0)
       expect(existsSync(join(root, "unsafe"))).toBe(false)
-      expect(subject.prompts).toHaveLength(1)
+      expect([1, 4]).toContain(subject.prompts.length)
+      // The local engine keeps the single-attempt behaviour (prose is its answer, so only the strict cases apply).
+      if (response.startsWith("{")) {
+        const local = harness({ engine: "local", responses: [response] })
+        await (await local.host.prepare(local.request)).run()
+        expect(local.observed.before).toBe(0)
+        expect(local.prompts).toHaveLength(1)
+      }
     }
+  })
+
+  test("Claude/Codex recover from an unreadable reply, an unknown tool and invalid tool input within one turn", async () => {
+    writeFileSync(join(root, "README.md"), "fixture\n")
+    const subject = harness({ engine: "codex", role: "main", responses: [
+      '{"type":"tool","name":"read","input":{"path":',
+      JSON.stringify({ type: "tool", name: "search_web", input: { q: "x" } }),
+      JSON.stringify({ type: "tool", name: "read", input: { path: "README.md", limit: 5 } }),
+      JSON.stringify({ type: "tool", name: "read", input: { path: "README.md" }, note: "README is the fixture; answer next" }),
+      '{"type":"final","text":"done"}"}',
+    ] })
+    expect(await (await subject.host.prepare(subject.request)).run()).toEqual({ status: "completed", text: "done", work: "- read README.md" })
+    expect(subject.prompts[1]!).toContain("Otter could not read this reply as one envelope.")
+    expect(subject.prompts[2]!).toContain("Unknown tool.")
+    expect(subject.prompts[3]!).toContain("Invalid input for read.")
+    // The note outlives the reply that carried it; the stray closing characters after the final are not part of the answer.
+    expect(subject.prompts[4]!).toContain("- README is the fixture; answer next")
+    expect(subject.observed.before).toBe(1)
   })
 
   test("local engines accept unwrapped stage/report text without treating short or unknown tool syntax as a call", async () => {
@@ -2535,7 +2566,9 @@ describe("batched read-only calls", () => {
     const missing = JSON.stringify({ type: "tool", name: "read", input: { path: "missing.txt" } })
     const write = JSON.stringify({ type: "tool", name: "write", input: { path: "a.txt", content: "x" } })
     const refused = harness({ engine: "claude", responses: [`${read}\n${write}`, JSON.stringify({ type: "final", text: "done" })] })
-    expect(await (await refused.host.prepare(refused.request)).run()).toMatchObject({ status: "failed" })
+    // Claude/Codex: the mixed reply is returned to the model unexecuted and the turn continues.
+    expect(await (await refused.host.prepare(refused.request)).run()).toMatchObject({ status: "completed", text: "done" })
+    expect(refused.prompts[1]!).toContain("Nothing was executed.")
     expect(refused.observed.before).toBe(0)
     expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("alpha\n")
     const partial = harness({ responses: [`${missing}\n${read}`, JSON.stringify({ type: "final", text: "done" })] })

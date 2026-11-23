@@ -23,6 +23,9 @@ export const PLAN_RESPONSE_RESERVE_CHARS = 8_000
 /** A Claude/Codex answer may be a full review or design; 8,000 characters turned thorough answers into errors. */
 export const VENDOR_PLAN_RESPONSE_RESERVE_CHARS = 48_000
 
+/** Heads the host's record of a turn's tool calls, appended to that turn's answer in the model-facing conversation only. */
+export const WORK_RECORD_HEADING = "[Otter host record of the tool calls behind this answer; their results are not kept, re-read what you need]"
+
 /** The longest final answer (and the room kept for it in the conversation window) for a chat model on `engine`. */
 export function planResponseReserveChars(engine: string | undefined): number {
   return engine === "codex" || engine === "claude" ? VENDOR_PLAN_RESPONSE_RESERVE_CHARS : PLAN_RESPONSE_RESERVE_CHARS
@@ -251,12 +254,13 @@ export function createPlanConversation(
         if (result.status === "diagnostic") throw new Error(`planning conversation superseded: ${result.reason}`)
         if (result.status === "stuck") throw new ModelRequestError("input_budget", result.reason)
         if (!result.text.trim()) throw new ModelRequestError("empty_response", "planning conversation model returned only whitespace")
-        const next: ConversationMessage[] = [...window.messages, { role: "assistant", text: result.text }]
+        // The next message's model sees which tools this turn ran (names and targets); the user-visible answer is unchanged.
+        const remembered = result.work ? `${result.text}\n\n${WORK_RECORD_HEADING}\n${result.work}` : result.text
+        const next: ConversationMessage[] = [...window.messages, { role: "assistant", text: remembered }]
         // JSON escaping can make a completed response larger than its raw character reserve.
         // Keep checkpointable whole pairs; the full result remains in the returned turn/transcript.
-        if (engine === "local") {
-          while (next.length > 48 || JSON.stringify(next).length > 196608) next.splice(0, 2)
-        }
+        // Every engine: the session store refuses a carried context over these bounds (vendor windows now reach them too).
+        while (next.length > 48 || JSON.stringify(next).length > 196608) next.splice(0, 2)
         droppedPairs += Math.max(0, (history.length + 2 - next.length) / 2)
         history.splice(0, history.length, ...next)
         const plan = extractPlan(result.text)

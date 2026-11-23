@@ -42,6 +42,7 @@ function fixture(options: {
   nativeContext?: Readonly<{ identity: string; instructions: string }>
   chatExecute?: boolean
   engine?: string
+  work?: string
 } = {}) {
   const requests: ExecutionRequest[] = []
   let complete = false
@@ -66,7 +67,7 @@ function fixture(options: {
           expect(runtime.runs.status().executions.at(-1)?.hostDispatch).toBe("started")
           if (options.hang) return new Promise<ExecutionOutcome>(resolve => { resolveRun = resolve })
           complete = true
-          return { status: "completed" as const, text: options.text ?? "We can discuss the change first." }
+          return { status: "completed" as const, text: options.text ?? "We can discuss the change first.", ...(options.work ? { work: options.work } : {}) }
         },
         async requestCancel() {
           cancels++
@@ -614,6 +615,15 @@ describe("local conversation context", () => {
     await createPlanConversation(cloud.runtime, "cloud-context").turn("가".repeat(10000))
     expect(cloud.requests).toHaveLength(1)
     expect(planConversationChars("claude", 4096)).toBe(200000)
+  })
+
+  test("the host's record of a turn's tool calls reaches the next message's model, not the user-visible answer", async () => {
+    const f = fixture({ engine: "codex", text: "Changed the parser.", work: "- read src/parser.ts\n- edit src/parser.ts" })
+    const conversation = createPlanConversation(f.runtime, "work-record")
+    expect((await conversation.turn("fix the parser")).text).toBe("Changed the parser.")
+    await conversation.turn("now add a test")
+    expect(f.requests[1]!.text).toContain("Otter host record of the tool calls behind this answer")
+    expect(f.requests[1]!.text).toContain("- edit src/parser.ts")
   })
 })
 

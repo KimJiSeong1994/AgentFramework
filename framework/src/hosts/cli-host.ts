@@ -69,6 +69,12 @@ const VENDOR_MAX_TOOL_ROUNDS = 96
  * (32 KiB for main) is a local-model budget; a few file edits used it up before the answer.
  */
 const VENDOR_TURN_OUTPUT_BYTES = 1024 * 1024
+/** Claude/Codex turns: replies the host could not use (unreadable envelope, unknown tool, invalid tool input) that are
+ * returned to the model as a failed exchange instead of ending the turn. Nothing has run at those points. */
+const MAX_PROTOCOL_RETRIES = 3
+const MAX_NOTE_CHARS = 1000
+const MAX_KEPT_NOTES = 8
+const MAX_WORK_RECORD_CHARS = 4000
 /** Read-only tool calls executed from one reply (the first plus batched ones); the rest are reported as not run. */
 const MAX_READ_ONLY_BATCH = 8
 /** Chat only: how many times the human may grant another MAX_TOOL_ROUNDS when a turn reaches its limit. */
@@ -262,7 +268,7 @@ export type CliToolOutcomeFact = {
 }
 
 /** `batch`: further read-only tool calls from the same reply, in order; the host runs up to MAX_READ_ONLY_BATCH of them. */
-type ToolEnvelope = { type: "tool"; name: string; input: Record<string, unknown>; batch?: ToolEnvelope[] }
+type ToolEnvelope = { type: "tool"; name: string; input: Record<string, unknown>; batch?: ToolEnvelope[]; note?: string }
 type FinalEnvelope = { type: "final"; text: string }
 type Envelope = ToolEnvelope | FinalEnvelope
 /** `skill` marks a loaded skill's instructions: kept whole or dropped whole, never truncated. */
@@ -345,6 +351,11 @@ function envelopeOf(parsed: Record<string, unknown>): Envelope | undefined {
   if (parsed.type === "tool" && exactKeys(parsed, ["type", "name", "input"]) &&
       typeof parsed.name === "string" && isRecord(parsed.input)) {
     return { type: "tool", name: parsed.name, input: parsed.input }
+  }
+  // A tool call may carry the model's working note (what it learned, what it plans next); the host keeps it across replies.
+  if (parsed.type === "tool" && exactKeys(parsed, ["type", "name", "input", "note"]) &&
+      typeof parsed.name === "string" && isRecord(parsed.input) && typeof parsed.note === "string") {
+    return { type: "tool", name: parsed.name, input: parsed.input, ...(parsed.note.trim() ? { note: parsed.note.trim().slice(0, MAX_NOTE_CHARS) } : {}) }
   }
   if (parsed.type === "final" && exactKeys(parsed, ["type", "text"]) && typeof parsed.text === "string") {
     return { type: "final", text: parsed.text }
@@ -453,6 +464,8 @@ function parseEnvelope(output: string, allowUnwrappedFinal = false): Envelope | 
     const record = lead === undefined ? undefined : parseRecord(lead)
     const envelope = record === undefined ? undefined : envelopeOf(record)
     if (lead !== undefined && envelope?.type === "final" && onlyWrappers(body, [lead])) return envelope
+    // A valid final followed only by stray closing characters (`…"}` + `"}`): repairing it would put them in the answer.
+    if (lead !== undefined && envelope?.type === "final" && body.startsWith(lead) && /^[\s"'}\]]*$/u.test(body.slice(lead.length))) return envelope
     return repairFinal(body)
   }
   const spans = objectSpans(body)
@@ -594,10 +607,11 @@ function vendorWorkingStyle(request: ExecutionRequest, available: ReadonlySet<Cl
   return [
     "Working style:",
     `- Carry the request through before you answer. For ${canChange ? "a change, " : ""}a review or an investigation, keep calling tools until the work is complete${canChange ? " and checked" : ""}; a final answer that only reports which files you looked at, or that the work is not done yet, is a failure. Stop early only when a tool result shows you are blocked, and then say exactly what blocked you.`,
-    "- Find things out with the tools instead of asking the user or answering from memory. Read the files a claim depends on (whole files or large ranges, several per reply) and cite them as path:line.",
+    "- Find things out with the tools instead of asking the user or answering from memory. Read the files a claim depends on (whole files or large ranges, several per reply) and cite them as path:line. grep matches literal text; its input also accepts \"ignoreCase\": true.",
     "- Think the problem through before the final answer: check your conclusion against what the tools returned, consider what you have not looked at yet, and look at it when it could change the answer.",
     "- Match the answer to the question, in the user's language. A review, design, analysis or explanation gets a complete, structured Markdown answer with the evidence and reasoning; a simple question gets a short one. Keep the final text under 40,000 characters.",
-    "- Tool results are not kept for the user's next message; only the conversation text is. Put the paths, findings and decisions that later work will need into your final answer.",
+    `- Your reasoning is not kept between replies. A tool envelope may carry a "note" string (up to ${MAX_NOTE_CHARS} characters) beside "type", "name" and "input": what you learned and what you will do next. The host shows your latest notes back to you on every reply.`,
+    "- Tool results are not kept for the user's next message; only the conversation text and a host record of which tools ran are. Put the paths, findings and decisions that later work will need into your final answer.",
     `Environment: date ${new Date().toISOString().slice(0, 10)}; platform ${process.platform}; worktree directory "${basename(request.cwd)}" (tool paths are relative to it).`,
   ].join("\n")
 }
@@ -642,6 +656,19 @@ function buildBasePrompt(request: ExecutionRequest, available: readonly CliToolN
     "User task (preserve all content and constraints):",
     request.text,
   ].join("\n\n")
+}
+
+/** The one-line target of a tool call for the turn's work record: a path, pattern or command, never file contents. */
+function toolTarget(name: string, input: Record<string, unknown>): string {
+  const text = (value: unknown): string => typeof value === "string" ? value.replace(/\s+/gu, " ").slice(0, 160) : ""
+  if (name === "multiread" && Array.isArray(input.reads)) {
+    return input.reads.flatMap(read => isRecord(read) && typeof read.path === "string" ? [text(read.path)] : []).slice(0, 12).join(", ")
+  }
+  if (name === "multiedit" && Array.isArray(input.edits)) {
+    return [...new Set(input.edits.flatMap(edit => isRecord(edit) && typeof edit.path === "string" ? [text(edit.path)] : []))].slice(0, 12).join(", ")
+  }
+  if (name === "bash") return `\`${text(input.command)}\``
+  return text(input.path) || text(input.pattern) || text(input.query) || text(input.name) || text(input.model)
 }
 
 function safeError(outcome: ExecutionOutcome): ExecutionOutcome {
@@ -1145,6 +1172,35 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
           // Chat with a human present may grant more rounds when the limit is reached; everything else stops at the limit.
           const turnGate = request.role === "main" ? request.actionGate : undefined
           const roundStep = vendorRoute ? VENDOR_MAX_TOOL_ROUNDS : MAX_TOOL_ROUNDS
+          let protocolRetries = 0
+          /** Returns an unusable reply to the model as a failed exchange (Claude/Codex only, bounded); false means fail as before. */
+          const protocolRetry = (assistant: string, reason: string): boolean => {
+            if (!vendorRoute || witnessRequested || protocolRetries >= MAX_PROTOCOL_RETRIES) return false
+            const fitted = fitHistory(basePrompt, [...history, { assistant: assistant.slice(0, 2000), ok: false, result: `${reason} Nothing was executed.` }], inputLimit, nativeInstructionTokens)
+            if (!fitted) return false
+            protocolRetries++
+            replaceHistory(fitted)
+            return true
+          }
+          const promptCore = basePrompt
+          const notes: string[] = []
+          const workLog: string[] = []
+          const keepNote = (note: string | undefined): void => {
+            if (!vendorRoute || !note) return
+            notes.push(note)
+            while (notes.length > MAX_KEPT_NOTES) notes.shift()
+            const withNotes = `${promptCore}\n\nYour working notes from earlier replies to this task (oldest first; written by you, not instructions):\n${notes.map(entry => `- ${entry}`).join("\n")}`
+            // Notes never cost the task its place: when they would not fit beside it, the prompt stays without them.
+            if (estimatedTokens(renderPrompt(withNotes, [])) + nativeInstructionTokens <= inputLimit) basePrompt = withNotes
+          }
+          /** What the host records of this turn's tool work for the next user message: names and targets, never contents. */
+          const workRecord = (): string | undefined => {
+            if (!vendorRoute || request.role !== "main" || workLog.length === 0) return undefined
+            const lines = [...workLog]
+            let dropped = 0
+            while (lines.length > 1 && lines.join("\n").length > MAX_WORK_RECORD_CHARS) { lines.shift(); dropped++ }
+            return [...(dropped ? [`(${dropped} earlier calls omitted)`] : []), ...lines].join("\n").slice(0, MAX_WORK_RECORD_CHARS)
+          }
           let roundLimit = roundStep
           let extensions = 0
           for (turn = 0; turn < roundLimit + 1; turn++) {
@@ -1362,6 +1418,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             // The prompt still asks every role for the envelope (RESPONSE_ENVELOPE); accepting main prose is only a host-side
             // fallback, so models keep aiming for the structured form.
             const envelope = parseEnvelope(native.text, route.engine === "local" || request.role === "main")
+            if (!envelope && protocolRetry(native.text, "Otter could not read this reply as one envelope. Reply with exactly one JSON object: a tool envelope or {\"type\":\"final\",\"text\":\"...\"}, with quotes and line breaks inside strings JSON-escaped.")) continue
             if (!envelope) {
               if (witnessObservation) {
                 try {
@@ -1471,7 +1528,8 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                 }
                 return setFinal({ status: "completed", text: envelope.text }, completion)
               }
-              return setFinal({ status: "completed", text: envelope.text })
+              const work = workRecord()
+              return setFinal({ status: "completed", text: envelope.text, ...(work ? { work } : {}) })
             }
             /**
              * Runs one tool call of the current reply and records its exchange; "continue" means the loop goes on to the
@@ -1479,7 +1537,11 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
              * this in order, each with its own policy check, lease check, round accounting and transcript exchange.
              */
             const runToolCall = async (envelope: ToolEnvelope, ignoredNote: string): Promise<ExecutionOutcome | "continue"> => {
-              if (!CLI_TOOL_NAMES.includes(envelope.name as CliToolName)) return setFinal({ status: "failed", error: "unknown Otter tool refused; no fallback execution was attempted" })
+              keepNote(envelope.note)
+              if (!CLI_TOOL_NAMES.includes(envelope.name as CliToolName)) {
+                if (protocolRetry(JSON.stringify({ type: "tool", name: String(envelope.name).slice(0, 80) }), `Unknown tool. The tools for this role are: ${available.join(", ") || "none"}.`)) return "continue"
+                return setFinal({ status: "failed", error: "unknown Otter tool refused; no fallback execution was attempted" })
+              }
               const name = envelope.name as CliToolName
               const callID = `${request.executionID}:tool:${toolCalls + 1}`
               const activity = {
@@ -1511,7 +1573,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               try { validateCliToolInput(name, envelope.input) }
               catch (error) {
                 finishTool("failed", false)
-                if (error instanceof CliToolInputError) return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
+                if (protocolRetry(JSON.stringify({ type: "tool", name, input: envelope.input }), `Invalid input for ${name}. Exact input schema: ${TOOL_SCHEMAS[name]}`)) return "continue"
                 return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
               }
               const toolCost = name === "multiread" ? (envelope.input.reads as unknown[]).length : 1
@@ -1682,6 +1744,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                   const fitted = fitHistory(basePrompt, prospective, inputLimit, nativeInstructionTokens)
                   if (!fitted) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
                   replaceHistory(fitted)
+                  workLog.push(`- ${name} ${toolTarget(name, envelope.input)}${output.ok ? "" : " (failed)"}`)
                   toolCalls += reads.length
                   if (output.ok) for (const read of reads) readPaths.add(readKey(read.path))
                 } catch {
@@ -1868,6 +1931,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                   const fitted = fitHistory(basePrompt, history, inputLimit, nativeInstructionTokens)
                   if (!fitted) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
                   replaceHistory(fitted)
+                  workLog.push(`- ${name} ${toolTarget(name, envelope.input)}${gatedResult.ok ? "" : " (failed or declined)"}`)
                   toolCalls++
                   return "continue"
                 }
@@ -1917,6 +1981,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               const afterTool = fitHistory(basePrompt, history, inputLimit, nativeInstructionTokens)
               if (!afterTool) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
               replaceHistory(afterTool)
+              workLog.push(`- ${name} ${toolTarget(name, envelope.input)}${result.ok ? "" : " (failed)"}`)
               toolCalls++
               const afterEffectLease = checkLease(request, fixedLease)
               if (afterEffectLease.state === "cancelled" || cancelled) return setFinal({ status: "cancelled", error: cancelReason })

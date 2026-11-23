@@ -104,6 +104,16 @@ Claude and Codex turns also get larger budgets than the local engine: 160,000 es
 for the chat model (49,152 for workers and reviewers), tool results up to 2,000 lines, 96 tool calls
 per message before the extension prompt, and final answers up to 48,000 characters.
 
+Claude and Codex turns also differ from the local engine in how a turn survives mistakes and keeps its place:
+
+- A reply the host cannot use (an unreadable envelope, an unknown tool, invalid tool input) is returned to the
+  model as a failed exchange, up to three times per message, instead of ending the turn. Nothing runs at those points.
+- A tool envelope may carry a `"note"` string; the host shows the latest eight notes back on every reply, because
+  the vendor process is restarted for each one and keeps no reasoning.
+- The next message's model sees a host record of which tools the previous answer used (names and targets, never
+  contents), so it does not have to rediscover which files were involved.
+- `grep` accepts `"ignoreCase": true` (all engines). Patterns stay literal.
+
 ### Chat execution (`chat.execute`)
 
 Every execution is approved by the local human, one action at a time or one plan at a time.
