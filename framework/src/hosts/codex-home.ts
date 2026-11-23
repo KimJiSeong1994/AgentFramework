@@ -14,7 +14,7 @@ import { stateBase } from "../state/store.ts"
 
 export const OWNED_CODEX_HOME_DIRECTORY = "codex-home"
 /** Files that would re-inject instructions if a user (or a tool) placed them in the owned home; otter refuses to run then. */
-const FORBIDDEN_ENTRIES = ["AGENTS.md", "config.toml", "hooks.json", "rules"] as const
+const FORBIDDEN_ENTRIES = ["AGENTS.md", "AGENTS.override.md", "config.toml", "hooks.json", "rules"] as const
 
 /** The user's real Codex home, where `codex login` stores auth.json: $CODEX_HOME when absolute, else ~/.codex. */
 export function realCodexHome(env: NodeJS.ProcessEnv = process.env): string {

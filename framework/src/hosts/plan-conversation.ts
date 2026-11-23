@@ -18,6 +18,8 @@ export const MAX_PLAN_CONVERSATION_CHARS = 24_000
  * (cli-host VENDOR_MAIN_INPUT_LIMIT tokens at ~4 characters per token) with room for tools and skills.
  */
 export const VENDOR_PLAN_CONVERSATION_CHARS = 200_000
+/** Claude's main input estimate is lower (cli-host CLAUDE_MAIN_INPUT_LIMIT), so its window is too: a Hangul window must fit it. */
+export const CLAUDE_PLAN_CONVERSATION_CHARS = 150_000
 export const MAX_PLAN_CONVERSATION_TURNS = 24
 export const PLAN_RESPONSE_RESERVE_CHARS = 8_000
 /** A Claude/Codex answer may be a full review or design; 8,000 characters turned thorough answers into errors. */
@@ -34,7 +36,7 @@ export function planResponseReserveChars(engine: string | undefined): number {
 /** The conversation window for a chat model on `engine`. */
 export function planConversationChars(engine: string | undefined, localInputTokens = 8192): number {
   if (engine === "local" && localInputTokens !== 8192) return Math.min(196608, localInputTokens * 3)
-  return engine === "codex" || engine === "claude" ? VENDOR_PLAN_CONVERSATION_CHARS : MAX_PLAN_CONVERSATION_CHARS
+  return engine === "codex" ? VENDOR_PLAN_CONVERSATION_CHARS : engine === "claude" ? CLAUDE_PLAN_CONVERSATION_CHARS : MAX_PLAN_CONVERSATION_CHARS
 }
 
 export type ConversationMessage = { role: "user" | "assistant"; text: string }
@@ -169,7 +171,7 @@ export function createPlanConversation(
   let busy = false
   let droppedPairs = 0
   const engine = runtime.host.identity.engine
-  const currentInputTokens = () => engine === "local" ? localContextInputTokens(loadConfig(runtime.worktree)) : engine === "claude" || engine === "codex" ? 160_000 : 8192
+  const currentInputTokens = () => engine === "local" ? localContextInputTokens(loadConfig(runtime.worktree)) : engine === "codex" ? 160_000 : engine === "claude" ? 120_000 : 8192
 
   function contextState(): ConversationContextState {
     return { messages: history.map(message => ({ ...message })), pinnedNote }
@@ -255,12 +257,16 @@ export function createPlanConversation(
         if (result.status === "stuck") throw new ModelRequestError("input_budget", result.reason)
         if (!result.text.trim()) throw new ModelRequestError("empty_response", "planning conversation model returned only whitespace")
         // The next message's model sees which tools this turn ran (names and targets); the user-visible answer is unchanged.
-        const remembered = result.work ? `${result.text}\n\n${WORK_RECORD_HEADING}\n${result.work}` : result.text
+        // The heading is the host's: an answer that types it itself must not pass for a host record.
+        const answer = result.text.replaceAll(WORK_RECORD_HEADING, "[Otter host record heading removed from the answer]")
+        const remembered = result.work ? `${answer}\n\n${WORK_RECORD_HEADING}\n${result.work}` : answer
         const next: ConversationMessage[] = [...window.messages, { role: "assistant", text: remembered }]
         // JSON escaping can make a completed response larger than its raw character reserve.
         // Keep checkpointable whole pairs; the full result remains in the returned turn/transcript.
-        // Every engine: the session store refuses a carried context over these bounds (vendor windows now reach them too).
-        while (next.length > 48 || JSON.stringify(next).length > 196608) next.splice(0, 2)
+        // The local engine's context is persisted, and the session store refuses one over these bounds. A Claude/Codex
+        // context is not persisted: it keeps at least the newest pair, so one oversized answer never empties the conversation.
+        const floor = engine === "local" ? 0 : 2
+        while (next.length > floor && (next.length > 48 || JSON.stringify(next).length > 196608)) next.splice(0, 2)
         droppedPairs += Math.max(0, (history.length + 2 - next.length) / 2)
         history.splice(0, history.length, ...next)
         const plan = extractPlan(result.text)

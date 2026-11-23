@@ -576,7 +576,12 @@ export function loadConfig(worktree: string): OtterConfig {
       }
     }
     const authorizedMode = chatExecuteMode(cfg)
+    const authorizedEffort = chatEffort(cfg)
     cfg = deepMerge(cfg, patch)
+    if (source === "project" && VENDOR_EFFORTS.indexOf(chatEffort(cfg)) > VENDOR_EFFORTS.indexOf(authorizedEffort)) {
+      // A repository may lower the reasoning effort, never raise it: a higher level spends more of the user's quota.
+      cfg = { ...cfg, chat: { ...cfg.chat, effort: authorizedEffort } }
+    }
     if (source === "project") {
       // Repository-controlled settings may restrict execution, never grant approval.
       const projectMode = chatExecuteMode(cfg)

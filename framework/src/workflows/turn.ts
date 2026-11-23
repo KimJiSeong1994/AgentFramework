@@ -126,11 +126,15 @@ const HOST_FAILURE_HINTS: Readonly<Partial<Record<HostFailureReason, string>>> =
 
 /** Issued before dispatch or after settlement; the display diagnostic is fixed, not provider text. */
 /** Fixed sentences for an engine failure class; the vendor's own wording never appears. */
+/** The least time a Claude/Codex chat turn gets (a longer `delegate.task_ttl_ms` still applies). */
+export const VENDOR_CHAT_TTL_MS = 45 * 60 * 1000
+
 export const ENGINE_FAILURE_HINTS: Readonly<Record<EngineFailureClass, string>> = {
   rate_limited: "The engine reported a rate limit.",
   quota: "The engine reported a usage or billing limit.",
   auth: "The engine requires sign-in.",
   transient: "The engine reported a temporary error.",
+  context_overflow: "The request was larger than the model's context window. Sending it again will fail the same way: start a new message, ask for narrower reads, or use /clear.",
 }
 
 export class ModelRequestError extends Error {
@@ -270,7 +274,10 @@ async function dispatch(runtime: ExecutionRuntime, input: Dispatch): Promise<Tur
     if (checkStale()) return { status: "diagnostic", reason: stale! }
     if (signal?.aborted) throw new Error("conversation cancelled")
   }
-  const deadlineAt = Date.now() + runtime.config.delegate.task_ttl_ms
+  // A Claude/Codex chat turn may use 96 tool calls and wait on the human for approvals; 15 minutes ended such turns
+  // after the tokens were spent and before the answer.
+  const vendorChat = binding.kind === "plan" && binding.role === "main" && (runtime.host.identity.engine === "codex" || runtime.host.identity.engine === "claude")
+  const deadlineAt = Date.now() + (vendorChat ? Math.max(runtime.config.delegate.task_ttl_ms, VENDOR_CHAT_TTL_MS) : runtime.config.delegate.task_ttl_ms)
   const claim: ExecutionClaim = runtime.runs.claim(sessionID, runtime.instance, process.pid)
   let registered = false
   let handle: ExecutionHandle | undefined

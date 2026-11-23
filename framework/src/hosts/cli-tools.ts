@@ -1,3 +1,4 @@
+import { webSearchQueryIsVisible } from "./web-search.ts"
 import {
   closeSync,
   constants,
@@ -175,7 +176,7 @@ export function validateCliToolInput(name: string, input: unknown): asserts inpu
       return
     case "web_search":
       if (!hasExactKeys(input, ["query"]) || typeof input.query !== "string" || !input.query.trim() ||
-          input.query.length > 500 || input.query.includes("\0")) throw new CliToolInputError()
+          input.query.length > 500 || !webSearchQueryIsVisible(input.query)) throw new CliToolInputError()
       return
     case "bash":
       if (!hasExactKeys(input, ["command"], ["interactive", "timeoutSeconds"]) || typeof input.command !== "string" ||

@@ -136,6 +136,8 @@ export type ActionGate = Readonly<{
   }>
   /** The turn used its tool rounds: the human decides whether it may use `rounds` more. Without this the turn fails. */
   extendRounds?(used: number, rounds: number, signal: AbortSignal): Promise<boolean>
+  /** The turn sent its input budget (estimated tokens, summed over every model call): may it send `more`? Without this the turn fails. */
+  extendInput?(usedTokens: number, more: number, signal: AbortSignal): Promise<boolean>
 }>
 
 /**
@@ -184,7 +186,7 @@ export type ExecutionEvent =
  * Why a vendor CLI call failed, when its bounded diagnostics say so: a rate limit, a usage/billing limit, a missing
  * sign-in, or a temporary service error. Derived by pattern only; the diagnostic text itself is never kept.
  */
-export type EngineFailureClass = "rate_limited" | "quota" | "auth" | "transient"
+export type EngineFailureClass = "rate_limited" | "quota" | "auth" | "transient" | "context_overflow"
 
 export type ExecutionOutcome = {
   status: "completed" | "failed" | "cancelled" | "unresolved" | "incomplete"

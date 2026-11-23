@@ -52,6 +52,8 @@ export type CliTransportResult = {
 export function classifyEngineFailure(text: unknown): EngineFailureClass | undefined {
   if (typeof text !== "string" || !text) return undefined
   const sample = text.slice(0, 4096)
+  // Before the transient patterns: vendors phrase this as "... try again" too, and a retry rebuilds the same prompt.
+  if (/prompt is too long|context[ _](?:window|length)|maximum context|context_length_exceeded|too many (?:input )?tokens|input (?:is too long|exceeds)|exceeds? the (?:model's )?(?:maximum|max) (?:input|context)/iu.test(sample)) return "context_overflow"
   if (/not logged in|unauthori[sz]ed|\b401\b|authenticat|invalid api key|login required|expired token|run \/login|sign in/iu.test(sample)) return "auth"
   if (/rate.?limit|too many requests|\b429\b|overloaded|at capacity/iu.test(sample)) return "rate_limited"
   if (/quota|usage limit|usage cap|plan limit|insufficient (?:credit|quota|balance|funds)|billing|exceeded your|out of credits/iu.test(sample)) return "quota"
@@ -722,7 +724,11 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
         const allowedPlugins = new Set(["cc-plugin-agents-md", "cc-plugin-telemetry", "cc-plugin-plugin-authoring", "cc-plugin-privacy"])
         if (!Array.isArray(record.plugins) || record.plugins.some(plugin => {
           const name = typeof plugin === "string" ? plugin : isRecord(plugin) ? plugin.name : undefined
-          return typeof name !== "string" || !allowedPlugins.has(name)
+          if (typeof name !== "string" || !allowedPlugins.has(name)) return true
+          // A plugin loaded from disk or a marketplace under a builtin's name reports where it came from; only the
+          // CLI's own builtin is accepted.
+          return isRecord(plugin) && ((plugin.path !== undefined && plugin.path !== "builtin") ||
+            (plugin.source !== undefined && plugin.source !== `${name}@builtin`))
         })) fail(SAFE_ERRORS.tool)
       }
       claudeSessionSeen = true

@@ -274,6 +274,19 @@ describe("host-neutral execution tool policy", () => {
     }
   })
 
+  test("Claude/Codex trim hints name the CLI read parameters, and a guard the user lowered still applies", () => {
+    const body = Array.from({ length: 3000 }, (_, index) => `line ${index}`).join("\n")
+    const event = { type: "tool-result" as const, sessionID: "vendor", callID: "read", toolID: "t", name: "read", result: body }
+    const vendor = createExecutionPolicy(config({ models: { worker: "codex/gpt-6-astra" } as OtterConfig["models"] }))
+    const trimmed = vendor.handlers(request(vendor)).toolResult(event) as { trimmed: boolean; result?: string; output?: string }
+    expect(trimmed.trimmed).toBe(true)
+    expect(JSON.stringify(trimmed)).toContain("continue with startLine")
+    expect(JSON.stringify(trimmed)).not.toContain("offset/limit")
+    const lowered = createExecutionPolicy(config({ models: { worker: "codex/gpt-6-astra" } as OtterConfig["models"], guards: { read_max_lines: 50 } as OtterConfig["guards"] }))
+    const short = Array.from({ length: 120 }, (_, index) => `line ${index}`).join("\n")
+    expect(lowered.handlers(request(lowered)).toolResult({ ...event, result: short })).toMatchObject({ trimmed: true })
+  })
+
   test("resets active mode failures only after a successful result for that session", () => {
     const worktree = mkdtempSync(join(tmpdir(), "policy-state-"))
     try {

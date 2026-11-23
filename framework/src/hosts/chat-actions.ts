@@ -201,7 +201,7 @@ export function describeAction(action: ChatAction, maxLines = 40): { title: stri
     return {
       title: `Search the web through ${action.engine} / ${action.model}`,
       preview: ["The query below leaves this machine: it is sent to the vendor's web search. A separate search-only process runs it;",
-        "it sees nothing of this repository. Uses your plan's quota.", "Exact query sent:", ...action.query.split("\n")],
+        "it sees nothing of this repository. Uses your plan's quota.", "Exact query sent (one line; a query with hidden characters or line breaks is refused before this prompt):", `  | ${action.query}`],
     }
   }
   if (action.tool === "bash") {
