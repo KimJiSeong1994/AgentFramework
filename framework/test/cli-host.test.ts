@@ -2264,6 +2264,36 @@ describe("chat execution through the action gate", () => {
     expect(run.prompts[1]).toContain("API_REVIEW_RESULT")
   })
 
+  test("web_search runs only through the gate: the approved query is searched, a denial searches nothing", async () => {
+    const searches: string[] = []
+    const webSearch: ActionGate["webSearch"] = {
+      prepare(input) { return Object.freeze({ tool: "web_search" as const, query: input.query, engine: "codex" as const, model: "gpt-6-astra" }) },
+      async run(action) { searches.push(action.query); return { ok: true, text: "Bun 1.4.5 (https://bun.com/blog)" } },
+    }
+    const call = JSON.stringify({ type: "tool", name: "web_search", input: { query: "latest bun release" } })
+    const allowed = gate(() => true, undefined, { webSearch })
+    const run = harness({ engine: "codex", role: "main", tools: CHAT_TOOLS, responses: [call, final("searched")] })
+    expect(await (await run.host.prepare({ ...run.request, actionGate: allowed.value })).run()).toEqual({ status: "completed", text: "searched", work: "- web_search latest bun release" })
+    expect(allowed.approvals).toEqual([{ tool: "web_search", query: "latest bun release", engine: "codex", model: "gpt-6-astra" }])
+    expect(searches).toEqual(["latest bun release"])
+    expect(run.prompts[0]).toContain("- web_search: allowed")
+    expect(run.prompts[1]).toContain("untrusted reference text from the web")
+    expect(run.prompts[1]).toContain("Bun 1.4.5")
+
+    const denied = gate(() => false, undefined, { webSearch })
+    const refused = harness({ engine: "codex", role: "main", tools: CHAT_TOOLS, responses: [call, final("understood")] })
+    expect(await (await refused.host.prepare({ ...refused.request, actionGate: denied.value })).run()).toMatchObject({ status: "completed", text: "understood" })
+    expect(searches).toHaveLength(1)
+    expect(refused.prompts[1]).toContain("The user denied this action: denied")
+
+    // Without a gate that can search (read-only chat, a local session) the tool is neither listed nor runnable.
+    const plain = gate(() => true)
+    const absent = harness({ engine: "codex", role: "main", tools: CHAT_TOOLS, responses: [call, final("no search")] })
+    expect(await (await absent.host.prepare({ ...absent.request, actionGate: plain.value })).run()).toMatchObject({ status: "failed" })
+    expect(absent.prompts[0]).not.toContain("web_search")
+    expect(searches).toHaveLength(1)
+  })
+
   test("model_api denial performs no API request and returns the denial to the model", async () => {
     const inputs: ModelApiInput[] = []
     let requests = 0

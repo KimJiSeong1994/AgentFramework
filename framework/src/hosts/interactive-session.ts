@@ -1,4 +1,5 @@
 import { prepareModelApiAction, runModelApi } from "./model-api.ts"
+import { prepareWebSearchAction, runWebSearch } from "./web-search.ts"
 import { randomUUID } from "node:crypto"
 import { STOP_LABEL } from "../flow/status.ts"
 import { taskPartition } from "../workflows/checkpoint.ts"
@@ -1249,7 +1250,7 @@ export async function runInteractiveSession(
     checkpointStore ??= deps.createCheckpoints(root, () => checkpointTurnLabel)
     return checkpointStore
   }
-  function chatActionGate(runtime: ExecutionRuntime): ActionGate | undefined {
+  function chatActionGate(runtime: ExecutionRuntime, search?: { engine: string; model: string }): ActionGate | undefined {
     const mode = chatExecuteMode(runtime.config)
     if (mode === "plan") return undefined
     // Only a runtime whose main role was built to act (cli-runtime with chat.execute ask/auto-edit) gets a gate.
@@ -1269,7 +1270,7 @@ export async function runInteractiveSession(
           note(`Allowed by your rule: ${title}`)
           return { how: "rule", decision: { allow: true } }
         }
-      } else if (action.tool !== "model_api" && mode === "auto-edit" && !(action.tool === "write" && action.overwritesUnread)) {
+      } else if (action.tool !== "model_api" && action.tool !== "web_search" && mode === "auto-edit" && !(action.tool === "write" && action.overwritesUnread)) {
         // A write over an existing file the turn never read is the one edit auto-edit does not apply unasked.
         note(`${title} (auto-edit)`)
         return { how: "auto-edit", decision: { allow: true } }
@@ -1306,6 +1307,10 @@ export async function runInteractiveSession(
     }
     return {
       modelApi: { prepare: prepareModelApiAction, run: runModelApi },
+      // Web search runs through the session's own vendor CLI, so only a Claude/Codex session offers it.
+      ...(search && (search.engine === "codex" || search.engine === "claude")
+        ? { webSearch: { prepare: input => prepareWebSearchAction(input, search.engine as "codex" | "claude", search.model), run: runWebSearch } }
+        : {}),
       async approve(action, signal) {
         const { decision, how } = await decide(action, signal)
         // Structured record for the session digest: tool, decision, written paths, a command's rule prefix. No contents.
@@ -1315,7 +1320,7 @@ export async function runInteractiveSession(
             ...(rule ? { rule } : {}) })
         } catch { /* persist marks the session failed itself */ }
         // The turn's checkpoint is taken before its first effect, whichever way that effect was allowed.
-        if (decision.allow && action.tool !== "model_api") {
+        if (decision.allow && action.tool !== "model_api" && action.tool !== "web_search") {
           try {
             const checkpoints = chatCheckpoints(runtime.worktree)
             if (action.tool === "bash") await checkpoints.beforeEffect({ tool: "bash" })
@@ -4078,7 +4083,7 @@ export async function runInteractiveSession(
       const turnSkills = skillSession
       const userFact = persist("user", { text: outbound })
       checkpointTurnLabel = outbound.replace(/\s+/gu, " ").trim().slice(0, 80)
-      const actionGate = chatActionGate(turnSelection.runtime)
+      const actionGate = chatActionGate(turnSelection.runtime, { engine: turnSelection.engine, model: turnSelection.model })
       progress.mainActs(actionGate !== undefined)
       progress.waiting()
       operationAbort = new AbortController()

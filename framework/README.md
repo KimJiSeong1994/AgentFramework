@@ -124,6 +124,13 @@ Every execution is approved by the local human, one action at a time or one plan
 | `"auto-edit"` | same | commands and model API calls; file edits apply and are noted, except a `write` over an existing file the turn has not read, which asks |
 | `"plan"` | `read list glob grep multiread memory skill` | none (read-only; the model points to `/plan` and `!<command>`) |
 
+In a Claude or Codex session with `"ask"` or `"auto-edit"`, the chat model also has `web_search`. The exact
+query is shown for approval every time (auto-edit never skips it). An approved query runs in a separate
+search-only vendor CLI process: an empty scratch directory, the vendor's web search, no shell, MCP server or
+project file, and only the query as input. Its findings return to the chat model as untrusted reference text.
+The chat model's own vendor process still has no native tools. Searches use your plan's quota. Local-engine
+sessions and `"plan"` mode do not offer the tool.
+
 Only user configuration can grant `auto-edit`; project configuration may restrict the user's
 mode but cannot elevate `ask` or `plan`. Shell commands, including inspection commands such as
 `git status`, require approval or a saved user command rule. Use `read`, `list`, `glob` and `grep`
