@@ -1373,6 +1373,16 @@ export async function runInteractiveSession(
         note(granted ? `Allowed ${rounds} more tool calls this turn.` : "Stopped: the turn ends at its tool-call limit.")
         return granted
       },
+      async extendInput(usedTokens, more, signal) {
+        const millions = (tokens: number) => `${(tokens / 1_000_000).toFixed(1)}M`
+        progress.suspend()
+        let picked: number | undefined
+        try { picked = await chooseDecision(terminal, `otter sent about ${millions(usedTokens)} input tokens for this message (every tool call re-sends the conversation). Allow ${millions(more)} more?`, [`Continue (${millions(more)} more)`, "Stop here"], signal) }
+        finally { terminal.resume?.(); progress.resume() }
+        const granted = !signal.aborted && picked === 0
+        note(granted ? `Allowed about ${millions(more)} more input tokens for this message.` : "Stopped: the turn ends at its input budget.")
+        return granted
+      },
     }
   }
   terminal.controls?.(action => {

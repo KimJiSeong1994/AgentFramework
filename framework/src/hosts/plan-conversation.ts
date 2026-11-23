@@ -18,6 +18,8 @@ export const MAX_PLAN_CONVERSATION_CHARS = 24_000
  * (cli-host VENDOR_MAIN_INPUT_LIMIT tokens at ~4 characters per token) with room for tools and skills.
  */
 export const VENDOR_PLAN_CONVERSATION_CHARS = 200_000
+/** Claude's main input estimate is lower (cli-host CLAUDE_MAIN_INPUT_LIMIT), so its window is too: a Hangul window must fit it. */
+export const CLAUDE_PLAN_CONVERSATION_CHARS = 150_000
 export const MAX_PLAN_CONVERSATION_TURNS = 24
 export const PLAN_RESPONSE_RESERVE_CHARS = 8_000
 /** A Claude/Codex answer may be a full review or design; 8,000 characters turned thorough answers into errors. */
@@ -34,7 +36,7 @@ export function planResponseReserveChars(engine: string | undefined): number {
 /** The conversation window for a chat model on `engine`. */
 export function planConversationChars(engine: string | undefined, localInputTokens = 8192): number {
   if (engine === "local" && localInputTokens !== 8192) return Math.min(196608, localInputTokens * 3)
-  return engine === "codex" || engine === "claude" ? VENDOR_PLAN_CONVERSATION_CHARS : MAX_PLAN_CONVERSATION_CHARS
+  return engine === "codex" ? VENDOR_PLAN_CONVERSATION_CHARS : engine === "claude" ? CLAUDE_PLAN_CONVERSATION_CHARS : MAX_PLAN_CONVERSATION_CHARS
 }
 
 export type ConversationMessage = { role: "user" | "assistant"; text: string }
@@ -169,7 +171,7 @@ export function createPlanConversation(
   let busy = false
   let droppedPairs = 0
   const engine = runtime.host.identity.engine
-  const currentInputTokens = () => engine === "local" ? localContextInputTokens(loadConfig(runtime.worktree)) : engine === "claude" || engine === "codex" ? 160_000 : 8192
+  const currentInputTokens = () => engine === "local" ? localContextInputTokens(loadConfig(runtime.worktree)) : engine === "codex" ? 160_000 : engine === "claude" ? 120_000 : 8192
 
   function contextState(): ConversationContextState {
     return { messages: history.map(message => ({ ...message })), pinnedNote }

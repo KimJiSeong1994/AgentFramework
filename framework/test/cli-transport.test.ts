@@ -1319,4 +1319,9 @@ test("classifyEngineFailure reads only a bounded sample and knows the four class
   expect(classifyEngineFailure("something else")).toBeUndefined()
   expect(classifyEngineFailure(`${"x".repeat(5000)} 429`)).toBeUndefined()
   expect(classifyEngineFailure(42)).toBeUndefined()
+  // A context overflow is its own class even when the vendor adds "try again": a retry rebuilds the same prompt.
+  for (const overflow of ["Prompt is too long", "This model's maximum context length is 272000 tokens", "context_length_exceeded",
+    "Your input exceeds the context window of this model. Please try again with a shorter input."]) {
+    expect(classifyEngineFailure(overflow)).toBe("context_overflow")
+  }
 })

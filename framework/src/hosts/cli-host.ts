@@ -58,6 +58,11 @@ const MAIN_INPUT_LIMIT = 8192
  * vendors' own context.
  */
 const VENDOR_MAIN_INPUT_LIMIT = 160_000
+/**
+ * Claude main turns. The estimate ran about 1.35-1.5x below Claude's reported input tokens on ordinary code and JSON
+ * (two recorded calls), so the same 160,000 could exceed a 200K window.
+ */
+const CLAUDE_MAIN_INPUT_LIMIT = 120_000
 const WORKER_INPUT_LIMIT = 5120
 /** Claude/Codex worker, reviewer and data roles: the 5,120-token local budget cannot hold a task plus the files it names. */
 const VENDOR_WORKER_INPUT_LIMIT = 49152
@@ -72,6 +77,16 @@ const VENDOR_TURN_OUTPUT_BYTES = 1024 * 1024
 /** Claude/Codex turns: replies the host could not use (unreadable envelope, unknown tool, invalid tool input) that are
  * returned to the model as a failed exchange instead of ending the turn. Nothing has run at those points. */
 const MAX_PROTOCOL_RETRIES = 3
+/**
+ * Claude/Codex turns: estimated input tokens one user message may send in total. Every tool round re-sends the whole
+ * prompt to a fresh vendor process, so 96 rounds near the input limit would be about 14M tokens; past this budget the
+ * human decides whether the turn continues (chat) or the turn ends (everything else).
+ */
+const VENDOR_TURN_INPUT_TOKENS = 3_000_000
+/** The longest final answer the chat conversation accepts from a Claude/Codex main turn (plan-conversation's reserve). */
+const VENDOR_MAIN_FINAL_CHARS = 48_000
+/** Read-only tools whose identical repeat returns nothing new while the earlier result is still in the transcript. */
+const REPEATABLE_READS: ReadonlySet<string> = new Set(["read", "multiread", "list", "glob", "grep"])
 const MAX_NOTE_CHARS = 1000
 const MAX_KEPT_NOTES = 8
 /** All kept notes together; older ones leave first, so notes cannot crowd tool results out of the input budget. */
@@ -497,9 +512,25 @@ function parseEnvelope(output: string, allowUnwrappedFinal = false): Envelope | 
   return body.startsWith("{") ? undefined : { type: "final", text: body }
 }
 
+/** Unbroken runs of base64/hex-like text. 65 and up, so a SHA-256 hex digest (64) keeps its ordinary estimate. */
+const DENSE_RUN = /[A-Za-z0-9+/=_-]{65,}/gu
+/**
+ * Tokens the word-based heuristic misses in encoded data. It counts letters and digits at 4 characters per token, but
+ * vendors tokenize base64 and hex at about 0.6-0.7 tokens per character (measured 2.3-2.6x under), so an in-budget
+ * prompt of such tool results exceeded the vendor's real context window.
+ */
+function denseDataTokens(text: string): number {
+  let extra = 0
+  for (const match of text.matchAll(DENSE_RUN)) {
+    const run = match[0]
+    if (/\d/u.test(run) && /[A-Za-z]/u.test(run)) extra += run.length * 0.45
+  }
+  return Math.ceil(extra)
+}
+
 function estimatedTokens(text: string): number {
   // Reuse the project's Gemma-calibrated heuristic; this is not cross-model token proof.
-  return INPUT_ESTIMATE_OVERHEAD + estimateTokens(text)
+  return INPUT_ESTIMATE_OVERHEAD + estimateTokens(text) + denseDataTokens(text)
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -581,7 +612,7 @@ function droppedSkills(before: readonly TranscriptExchange[], after: readonly Tr
 /** Workflow read-only roles carry plan/spec context, so they use the main limit (B1); every legacy role keeps its limit. */
 export function roleInputLimit(role: ExecutionRole, engine: CliEngine = "local", localInputTokens = MAIN_INPUT_LIMIT): number {
   if (role !== "main" && !isWorkflowReadOnlyRole(role)) return engine === "local" ? Math.min(WORKER_INPUT_LIMIT, localInputTokens) : VENDOR_WORKER_INPUT_LIMIT
-  return engine === "local" ? localInputTokens : VENDOR_MAIN_INPUT_LIMIT
+  return engine === "local" ? localInputTokens : engine === "claude" ? CLAUDE_MAIN_INPUT_LIMIT : VENDOR_MAIN_INPUT_LIMIT
 }
 
 /** At most this many skills are listed per turn (ranked against the task text); each description is clipped. */
@@ -605,6 +636,11 @@ function offeredSkillTool(request: ExecutionRequest): { provider: SkillToolProvi
  * call tools but nothing about finishing work or answer depth; recorded sessions stopped after a few reads and answered
  * in a line. The local engine's prompt is unchanged.
  */
+/** Today's date where the user is (an ISO date in UTC is yesterday's for the first hours of a day east of Greenwich). */
+function localDate(now = new Date()): string {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`
+}
+
 function vendorWorkingStyle(request: ExecutionRequest, available: ReadonlySet<CliToolName>): string {
   const canChange = available.has("write") || available.has("edit")
   return [
@@ -616,7 +652,7 @@ function vendorWorkingStyle(request: ExecutionRequest, available: ReadonlySet<Cl
     "- Match the answer to the question, in the user's language. A review, design, analysis or explanation gets a complete, structured Markdown answer with the evidence and reasoning; a simple question gets a short one. Keep the final text under 40,000 characters.",
     `- Your reasoning is not kept between replies. A tool envelope may carry a "note" string (up to ${MAX_NOTE_CHARS} characters) beside "type", "name" and "input": what you learned and what you will do next. The host shows your latest notes back to you on every reply.`,
     "- Tool results are not kept for the user's next message; only the conversation text and a host record of which tools ran are. Put the paths, findings and decisions that later work will need into your final answer.",
-    `Environment: date ${new Date().toISOString().slice(0, 10)}; platform ${process.platform}; worktree directory "${basename(request.cwd)}" (tool paths are relative to it).`,
+    `Environment: date ${localDate()}; platform ${process.platform}; worktree directory ${JSON.stringify(basename(request.cwd).replace(/[^\p{L}\p{N}._-]/gu, "_").slice(0, 64))} (tool paths are relative to it).`,
   ].join("\n")
 }
 
@@ -780,7 +816,8 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
   }
   const vendorTransportOptions = (): Pick<CliTransportOptions, "effort"> => {
     let effort: CliTransportOptions["effort"]
-    try { effort = options.loadEffort?.() } catch { effort = undefined }
+    // An unreadable config must not silently drop to the vendor's default ("low" on Codex gpt-6-astra).
+    try { effort = options.loadEffort?.() } catch { effort = "high" }
     return effort ? { effort } : {}
   }
   const currentHandles = new Map<string, { reconcile: () => Promise<ExecutionReconciliation> }>()
@@ -1180,6 +1217,10 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
           const roundStep = vendorRoute ? VENDOR_MAX_TOOL_ROUNDS : MAX_TOOL_ROUNDS
           let protocolRetries = 0
           let returnedCalls = 0
+          let inputSpent = 0
+          let inputBudget = VENDOR_TURN_INPUT_TOKENS
+          /** Canonical read-only calls whose result is in the transcript and still current (cleared by any change). */
+          const freshReads = new Set<string>()
           /** Returns an unusable reply to the model as a failed exchange (Claude/Codex only, bounded); false means fail as before. */
           const protocolRetry = (assistant: string, reason: string): boolean => {
             if (!vendorRoute || witnessRequested || protocolRetries >= MAX_PROTOCOL_RETRIES) return false
@@ -1227,7 +1268,30 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             const fitted = fitHistory(basePrompt, history, inputLimit, nativeInstructionTokens)
             if (!fitted) return setFinal({ status: "failed", error: "estimated input budget exceeded; task and role constraints were preserved" })
             replaceHistory(fitted)
-            const prompt = renderPrompt(basePrompt, history)
+            let prompt = renderPrompt(basePrompt, history)
+            if (vendorRoute && !witnessRequested) {
+              const promptTokens = estimatedTokens(prompt) + nativeInstructionTokens
+              if (inputSpent + promptTokens > inputBudget) {
+                let granted = false
+                if (turnGate?.extendInput) {
+                  const extendSignal = AbortSignal.any([toolWaitAbort.signal, AbortSignal.timeout(Math.max(1, request.deadlineAt - Date.now()))])
+                  try { granted = await turnGate.extendInput(inputSpent, VENDOR_TURN_INPUT_TOKENS, extendSignal) } catch { granted = false }
+                }
+                if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+                if (!granted) return setFinal({ status: "failed", error: "Otter input budget for this message reached" })
+                inputBudget += VENDOR_TURN_INPUT_TOKENS
+              }
+              // Running out returns nothing to the user, so the model is told while it can still answer.
+              const running: string[] = []
+              if (roundLimit - toolCalls <= 5) running.push(`${Math.max(0, roundLimit - toolCalls)} tool call(s) left for this message`)
+              if (nativeDeadlineAt - Date.now() < 180_000) running.push("under three minutes left for this message")
+              if (inputBudget - inputSpent < 3 * promptTokens) running.push("the input budget for this message is nearly used")
+              if (request.role === "main" && running.length) {
+                const noticed = `${prompt}\n\nHost notice: ${running.join("; ")}. Give your final answer now with what you have; a message that runs out returns nothing to the user.`
+                if (estimatedTokens(noticed) + nativeInstructionTokens <= inputLimit) prompt = noticed
+              }
+              inputSpent += promptTokens
+            }
             if (witnessRequested && Buffer.byteLength(prompt, "utf8") > 64 * 1024) {
               return setFinal({ status: "failed", error: "skill loader witness prompt byte limit exceeded" })
             }
@@ -1463,6 +1527,8 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               }
               return setFinal({ status: "failed", error: "skill loader witness refused a tool response before effects" })
             }
+            if (envelope.type === "final" && request.role === "main" && envelope.text.length > VENDOR_MAIN_FINAL_CHARS &&
+                protocolRetry(JSON.stringify(`${envelope.text.slice(0, 200)}…`), `Your final answer is ${envelope.text.length} characters; the limit is ${VENDOR_MAIN_FINAL_CHARS}. Send it again, shorter.`)) continue
             if (envelope.type === "final") {
               if (witnessObservation) {
                 try {
@@ -1594,6 +1660,17 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                 return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
               }
               keepNote(envelope.note)
+              // An identical read whose result is still in the transcript returns nothing new and costs a full prompt.
+              const repeatKey = JSON.stringify({ type: "tool", name, input: envelope.input })
+              if (vendorRoute && REPEATABLE_READS.has(name) && freshReads.has(repeatKey) &&
+                  history.some(entry => entry.ok && entry.assistant === repeatKey && !entry.result.endsWith(TRUNCATION_MARKER))) {
+                finishTool("denied", false)
+                const fitted = fitHistory(basePrompt, [...history, { assistant: repeatKey, ok: false, result: "Not run again: this exact call already ran and its result is in the transcript above, unchanged since. Use that result, or make a different call." }], inputLimit, nativeInstructionTokens)
+                if (!fitted) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
+                replaceHistory(fitted)
+                toolCalls++
+                return "continue"
+              }
               const toolCost = name === "multiread" ? (envelope.input.reads as unknown[]).length : 1
               if (toolCalls + toolCost > roundLimit) {
                 let granted = false
@@ -1763,6 +1840,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                   if (!fitted) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
                   replaceHistory(fitted)
                   workLog.push(`- ${name} ${toolTarget(name, envelope.input)}`.trimEnd() + (output.ok ? "" : " (failed)"))
+                  if (output.ok) freshReads.add(repeatKey)
                   toolCalls += reads.length
                   if (output.ok) for (const read of reads) readPaths.add(readKey(read.path))
                 } catch {
@@ -1987,6 +2065,8 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                   replaceHistory(fitted)
                   // A declined or failed action records its tool only: its command line or path was not accepted by the human.
                   workLog.push(gatedResult.ok ? `- ${name} ${toolTarget(name, envelope.input)}` : `- ${name} (failed or declined)`)
+                  // A write, edit or command may have changed what an earlier read returned.
+                  freshReads.clear()
                   toolCalls++
                   return "continue"
                 }
@@ -2037,6 +2117,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               if (!afterTool) return setFinal({ status: "failed", error: "tool result exceeded the estimated input budget" })
               replaceHistory(afterTool)
               workLog.push(`- ${name} ${toolTarget(name, envelope.input)}`.trimEnd() + (result.ok ? "" : " (failed)"))
+              if (REPEATABLE_READS.has(name)) { if (result.ok) freshReads.add(repeatKey) } else freshReads.clear()
               toolCalls++
               const afterEffectLease = checkLease(request, fixedLease)
               if (afterEffectLease.state === "cancelled" || cancelled) return setFinal({ status: "cancelled", error: cancelReason })

@@ -1,6 +1,6 @@
 import { AGENT_DEFS, DATA_ANALYST_PROMPT, DATA_VERIFIER_PROMPT, REVIEWER_PROMPT, WORKER_PROMPT, mainPrompt } from "../agents/prompts.ts"
 import { createHash } from "node:crypto"
-import { parseModelSelection, type OtterConfig, type ModelSelection } from "../config.ts"
+import { DEFAULT_CONFIG, parseModelSelection, type OtterConfig, type ModelSelection } from "../config.ts"
 import { RepeatGuard, errorExcerpt, repeatBlockMessage } from "../guards/repeat.ts"
 import { RepetitionDetector } from "../guards/repetition.ts"
 import { trimToolOutput } from "../guards/trim.ts"
@@ -49,6 +49,14 @@ const SYSTEM: Record<ExecutionRole, string> = {
  */
 export const VENDOR_TRIM = Object.freeze({ read_max_lines: 2000, read_max_bytes: 32 * 1024, read_max_tokens: 12_000 })
 const isVendorEngine = (providerID: string | undefined): boolean => providerID === "codex" || providerID === "claude"
+/** A guard the user set below its default is the user's restriction and still applies; otherwise the vendor bound does. */
+function vendorTrim(guards: OtterConfig["guards"]): { read_max_lines: number; read_max_bytes: number; read_max_tokens: number } {
+  const pick = (key: "read_max_lines" | "read_max_bytes" | "read_max_tokens"): number => {
+    const user = guards[key]
+    return typeof user === "number" && user > 0 && user < DEFAULT_CONFIG.guards[key]! ? user : VENDOR_TRIM[key]
+  }
+  return { read_max_lines: pick("read_max_lines"), read_max_bytes: pick("read_max_bytes"), read_max_tokens: pick("read_max_tokens") }
+}
 
 export type ExecutionPolicyOptions = {
   directory?: string
@@ -186,8 +194,14 @@ export function createExecutionPolicy(config: Readonly<OtterConfig>, options: Ex
           let hinted = false
           if (!config.disabled_hooks.includes("guard.trim")) {
             if (config.guards.relativize_paths && PATH_TOOLS.has(event.name)) text = relativizePaths(text, [options.directory ?? "", options.worktree ?? "", request.cwd])
-            const trimmedResult = trimToolOutput(event.name, text, isVendorEngine(policy.model?.providerID) ? VENDOR_TRIM : config.guards)
-            text = trimmedResult.output
+            const vendor = isVendorEngine(policy.model?.providerID)
+            const trimmedResult = trimToolOutput(event.name, text, vendor ? vendorTrim(config.guards) : config.guards)
+            // The shared marker names another host's read parameters; the CLI read tool takes startLine/maxLines.
+            text = vendor && trimmedResult.trimmed
+              ? trimmedResult.output.replace("re-read with offset/limit if needed", event.name === "read"
+                ? "continue with startLine set to the next line (and maxLines); a file that is one long line cannot be paged"
+                : "narrow the pattern or path to see the rest")
+              : trimmedResult.output
             trimmed = trimmedResult.trimmed
           }
           if (!ok && !config.disabled_hooks.includes("guard.recover")) {

@@ -102,8 +102,15 @@ Claude receives `--effort`. Higher levels answer more slowly and use more of you
 The local engine ignores it.
 
 Claude and Codex turns also get larger budgets than the local engine: 160,000 estimated input tokens
-for the chat model (49,152 for workers and reviewers), tool results up to 2,000 lines, 96 tool calls
-per message before the extension prompt, and final answers up to 48,000 characters.
+for the Codex chat model and 120,000 for Claude (49,152 for workers and reviewers), tool results up to
+2,000 lines, 96 tool calls per message before the extension prompt, final answers up to 48,000 characters,
+and at least 45 minutes per chat turn.
+
+Each tool call re-sends the whole prompt to a fresh vendor process, so these turns are bounded in total as well:
+one message may send about 3,000,000 estimated input tokens before otter asks whether to continue; an identical
+read whose result is still in the transcript is not run again; and near a limit (tool calls, time, input budget)
+the model is told to answer with what it has. The estimate counts base64- and hex-like data at the rate vendors
+charge, and a request that still exceeds the model's context window is reported as that, not as a temporary error.
 
 Claude and Codex turns also differ from the local engine in how a turn survives mistakes and keeps its place:
 

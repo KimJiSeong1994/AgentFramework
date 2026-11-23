@@ -1562,7 +1562,7 @@ describe("common CLI execution host", () => {
     writeFileSync(path, '{"local_model":{"context_input_tokens":4096}}')
     const cloud = harness({ engine: "claude", role: "main", taskText, responses: [JSON.stringify({ type: "final", text: "done" })] })
     expect((await (await cloud.host.prepare(cloud.request)).run()).status).toBe("completed")
-    expect(cloud.prompts[0]).toContain("Input estimate limit: 160000")
+    expect(cloud.prompts[0]).toContain("Input estimate limit: 120000")
     // The working-style block is for Claude/Codex main turns only: the local prompt and vendor workers are unchanged.
     expect(cloud.prompts[0]).toContain("Working style:")
     expect(cloud.prompts[0]).toContain(`worktree directory "${basename(cloud.request.cwd)}"`)
@@ -1591,7 +1591,8 @@ describe("common CLI execution host", () => {
       expect(roleInputLimit(role)).toBe(8192)
       expect(roleInputLimit(role, "local", 4096)).toBe(4096)
       expect(roleInputLimit(role, "local", 65536)).toBe(65536)
-      expect(roleInputLimit(role, "claude", 4096)).toBe(160000)
+      expect(roleInputLimit(role, "claude", 4096)).toBe(120000)
+      expect(roleInputLimit(role, "codex", 4096)).toBe(160000)
     }
     expect(roleInputLimit("worker", "local", 4096)).toBe(4096)
     expect(roleInputLimit("worker", "local", 65536)).toBe(5120)
@@ -2582,6 +2583,60 @@ describe("chat execution through the action gate", () => {
     expect(asked).toBe(0)
     expect(run.observed.before).toBe(23)
     expect(run.observed.results).toBe(23)
+  })
+
+  test("Claude/Codex: an identical read is not run twice, a turn near its limit is told to answer, an over-long answer is sent back", async () => {
+    writeFileSync(join(root, "README.md"), Array.from({ length: 200 }, (_, index) => `line ${index}`).join("\n"))
+    const read = (startLine?: number) => JSON.stringify({ type: "tool", name: "read", input: { path: "README.md", ...(startLine ? { startLine, maxLines: 1 } : {}) } })
+    const repeated = harness({ engine: "codex", role: "main", tools: CHAT_TOOLS, responses: [read(), read(), final("done")] })
+    expect(await (await repeated.host.prepare(repeated.request)).run()).toMatchObject({ status: "completed", text: "done", work: "- read README.md" })
+    expect(repeated.observed.before).toBe(1)
+    expect(repeated.prompts[2]!).toContain("Not run again: this exact call already ran")
+    // The local engine keeps running repeats (its own repeat guard decides).
+    const local = harness({ role: "main", tools: CHAT_TOOLS, responses: [read(), read(), final("done")] })
+    await (await local.host.prepare(local.request)).run()
+    expect(local.prompts[2]!).not.toContain("Not run again")
+
+    const many = harness({ engine: "codex", role: "main", tools: CHAT_TOOLS, responses: [...Array.from({ length: 93 }, (_, index) => read(index + 1)), final("done")] })
+    expect(await (await many.host.prepare(many.request)).run()).toMatchObject({ status: "completed", text: "done" })
+    // (The fixture's short deadline adds its own notice to every prompt, so only the tool-call part is asserted.)
+    expect(many.prompts[90]!).not.toContain("tool call(s) left for this message")
+    expect(many.prompts[93]!).toContain("3 tool call(s) left for this message")
+    expect(many.prompts[93]!).toContain("Give your final answer now")
+
+    const long = harness({ engine: "codex", role: "main", tools: CHAT_TOOLS, responses: [final("가".repeat(48_001)), final("short")] })
+    expect(await (await long.host.prepare(long.request)).run()).toMatchObject({ status: "completed", text: "short" })
+    expect(long.prompts[1]!).toContain("Your final answer is 48001 characters; the limit is 48000.")
+  })
+
+  test("Claude/Codex: the input one message may send in total is bounded; chat asks to continue, a refusal or no gate ends the turn", async () => {
+    writeFileSync(join(root, "README.md"), Array.from({ length: 200 }, (_, index) => `line ${index}`).join("\n"))
+    const reads = Array.from({ length: 24 }, (_, index) => JSON.stringify({ type: "tool", name: "read", input: { path: "README.md", startLine: index + 1, maxLines: 1 } }))
+    // About 150,000 estimated tokens of task, so every model call sends that much again.
+    const taskText = "word ".repeat(120_000)
+    const asked: Array<[number, number]> = []
+    const granting = gate(() => true, undefined, { extendInput: async (used: number, more: number) => { asked.push([used, more]); return true } })
+    const run = harness({ engine: "codex", role: "main", tools: CHAT_TOOLS, taskText, responses: [...reads, final("done")] })
+    expect(await (await run.host.prepare({ ...run.request, actionGate: granting.value })).run()).toMatchObject({ status: "completed", text: "done" })
+    expect(asked).toHaveLength(1)
+    expect(asked[0]![1]).toBe(3_000_000)
+    expect(asked[0]![0]).toBeGreaterThan(2_800_000)
+    expect(run.prompts.some(prompt => prompt.includes("the input budget for this message is nearly used"))).toBe(true)
+
+    const refusing = gate(() => true, undefined, { extendInput: async () => false })
+    const stopped = harness({ engine: "codex", role: "main", tools: CHAT_TOOLS, taskText, responses: [...reads, final("done")] })
+    expect(await (await stopped.host.prepare({ ...stopped.request, actionGate: refusing.value })).run()).toEqual({ status: "failed", error: "Otter input budget for this message reached" })
+    expect(stopped.prompts.length).toBeLessThan(21)
+  })
+
+  test("encoded data counts for what vendors charge: a base64 task that the word estimate admitted is refused", async () => {
+    // 120,000 characters: 30,000 tokens by the 4-characters-per-token word estimate, about 84,000 with the dense-data floor.
+    const subject = harness({ engine: "codex", taskText: "Ab1+".repeat(30_000), responses: [JSON.stringify({ type: "final", text: "unexpected" })] })
+    expect(await (await subject.host.prepare(subject.request)).run()).toMatchObject({ status: "failed", error: expect.stringContaining("estimated input budget") })
+    expect(subject.prompts).toHaveLength(0)
+    // Ordinary prose of the same length still fits, and a SHA-256 hex digest is not treated as encoded data.
+    const prose = harness({ engine: "codex", taskText: `${"word ".repeat(24_000)}${"a1".repeat(32)}`, responses: [JSON.stringify({ type: "final", text: "done" })] })
+    expect(await (await prose.host.prepare(prose.request)).run()).toMatchObject({ status: "completed" })
   })
 
   test("at the tool-call limit chat asks to continue; granted rounds keep the turn going, a refusal ends it", async () => {

@@ -319,7 +319,8 @@ describe("common planning conversation", () => {
   })
 
   test("Claude/Codex chat gets the larger conversation window; local and OpenCode keep the base window", async () => {
-    expect(planConversationChars("claude")).toBe(VENDOR_PLAN_CONVERSATION_CHARS)
+    // Claude's window is smaller than Codex's because its input estimate limit is (120,000 against 160,000).
+    expect(planConversationChars("claude")).toBe(150_000)
     expect(planConversationChars("codex")).toBe(VENDOR_PLAN_CONVERSATION_CHARS)
     expect(planConversationChars("local")).toBe(MAX_PLAN_CONVERSATION_CHARS)
     expect(planConversationChars("opencode")).toBe(MAX_PLAN_CONVERSATION_CHARS)
@@ -614,7 +615,8 @@ describe("local conversation context", () => {
     const cloud = fixture({ engine: "claude" })
     await createPlanConversation(cloud.runtime, "cloud-context").turn("가".repeat(10000))
     expect(cloud.requests).toHaveLength(1)
-    expect(planConversationChars("claude", 4096)).toBe(200000)
+    expect(planConversationChars("claude", 4096)).toBe(150000)
+    expect(planConversationChars("codex", 4096)).toBe(200000)
   })
 
   test("the host's record of a turn's tool calls reaches the next message's model, not the user-visible answer", async () => {

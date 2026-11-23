@@ -52,6 +52,8 @@ export type CliTransportResult = {
 export function classifyEngineFailure(text: unknown): EngineFailureClass | undefined {
   if (typeof text !== "string" || !text) return undefined
   const sample = text.slice(0, 4096)
+  // Before the transient patterns: vendors phrase this as "... try again" too, and a retry rebuilds the same prompt.
+  if (/prompt is too long|context[ _](?:window|length)|maximum context|context_length_exceeded|too many (?:input )?tokens|input (?:is too long|exceeds)|exceeds? the (?:model's )?(?:maximum|max) (?:input|context)/iu.test(sample)) return "context_overflow"
   if (/not logged in|unauthori[sz]ed|\b401\b|authenticat|invalid api key|login required|expired token|run \/login|sign in/iu.test(sample)) return "auth"
   if (/rate.?limit|too many requests|\b429\b|overloaded|at capacity/iu.test(sample)) return "rate_limited"
   if (/quota|usage limit|usage cap|plan limit|insufficient (?:credit|quota|balance|funds)|billing|exceeded your|out of credits/iu.test(sample)) return "quota"
