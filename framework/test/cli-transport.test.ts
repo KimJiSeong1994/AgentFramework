@@ -531,7 +531,7 @@ test("Claude permits only the observed safe-mode builtin plugin names", async ()
     ["cc-plugin-agents-md", { name: "cc-plugin-telemetry" }],
     [{ name: "cc-plugin-agents-md" }, "cc-plugin-telemetry"],
     // Claude CLI 2.1.301 init shape.
-    [{ name: "cc-plugin-agents-md" }, { name: "cc-plugin-telemetry" }, { name: "cc-plugin-plugin-authoring" }],
+    [{ name: "cc-plugin-agents-md" }, { name: "cc-plugin-telemetry" }, { name: "cc-plugin-plugin-authoring" }, { name: "cc-plugin-privacy" }],
   ]) {
     const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
     testDirectories.push(resolve(marker, ".."))
