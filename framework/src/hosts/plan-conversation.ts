@@ -255,12 +255,16 @@ export function createPlanConversation(
         if (result.status === "stuck") throw new ModelRequestError("input_budget", result.reason)
         if (!result.text.trim()) throw new ModelRequestError("empty_response", "planning conversation model returned only whitespace")
         // The next message's model sees which tools this turn ran (names and targets); the user-visible answer is unchanged.
-        const remembered = result.work ? `${result.text}\n\n${WORK_RECORD_HEADING}\n${result.work}` : result.text
+        // The heading is the host's: an answer that types it itself must not pass for a host record.
+        const answer = result.text.replaceAll(WORK_RECORD_HEADING, "[Otter host record heading removed from the answer]")
+        const remembered = result.work ? `${answer}\n\n${WORK_RECORD_HEADING}\n${result.work}` : answer
         const next: ConversationMessage[] = [...window.messages, { role: "assistant", text: remembered }]
         // JSON escaping can make a completed response larger than its raw character reserve.
         // Keep checkpointable whole pairs; the full result remains in the returned turn/transcript.
-        // Every engine: the session store refuses a carried context over these bounds (vendor windows now reach them too).
-        while (next.length > 48 || JSON.stringify(next).length > 196608) next.splice(0, 2)
+        // The local engine's context is persisted, and the session store refuses one over these bounds. A Claude/Codex
+        // context is not persisted: it keeps at least the newest pair, so one oversized answer never empties the conversation.
+        const floor = engine === "local" ? 0 : 2
+        while (next.length > floor && (next.length > 48 || JSON.stringify(next).length > 196608)) next.splice(0, 2)
         droppedPairs += Math.max(0, (history.length + 2 - next.length) / 2)
         history.splice(0, history.length, ...next)
         const plan = extractPlan(result.text)

@@ -722,7 +722,11 @@ function createNativeProtocol(options: CliTransportOptions, stopAtOutputLimit: (
         const allowedPlugins = new Set(["cc-plugin-agents-md", "cc-plugin-telemetry", "cc-plugin-plugin-authoring", "cc-plugin-privacy"])
         if (!Array.isArray(record.plugins) || record.plugins.some(plugin => {
           const name = typeof plugin === "string" ? plugin : isRecord(plugin) ? plugin.name : undefined
-          return typeof name !== "string" || !allowedPlugins.has(name)
+          if (typeof name !== "string" || !allowedPlugins.has(name)) return true
+          // A plugin loaded from disk or a marketplace under a builtin's name reports where it came from; only the
+          // CLI's own builtin is accepted.
+          return isRecord(plugin) && ((plugin.path !== undefined && plugin.path !== "builtin") ||
+            (plugin.source !== undefined && plugin.source !== `${name}@builtin`))
         })) fail(SAFE_ERRORS.tool)
       }
       claudeSessionSeen = true

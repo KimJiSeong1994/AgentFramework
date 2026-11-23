@@ -95,7 +95,8 @@ otter chat --engine claude --model sonnet
 
 Otter starts the Claude and Codex CLIs without your own CLI settings, so their effort setting
 (`model_reasoning_effort`, `effortLevel`) does not apply. `chat.effort` sets it instead:
-`"low"`, `"medium"`, `"high"` (default), `"xhigh"` or `"max"`. Codex receives it as
+`"low"`, `"medium"`, `"high"` (default), `"xhigh"` or `"max"`. A project's `.otter/otter.jsonc` may lower it but
+never raise it above the user's setting. Codex receives it as
 `model_reasoning_effort` (lowered to the highest level the model lists) with `model_verbosity="medium"`;
 Claude receives `--effort`. Higher levels answer more slowly and use more of your plan's quota.
 The local engine ignores it.
@@ -110,8 +111,8 @@ Claude and Codex turns also differ from the local engine in how a turn survives 
   model as a failed exchange, up to three times per message, instead of ending the turn. Nothing runs at those points.
 - A tool envelope may carry a `"note"` string; the host shows the latest eight notes back on every reply, because
   the vendor process is restarted for each one and keeps no reasoning.
-- The next message's model sees a host record of which tools the previous answer used (names and targets, never
-  contents), so it does not have to rediscover which files were involved.
+- The next message's model sees a host record of which tools the previous answer used (tool names, file paths and
+  the command lines that ran; never contents, search patterns, web queries or declined actions).
 - `grep` accepts `"ignoreCase": true` (all engines). Patterns stay literal.
 
 ### Chat execution (`chat.execute`)
@@ -126,8 +127,12 @@ Every execution is approved by the local human, one action at a time or one plan
 
 In a Claude or Codex session with `"ask"` or `"auto-edit"`, the chat model also has `web_search`. The exact
 query is shown for approval every time (auto-edit never skips it). An approved query runs in a separate
-search-only vendor CLI process: an empty scratch directory, the vendor's web search, no shell, MCP server or
-project file, and only the query as input. Its findings return to the chat model as untrusted reference text.
+search-only vendor CLI process: a scratch directory, the vendor's web search, no shell, MCP server or project
+file, and the query as otter's only input (the vendor CLI adds its own account context). The Codex worker uses
+the same stripped model catalog and permission profile as inference with only the search tool switched on, and
+a worker that reports any other tool or activity has its result refused. A query must be one line of visible
+text: line breaks and control or invisible characters are refused before the approval prompt.
+Its findings return to the chat model as untrusted reference text.
 The chat model's own vendor process still has no native tools. Searches use your plan's quota. Local-engine
 sessions and `"plan"` mode do not offer the tool.
 

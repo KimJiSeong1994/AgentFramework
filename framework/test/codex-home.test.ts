@@ -53,4 +53,8 @@ test("refuses a regular auth.json (a credential copy) and instruction files plac
   rmSync(owned.authLink)
   writeFileSync(join(owned.path, "AGENTS.md"), "injected")
   expect(() => ensureOwnedCodexHome()).toThrow(/AGENTS\.md/u)
+  // Codex also reads AGENTS.override.md from its home, whatever project_doc_max_bytes says.
+  rmSync(join(owned.path, "AGENTS.md"))
+  writeFileSync(join(owned.path, "AGENTS.override.md"), "injected")
+  expect(() => ensureOwnedCodexHome()).toThrow(/AGENTS\.override\.md/u)
 })

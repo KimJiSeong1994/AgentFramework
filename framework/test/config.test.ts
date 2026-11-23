@@ -65,6 +65,18 @@ describe("chat.effort", () => {
     refused(projectConfigPath(worktree), "invalid-chat-effort")
     expect(DEFAULT_CONFIG.chat).toEqual({})
   })
+
+  test("a project file may lower the effort but never raise it above the user's", () => {
+    put(userConfigPath(), JSON.stringify({ chat: { effort: "medium" } }))
+    put(projectConfigPath(worktree), '{"chat":{"effort":"max"}}')
+    expect(chatEffort(loadConfig(worktree))).toBe("medium")
+    put(projectConfigPath(worktree), '{"chat":{"effort":"low"}}')
+    expect(chatEffort(loadConfig(worktree))).toBe("low")
+    // With no user setting the default (high) is the ceiling.
+    put(userConfigPath(), "{}")
+    put(projectConfigPath(worktree), '{"chat":{"effort":"xhigh"}}')
+    expect(chatEffort(loadConfig(worktree))).toBe("high")
+  })
 })
 
 describe("chat.execute", () => {

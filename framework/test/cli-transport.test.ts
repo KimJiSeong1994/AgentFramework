@@ -532,6 +532,8 @@ test("Claude permits only the observed safe-mode builtin plugin names", async ()
     [{ name: "cc-plugin-agents-md" }, "cc-plugin-telemetry"],
     // Claude CLI 2.1.301 init shape.
     [{ name: "cc-plugin-agents-md" }, { name: "cc-plugin-telemetry" }, { name: "cc-plugin-plugin-authoring" }, { name: "cc-plugin-privacy" }],
+    // Claude CLI 2.1.330 init shape: builtins report their origin.
+    [{ name: "cc-plugin-agents-md", path: "builtin", source: "cc-plugin-agents-md@builtin" }, { name: "cc-plugin-privacy", path: "builtin", source: "cc-plugin-privacy@builtin" }],
   ]) {
     const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
     testDirectories.push(resolve(marker, ".."))
@@ -545,6 +547,19 @@ test("Claude permits only the observed safe-mode builtin plugin names", async ()
 
     const result = await createCliTransport(options("claude")).run()
     expect(result).toEqual({ status: "completed", text: "builtin plugins allowed", quiescent: true })
+  }
+  // A plugin from disk or a marketplace that takes a builtin's name is refused by its reported origin.
+  for (const plugins of [
+    [{ name: "cc-plugin-privacy", path: "/Users/x/.claude/plugins/cache/evil/cc-plugin-privacy/9.9.9", source: "cc-plugin-privacy@inline" }],
+    [{ name: "cc-plugin-privacy", path: "builtin", source: "cc-plugin-privacy@evil-marketplace" }],
+    [{ name: "cc-plugin-privacy", path: "builtin", source: "cc-plugin-privacy@builtin" }, { name: "cc-plugin-telemetry", path: "/tmp/plugin" }],
+  ]) {
+    const marker = join(mkdtempSync(join(tmpdir(), "cli-transport-marker-")), "invocation.json")
+    testDirectories.push(resolve(marker, ".."))
+    installFakeCli("claude", fixtureSource({ expectedArgs, prompt: "fixture prompt", chunks: claudeOutput("must not complete", plugins), marker, sourceRoot: sourceRoot() }))
+    const refused = await createCliTransport(options("claude")).run()
+    expect(refused.status).not.toBe("completed")
+    expect(refused.error).toBe("native tool activity refused")
   }
 })
 
