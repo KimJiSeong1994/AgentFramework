@@ -233,9 +233,32 @@ describe("host-neutral execution tool policy", () => {
     const before = (callID: string) => h.beforeTool({ type: "tool-before", sessionID: "vendor", callID, toolID: "t", name: "bash", input: { command: "bad" } })
     expect(before("1")).toEqual({ allow: true })
     h.toolResult({ type: "tool-result", sessionID: "vendor", callID: "1", toolID: "t", name: "bash", result: "Error: failed" })
-    expect(before("2")).toMatchObject({ allow: false, reason: expect.stringContaining("failed with") })
+    // The refusal is written for the model, so the host may return it instead of ending the turn.
+    expect(before("2")).toMatchObject({ allow: false, reason: expect.stringContaining("failed with"), retryable: true })
     h.toolResult({ type: "tool-result", sessionID: "vendor", callID: "2", toolID: "t", name: "bash", result: "ok" })
     expect(before("3")).toEqual({ allow: true })
+  })
+
+  test("the same failing command after a successful edit is a new attempt, not a repeat", () => {
+    const p = createExecutionPolicy(config())
+    const h = p.handlers(request(p))
+    const test = (callID: string) => {
+      const decision = h.beforeTool({ type: "tool-before", sessionID: "vendor", callID, toolID: "t", name: "bash", input: { command: "bun test" } })
+      if (decision.allow) h.toolResult({ type: "tool-result", sessionID: "vendor", callID, toolID: "t", name: "bash", result: "Error: exit 1" })
+      return decision.allow
+    }
+    const edit = (callID: string, result: string) => {
+      expect(h.beforeTool({ type: "tool-before", sessionID: "vendor", callID, toolID: "t", name: "edit", input: { path: "a.ts", oldText: callID, newText: "y" } })).toEqual({ allow: true })
+      h.toolResult({ type: "tool-result", sessionID: "vendor", callID, toolID: "t", name: "edit", result })
+    }
+    expect(test("t1")).toBe(true)
+    edit("e1", "edited")
+    expect(test("t2")).toBe(true)
+    edit("e2", "edited")
+    expect(test("t3")).toBe(true)
+    edit("e3", "Error: oldText not found")
+    expect(test("t4")).toBe(true)
+    expect(test("t5")).toBe(false)
   })
 
   test("binds exact handler instances and honors repetition cancellation configuration", () => {

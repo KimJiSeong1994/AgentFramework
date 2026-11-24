@@ -1920,7 +1920,8 @@ tokens, main only), D12b (commands stop/status/plan/approve/reject/cancel), D12c
   `permission` for every agent.
 - Prompt budgets (estimated tokens, `src/tokens.ts`): main <= 1500, worker <= 800, reviewer <= 600.
   Whole prefix incl. tools: main <= 8K, worker <= 5K, reviewer <= 3K (`DEFAULT_CONFIG.budget`).
-- Guards (`tool.execute.before/after`): identical (tool, args) call blocked after `repeat_limit`,
+- Guards (`tool.execute.before/after`): identical (tool, args) call blocked after `repeat_limit`
+  until one succeeds or a file change succeeds in between (in CLI chat the model is told and may change its approach),
   read/bash output trimming, edit/JSON error-recovery hints, n-gram repetition abort.
 - Modes (`ulw`, `plan`) as <= 300-char suffixes on the user message, state under `$XDG_STATE_HOME/otter/<repo-hash>/`.
 - Acceptance: prefix <= 8K tokens, zero repeated identical calls, fib task done in < 5 min.

@@ -1336,6 +1336,34 @@ describe("common CLI execution host", () => {
     expect(long.prompts).toHaveLength(1)
   })
 
+  test("a refusal marked retryable (the repeat guard) is returned to the model, bounded; a plain denial still ends the turn", async () => {
+    writeFileSync(join(root, "README.md"), "fixture\n")
+    const read = (path: string) => JSON.stringify({ type: "tool", name: "read", input: { path } })
+    const blocked = "otter: blocked repeated call to read with identical arguments (3x). Change the approach."
+    const refuse = (subject: ReturnType<typeof harness>, retryable: boolean) => {
+      const original = subject.request.handlers
+      subject.request.handlers = { ...original, beforeTool(event) {
+        return (event.input as { path: string }).path === "again.txt" ? { allow: false, reason: blocked, ...(retryable ? { retryable: true as const } : {}) } : original.beforeTool(event)
+      } }
+    }
+    for (const engine of ["local", "codex"] as const) {
+      const subject = harness({ engine, role: "main", responses: [read("again.txt"), read("README.md"), JSON.stringify({ type: "final", text: "done" })] })
+      refuse(subject, true)
+      expect(await (await subject.host.prepare(subject.request)).run()).toMatchObject({ status: "completed", text: "done" })
+      expect(subject.prompts[1]!).toContain("blocked repeated call to read")
+      expect(subject.prompts[1]!).toContain("Nothing was executed.")
+      // A model that keeps repeating is stopped after three returns, on the local engine too (a refused call is not an accepted one).
+      const stuck = harness({ engine, role: "main", responses: [read("README.md"), read("again.txt"), read("again.txt"), read("again.txt"), read("again.txt"), JSON.stringify({ type: "final", text: "never" })] })
+      refuse(stuck, true)
+      expect(await (await stuck.host.prepare(stuck.request)).run()).toEqual({ status: "failed", error: "Otter pre-execution tool policy denied the tool" })
+      expect(stuck.prompts).toHaveLength(5)
+      const plain = harness({ engine, role: "main", responses: [read("again.txt"), JSON.stringify({ type: "final", text: "never" })] })
+      refuse(plain, false)
+      expect(await (await plain.host.prepare(plain.request)).run()).toEqual({ status: "failed", error: "Otter pre-execution tool policy denied the tool" })
+      expect(plain.prompts).toHaveLength(1)
+    }
+  })
+
   test("a call returned for invalid input never shares its call ID with the next call", async () => {
     writeFileSync(join(root, "README.md"), "fixture\n")
     const activities: CliHostActivity[] = []

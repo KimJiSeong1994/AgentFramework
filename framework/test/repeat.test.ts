@@ -26,6 +26,21 @@ describe("RepeatGuard", () => {
     expect(g.check("other", "read", { filePath: "a" }, "c4").blocked).toBe(false)
   })
 
+  test("a successful file change starts every count again; a failed one or a successful read does not", () => {
+    const g = new RepeatGuard(2)
+    const run = (id: string) => { const check = g.check("s", "bash", { command: "bun test" }, id); g.recordResult("s", id, false, "exit 1"); return check.blocked }
+    expect(run("t1")).toBe(false)
+    g.check("s", "edit", { path: "a.ts", oldText: "x", newText: "y" }, "e1"); g.recordResult("s", "e1", true)
+    expect(run("t2")).toBe(false)
+    g.check("s", "multiedit", { edits: [] }, "e2"); g.recordResult("s", "e2", true)
+    expect(run("t3")).toBe(false)
+    // No change in between: a failed edit and a successful read leave the count, and the third run is blocked.
+    g.check("s", "edit", { path: "a.ts", oldText: "gone", newText: "y" }, "e3"); g.recordResult("s", "e3", false, "oldText not found")
+    g.check("s", "read", { path: "a.ts" }, "r1"); g.recordResult("s", "r1", true)
+    expect(run("t4")).toBe(false)
+    expect(run("t5")).toBe(true)
+  })
+
   test("a success resets the counter; failures keep the last error for the message", () => {
     const g = new RepeatGuard(2)
     g.check("s", "write", { f: 1 }, "c1")
