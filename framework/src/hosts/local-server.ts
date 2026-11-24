@@ -23,6 +23,16 @@ const MAX_LINE_BYTES = 1024 * 1024
 const MAX_NATIVE_CALLS = 8
 const MAX_NATIVE_CALL_NAME_CHARS = 128
 const NATIVE_REFUSED = "native tool activity refused"
+/**
+ * Hidden output (reasoning the server streams apart from the answer) a reply may produce before any answer text. A
+ * local model can loop in its reasoning: Inkling 2 Mini twice generated the server's whole 32,768-token allowance over
+ * 9 and 12 minutes and answered nothing (2026-11-24). With thinking off that much reasoning is never an answer on its
+ * way; with thinking on the bound is wider.
+ */
+const MAX_HIDDEN_BYTES = 32 * 1024
+const MAX_HIDDEN_BYTES_THINKING = 128 * 1024
+/** The reply was cut off without an answer (hidden-output bound, or the server's token limit with no text). */
+export const LOCAL_NO_ANSWER_ERROR = "local model produced no answer before its output limit"
 
 /** A loopback http(s) base URL with no credentials, query or fragment; returns it without a trailing slash. */
 export function loopbackEndpoint(value: unknown): string | undefined {
@@ -120,6 +130,9 @@ export function createSglangTransport(options: CliTransportOptions, endpoint: st
       let usage: CliObservedUsage | undefined
       let finished = false
       let failureClass: EngineFailureClass | undefined
+      let hiddenBytes = 0
+      let cutShort = false
+      const hiddenLimit = options.localThink === true ? MAX_HIDDEN_BYTES_THINKING : MAX_HIDDEN_BYTES
       // A server started without a reasoning parser streams "<think>…</think>" as content; hold a leading block back.
       let thinkState = "unknown" as "unknown" | "inside" | "done"
       let held = ""
@@ -212,6 +225,14 @@ export function createSglangTransport(options: CliTransportOptions, endpoint: st
               if (!collectNativeCalls(delta.tool_calls)) { controller.abort("native-calls"); return result({ status: "failed", text, quiescent: true, error: NATIVE_REFUSED }) }
               if (outputBytes > options.maxOutputBytes) { controller.abort("output-limit"); return result({ status: "incomplete", text, quiescent: true, error: SAFE.outputLimit }) }
             }
+            for (const hidden of [delta.reasoning_content, delta.reasoning]) {
+              if (typeof hidden === "string") hiddenBytes += Buffer.byteLength(hidden, "utf8")
+            }
+            if (hiddenBytes > hiddenLimit && !text && nativeCalls.size === 0) {
+              controller.abort("no-answer")
+              return result({ status: "incomplete", text: "", quiescent: true, error: LOCAL_NO_ANSWER_ERROR })
+            }
+            if (choice.finish_reason === "length") cutShort = true
             if (typeof delta.content === "string" && delta.content) {
               outputBytes += Buffer.byteLength(delta.content, "utf8")
               if (outputBytes > options.maxOutputBytes) { controller.abort("output-limit"); return result({ status: "incomplete", text, quiescent: true, error: SAFE.outputLimit }) }
@@ -257,6 +278,8 @@ export function createSglangTransport(options: CliTransportOptions, endpoint: st
         if (thinkState === "inside") return result({ status: "incomplete", text, quiescent: true, error: SAFE.incomplete })
         if (held) { text += held; try { options.onText?.(held) } catch { return result({ status: "failed", text, quiescent: true, error: SAFE.callback }) } }
         if (!finished) return result({ status: "incomplete", text, quiescent: true, error: SAFE.incomplete })
+        // The server's token limit ended the reply before any answer text or call: that is not an empty answer.
+        if (cutShort && !text.trim() && nativeCalls.size === 0) return result({ status: "incomplete", text: "", quiescent: true, error: LOCAL_NO_ANSWER_ERROR })
         if (nativeCalls.size) {
           // The calls are the reply: prose the model wrote beside them is dropped, as a prose-answer role would
           // otherwise end its turn on that prose.

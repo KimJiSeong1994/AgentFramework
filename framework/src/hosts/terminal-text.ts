@@ -1,6 +1,12 @@
 /** Display-only recovery for double-escaped Markdown reports, including mixed line endings.
  * Keep model/history bytes and code examples intact; never decode arbitrary JSON escapes.
  */
+/**
+ * A drive path (`C:\dir`) or a UNC path. The drive letter stands alone (or directly after an escaped line break): a word before a colon and an escaped line break
+ * (`Summary:\n`) is ordinary report text, and treating it as a path left every such report unrepaired.
+ */
+const WINDOWS_PATH = /(?:(?<![A-Za-z0-9])|(?<=\\[nr]))[A-Za-z]:\\|\\\\[A-Za-z]/u
+
 export function assistantDisplayText(value: string): string {
   if (/^[\s]*[\[{"`~]/u.test(value)) return value
   // Match entire delimiter runs: a template-literal backtick cannot close a triple fence.
@@ -23,16 +29,16 @@ export function assistantDisplayText(value: string): string {
   parts.push(value.slice(cursor))
   const prose = parts.filter((_, index) => index % 2 === 0).join("").replace(/(?<!\\)\\r\\n/gu, "\\n")
   // Unquoted Windows paths make literal backslashes ambiguous; leave that answer untouched.
-  if (/[A-Za-z]:\\|\\\\[A-Za-z]/u.test(prose)) return value
+  if (WINDOWS_PATH.test(prose)) return value
   if (!prose.includes("\\n\\n") ||
-      !/\\n(?:#{1,6} |[-*] |\d+\. |\|)/u.test(prose) ||
+      !/\\n(?:#{1,6} |[-*] |\d+[.)] |\|)/u.test(prose) ||
       (prose.match(/(?<!\\)\\n/gu)?.length ?? 0) < 3) return value
   const decodeLines = (text: string) => text.replace(/(?<!\\)\\(?:r\\n|n)/gu, "\n")
   return parts.map((part, index) => {
     if (index % 2 === 0) return decodeLines(part)
     // Plain-text tree diagrams carry layout, not string-literal escapes. Other code stays opaque.
     const diagram = /^(`{3,}|~{3,})(?:text|plaintext)\\(?:r\\n|n)([\s\S]*?)\\(?:r\\n|n)\1$/u.exec(part)
-    return diagram && /[└├│→]/u.test(diagram[2]!) && !/[A-Za-z]:\\|\\\\[A-Za-z]/u.test(diagram[2]!)
+    return diagram && /[└├│→]/u.test(diagram[2]!) && !WINDOWS_PATH.test(diagram[2]!)
       ? decodeLines(part) : part
   }).join("")
 }
