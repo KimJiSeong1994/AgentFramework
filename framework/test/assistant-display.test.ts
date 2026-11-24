@@ -13,6 +13,11 @@ test("repairs escaped report paragraphs, headings and table rows for display", (
   expect(userRows).toContain("\\n")
 })
 
+test("a report whose only list is numbered with parentheses is repaired too", () => {
+  const report = String.raw`The weakest point is the timeout branch.\n\nProposed change:\n1) spread the class in cli-transport.ts\n2) keep the gate in interactive-session.ts\n3) add a test`
+  expect(assistantDisplayText(report)).toBe("The weakest point is the timeout branch.\n\nProposed change:\n1) spread the class in cli-transport.ts\n2) keep the gate in interactive-session.ts\n3) add a test")
+})
+
 test("preserves normal prose, code, JSON, paths and intentional escape explanations", () => {
   for (const text of ["normal\n\n## Heading\ntext", String.raw`Use \n to separate lines`,
     String.raw`C:\new\notes\next`, JSON.stringify({ text: String.raw`a\n\n## h\nb` }),

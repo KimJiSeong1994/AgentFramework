@@ -180,6 +180,41 @@ describe("scoped CLI file tools", () => {
     expect(() => tools.execute("grep", { pattern: "needle", ignoreCase: "yes" })).toThrow()
   })
 
+  test("grep takes a regular expression only when asked, and says when a literal search may have been meant as one", () => {
+    mkdirSync(join(root, "src"))
+    writeFileSync(join(root, "src/a.ts"), "export function alpha() {}\nconst union: 'x' | 'y' = 'x'\n")
+    writeFileSync(join(root, "src/b.ts"), "export async function beta() {}\n// TODO later\n")
+    const lines = (result: ReturnType<typeof tools.execute>) => (JSON.parse(text(result).split("\n[")[0]!) as Array<{ path: string; line: number }>).map(match => `${match.path}:${match.line}`)
+    expect(lines(tools.execute("grep", { pattern: "alpha|beta", path: "src", regex: true }))).toEqual(["src/a.ts:1", "src/b.ts:1"])
+    expect(lines(tools.execute("grep", { pattern: "^export (async )?function \\w+\\(", path: "src", regex: true }))).toEqual(["src/a.ts:1", "src/b.ts:1"])
+    expect(lines(tools.execute("grep", { pattern: "todo|fixme", path: "src/b.ts", regex: true, ignoreCase: true }))).toEqual(["src/b.ts:2"])
+    // Without the flag the pattern is literal text: a real `|` in code is found, and a miss names the flag.
+    expect(lines(tools.execute("grep", { pattern: "'x' | 'y'", path: "src" }))).toEqual(["src/a.ts:2"])
+    const literal = text(tools.execute("grep", { pattern: "alpha|beta", path: "src" }))
+    expect(literal.startsWith("[]\n")).toBe(true)
+    expect(literal).toContain('add "regex": true')
+    expect(text(tools.execute("grep", { pattern: "gamma", path: "src" }))).toBe("[]")
+    // Patterns outside the linear-time subset are invalid input, never handed to RegExp.
+    for (const pattern of ["(a)\\1", "(?=a)b", "a{2,3}", "(a", "x".repeat(257)]) expect(() => tools.execute("grep", { pattern, regex: true })).toThrow()
+    expect(() => tools.execute("grep", { pattern: "a", regex: "yes" })).toThrow()
+    const started = performance.now()
+    writeFileSync(join(root, "src/long.txt"), `${"a".repeat(200_000)}!\n`)
+    expect(lines(tools.execute("grep", { pattern: "(a+)+$", path: "src", regex: true }))).toEqual([])
+    expect(performance.now() - started).toBeLessThan(3000)
+  })
+
+  test("grep searches files up to the read limit and names the ones it left out", () => {
+    mkdirSync(join(root, "src"))
+    writeFileSync(join(root, "src/large.ts"), `${"// filler line\n".repeat(20_000)}const marker = "Retry on"\n`)
+    writeFileSync(join(root, "src/huge.ts"), `${"// filler line\n".repeat(80_000)}const marker = "Retry on"\n`)
+    const directory = text(tools.execute("grep", { pattern: "Retry on", path: "src" }))
+    expect(directory).toContain('"path":"src/large.ts","line":20001')
+    expect(directory).toContain("[partial results:")
+    expect(directory).toContain("[not searched, over the 1024 KiB search limit: src/huge.ts]")
+    expect(text(tools.execute("grep", { pattern: "Retry on", path: "src/large.ts" }))).toContain('"line":20001')
+    expect(tools.execute("grep", { pattern: "Retry on", path: "src/huge.ts" })).toEqual({ ok: false, error: "Tool refused: file exceeds the 1 MiB search-size limit." })
+  })
+
   test("directory names stay on the retained descriptor when a target is replaced immediately after open", () => {
     const target = join(root, "target")
     const renamed = join(root, "target-held")

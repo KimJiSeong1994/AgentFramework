@@ -17,6 +17,7 @@ import { EXECUTION_ROLES, roleAllowsCliWrites, type ExecutionRole } from "./type
 import { FdTree, fdStatKind, type FdDirectory, type FdEntry } from "../skills/fd-tree.ts"
 import type { OtterConfig } from "../config.ts"
 import { memoryToolText } from "../wiki/recall.ts"
+import { compileSafeRegex } from "./safe-regex.ts"
 
 export const CLI_TOOL_NAMES = ["read", "multiread", "list", "glob", "grep", "memory", "skill", "write", "edit", "multiedit", "bash", "model_api", "web_search", "repo_search"] as const
 export const MAX_MULTIREAD_FILES = 8
@@ -79,7 +80,11 @@ const MAX_RESULTS = 200
 const MAX_GREP_TOTAL_BYTES = 8 * 1024 * 1024
 const MAX_GREP_DURATION_MS = 1000
 const MAX_IGNORE_RULES = 1000
-const MAX_GREP_FILE_BYTES = 256 * 1024
+// The same bound as `read`: a file the model can read must be one it can search. At 256 KiB the largest source file of
+// this repository was silently left out of every search, and a model concluded its contents did not exist (2026-11-24).
+const MAX_GREP_FILE_BYTES = MAX_READ_BYTES
+const MAX_GREP_SKIPPED_NAMES = 5
+const GREP_DEADLINE_CHECK_LINES = 256
 // Darwin's O_NOFOLLOW_ANY is intentionally used without constants.O_NOFOLLOW.
 const DARWIN_O_NOFOLLOW_ANY = 0x20000000
 const PROTECTED_DIRECTORIES = new Set([".git", ".otter", ".gjc"])
@@ -135,8 +140,10 @@ export function validateCliToolInput(name: string, input: unknown): asserts inpu
       if (!hasExactKeys(input, ["pattern"]) || !boundedString(input.pattern, 1024) || input.pattern.length === 0) throw new CliToolInputError()
       return
     case "grep":
-      if (!hasExactKeys(input, ["pattern"], ["path", "ignoreCase"]) || !boundedString(input.pattern, 1024) || input.pattern.length === 0 ||
-          (input.path !== undefined && !path(input.path)) || (input.ignoreCase !== undefined && typeof input.ignoreCase !== "boolean")) throw new CliToolInputError()
+      if (!hasExactKeys(input, ["pattern"], ["path", "ignoreCase", "regex"]) || !boundedString(input.pattern, 1024) || input.pattern.length === 0 ||
+          (input.path !== undefined && !path(input.path)) || (input.ignoreCase !== undefined && typeof input.ignoreCase !== "boolean") ||
+          (input.regex !== undefined && typeof input.regex !== "boolean") ||
+          (input.regex === true && compileSafeRegex(input.pattern, input.ignoreCase === true) === undefined)) throw new CliToolInputError()
       return
     case "memory":
       if (!hasExactKeys(input, ["query"]) || typeof input.query !== "string" || input.query.includes("\0") ||
@@ -818,11 +825,32 @@ function globTool(root: string, pattern: string, identity: RootIdentity): CliToo
   }
 }
 
-/** Literal line match; `ignoreCase` compares lower-cased text. Patterns stay literal: a model-supplied regex could stall the host. */
-function lineMatcher(pattern: string, ignoreCase: boolean): (line: string) => boolean {
+/**
+ * Literal line match by default; `ignoreCase` compares lower-cased text. With `regex` the pattern runs on otter's
+ * linear-time matcher (safe-regex.ts), never on RegExp: a model-supplied pattern handed to RegExp could stall the host.
+ */
+function lineMatcher(pattern: string, ignoreCase: boolean, regex = false): (line: string) => boolean {
+  if (regex) {
+    const compiled = compileSafeRegex(pattern, ignoreCase)
+    if (!compiled) throw new CliToolInputError()
+    return compiled
+  }
   if (!ignoreCase) return line => line.includes(pattern)
   const needle = pattern.toLowerCase()
   return line => line.toLowerCase().includes(needle)
+}
+
+/** What a search result says beyond its matches, so an empty result is not read as "this does not exist". */
+function grepNotes(pattern: string, regex: boolean, matched: number, skipped: readonly string[]): string {
+  const notes: string[] = []
+  if (skipped.length) {
+    const named = skipped.slice(0, MAX_GREP_SKIPPED_NAMES).join(", ")
+    notes.push(`[not searched, over the ${MAX_GREP_FILE_BYTES / 1024} KiB search limit: ${named}${skipped.length > MAX_GREP_SKIPPED_NAMES ? ` and ${skipped.length - MAX_GREP_SKIPPED_NAMES} more` : ""}]`)
+  }
+  if (!regex && matched === 0 && /[|]|\\[dwsb]|\.[*+]/u.test(pattern)) {
+    notes.push('[the pattern was searched as literal text; for alternatives (a|b) or other regular-expression syntax add "regex": true]')
+  }
+  return notes.length ? `\n${notes.join("\n")}` : ""
 }
 
 function grepTool(
@@ -832,9 +860,11 @@ function grepTool(
   identity: RootIdentity,
   beforeEffect?: () => void,
   ignoreCase = false,
+  regex = false,
 ): CliToolOutput {
-  const matchesLine = lineMatcher(pattern, ignoreCase)
   try {
+    const matchesLine = lineMatcher(pattern, ignoreCase, regex)
+    const skipped: string[] = []
     const startedAt = performance.now()
     const relativePath = inputPath ? normalizeToolPath(inputPath) : ""
     const target = checkedDirectoryPath(root, relativePath, identity)
@@ -869,6 +899,7 @@ function grepTool(
         if (error instanceof Error && error.message === "size") {
           partial = true
           if (remainingBytes < MAX_GREP_FILE_BYTES) break
+          skipped.push(file.path)
           continue
         }
         throw error
@@ -877,6 +908,11 @@ function grepTool(
       const text = contents.toString("utf8")
       const lines = text.split(/\r?\n/)
       for (let index = 0; index < lines.length && matches.length < MAX_RESULTS; index++) {
+        // A long file is not allowed to run past the time bound on its own.
+        if (index % GREP_DEADLINE_CHECK_LINES === GREP_DEADLINE_CHECK_LINES - 1 && performance.now() - startedAt >= 2 * MAX_GREP_DURATION_MS) {
+          partial = true
+          break
+        }
         if (matchesLine(lines[index]!)) matches.push({ path: file.path, line: index + 1, text: lines[index]!.slice(0, 1000) })
       }
       if (matches.length >= MAX_RESULTS) {
@@ -888,7 +924,7 @@ function grepTool(
         break
       }
     }
-    return { ok: true, text: safeOutput(JSON.stringify(matches), partial) }
+    return { ok: true, text: `${safeOutput(JSON.stringify(matches), partial)}${grepNotes(pattern, regex, matches.length, skipped)}` }
   } catch (error) {
     return publicFailure(error)
   }
@@ -901,9 +937,10 @@ function grepSingleFile(
   identity: RootIdentity,
   beforeEffect?: () => void,
   ignoreCase = false,
+  regex = false,
 ): CliToolOutput {
-  const matchesLine = lineMatcher(pattern, ignoreCase)
   try {
+    const matchesLine = lineMatcher(pattern, ignoreCase, regex)
     const target = resolve(root, relativePath)
     if (ignoredTarget(root, target, false, identity)) return { ok: false, error: "Tool refused: ignored file is unavailable." }
     beforeEffect?.()
@@ -912,16 +949,22 @@ function grepSingleFile(
       contents = readTarget(root, relativePath, identity, MAX_GREP_FILE_BYTES)
     } catch (error) {
       if (error instanceof Error && error.message === "size") {
-        return { ok: false, error: "Tool refused: file exceeds the search-size limit." }
+        return { ok: false, error: "Tool refused: file exceeds the 1 MiB search-size limit." }
       }
       throw error
     }
     const lines = contents.toString("utf8").split(/\r?\n/)
     const matches: Array<{ path: string; line: number; text: string }> = []
+    const startedAt = performance.now()
+    let partial = false
     for (let index = 0; index < lines.length && matches.length < MAX_RESULTS; index++) {
+      if (index % GREP_DEADLINE_CHECK_LINES === GREP_DEADLINE_CHECK_LINES - 1 && performance.now() - startedAt >= 2 * MAX_GREP_DURATION_MS) {
+        partial = true
+        break
+      }
       if (matchesLine(lines[index]!)) matches.push({ path: relativePath, line: index + 1, text: lines[index]!.slice(0, 1000) })
     }
-    return { ok: true, text: safeOutput(JSON.stringify(matches), matches.length >= MAX_RESULTS) }
+    return { ok: true, text: `${safeOutput(JSON.stringify(matches), partial || matches.length >= MAX_RESULTS)}${grepNotes(pattern, regex, matches.length, [])}` }
   } catch (error) {
     return publicFailure(error)
   }
@@ -954,8 +997,8 @@ function executeFileTool(
         isFile = stat.isFile()
         isDirectory = stat.isDirectory()
       } finally { closeSync(fd) }
-      if (isFile) return grepSingleFile(root, relativePath, input.pattern as string, identity, beforeEffect, input.ignoreCase === true)
-      if (isDirectory) return grepTool(root, input.pattern as string, relativePath, identity, beforeEffect, input.ignoreCase === true)
+      if (isFile) return grepSingleFile(root, relativePath, input.pattern as string, identity, beforeEffect, input.ignoreCase === true, input.regex === true)
+      if (isDirectory) return grepTool(root, input.pattern as string, relativePath, identity, beforeEffect, input.ignoreCase === true, input.regex === true)
       return publicFailure(new Error("type"))
     }
     case "memory": return { ok: false, error: "Tool refused: memory recall is asynchronous." }

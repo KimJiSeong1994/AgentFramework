@@ -151,6 +151,23 @@ describe("SGLang transport", () => {
     expect(await run([{ choices: [{ delta: { tool_calls: [fn(0, "write", JSON.stringify({ content: "x".repeat(5000) }))] } }] }, "[DONE]"])).toMatchObject({ status: "incomplete", error: "output byte limit reached" })
   })
 
+  test("a reply that spends its allowance on hidden reasoning, or hits the token limit with no text, is cut off as no answer", async () => {
+    const reasoning = (bytes: number) => ({ choices: [{ delta: { reasoning_content: "r".repeat(bytes) } }] })
+    const answer = { choices: [{ delta: { content: "{\"type\":\"final\",\"text\":\"OK\"}" }, finish_reason: "stop" }] }
+    const run = async (events: unknown[], extra: Record<string, unknown> = {}) => await createCliTransport(options(fakeSglang(() => new Response(sse(events))).endpoint, extra)).run()
+    const noAnswer = { status: "incomplete", text: "", error: "local model produced no answer before its output limit" }
+    // Thinking off: over 32 KiB of reasoning with no answer text is stopped; under it the answer still arrives.
+    expect(await run([reasoning(20_000), reasoning(20_000), answer, "[DONE]"])).toMatchObject(noAnswer)
+    expect(await run([reasoning(20_000), answer, "[DONE]"])).toMatchObject({ status: "completed", text: '{"type":"final","text":"OK"}' })
+    // Thinking on widens the bound; reasoning after the answer started is never a reason to stop.
+    expect(await run([reasoning(20_000), reasoning(20_000), answer, "[DONE]"], { localThink: true })).toMatchObject({ status: "completed" })
+    expect(await run([reasoning(70_000), reasoning(70_000), answer, "[DONE]"], { localThink: true })).toMatchObject(noAnswer)
+    expect(await run([{ choices: [{ delta: { content: "{\"type\":" } }] }, reasoning(40_000), { choices: [{ delta: { content: "\"final\",\"text\":\"OK\"}" }, finish_reason: "stop" }] }, "[DONE]"])).toMatchObject({ status: "completed" })
+    // The server's own token limit with nothing visible is the same condition; with text it stays a completed reply.
+    expect(await run([reasoning(100), { choices: [{ delta: {}, finish_reason: "length" }] }, "[DONE]"])).toMatchObject(noAnswer)
+    expect(await run([{ choices: [{ delta: { content: "partial answer" }, finish_reason: "length" }] }, "[DONE]"])).toMatchObject({ status: "completed", text: "partial answer" })
+  })
+
   test("nameless tool calls, malformed events, a missing finish and the output bound are refused", async () => {
     const tool = fakeSglang(() => new Response(sse([{ choices: [{ delta: { tool_calls: [{ id: "1" }] } }] }, "[DONE]"])))
     expect(await createCliTransport(options(tool.endpoint)).run()).toMatchObject({ status: "failed", error: "native tool activity refused" })

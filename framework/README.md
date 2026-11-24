@@ -120,7 +120,13 @@ Claude and Codex turns also differ from the local engine in how a turn survives 
   the vendor process is restarted for each one and keeps no reasoning.
 - The next message's model sees a host record of which tools the previous answer used (tool names, file paths and
   the command lines that ran; never contents, search patterns, web queries or declined actions).
-- `grep` accepts `"ignoreCase": true` (all engines). Patterns stay literal.
+- `grep` accepts `"ignoreCase": true` and `"regex": true` (all engines). Patterns are literal unless `regex` is set; a
+  regular expression runs on otter's own linear-time matcher (`src/hosts/safe-regex.ts`: `| ( ) [ ] . * + ? ^ $ \d \w \s \b`,
+  at most 256 characters, no backreferences, lookaround or `{n,m}`), never on JavaScript's `RegExp`, so a model-written
+  pattern cannot stall the host. Files up to 1 MiB are searched (the `read` limit); larger ones are named in the result
+  as not searched. A literal search that finds nothing and looks like a regular expression says so.
+- A local reply that spends its output on hidden reasoning without answering (over 32 KiB with thinking off, 128 KiB
+  with it on), or that hits the server's token limit with no text, is cut off and asked for again within the retry bound.
 
 ### Chat execution (`chat.execute`)
 

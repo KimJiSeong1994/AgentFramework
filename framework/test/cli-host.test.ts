@@ -261,6 +261,9 @@ let prompt = ""
   })
 }
 
+/** A fixture response that makes the stub transport report a local reply cut off before any answer. */
+const NO_ANSWER_REPLY = "\u0000no-answer"
+
 type HarnessOptions = {
   engine?: "local" | "codex" | "claude"
   role?: ExecutionRole
@@ -409,6 +412,10 @@ function harness(options: HarnessOptions = {}) {
         if (options.nativeFailure !== undefined) {
           finished = true
           return { status: "failed", text: response, quiescent: true, error: options.nativeFailure }
+        }
+        if (response === NO_ANSWER_REPLY) {
+          finished = true
+          return { status: "incomplete", text: "", quiescent: true, error: "local model produced no answer before its output limit" }
         }
         try {
           beforeOutput?.()
@@ -1362,6 +1369,15 @@ describe("common CLI execution host", () => {
       expect(await (await plain.host.prepare(plain.request)).run()).toEqual({ status: "failed", error: "Otter pre-execution tool policy denied the tool" })
       expect(plain.prompts).toHaveLength(1)
     }
+  })
+
+  test("a local reply cut off before any answer is asked for again, bounded", async () => {
+    const subject = harness({ engine: "local", role: "main", responses: [NO_ANSWER_REPLY, JSON.stringify({ type: "final", text: "done" })] })
+    expect(await (await subject.host.prepare(subject.request)).run()).toMatchObject({ status: "completed", text: "done" })
+    expect(subject.prompts[1]!).toContain("Your reply ended without an answer")
+    const stuck = harness({ engine: "local", role: "main", responses: [NO_ANSWER_REPLY, NO_ANSWER_REPLY, NO_ANSWER_REPLY, NO_ANSWER_REPLY, JSON.stringify({ type: "final", text: "never" })] })
+    expect(await (await stuck.host.prepare(stuck.request)).run()).toMatchObject({ status: "failed" })
+    expect(stuck.prompts).toHaveLength(4)
   })
 
   test("a call returned for invalid input never shares its call ID with the next call", async () => {
