@@ -1,9 +1,15 @@
-// RepeatGuard: blocks the (limit+1)th identical (tool, args) call per session until one of them succeeds.
+// RepeatGuard: blocks the (limit+1)th identical (tool, args) call per session until one of them succeeds or a file
+// change succeeds in between.
 // Evidence: Gemma 26B re-issued the same failing `write` 13 times in a row (review §3).
+// A successful file change starts every count again: the same command after an edit is a new attempt, not a repeat
+// (`bun test` → edit → `bun test` → edit → `bun test` was blocked on the third run, 2026-11-24).
 
 const MAX_SIGNATURES_PER_SESSION = 50
 const MAX_CALLS_PER_SESSION = 50
 const ERROR_EXCERPT_CHARS = 240
+
+/** Tools whose success changes the files other calls act on. */
+const FILE_CHANGING_TOOLS: ReadonlySet<string> = new Set(["write", "edit", "multiedit", "patch", "apply_patch"])
 
 type Entry = { count: number; lastError?: string }
 
@@ -75,14 +81,18 @@ export class RepeatGuard {
     return { blocked: count > this.limit, count, lastError: entry.lastError }
   }
 
-  /** Success resets the signature's counter; failure remembers an excerpt of the error for the block message. */
+  /**
+   * Success resets the signature's counter, and a successful file change resets every counter of the session; failure
+   * remembers an excerpt of the error for the block message.
+   */
   recordResult(sessionID: string, callID: string, ok: boolean, error?: string): void {
     const sig = this.calls.get(sessionID)?.get(callID)
     if (!sig) return
     const ring = this.sessions.get(sessionID)
     if (!ring) return
     if (ok) {
-      ring.delete(sig)
+      if (FILE_CHANGING_TOOLS.has(sig.slice(0, sig.indexOf(":")))) ring.clear()
+      else ring.delete(sig)
       return
     }
     const entry = ring.get(sig)

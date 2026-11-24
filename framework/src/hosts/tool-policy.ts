@@ -174,7 +174,7 @@ export function createExecutionPolicy(config: Readonly<OtterConfig>, options: Ex
           if (!policy.tools.allowed.includes(policyName) || policy.tools.denied.includes(policyName)) return { allow: false, reason: `otter: tool ${event.name} is not allowed for ${request.role}` }
           if (!config.disabled_hooks.includes("guard.repeat")) {
             const check = repeat.check(event.sessionID, event.name, event.input, event.callID)
-            if (check.blocked) return { allow: false, reason: repeatBlockMessage(event.name, check.count, check.lastError) }
+            if (check.blocked) return { allow: false, reason: repeatBlockMessage(event.name, check.count, check.lastError), retryable: true }
           }
           return { allow: true }
         },

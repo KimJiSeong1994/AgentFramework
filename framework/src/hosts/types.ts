@@ -244,7 +244,11 @@ export interface ExecutionHost {
   reconcile(reference: ExecutionReference): Promise<ExecutionReconciliation>
 }
 
-export type ExecutionDecision = { allow: true } | { allow: false; reason: string; holdTicket?: SkillHoldTicket }
+/**
+ * `retryable` marks a refusal whose reason is written for the model (the repeat guard's "change the approach"): the
+ * host may return it to the model as a failed call, within its bounded retries, instead of ending the turn.
+ */
+export type ExecutionDecision = { allow: true } | { allow: false; reason: string; holdTicket?: SkillHoldTicket; retryable?: true }
 export type ExecutionPolicyHandlers = {
   beforeTool(event: Extract<ExecutionEvent, { type: "tool-before" }>): ExecutionDecision
   toolResult(event: Extract<ExecutionEvent, { type: "tool-result" }>): { result?: unknown; error?: unknown; trimmed?: boolean; hinted?: boolean }

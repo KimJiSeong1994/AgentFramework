@@ -1666,6 +1666,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               // A local model slips on the envelope shape now and then through a long turn (Inkling 2 Mini: "args" for
               // "input" about once in eight calls), so its retries are counted in a row: a call the host accepts starts
               // the count again, and the round limit still bounds the turn. Claude/Codex keep one total per turn.
+              const retriesBeforeCall = protocolRetries
               if (!vendorRoute) protocolRetries = 0
               keepNote(envelope.note)
               // An identical read whose result is still in the transcript returns nothing new and costs a full prompt.
@@ -1938,6 +1939,13 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               }
               if (!allowed) {
                 finishTool("denied", false)
+                // The repeat guard's refusal tells the model to change its approach; it gets to read that (bounded).
+                // A refused call was not accepted, so it does not start the local engine's retry count again.
+                protocolRetries = retriesBeforeCall
+                if (!decision.allow && decision.retryable === true && protocolRetry(repeatKey, decision.reason)) {
+                  returnedCalls++
+                  return "continue"
+                }
                 return setFinal({ status: "failed", error: "Otter pre-execution tool policy denied the tool" })
               }
               try {
