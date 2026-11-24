@@ -1166,7 +1166,12 @@ Configured in the **user** config only:
   first runs and the model is told the rest did not); a `write`/`edit` anywhere outside a strict envelope fails the reply,
   so prose that quotes or narrates a write never performs it. A final whose text has unescaped quotes or raw line breaks
   is repaired to final text only. The read-only main role keeps a plain-prose reply, or prose that merely mentions an
-  envelope, as its answer. Unknown tools, a final mixed with calls, several finals and malformed shapes fail closed. Before this, 32% of claude-haiku turns in the load evaluation failed on the reply format; after it, 5-9%.
+  envelope, as its answer. Unknown tools, a final mixed with calls, several finals and malformed shapes fail closed, after the model has been
+  told what was wrong and asked again: up to three times per turn on Claude/Codex, up to three times in a row on the
+  local engine (nothing runs from a refused reply). A local server (SGLang, MLX, or another loopback OpenAI-compatible
+  server such as oMLX) that reports a call as `tool_calls`, because the model wrote it in its own tool-call syntax, is
+  read as the same envelope; otter never sends `tools`, and the call still goes through tool names, input schemas, role
+  policy and approval. Before this, 32% of claude-haiku turns in the load evaluation failed on the reply format; after it, 5-9%.
   A failed model turn now adds why after the fixed message (`… Reason: The model's reply was not in the required
   tool/answer format.`, input budget, deadline, tool rounds, …).
 - **Telemetry**: each chat turn that offers the skill tool writes a `skill_turn` routing event (skills listed, loaded,

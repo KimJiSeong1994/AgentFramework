@@ -112,7 +112,46 @@ describe("SGLang transport", () => {
     expect(down.error).toContain("scripts/sglang-server.sh")
   })
 
-  test("tool calls, malformed events, a missing finish and the output bound are refused", async () => {
+  test("tool calls the server reports in its own form become envelope text for the host; nothing is requested or run", async () => {
+    const call = (index: number, name: string | undefined, args: unknown) => ({ index, id: `call_${index}`, type: "function", function: { ...(name === undefined ? {} : { name }), arguments: args } })
+    const { endpoint, requests } = fakeSglang(() => new Response(sse([
+      { choices: [{ delta: { reasoning_content: "PRIVATE reasoning" } }] },
+      { choices: [{ delta: { content: "I will read both files." } }] },
+      { choices: [{ delta: { tool_calls: [call(0, "read", '{"path":')] } }] },
+      { choices: [{ delta: { tool_calls: [call(0, undefined, '"src/cart.ts"}'), call(1, "glob", { pattern: "**/*.ts" })] } }] },
+      { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+      { choices: [], usage: { prompt_tokens: 50, completion_tokens: 20 } },
+      "[DONE]",
+    ])))
+    const seen: string[] = []
+    const result = await createCliTransport(options(endpoint, { onText: (text: string) => seen.push(text) })).run()
+    const expected = '{"type":"tool","name":"read","input":{"path":"src/cart.ts"}}\n{"type":"tool","name":"glob","input":{"pattern":"**/*.ts"}}'
+    // The calls are the whole reply: prose beside them is dropped so a prose-answer role does not end its turn on it.
+    expect(result).toEqual({ status: "completed", text: expected, quiescent: true, usage: { inputTokens: 50, outputTokens: 20 } })
+    expect(seen.at(-1)).toBe(expected)
+    expect(requests[0]).not.toHaveProperty("tools")
+
+    // Empty arguments are an empty input; arguments that are not a JSON object stay a string the host refuses as malformed.
+    const empty = fakeSglang(() => new Response(sse([{ choices: [{ delta: { tool_calls: [call(0, "list", "")] }, finish_reason: "tool_calls" }] }, "[DONE]"])))
+    expect((await createCliTransport(options(empty.endpoint)).run()).text).toBe('{"type":"tool","name":"list","input":{}}')
+    const broken = fakeSglang(() => new Response(sse([{ choices: [{ delta: { tool_calls: [call(0, "read", '{"path":')] }, finish_reason: "tool_calls" }] }, "[DONE]"])))
+    expect((await createCliTransport(options(broken.endpoint)).run()).text).toBe('{"type":"tool","name":"read","input":"{\\"path\\":"}')
+  })
+
+  test("native tool calls without a name, out of bounds, cut short or over the output bound are refused", async () => {
+    const run = async (events: unknown[]) => await createCliTransport(options(fakeSglang(() => new Response(sse(events))).endpoint)).run()
+    const fn = (index: unknown, name: unknown, args = "{}") => ({ index, function: { name, arguments: args } })
+    expect(await run([{ choices: [{ delta: { tool_calls: [fn(8, "read")] } }] }, "[DONE]"])).toMatchObject({ status: "failed", error: "native tool activity refused" })
+    expect(await run([{ choices: [{ delta: { tool_calls: [fn(-1, "read")] } }] }, "[DONE]"])).toMatchObject({ status: "failed", error: "native tool activity refused" })
+    expect(await run([{ choices: [{ delta: { tool_calls: [fn(0, 7)] } }] }, "[DONE]"])).toMatchObject({ status: "failed", error: "native tool activity refused" })
+    expect(await run([{ choices: [{ delta: { tool_calls: [fn(0, "x".repeat(129))] } }] }, "[DONE]"])).toMatchObject({ status: "failed", error: "native tool activity refused" })
+    expect(await run([{ choices: [{ delta: { tool_calls: ["read"] } }] }, "[DONE]"])).toMatchObject({ status: "failed", error: "native tool activity refused" })
+    // A stream that ends without a finish is incomplete; the collected call is not used.
+    expect(await run([{ choices: [{ delta: { tool_calls: [fn(0, "read")] } }] }])).toMatchObject({ status: "incomplete", text: "" })
+    expect(await run([{ choices: [{ delta: { tool_calls: [fn(0, "write", JSON.stringify({ content: "x".repeat(5000) }))] } }] }, "[DONE]"])).toMatchObject({ status: "incomplete", error: "output byte limit reached" })
+  })
+
+  test("nameless tool calls, malformed events, a missing finish and the output bound are refused", async () => {
     const tool = fakeSglang(() => new Response(sse([{ choices: [{ delta: { tool_calls: [{ id: "1" }] } }] }, "[DONE]"])))
     expect(await createCliTransport(options(tool.endpoint)).run()).toMatchObject({ status: "failed", error: "native tool activity refused" })
     const malformed = fakeSglang(() => new Response("data: {not json}\n\n"))

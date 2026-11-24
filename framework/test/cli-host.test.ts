@@ -1268,20 +1268,20 @@ describe("common CLI execution host", () => {
       '{"type":"read","input":{"path":"README.md"},"extra":1}',
       'Done: {"type":"final","text":"a"} or {"type":"final","text":"b"}',
       '{"type":"tool","name":"read","name":"write","input":{"path":"README.md"}}']) {
-      // Claude/Codex: an unreadable reply is returned to the model up to three times before the turn fails closed; a
-      // readable call the role may not make (bash here) is still refused at once.
+      // An unreadable reply is returned to the model up to three times before the turn fails closed; a readable call
+      // the role may not make (bash here) is still refused at once.
       const subject = harness({ engine: "claude", responses: [response, response, response, response] })
       const handle = await subject.host.prepare(subject.request)
       expect(await handle.run()).toMatchObject({ status: "failed" })
       expect(subject.observed.before).toBe(0)
       expect(existsSync(join(root, "unsafe"))).toBe(false)
       expect([1, 4]).toContain(subject.prompts.length)
-      // The local engine keeps the single-attempt behaviour (prose is its answer, so only the strict cases apply).
+      // The local engine gets the same bounded retries (prose is its answer, so only the strict cases apply).
       if (response.startsWith("{")) {
-        const local = harness({ engine: "local", responses: [response] })
-        await (await local.host.prepare(local.request)).run()
+        const local = harness({ engine: "local", responses: [response, response, response, response] })
+        expect(await (await local.host.prepare(local.request)).run()).toMatchObject({ status: "failed" })
         expect(local.observed.before).toBe(0)
-        expect(local.prompts).toHaveLength(1)
+        expect([1, 4]).toContain(local.prompts.length)
       }
     }
   })
@@ -1302,6 +1302,38 @@ describe("common CLI execution host", () => {
     // The note outlives the reply that carried it; the stray closing characters after the final are not part of the answer.
     expect(subject.prompts[4]!).toContain('- "README is the fixture; answer next"')
     expect(subject.observed.before).toBe(1)
+  })
+
+  test("the local engine recovers from a wrong envelope key, empty tool input and joined write calls within one turn", async () => {
+    writeFileSync(join(root, "README.md"), "fixture\n")
+    const subject = harness({ engine: "local", role: "main", responses: [
+      JSON.stringify({ type: "tool", name: "read", args: { path: "README.md" } }),
+      JSON.stringify({ type: "tool", name: "read", input: {} }),
+      `${toolWrite("a.txt", "a")}${toolWrite("b.txt", "b")}`,
+      JSON.stringify({ type: "tool", name: "read", input: { path: "README.md" } }),
+      JSON.stringify({ type: "final", text: "done" }),
+    ] })
+    expect(await (await subject.host.prepare(subject.request)).run()).toMatchObject({ status: "completed", text: "done" })
+    expect(subject.prompts[1]!).toContain("with exactly those keys")
+    expect(subject.prompts[2]!).toContain("Invalid input for read.")
+    expect(subject.prompts[3]!).toContain("Nothing was executed.")
+    expect(existsSync(join(root, "a.txt"))).toBe(false)
+    expect(subject.observed.before).toBe(1)
+    // Local retries are counted in a row: accepted calls between slips start the count again; four slips in a row fail.
+    const slip = JSON.stringify({ type: "tool", name: "read", args: { path: "README.md" } })
+    const good = (line: number) => JSON.stringify({ type: "tool", name: "read", input: { path: "README.md", startLine: line } })
+    const spread = harness({ engine: "local", role: "main", responses: [slip, good(1), slip, slip, good(2), slip, slip, slip, good(3), JSON.stringify({ type: "final", text: "done" })] })
+    expect(await (await spread.host.prepare(spread.request)).run()).toMatchObject({ status: "completed", text: "done" })
+    const stuck = harness({ engine: "local", role: "main", responses: [good(1), slip, slip, slip, slip, JSON.stringify({ type: "final", text: "never" })] })
+    expect(await (await stuck.host.prepare(stuck.request)).run()).toMatchObject({ status: "failed" })
+    expect(stuck.prompts).toHaveLength(5)
+    // Claude/Codex keep one total of three per turn.
+    const vendor = harness({ engine: "codex", role: "main", responses: [slip, good(1), slip, good(2), slip, good(3), slip, JSON.stringify({ type: "final", text: "never" })] })
+    expect(await (await vendor.host.prepare(vendor.request)).run()).toMatchObject({ status: "failed" })
+    // A long local final is the answer as before: the length retry stays a Claude/Codex rule.
+    const long = harness({ engine: "local", role: "main", responses: [JSON.stringify({ type: "final", text: "x".repeat(60_000) })] })
+    expect(await (await long.host.prepare(long.request)).run()).toMatchObject({ status: "completed" })
+    expect(long.prompts).toHaveLength(1)
   })
 
   test("a call returned for invalid input never shares its call ID with the next call", async () => {
@@ -1445,11 +1477,12 @@ describe("common CLI execution host", () => {
   test("known tools with malformed input still emit a correlated failed lifecycle", async () => {
     const activities: CliHostActivity[] = []
     const subject = harness({
-      responses: [JSON.stringify({ type: "tool", name: "read", input: { path: 1 } })],
+      responses: [JSON.stringify({ type: "tool", name: "read", input: { path: 1 } }), JSON.stringify({ type: "final", text: "gave up" })],
       observeActivity: activity => activities.push(activity),
     })
     const handle = await subject.host.prepare(subject.request)
-    expect(await handle.run()).toMatchObject({ status: "failed" })
+    // The call is returned to the model unexecuted; its failed lifecycle is still reported once.
+    expect(await handle.run()).toMatchObject({ status: "completed", text: "gave up" })
     expect(subject.observed.before).toBe(0)
     const toolActivities = activities.filter(activity => activity.kind === "tool-started" || activity.kind === "tool-finished")
     const execution = toolActivities[0]!.execution
@@ -1741,9 +1774,8 @@ describe("common CLI execution host", () => {
   })
 
   test("transport JSON parsing rejects duplicate-key or multi-envelope ambiguity", async () => {
-    const subject = harness({ responses: [
-      '{"type":"final","type":"tool","name":"write","input":{"path":"bad.txt","content":"x"}}',
-    ] })
+    const ambiguous = '{"type":"final","type":"tool","name":"write","input":{"path":"bad.txt","content":"x"}}'
+    const subject = harness({ responses: [ambiguous, ambiguous, ambiguous, ambiguous] })
     const handle = await subject.host.prepare(subject.request)
     expect(await handle.run()).toMatchObject({ status: "failed" })
     expect(existsSync(join(root, "bad.txt"))).toBe(false)
@@ -2179,7 +2211,7 @@ describe("host-provided skill tool", () => {
     expect(reads).toEqual(["wiki-helper:references/style.md"])
     // Traversal and absolute paths are refused by input validation before any read.
     for (const path of ["../x.md", "/etc/passwd", "a/../../b"]) {
-      const bad = harness({ role: "main", responses: [call("wiki-helper"), read(path)] })
+      const bad = harness({ role: "main", responses: [call("wiki-helper"), read(path), read(path), read(path), read(path)] })
       expect(await (await bad.host.prepare({ ...bad.request, skillTool })).run()).toMatchObject({ status: "failed" })
     }
   })

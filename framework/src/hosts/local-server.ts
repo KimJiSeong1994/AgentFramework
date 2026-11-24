@@ -19,6 +19,10 @@ export function localServerScript(kind: HttpLocalServer["kind"]): string { retur
 export const DEFAULT_SGLANG_ENDPOINT = "http://127.0.0.1:30000"
 const MAX_STREAM_BYTES = 16 * 1024 * 1024
 const MAX_LINE_BYTES = 1024 * 1024
+/** Bounds on tool calls a server reports in its own `tool_calls` form (see nativeCallText). */
+const MAX_NATIVE_CALLS = 8
+const MAX_NATIVE_CALL_NAME_CHARS = 128
+const NATIVE_REFUSED = "native tool activity refused"
 
 /** A loopback http(s) base URL with no credentials, query or fragment; returns it without a trailing slash. */
 export function loopbackEndpoint(value: unknown): string | undefined {
@@ -63,6 +67,27 @@ function observedUsage(value: unknown): CliObservedUsage | undefined {
   return Object.keys(observed).length ? Object.freeze(observed) : undefined
 }
 
+type NativeCall = { name: string; arguments: string }
+
+/**
+ * A reply the server reported as OpenAI `tool_calls`, rewritten as the envelope text otter asks models for
+ * ({"type":"tool","name":...,"input":{...}}, one per line). otter never sends `tools`, so the server runs nothing: a
+ * model (Inkling 2 Mini, for one) wrote the call in its own tool-call syntax and the server parsed it out of the text.
+ * The result is model text like any other reply: the host parses it and applies tool names, input schemas, policy and
+ * approval exactly as for a call written as JSON. Arguments that are not a JSON object stay in the envelope as a string,
+ * which the host refuses as malformed. Undefined (refused) when a call has no name.
+ */
+function nativeCallText(calls: Map<number, NativeCall>): string | undefined {
+  const lines: string[] = []
+  for (const [, call] of [...calls].sort(([left], [right]) => left - right)) {
+    if (!call.name.trim()) return undefined
+    let input: unknown = call.arguments
+    try { input = call.arguments.trim() ? JSON.parse(call.arguments) : {} } catch { /* kept as the raw string */ }
+    lines.push(JSON.stringify({ type: "tool", name: call.name, input }))
+  }
+  return lines.length ? lines.join("\n") : undefined
+}
+
 /** Lists the model ids the server serves (`GET /v1/models`); empty on any failure. */
 export async function listServedModels(endpoint: string, signal?: AbortSignal, timeoutMs = 3000): Promise<string[] | undefined> {
   try {
@@ -98,6 +123,27 @@ export function createSglangTransport(options: CliTransportOptions, endpoint: st
       // A server started without a reasoning parser streams "<think>…</think>" as content; hold a leading block back.
       let thinkState = "unknown" as "unknown" | "inside" | "done"
       let held = ""
+      const nativeCalls = new Map<number, NativeCall>()
+      /** Collects streamed `tool_calls` fragments; false when they are not a bounded list of function calls. */
+      const collectNativeCalls = (fragments: unknown[]): boolean => {
+        for (const [position, fragment] of fragments.entries()) {
+          if (!fragment || typeof fragment !== "object" || Array.isArray(fragment)) return false
+          const call = fragment as Record<string, unknown>
+          const index = call.index === undefined ? position : call.index
+          if (typeof index !== "number" || !Number.isSafeInteger(index) || index < 0 || index >= MAX_NATIVE_CALLS) return false
+          const fn = call.function && typeof call.function === "object" && !Array.isArray(call.function) ? call.function as Record<string, unknown> : {}
+          const slot = nativeCalls.get(index) ?? { name: "", arguments: "" }
+          nativeCalls.set(index, slot)
+          if (typeof fn.name === "string") slot.name += fn.name
+          else if (fn.name !== undefined && fn.name !== null) return false
+          if (slot.name.length > MAX_NATIVE_CALL_NAME_CHARS) return false
+          const piece = typeof fn.arguments === "string" ? fn.arguments
+            : fn.arguments !== undefined && fn.arguments !== null ? JSON.stringify(fn.arguments) : ""
+          outputBytes += Buffer.byteLength(piece, "utf8")
+          slot.arguments += piece
+        }
+        return true
+      }
       const visible = (piece: string): string => {
         if (thinkState === "done") return piece
         held += piece
@@ -160,8 +206,12 @@ export function createSglangTransport(options: CliTransportOptions, endpoint: st
           const choices = Array.isArray(event.choices) ? event.choices as Array<Record<string, unknown>> : []
           for (const choice of choices) {
             const delta = choice.delta && typeof choice.delta === "object" ? choice.delta as Record<string, unknown> : {}
-            // Tool calls are never requested; a server that emits one is refused like native tool activity.
-            if (Array.isArray(delta.tool_calls) && delta.tool_calls.length) return result({ status: "failed", text, quiescent: true, error: "native tool activity refused" })
+            // Tool calls are never requested, so a server reports one only when the model wrote it in its own syntax.
+            // It is collected and handed to the host as envelope text (nativeCallText); nothing has run.
+            if (Array.isArray(delta.tool_calls) && delta.tool_calls.length) {
+              if (!collectNativeCalls(delta.tool_calls)) { controller.abort("native-calls"); return result({ status: "failed", text, quiescent: true, error: NATIVE_REFUSED }) }
+              if (outputBytes > options.maxOutputBytes) { controller.abort("output-limit"); return result({ status: "incomplete", text, quiescent: true, error: SAFE.outputLimit }) }
+            }
             if (typeof delta.content === "string" && delta.content) {
               outputBytes += Buffer.byteLength(delta.content, "utf8")
               if (outputBytes > options.maxOutputBytes) { controller.abort("output-limit"); return result({ status: "incomplete", text, quiescent: true, error: SAFE.outputLimit }) }
@@ -207,6 +257,14 @@ export function createSglangTransport(options: CliTransportOptions, endpoint: st
         if (thinkState === "inside") return result({ status: "incomplete", text, quiescent: true, error: SAFE.incomplete })
         if (held) { text += held; try { options.onText?.(held) } catch { return result({ status: "failed", text, quiescent: true, error: SAFE.callback }) } }
         if (!finished) return result({ status: "incomplete", text, quiescent: true, error: SAFE.incomplete })
+        if (nativeCalls.size) {
+          // The calls are the reply: prose the model wrote beside them is dropped, as a prose-answer role would
+          // otherwise end its turn on that prose.
+          const calls = nativeCallText(nativeCalls)
+          if (calls === undefined) return result({ status: "failed", text, quiescent: true, error: NATIVE_REFUSED })
+          try { options.onText?.(calls) } catch { return result({ status: "failed", text, quiescent: true, error: SAFE.callback }) }
+          return result({ status: "completed", text: calls, quiescent: true, ...(usage ? { usage } : {}) })
+        }
         return result({ status: "completed", text, quiescent: true, ...(usage ? { usage } : {}) })
       } finally {
         clearTimeout(timer)

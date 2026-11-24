@@ -1221,9 +1221,13 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
           let inputBudget = VENDOR_TURN_INPUT_TOKENS
           /** Canonical read-only calls whose result is in the transcript and still current (cleared by any change). */
           const freshReads = new Set<string>()
-          /** Returns an unusable reply to the model as a failed exchange (Claude/Codex only, bounded); false means fail as before. */
+          /**
+           * Returns an unusable reply to the model as a failed exchange (bounded); false means fail as before. Every
+           * engine gets this: a local model's one slip in the envelope shape would otherwise end the whole turn.
+           * The bound is per turn for Claude/Codex and per run of consecutive unusable replies for the local engine.
+           */
           const protocolRetry = (assistant: string, reason: string): boolean => {
-            if (!vendorRoute || witnessRequested || protocolRetries >= MAX_PROTOCOL_RETRIES) return false
+            if (witnessRequested || protocolRetries >= MAX_PROTOCOL_RETRIES) return false
             const fitted = fitHistory(basePrompt, [...history, { assistant: assistant.slice(0, 4200), ok: false, result: `${reason} Nothing was executed.` }], inputLimit, nativeInstructionTokens)
             if (!fitted) return false
             protocolRetries++
@@ -1496,7 +1500,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             // The prompt still asks every role for the envelope (RESPONSE_ENVELOPE); accepting main prose is only a host-side
             // fallback, so models keep aiming for the structured form.
             const envelope = parseEnvelope(native.text, route.engine === "local" || request.role === "main")
-            if (!envelope && protocolRetry(JSON.stringify(native.text.slice(0, 2000)), "Otter could not read this reply as one envelope. Reply with exactly one JSON object: a tool envelope or {\"type\":\"final\",\"text\":\"...\"}, with quotes and line breaks inside strings JSON-escaped.")) continue
+            if (!envelope && protocolRetry(JSON.stringify(native.text.slice(0, 2000)), "Otter could not read this reply as one envelope. Reply with exactly one JSON object: {\"type\":\"tool\",\"name\":\"<tool>\",\"input\":{...}} with exactly those keys (one call per reply unless every call is read-only), or {\"type\":\"final\",\"text\":\"...\"}, with quotes and line breaks inside strings JSON-escaped.")) continue
             if (!envelope) {
               if (witnessObservation) {
                 try {
@@ -1527,7 +1531,7 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
               }
               return setFinal({ status: "failed", error: "skill loader witness refused a tool response before effects" })
             }
-            if (envelope.type === "final" && request.role === "main" && envelope.text.length > VENDOR_MAIN_FINAL_CHARS &&
+            if (vendorRoute && envelope.type === "final" && request.role === "main" && envelope.text.length > VENDOR_MAIN_FINAL_CHARS &&
                 protocolRetry(JSON.stringify(`${envelope.text.slice(0, 200)}…`), `Your final answer is ${envelope.text.length} characters; the limit is ${VENDOR_MAIN_FINAL_CHARS}. Send it again, shorter.`)) continue
             if (envelope.type === "final") {
               if (witnessObservation) {
@@ -1659,6 +1663,10 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                 }
                 return setFinal({ status: "failed", error: "malformed Otter tool input refused" })
               }
+              // A local model slips on the envelope shape now and then through a long turn (Inkling 2 Mini: "args" for
+              // "input" about once in eight calls), so its retries are counted in a row: a call the host accepts starts
+              // the count again, and the round limit still bounds the turn. Claude/Codex keep one total per turn.
+              if (!vendorRoute) protocolRetries = 0
               keepNote(envelope.note)
               // An identical read whose result is still in the transcript returns nothing new and costs a full prompt.
               const repeatKey = JSON.stringify({ type: "tool", name, input: envelope.input })
