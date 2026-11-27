@@ -209,7 +209,8 @@ changes; existing workflow ownership and policy checks are not bypassed.
 - **Status line budget**: in the full-screen TUI the status line shows the main model's latest input estimate against
   its limit and the tool rounds used (`ctx 6.1k/8.2k 74% · tools 3/24`; ✂ at 90% or more). Estimates, not vendor counts.
 - **Tool-call limit**: at 24 tool calls a chat turn asks to continue (24 more, at most 3 times) instead of failing;
-  workers and workflow roles keep the hard limit.
+  workers and workflow roles keep the hard limit. When no more calls are granted, the call over the limit is not run
+  and the model gets one reply to answer from the results it has; another tool call there ends the turn as failed.
 - **Context**: Claude/Codex chat uses a 96,000-character conversation window (vendor main input estimate 49,152
   tokens); local defaults to 24,000 conversation characters and an 8,192-token input estimate (configurable with
   `/context budget`). OpenCode keeps its existing 24,000-character conversation window.
@@ -1177,7 +1178,9 @@ Configured in the **user** config only:
   local engine (nothing runs from a refused reply). A local server (SGLang, MLX, or another loopback OpenAI-compatible
   server such as oMLX) that reports a call as `tool_calls`, because the model wrote it in its own tool-call syntax, is
   read as the same envelope; otter never sends `tools`, and the call still goes through tool names, input schemas, role
-  policy and approval. Before this, 32% of claude-haiku turns in the load evaluation failed on the reply format; after it, 5-9%.
+  policy and approval. A call to a known tool with its input under `args`, `arguments` or `parameters`, or with the
+  input keys written beside `name`, is read as that call (two slips local models make); the same refused reply sent
+  twice in a row is named as a repeat. Before this, 32% of claude-haiku turns in the load evaluation failed on the reply format; after it, 5-9%.
   A failed model turn now adds why after the fixed message (`… Reason: The model's reply was not in the required
   tool/answer format.`, input budget, deadline, tool rounds, …).
 - **Telemetry**: each chat turn that offers the skill tool writes a `skill_turn` routing event (skills listed, loaded,
