@@ -96,6 +96,7 @@ const MAX_WORK_RECORD_CHARS = 4000
 const MAX_READ_ONLY_BATCH = 8
 /** Chat only: how many times the human may grant another MAX_TOOL_ROUNDS when a turn reaches its limit. */
 const MAX_ROUND_EXTENSIONS = 3
+const LIMIT_ANSWER_REQUEST = "Not run: this turn has reached its tool-call limit and no further tool call will run. Reply now with {\"type\":\"final\",\"text\":\"...\"}: answer from the results above, and say plainly what is unfinished or unverified."
 const MAX_NATIVE_RESPONSE_BYTES = 256 * 1024
 const MAX_TOTAL_OUTPUT_BYTES = 16 * 1024 * 1024
 const MAX_EXECUTION_MS = 24 * 60 * 60 * 1000
@@ -360,6 +361,9 @@ function deterministicJson(text: string): boolean {
   return validate(root, 0)
 }
 
+/** Keys other tool-call formats use for the input object. */
+const INPUT_KEY_ALIASES = ["args", "arguments", "parameters"] as const
+
 /**
  * One parsed object as an envelope: the canonical tool/final forms, or a known tool named by `type` ("shorthand") with
  * its input either under `input` or as the remaining keys (`{"type":"skill","name":"x"}`). Only Otter tool names
@@ -377,6 +381,15 @@ function envelopeOf(parsed: Record<string, unknown>): Envelope | undefined {
   }
   if (parsed.type === "final" && exactKeys(parsed, ["type", "text"]) && typeof parsed.text === "string") {
     return { type: "final", text: parsed.text }
+  }
+  // Two slips local models make on a call (observed 2026-11: Inkling 2 Mini, qwen3.8): the input under another API's
+  // key, or its keys written beside `name`. Only a known Otter tool qualifies, and the input is validated as always.
+  if (parsed.type === "tool" && typeof parsed.name === "string" && (CLI_TOOL_NAMES as readonly string[]).includes(parsed.name) && !Object.hasOwn(parsed, "input")) {
+    for (const alias of INPUT_KEY_ALIASES) {
+      if (exactKeys(parsed, ["type", "name", alias])) return isRecord(parsed[alias]) ? { type: "tool", name: parsed.name, input: parsed[alias] } : undefined
+    }
+    const { type, name, ...input } = parsed
+    return Object.keys(input).length > 0 ? { type: "tool", name: name as string, input } : undefined
   }
   if (typeof parsed.type === "string" && (CLI_TOOL_NAMES as readonly string[]).includes(parsed.type)) {
     if (exactKeys(parsed, ["type", "input"])) return isRecord(parsed.input) ? { type: "tool", name: parsed.type, input: parsed.input } : undefined
@@ -1228,7 +1241,11 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
            */
           const protocolRetry = (assistant: string, reason: string): boolean => {
             if (witnessRequested || protocolRetries >= MAX_PROTOCOL_RETRIES) return false
-            const fitted = fitHistory(basePrompt, [...history, { assistant: assistant.slice(0, 4200), ok: false, result: `${reason} Nothing was executed.` }], inputLimit, nativeInstructionTokens)
+            const returned = assistant.slice(0, 4200)
+            // The same unusable reply twice in a row: say so, since the same explanation did not change it.
+            const last = history.at(-1)
+            const again = last !== undefined && !last.ok && last.assistant === returned ? " You sent this exact reply before and it was refused for the same reason: change the reply, do not send it again." : ""
+            const fitted = fitHistory(basePrompt, [...history, { assistant: returned, ok: false, result: `${reason}${again} Nothing was executed.` }], inputLimit, nativeInstructionTokens)
             if (!fitted) return false
             protocolRetries++
             replaceHistory(fitted)
@@ -1262,7 +1279,9 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
           }
           let roundLimit = roundStep
           let extensions = 0
-          for (turn = 0; turn < roundLimit + 1; turn++) {
+          let limitAnswerRequested = false
+          let limitAnswerTurn = -1
+          for (turn = 0; turn < roundLimit + 1 + (limitAnswerRequested ? 1 : 0); turn++) {
             if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
             if (Date.now() >= nativeDeadlineAt) return setFinal({ status: "failed", error: "execution deadline elapsed before the next model turn" })
             assertFixedPolicy(request)
@@ -1693,6 +1712,17 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
                 if (!granted || cancelled) {
                   finishTool("denied", false)
                   if (cancelled) return setFinal({ status: "cancelled", error: cancelReason })
+                  // The work done so far is worth an answer: the model gets one reply to give it before the turn fails.
+                  if (!limitAnswerRequested && !witnessRequested) {
+                    const fitted = fitHistory(basePrompt, [...history, { assistant: repeatKey, ok: false, result: LIMIT_ANSWER_REQUEST }], inputLimit, nativeInstructionTokens)
+                    if (fitted) {
+                      limitAnswerRequested = true
+                      limitAnswerTurn = turn
+                      returnedCalls++
+                      replaceHistory(fitted)
+                      return "continue"
+                    }
+                  }
                   return setFinal({ status: "failed", error: "Otter tool round limit reached" })
                 }
                 extensions++
@@ -2155,6 +2185,8 @@ export function createCliHost(options: CliHostOptions): ExecutionHost {
             for (const [index, call] of calls.entries()) {
               const outcome = await runToolCall(call, index === calls.length - 1 ? ignoredNote : "")
               if (outcome !== "continue") return outcome
+              // The rest of a batch that ran into the limit is not run either; the model has been asked for its answer.
+              if (limitAnswerTurn === turn) break
             }
           }
           return setFinal({ status: "failed", error: "Otter tool round limit reached" })

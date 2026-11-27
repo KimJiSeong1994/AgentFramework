@@ -1314,7 +1314,7 @@ describe("common CLI execution host", () => {
   test("the local engine recovers from a wrong envelope key, empty tool input and joined write calls within one turn", async () => {
     writeFileSync(join(root, "README.md"), "fixture\n")
     const subject = harness({ engine: "local", role: "main", responses: [
-      JSON.stringify({ type: "tool", name: "read", args: { path: "README.md" } }),
+      JSON.stringify({ type: "tool", tool: "read", input: { path: "README.md" } }),
       JSON.stringify({ type: "tool", name: "read", input: {} }),
       `${toolWrite("a.txt", "a")}${toolWrite("b.txt", "b")}`,
       JSON.stringify({ type: "tool", name: "read", input: { path: "README.md" } }),
@@ -1327,7 +1327,7 @@ describe("common CLI execution host", () => {
     expect(existsSync(join(root, "a.txt"))).toBe(false)
     expect(subject.observed.before).toBe(1)
     // Local retries are counted in a row: accepted calls between slips start the count again; four slips in a row fail.
-    const slip = JSON.stringify({ type: "tool", name: "read", args: { path: "README.md" } })
+    const slip = JSON.stringify({ type: "tool", tool: "read", input: { path: "README.md" } })
     const good = (line: number) => JSON.stringify({ type: "tool", name: "read", input: { path: "README.md", startLine: line } })
     const spread = harness({ engine: "local", role: "main", responses: [slip, good(1), slip, slip, good(2), slip, slip, slip, good(3), JSON.stringify({ type: "final", text: "done" })] })
     expect(await (await spread.host.prepare(spread.request)).run()).toMatchObject({ status: "completed", text: "done" })
@@ -1341,6 +1341,40 @@ describe("common CLI execution host", () => {
     const long = harness({ engine: "local", role: "main", responses: [JSON.stringify({ type: "final", text: "x".repeat(60_000) })] })
     expect(await (await long.host.prepare(long.request)).run()).toMatchObject({ status: "completed" })
     expect(long.prompts).toHaveLength(1)
+  })
+
+  test("a call with its input under another API's key, or with the input keys beside name, runs as that call", async () => {
+    writeFileSync(join(root, "README.md"), "fixture\n")
+    for (const call of [
+      { type: "tool", name: "read", args: { path: "README.md" } },
+      { type: "tool", name: "read", arguments: { path: "README.md" } },
+      { type: "tool", name: "read", parameters: { path: "README.md" } },
+      { type: "tool", name: "read", path: "README.md" },
+    ]) {
+      const subject = harness({ engine: "local", role: "main", responses: [JSON.stringify(call), JSON.stringify({ type: "final", text: "done" })] })
+      expect(await (await subject.host.prepare(subject.request)).run()).toMatchObject({ status: "completed", text: "done" })
+      expect(subject.observed.before).toBe(1)
+      expect(subject.prompts[1]!).toContain("fixture")
+    }
+    // The input is validated as for any call, an alias that is not an object is refused, and an unknown tool stays unknown.
+    const invalid = harness({ engine: "local", role: "main", responses: [
+      JSON.stringify({ type: "tool", name: "read", args: { file: "README.md" } }),
+      JSON.stringify({ type: "tool", name: "read", args: "README.md" }),
+      JSON.stringify({ type: "tool", name: "shell", command: "ls" }),
+      JSON.stringify({ type: "final", text: "done" }),
+    ] })
+    expect(await (await invalid.host.prepare(invalid.request)).run()).toMatchObject({ status: "completed", text: "done" })
+    expect(invalid.observed.before).toBe(0)
+    expect(invalid.prompts[1]!).toContain("Invalid input for read.")
+    expect(invalid.prompts[2]!).toContain("with exactly those keys")
+    expect(invalid.prompts[3]!).toContain("with exactly those keys")
+    // The same unusable reply twice in a row is named as a repeat.
+    expect(invalid.prompts[2]!).not.toContain("You sent this exact reply before")
+    const same = JSON.stringify({ type: "tool", tool: "read" })
+    const repeated = harness({ engine: "local", role: "main", responses: [same, same, JSON.stringify({ type: "final", text: "done" })] })
+    expect(await (await repeated.host.prepare(repeated.request)).run()).toMatchObject({ status: "completed", text: "done" })
+    expect(repeated.prompts[1]!).not.toContain("You sent this exact reply before")
+    expect(repeated.prompts[2]!).toContain("You sent this exact reply before")
   })
 
   test("a refusal marked retryable (the repeat guard) is returned to the model, bounded; a plain denial still ends the turn", async () => {
@@ -1511,11 +1545,13 @@ describe("common CLI execution host", () => {
   test("multiread charges each member against the existing read work budget", async () => {
     writeFileSync(join(root, "a.txt"), "a")
     const batch = JSON.stringify({ type: "tool", name: "multiread", input: { reads: Array.from({ length: 8 }, () => ({ path: "a.txt" })) } })
-    const subject = harness({ responses: [batch, batch, batch, batch] })
+    const subject = harness({ responses: [batch, batch, batch, batch, batch] })
     expect(await (await subject.host.prepare(subject.request)).run()).toMatchObject({ status: "failed", error: "Otter tool round limit reached" })
     expect(subject.observed.before).toBe(24)
     expect(subject.observed.results).toBe(24)
-    expect(subject.prompts).toHaveLength(4)
+    // The call over the limit is answered once with a request for the final answer; a further call ends the turn.
+    expect(subject.prompts).toHaveLength(5)
+    expect(subject.prompts[4]).toContain("reached its tool-call limit")
   })
 
   test("known tools with malformed input still emit a correlated failed lifecycle", async () => {
@@ -2642,10 +2678,12 @@ describe("chat execution through the action gate", () => {
     } })
     const result = await (await run.host.prepare({ ...run.request, actionGate: approval.value })).run()
     expect(asked).toEqual([[23, 24, 23]])
-    expect(result).toEqual(grant ? { status: "completed", text: "done" } : { status: "failed", error: "Otter tool round limit reached" })
+    // Refused, the batch does not run and the model answers from what it has.
+    expect(result).toEqual({ status: "completed", text: "done" })
     expect(run.observed.before).toBe(grant ? 25 : 23)
     expect(run.observed.results).toBe(grant ? 25 : 23)
-    expect(run.prompts).toHaveLength(grant ? 25 : 24)
+    expect(run.prompts).toHaveLength(25)
+    expect(run.prompts[24]!.includes("reached its tool-call limit")).toBe(!grant)
   })
 
   test("headless planning multiread cannot extend its read budget", async () => {
@@ -2654,7 +2692,7 @@ describe("chat execution through the action gate", () => {
     const batch = JSON.stringify({ type: "tool", name: "multiread", input: { reads: [{ path: "seed.txt" }, { path: "seed.txt" }] } })
     let asked = 0
     const approval = gate(() => true, undefined, { extendRounds: async () => { asked++; return true } })
-    const run = harness({ role: "planner", responses: [...Array.from({ length: 23 }, () => read), batch] })
+    const run = harness({ role: "planner", responses: [...Array.from({ length: 23 }, () => read), batch, batch] })
     expect(await (await run.host.prepare({ ...run.request, actionGate: approval.value })).run()).toEqual({ status: "failed", error: "Otter tool round limit reached" })
     expect(asked).toBe(0)
     expect(run.observed.before).toBe(23)
@@ -2725,11 +2763,18 @@ describe("chat execution through the action gate", () => {
 
     const refusing = gate(() => true, undefined, { extendRounds: async () => false })
     const stopped = harness({ role: "main", tools: CHAT_TOOLS, responses: [...reads, final("listed")] })
-    expect(await (await stopped.host.prepare({ ...stopped.request, actionGate: refusing.value })).run()).toEqual({ status: "failed", error: "Otter tool round limit reached" })
+    // Refused: no further call runs, and the model gets one reply to answer from what it has.
+    expect(await (await stopped.host.prepare({ ...stopped.request, actionGate: refusing.value })).run()).toEqual({ status: "completed", text: "listed" })
+    expect(stopped.prompts.at(-1)).toContain("reached its tool-call limit")
+    const insisting = harness({ role: "main", tools: CHAT_TOOLS, responses: [...reads, reads[0]!, final("never")] })
+    expect(await (await insisting.host.prepare({ ...insisting.request, actionGate: refusing.value })).run()).toEqual({ status: "failed", error: "Otter tool round limit reached" })
+    expect(insisting.prompts).toHaveLength(26)
 
-    // Without a gate (workers, workflows) the limit is final.
+    // Without a gate (workers, workflows) nobody is asked; the same single reply is all that is left.
     const worker = harness({ role: "worker", responses: [...reads, final("listed")] })
-    expect(await (await worker.host.prepare(worker.request)).run()).toEqual({ status: "failed", error: "Otter tool round limit reached" })
+    expect(await (await worker.host.prepare(worker.request)).run()).toEqual({ status: "completed", text: "listed" })
+    const stubborn = harness({ role: "worker", responses: [...reads, reads[0]!, final("never")] })
+    expect(await (await stubborn.host.prepare(stubborn.request)).run()).toEqual({ status: "failed", error: "Otter tool round limit reached" })
   })
 
   test("without a gate main has no write, edit or bash, and other roles never get bash even with a gate", async () => {

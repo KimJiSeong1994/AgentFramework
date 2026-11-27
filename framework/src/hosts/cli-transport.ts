@@ -995,7 +995,9 @@ function statusFromProcess(result: VendorProcessResult, protocol: NativeProtocol
   const failureClass = classified ? { failureClass: classified } : {}
   if (runFailure) return { status: "failed", text, quiescent: true, error: runFailure, ...failureClass }
   if (protocol.failure) return { status: "failed", text, quiescent: true, error: protocol.failure, ...failureClass }
-  if (result.status === "timed-out") return { status: "failed", text, quiescent: true, error: SAFE_ERRORS.deadline }
+  // A call that ran out of time keeps the class its diagnostics showed (a rate limit that stalled it, say), so the
+  // human is still offered another engine.
+  if (result.status === "timed-out") return { status: "failed", text, quiescent: true, error: SAFE_ERRORS.deadline, ...failureClass }
   if (result.status === "cancelled") return { status: "cancelled", text, quiescent: true }
   if (result.status === "failed") return { status: "failed", text, quiescent: true, error: SAFE_ERRORS.process, ...failureClass }
   if (result.status === "incomplete" || !result.captureComplete || protocol.incomplete) {

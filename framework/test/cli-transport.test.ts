@@ -1309,6 +1309,11 @@ test("Claude failures carry a failure class: login, a rejected rate-limit event,
   const exited = await createCliTransport(options("claude", { prompt, model: "sonnet" })).run()
   expect(exited).toMatchObject({ status: "failed", failureClass: "rate_limited" })
   expect(JSON.stringify(exited)).not.toContain("SECRET")
+  // A call that stalls after such a diagnostic and runs out of time keeps the class (the human is offered another engine).
+  installFakeCli("claude", `process.stdin.resume(); process.stdin.on("end", () => { process.stderr.write("Error: 429 Too Many Requests SECRET\\n"); setInterval(() => {}, 1000) })`)
+  const stalled = await createCliTransport(options("claude", { prompt, model: "sonnet", deadlineAt: Date.now() + 700 })).run()
+  expect(stalled).toMatchObject({ status: "failed", error: "execution deadline elapsed", failureClass: "rate_limited" })
+  expect(JSON.stringify(stalled)).not.toContain("SECRET")
 })
 
 test("classifyEngineFailure reads only a bounded sample and knows the four classes", () => {
